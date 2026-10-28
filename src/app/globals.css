@@ -6,6 +6,9 @@
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {
+  --color-status-available: var(--status-available);
+  --color-status-busy: var(--status-busy);
+  --color-status-maintenance: var(--status-maintenance);
   --color-discord: #5865f2;
   --color-discord-foreground: #ffffff;
   --color-background: var(--background);
@@ -52,6 +55,9 @@
 }
 
 :root {
+  --status-available: #15803d;
+  --status-busy: #b45309;
+  --status-maintenance: #b91c1c;
   --background: #f5f5f4;
   --foreground: #18181b;
   --card: #fafaf9;
@@ -92,6 +98,9 @@
 }
 
 .dark {
+  --status-available: #4ade80;
+  --status-busy: #fbbf24;
+  --status-maintenance: #f87171;
   --background: #17191d;
   --foreground: oklch(0.985 0 0);
   --card: #22252a;

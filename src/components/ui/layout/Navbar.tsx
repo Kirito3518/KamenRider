@@ -1,11 +1,11 @@
 "use client";
 
 import Link from "next/link";
+import { usePathname } from "next/navigation";
 import {
   CircleHelp,
   History,
   Home,
-  Layers3,
   Menu,
   Monitor,
   Moon,
@@ -28,7 +28,6 @@ import {
 const links = [
   { label: "หน้าแรก", href: "/", icon: Home },
   { label: "เช่าคอมพิวเตอร์", href: "/rent", icon: Monitor },
-  { label: "ราคาแพ็กเกจ", href: "/#pricing", icon: Layers3 },
   { label: "วิธีใช้งาน", href: "/#how-it-works", icon: CircleHelp },
 ];
 
@@ -71,6 +70,7 @@ function LoginButton({ onClick }: { onClick: MouseEventHandler<HTMLButtonElement
 }
 
 export function Navbar() {
+  const pathname = usePathname();
   const [menuOpen, setMenuOpen] = useState(false);
   const [loginOpen, setLoginOpen] = useState(false);
   const loginTriggerRef = useRef<HTMLButtonElement>(null);
@@ -89,18 +89,18 @@ export function Navbar() {
       <NavBody className="h-[58px] border bg-card px-6 py-0 pl-7 shadow-[0_12px_35px_rgb(0_0_0/4%)]">
         <Brand />
         <nav className="flex items-center gap-1" aria-label="เมนูหลัก">
-          {links.map(({ label, href, icon: Icon }, index) => (
+          {links.map(({ label, href, icon: Icon }) => (
             <Link
               key={label}
               href={href}
-              aria-current={index === 0 ? "page" : undefined}
+              aria-current={pathname === href ? "page" : undefined}
               className={cn(
                 "inline-flex items-center gap-2 rounded-full px-3 py-[7px] text-sm font-medium whitespace-nowrap text-muted-foreground transition-colors hover:bg-accent hover:text-foreground",
-                index === 0 && "bg-accent text-foreground",
+                pathname === href && "bg-accent text-foreground",
               )}
             >
               <Icon
-                className={cn("size-[17px]", index === 0 && "text-primary")}
+                className={cn("size-[17px]", pathname === href && "text-primary")}
                 strokeWidth={1.8}
               />
               {label}
@@ -143,6 +143,7 @@ export function Navbar() {
               <Link
                 className="flex items-center gap-2.5 rounded-xl px-3 py-2.5 text-sm hover:bg-accent"
                 href={href}
+                aria-current={pathname === href ? "page" : undefined}
                 key={label}
                 onClick={() => setMenuOpen(false)}
               >

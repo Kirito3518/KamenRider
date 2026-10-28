@@ -9,6 +9,8 @@ const buttonVariants = cva(
       variant: {
         default: "bg-primary text-primary-foreground hover:bg-primary/80",
         discord: "bg-discord text-discord-foreground hover:bg-discord/90",
+        busy: "border-status-busy/30 bg-status-busy/15 text-status-busy disabled:opacity-100",
+        maintenance: "border-status-maintenance/30 bg-status-maintenance/15 text-status-maintenance disabled:opacity-100",
         outline:
           "border-border bg-background hover:bg-muted hover:text-foreground aria-expanded:bg-muted aria-expanded:text-foreground dark:bg-transparent dark:hover:bg-input/30",
         secondary:
