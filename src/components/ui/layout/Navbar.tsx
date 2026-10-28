@@ -12,9 +12,10 @@ import {
   Sun,
   X,
 } from "lucide-react";
-import { useState } from "react";
+import { useRef, useState, type MouseEventHandler } from "react";
 import { useThemeTransition } from "@/hooks/use-theme-transition";
 import { Button } from "@/components/ui/button";
+import { AuthDialog } from "@/components/auth/auth-dialog";
 import { cn } from "@/lib/utils";
 import {
   Navbar as ResizableNavbar,
@@ -61,9 +62,9 @@ function ThemeToggle() {
   );
 }
 
-function LoginButton() {
+function LoginButton({ onClick }: { onClick: MouseEventHandler<HTMLButtonElement> }) {
   return (
-    <Button nativeButton={false} render={<Link href="/login" />}>
+    <Button onClick={onClick}>
       เข้าสู่ระบบ
     </Button>
   );
@@ -71,8 +72,19 @@ function LoginButton() {
 
 export function Navbar() {
   const [menuOpen, setMenuOpen] = useState(false);
+  const [loginOpen, setLoginOpen] = useState(false);
+  const loginTriggerRef = useRef<HTMLButtonElement>(null);
+  const mobileMenuTriggerRef = useRef<HTMLButtonElement>(null);
+  const openLogin: MouseEventHandler<HTMLButtonElement> = (event) => {
+    loginTriggerRef.current = event.currentTarget.closest("#mobile-menu")
+      ? mobileMenuTriggerRef.current
+      : event.currentTarget;
+    setMenuOpen(false);
+    setLoginOpen(true);
+  };
 
   return (
+    <>
     <ResizableNavbar className="top-0 pt-3.5 sm:pt-6">
       <NavBody className="h-[58px] border bg-card px-6 py-0 pl-7 shadow-[0_12px_35px_rgb(0_0_0/4%)]">
         <Brand />
@@ -97,7 +109,7 @@ export function Navbar() {
         </nav>
         <div className="flex items-center gap-2">
           <ThemeToggle />
-          <LoginButton />
+          <LoginButton onClick={openLogin} />
         </div>
       </NavBody>
       <MobileNav className="min-h-[58px] border bg-card px-3 py-2 shadow-sm sm:px-5">
@@ -106,7 +118,7 @@ export function Navbar() {
           <div className="flex items-center gap-1 sm:gap-2">
             <ThemeToggle />
             <span className="hidden min-[400px]:inline-flex">
-              <LoginButton />
+              <LoginButton onClick={openLogin} />
             </span>
             <Button
               variant="outline"
@@ -115,6 +127,7 @@ export function Navbar() {
               aria-label={menuOpen ? "ปิดเมนู" : "เปิดเมนู"}
               aria-expanded={menuOpen}
               aria-controls="mobile-menu"
+              ref={mobileMenuTriggerRef}
             >
               {menuOpen ? <X /> : <Menu />}
             </Button>
@@ -146,11 +159,13 @@ export function Navbar() {
               ประวัติการเช่า
             </Link>
             <div className="mt-2 min-[400px]:hidden">
-              <LoginButton />
+              <LoginButton onClick={openLogin} />
             </div>
           </nav>
         </MobileNavMenu>
       </MobileNav>
     </ResizableNavbar>
+    <AuthDialog open={loginOpen} onOpenChange={setLoginOpen} returnFocusRef={loginTriggerRef} />
+    </>
   );
 }
