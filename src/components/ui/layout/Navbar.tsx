@@ -8,6 +8,7 @@ import {
   Home,
   Menu,
   Monitor,
+  MonitorPlay,
   Moon,
   Sun,
   X,
@@ -28,6 +29,7 @@ import {
 const links = [
   { label: "หน้าแรก", href: "/", icon: Home },
   { label: "เช่าคอมพิวเตอร์", href: "/rent", icon: Monitor },
+  { label: "เครื่องของฉัน", href: "/my-machines", icon: MonitorPlay },
   { label: "วิธีใช้งาน", href: "/#how-it-works", icon: CircleHelp },
 ];
 

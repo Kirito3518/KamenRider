@@ -4,6 +4,7 @@ import { ArrowUpRight, Monitor } from "lucide-react";
 const links = [
   { label: "หน้าแรก", href: "/" },
   { label: "เช่าคอมพิวเตอร์", href: "/rent" },
+  { label: "เครื่องของฉัน", href: "/my-machines" },
   { label: "วิธีใช้งาน", href: "/#how-it-works" },
   { label: "คำถามที่พบบ่อย", href: "/#faq" },
 ];
