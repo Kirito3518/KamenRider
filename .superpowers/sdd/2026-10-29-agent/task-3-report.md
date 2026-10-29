@@ -19,3 +19,10 @@ Implemented signed `/agent/sync`, persistent heartbeat metadata with 20-second r
 - Agent reports unknown readiness until a future real Sunshine health probe exists; sync or WOL success cannot imply ready. Polling is five seconds after success, with capped exponential reconnect delays (10/20/40/60 seconds), HTTP cancellation and service cancellation. Scheduling/backoff itself is not covered by virtual-time tests.
 - Agent only writes `applied-configuration.json` in DataDirectory; no Sunshine config writing. The worker conservatively ignores returned commands.
 - Boot ID is generated per Agent worker lifecycle; no OS boot identity integration in this task.
+
+## Review fix: precise Public IP special-use ranges
+
+- Verified boundaries against IANA IPv4 Special-Purpose Address Space: https://www.iana.org/assignments/iana-ipv4-special-registry/ (registry updated 2025-10-09).
+- Replaced overbroad exclusions of 198.51/16, 192.2/16 and 192.0/16 with 198.51.100/24, 192.0.2/24 and 192.0.0/24. Retained globally reachable 192.0.0.9 and .10 exceptions. Added deprecated 192.88.99/24 exclusion.
+- Added 19 table-driven valid/special-use/boundary cases. Before implementation the targeted run had 9 behavioral failures and 10 passes; after implementation all 19 passed.
+- Full `dotnet test services/KamenRaider.slnx`: Controller 48 passed, Agent 5 passed, zero failures.
