@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
-import { ChevronsUpDown, LogOut, MonitorPlay, UserRound, Wallet } from "lucide-react";
+import { ChevronsUpDown, LogOut, MonitorPlay, UserRound, Wallet, ShieldCheck } from "lucide-react";
 import { formatBalance } from "@/lib/money";
 import toast from "react-hot-toast";
 import { authClient } from "@/lib/auth-client";
@@ -49,6 +49,7 @@ export function AccountDropdown({ user, onNavigate }: {
       <div className="flex items-center justify-between gap-3 px-3 py-2.5 text-sm"><span className="flex items-center gap-2 text-muted-foreground"><Wallet className="size-4" aria-hidden="true" />ยอดเงิน</span><span className="font-medium tabular-nums">{formatBalance(user.balanceSatang)}</span></div>
       <DropdownMenuSeparator />
       <DropdownMenuGroup>
+        {user.role === "admin" && <DropdownMenuItem render={<Link href="/admin" />} onClick={onNavigate}><ShieldCheck />จัดการระบบ</DropdownMenuItem>}
         <DropdownMenuItem render={<Link href="/account" />} onClick={onNavigate}><UserRound />บัญชีของฉัน</DropdownMenuItem>
         <DropdownMenuItem render={<Link href="/my-machines" />} onClick={onNavigate}><MonitorPlay />เครื่องของฉัน</DropdownMenuItem>
       </DropdownMenuGroup>

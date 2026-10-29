@@ -50,6 +50,16 @@ test("real credential/session lifecycle and account boundaries", async () => {
   const session = await (await request("/get-session")).json();
   assert.equal(session.user.id, created.user.id);
   assert.equal(session.user.role, "user");
+  for (const path of ["/admin", "/admin/users", "/admin/balances"]) {
+    const guest = await fetch(`${base}${path}`, { redirect: "manual" });
+    const guestHtml = await guest.text();
+    assert.ok([307, 308].includes(guest.status) || guestHtml.includes("NEXT_REDIRECT"), `${path} must redirect guests`);
+    const member = await fetch(`${base}${path}`, { headers: { Cookie: cookie }, redirect: "manual" });
+    const memberHtml = await member.text();
+    assert.ok([307, 308].includes(member.status) || memberHtml.includes("NEXT_REDIRECT"), `${path} must reject regular members`);
+    assert.ok(!memberHtml.includes(user.email), "member response must not contain admin data");
+    assert.ok(!guestHtml.includes(user.email), "guest response must not contain admin data");
+  }
   await request("/update-user", { role: "admin" });
   assert.equal((await (await request("/get-session")).json()).user.role, "user", "profile updates must not grant admin");
   assert.equal(session.user.balanceSatang, 0);
@@ -105,6 +115,28 @@ test("real credential/session lifecycle and account boundaries", async () => {
   const restored = await (await request("/get-session")).json();
   assert.equal(restored.user.id, created.user.id);
   assert.equal(restored.user.role, process.env.TEST_AUTH_DB ? "admin" : "user");
+  if (process.env.TEST_AUTH_DB) {
+    for (const path of ["/admin", "/admin/users", "/admin/balances"]) {
+      const response = await fetch(`${base}${path}`, { headers: { Cookie: cookie }, redirect: "manual" });
+      const html = await response.text();
+      assert.equal(response.status, 200, `${path} must open for admin`);
+      assert.ok(!html.includes("NEXT_REDIRECT"));
+      assert.ok(html.includes("KamenRaiderPlay Admin"));
+      if (path === "/admin/users") assert.ok(html.includes(user.email));
+    }
+    const { default: Database } = await import("better-sqlite3");
+    const database = new Database(process.env.TEST_AUTH_DB);
+    try {
+      database.prepare("UPDATE user SET role = 'user' WHERE id = ?").run(created.user.id);
+      const denied = await fetch(`${base}/admin`, { headers: { Cookie: cookie }, redirect: "manual" });
+      const deniedHtml = await denied.text();
+      assert.ok([307, 308].includes(denied.status) || deniedHtml.includes("NEXT_REDIRECT"), "revoked admin must lose access with the same session");
+      assert.ok(!deniedHtml.includes(user.email));
+    } finally {
+      database.prepare("UPDATE user SET role = 'admin' WHERE id = ?").run(created.user.id);
+      database.close();
+    }
+  }
   await request("/update-user", { role: "user" });
   assert.equal((await (await request("/get-session")).json()).user.role, process.env.TEST_AUTH_DB ? "admin" : "user");
   assert.equal(restored.user.image, created.user.image);
