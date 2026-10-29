@@ -1,0 +1,89 @@
+using KamenRaider.Contracts;
+using Microsoft.Data.Sqlite;
+using System.Text.Json;
+namespace KamenRaider.Controller.Data;
+public sealed partial class ControllerDatabase {
+    private const string LeaseColumns="id,user_id,machine_id,state,revision,starts_at,expires_at,pending_revision,duration_seconds,preparation_deadline,pending_expires_at,boot_id";
+    private record LeaseRow(LeaseDto Dto,int Duration,long PreparationDeadline,long? PendingExpiry,string? Boot);
+    private static DateTimeOffset? Instant(SqliteDataReader r,int i) => r.IsDBNull(i)?null:DateTimeOffset.FromUnixTimeMilliseconds(r.GetInt64(i));
+    private static LeaseRow ReadLease(SqliteDataReader r) => new(new(r.GetString(0),r.GetString(1),r.GetString(2),r.GetString(3),r.GetInt64(4),Instant(r,5),Instant(r,6),r.IsDBNull(7)?null:r.GetInt64(7)),r.GetInt32(8),r.GetInt64(9),r.IsDBNull(10)?null:r.GetInt64(10),r.IsDBNull(11)?null:r.GetString(11));
+    private SqliteCommand LeaseCommand(SqliteTransaction tx,string sql,params (string,object?)[] values) {
+        var cmd=Command(sql,values); cmd.Transaction=tx; return cmd;
+    }
+    private void ExecuteLease(SqliteTransaction tx,string sql,params (string,object?)[] values) {
+        using var cmd=LeaseCommand(tx,sql,values); cmd.ExecuteNonQuery();
+    }
+    private LeaseRow? FindLease(SqliteTransaction tx,string id) {
+        using var cmd=LeaseCommand(tx,$"SELECT {LeaseColumns} FROM leases WHERE id=$id",("$id",id));
+        using var r=cmd.ExecuteReader(); return r.Read()?ReadLease(r):null;
+    }
+    private static void Identifier(string value) {
+        if(string.IsNullOrWhiteSpace(value)||value.Length>128) throw new ArgumentException("Invalid identifier");
+    }
+    private static void Duration(int seconds) {
+        if(seconds is <1 or >86400) throw new ArgumentException("Duration must be 1 to 86400 seconds");
+    }
+    private string? PriorRequest(SqliteTransaction tx,string scope,string key,string fingerprint) {
+        using var cmd=LeaseCommand(tx,"SELECT rental_id,fingerprint FROM lease_requests WHERE scope=$scope AND request_key=$key",("$scope",scope),("$key",key));
+        using var r=cmd.ExecuteReader(); if(!r.Read()) return null;
+        if(r.GetString(1)!=fingerprint) throw new InvalidOperationException("Idempotency conflict");
+        return r.GetString(0);
+    }
+    private void SaveRequest(SqliteTransaction tx,string scope,string key,string fingerprint,string rentalId) =>
+        ExecuteLease(tx,"INSERT INTO lease_requests(scope,request_key,fingerprint,rental_id) VALUES($scope,$key,$fp,$id)",("$scope",scope),("$key",key),("$fp",fingerprint),("$id",rentalId));
+
+    // These deadlines are checked under the same immediate transaction as every state transition.
+    private void ExpireLeases(SqliteTransaction tx,long now) {
+        ExecuteLease(tx,"UPDATE leases SET state=CASE WHEN state='preparing' THEN 'failed' ELSE 'ending' END,pending_revision=NULL,pending_expires_at=NULL WHERE (state='preparing' AND preparation_deadline <= $now) OR (state IN ('preparing','active') AND expires_at <= $now)",("$now",now));
+        ExecuteLease(tx,"UPDATE command_outbox SET status='expired' WHERE status='pending' AND (valid_until <= $now OR rental_id IN (SELECT id FROM leases WHERE state IN ('failed','ending')))",("$now",now));
+    }
+    public LeaseDto CreateTrialLease(string userId,string machineId,int durationSeconds,string idempotencyKey) {
+        Identifier(userId); Identifier(machineId); Identifier(idempotencyKey); Duration(durationSeconds);
+        lock(gate) {
+            using var tx=connection.BeginTransaction(); var now=clock.GetUtcNow().ToUnixTimeMilliseconds(); ExpireLeases(tx,now);
+            var scope="create:"+userId; var fp=JsonSerializer.Serialize(new {machineId,durationSeconds});
+            var prior=PriorRequest(tx,scope,idempotencyKey,fp);
+            if(prior is not null) {var existing=FindLease(tx,prior)!.Dto;tx.Commit();return existing;}
+            using(var approved=LeaseCommand(tx,"SELECT approval_status FROM machines WHERE machine_id=$id",("$id",machineId)))
+                if(approved.ExecuteScalar() as string != "approved") throw new InvalidOperationException("Machine is not approved");
+            using(var allocation=LeaseCommand(tx,"SELECT COUNT(*) FROM leases WHERE machine_id=$id AND allocation_held=1",("$id",machineId)))
+                if((long)allocation.ExecuteScalar()! != 0) throw new InvalidOperationException("Machine is allocated");
+            var id=Guid.NewGuid().ToString("N");
+            ExecuteLease(tx,"INSERT INTO leases(id,user_id,machine_id,state,pending_revision,duration_seconds,preparation_deadline) VALUES($id,$user,$machine,'preparing',1,$duration,$deadline)",("$id",id),("$user",userId),("$machine",machineId),("$duration",durationSeconds),("$deadline",now+300000));
+            SaveRequest(tx,scope,idempotencyKey,fp,id);
+            // An offline machine acquires a boot-bound command only when its next heartbeat arrives.
+            using(var boot=LeaseCommand(tx,"SELECT boot_id FROM machine_heartbeats WHERE machine_id=$id",("$id",machineId))) {
+                if(boot.ExecuteScalar() is string bootId) PrepareCommand(tx,FindLease(tx,id)!,bootId);
+            }
+            var result=FindLease(tx,id)!.Dto;tx.Commit();return result;
+        }
+    }
+    public LeaseDto ExtendLease(string rentalId,int additionalSeconds,long expectedRevision,string idempotencyKey) {
+        Identifier(rentalId); Identifier(idempotencyKey); Duration(additionalSeconds);
+        lock(gate) {
+            using var tx=connection.BeginTransaction(); var now=clock.GetUtcNow().ToUnixTimeMilliseconds(); ExpireLeases(tx,now);
+            var scope="extend:"+rentalId;var fp=JsonSerializer.Serialize(new {additionalSeconds,expectedRevision});
+            var prior=PriorRequest(tx,scope,idempotencyKey,fp);
+            if(prior is not null) {var existing=FindLease(tx,prior)!.Dto;tx.Commit();return existing;}
+            var lease=FindLease(tx,rentalId)??throw new KeyNotFoundException();
+            if(lease.Dto.State!="active"||lease.Dto.Revision!=expectedRevision||lease.Dto.PendingRevision is not null) throw new InvalidOperationException("Lease state or revision conflict");
+            var revision=checked(expectedRevision+1);var expiry=lease.Dto.ExpiresAtUtc!.Value.AddSeconds(additionalSeconds).ToUnixTimeMilliseconds();
+            ExecuteLease(tx,"UPDATE leases SET pending_revision=$revision,pending_expires_at=$expiry WHERE id=$id",("$revision",revision),("$expiry",expiry),("$id",rentalId));
+            AddCommand(tx,lease,"ApplyLease",revision,lease.Boot!,lease.Dto.ExpiresAtUtc.Value.ToUnixTimeMilliseconds(),new { startsAtUtc=lease.Dto.StartsAtUtc, expiresAtUtc=DateTimeOffset.FromUnixTimeMilliseconds(expiry) });
+            SaveRequest(tx,scope,idempotencyKey,fp,rentalId);
+            var result=FindLease(tx,rentalId)!.Dto;tx.Commit();return result;
+        }
+    }
+    public LeaseDto? GetLease(string rentalId) {
+        lock(gate) {using var tx=connection.BeginTransaction();ExpireLeases(tx,clock.GetUtcNow().ToUnixTimeMilliseconds());var result=FindLease(tx,rentalId)?.Dto;tx.Commit();return result;}
+    }
+    public LeaseDto[] GetUserLeases(string userId) {
+        Identifier(userId);
+        lock(gate) {
+            using var tx=connection.BeginTransaction();ExpireLeases(tx,clock.GetUtcNow().ToUnixTimeMilliseconds());
+            using var cmd=LeaseCommand(tx,$"SELECT {LeaseColumns} FROM leases WHERE user_id=$id ORDER BY rowid",("$id",userId));
+            var leases=new List<LeaseDto>();using(var r=cmd.ExecuteReader())while(r.Read()) leases.Add(ReadLease(r).Dto);
+            tx.Commit();return leases.ToArray();
+        }
+    }
+}

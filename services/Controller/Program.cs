@@ -1,5 +1,6 @@
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using KamenRaider.Controller.Agents;
+using KamenRaider.Controller.Leases;
 using KamenRaider.Controller.Data;
 using KamenRaider.Controller.Machines;
 using KamenRaider.Controller.Security;
@@ -47,6 +48,7 @@ public static class ControllerHost
         }
         builder.Services.AddSingleton<ControllerDatabase>(sp => new ControllerDatabase(sp.GetRequiredService<IOptions<ControllerOptions>>().Value.DatabasePath));
         builder.Services.AddSingleton<AgentAuthentication>();
+        builder.Services.AddSingleton<LeaseService>();
         builder.Services.TryAddSingleton<KamenRaider.Controller.Network.IWakeSender>(_ => new KamenRaider.Controller.Network.WakeService(settings.WakeInterfaceAddress));
         if (Uri.TryCreate(settings.PublicIpEndpoint, UriKind.Absolute, out var publicIp) && publicIp.Scheme == "https") {
             builder.Services.AddSingleton(_ => new KamenRaider.Controller.Network.PublicIpJob(new HttpClient(),publicIp));
@@ -72,9 +74,8 @@ public static class ControllerHost
         app.MapGet("/internal/health", () => new HealthResponse(Protocol.Version, "ok"));
         app.MapMachines();
         app.MapSync();
+        app.MapLeases();
         return app;
     }
 }
 public class Program { public static void Main(string[] args) => ControllerHost.Build(args).Run(); }
-
-

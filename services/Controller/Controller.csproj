@@ -16,4 +16,4 @@
     <ImplicitUsings>enable</ImplicitUsings>
   </PropertyGroup>
 
-  <ItemGroup><EmbeddedResource Include="Data\Migrations\*.sql" LogicalName="KamenRaider.Controller.Data.Migrations.001-machines.sql" /></ItemGroup></Project>
+  <ItemGroup><EmbeddedResource Include="Data\Migrations\*.sql" LogicalName="KamenRaider.Controller.Data.Migrations.%(Filename)%(Extension)" /></ItemGroup></Project>
