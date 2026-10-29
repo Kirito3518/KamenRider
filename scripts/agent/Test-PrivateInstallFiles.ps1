@@ -1,0 +1,46 @@
+$ErrorActionPreference='Stop'
+. (Join-Path $PSScriptRoot 'PrivateInstallFiles.ps1')
+$root=Join-Path ([IO.Path]::GetTempPath()) ('kr-private-'+[Guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $root | Out-Null
+$currentSid=[Security.Principal.WindowsIdentity]::GetCurrent().User
+$failures=@()
+try {
+ $existing=Join-Path $root 'existing';New-Item -ItemType Directory -Path $existing | Out-Null
+ $child=Join-Path $existing 'insecure.txt';[IO.File]::WriteAllText($child,'untrusted')
+ $acl=Get-Acl -LiteralPath $child
+ $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new('S-1-1-0'),[Security.AccessControl.FileSystemRights]::FullControl,[Security.AccessControl.AccessControlType]::Allow));Set-Acl -LiteralPath $child -AclObject $acl
+ try {Assert-EmptyInstallDirectory $existing;throw 'Nonempty destination was accepted'}catch{if($_.Exception.Message -ne 'Data directory must be empty.'){throw}}
+ if([IO.File]::ReadAllText($child) -ne 'untrusted'){throw 'Reject must not mutate existing data'}
+ Write-Output 'PASS: pre-existing insecure descendants are rejected without mutation'
+} catch {$failures+=$_.Exception.Message}
+try {
+ $empty=Join-Path $root 'empty';Initialize-PrivateDataDirectory $empty $currentSid
+ $acl=Get-Acl -LiteralPath $empty
+ $allowed=@($currentSid.Value,'S-1-5-18','S-1-5-32-544')
+ if(-not $acl.AreAccessRulesProtected){throw 'Data ACL must be protected'}
+ foreach($rule in $acl.Access){if($rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value -notin $allowed){throw 'Unexpected data access'}}
+ $publish=Join-Path $root 'publish';New-Item -ItemType Directory -Path $publish | Out-Null
+ $source=Join-Path $root 'secret.json';[IO.File]::WriteAllText($source,'{"credential":"test-only-secret"}')
+ $destination=Join-Path $publish 'appsettings.json';[IO.File]::WriteAllText($destination,'old')
+ $acl=Get-Acl -LiteralPath $destination;$acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new('S-1-1-0'),[Security.AccessControl.FileSystemRights]::FullControl,[Security.AccessControl.AccessControlType]::Allow));Set-Acl -LiteralPath $destination -AclObject $acl
+ Publish-PrivateConfiguration $source $publish $currentSid
+ if([IO.File]::ReadAllText($destination) -ne '{"credential":"test-only-secret"}'){throw 'Secret configuration was not published'}
+ $acl=Get-Acl -LiteralPath $destination
+ if(-not $acl.AreAccessRulesProtected){throw 'Published ACL must remain protected after atomic replacement'}
+ foreach($rule in $acl.Access){if($rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value -notin $allowed){throw 'Destination retained broad explicit or inherited ACL'}}
+ if(@(Get-ChildItem -LiteralPath $publish -Force).Count -ne 1){throw 'Private staging files leaked'}
+ Write-Output 'PASS: config atomically replaces insecure target with private source ACL'
+ $lock=[IO.File]::Open($source,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::None)
+ try {try{Publish-PrivateConfiguration $source $publish $currentSid;throw 'Locked source accepted'}catch{if($_.Exception.Message -eq 'Locked source accepted'){throw}}}finally{$lock.Dispose()}
+ if([IO.File]::ReadAllText($destination) -ne '{"credential":"test-only-secret"}'){throw 'Failed publication changed destination'}
+ if(@(Get-ChildItem -LiteralPath $publish -Force).Count -ne 1){throw 'Failed publication leaked staging files'}
+ Write-Output 'PASS: failed config publication preserves destination and cleans staging'
+} catch {$failures+=$_.Exception.Message}
+finally {
+ $resolved=[IO.Path]::GetFullPath($root)
+ $tempRoot=[IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\')+'\'
+ if(-not $resolved.StartsWith($tempRoot,[StringComparison]::OrdinalIgnoreCase) -or [IO.Path]::GetFileName($resolved) -notlike 'kr-private-*'){throw 'Unsafe test cleanup path.'}
+ Remove-Item -LiteralPath $resolved -Recurse -Force
+}
+if($failures.Count){throw ($failures -join '; ')}
+Write-Output 'Private installer-file tests passed using temporary files only; no services changed.'

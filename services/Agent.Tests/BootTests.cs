@@ -25,6 +25,12 @@ public class BootTests {
   using var f=new Fixture();f.Client.Resume=true;f.Environment.LeaseRestored=true;f.Environment.OnRestore=()=>f.Clock.Uptime=120010;
   Assert.Equal(Readiness.NotReady,await f.Run());
  }
+ [Fact] public async Task MissingControllerChallengeCannotSubmitProofOrBecomeReady() {
+  using var f=new Fixture();f.Client.NoChallenge=true;Assert.Equal(Readiness.NotReady,await f.Run());Assert.False(f.Client.Last!.HealthVerified);
+ }
+ [Fact] public async Task ProofIsBoundToExactControllerChallenge() {
+  using var f=new Fixture();Assert.Equal(Readiness.Ready,await f.Run());Assert.Equal("generation-1",f.Client.Last!.Challenge?.Token);Assert.Equal("allocation-1",f.Client.Last.Challenge?.AllocationId);Assert.Equal(4,f.Client.Last.Challenge?.LeaseRevision);
+ }
  sealed class Fixture:IDisposable {
   readonly string path=Path.Combine(Path.GetTempPath(),Guid.NewGuid().ToString());public Clock Clock=new();public Gate Gate=new();public Client Client=new();public Environment Environment=new();public AppliedConfiguration Configuration;
   public Fixture(){Directory.CreateDirectory(path);Configuration=new(path);}
@@ -34,14 +40,14 @@ public class BootTests {
  sealed class Clock:IBootClock {public string BootId=>"os-boot";public long Uptime=10;public long UptimeMilliseconds=>Uptime;}
  sealed class Gate:IStreamGate {public bool Blocked;public Task BlockAsync(CancellationToken ct){Blocked=true;return Task.CompletedTask;}}
  sealed class Client:IBootReconciliationClient {
-  public bool Offline,Resume;public ReconcileRequest? Last;
-  public Task<ReconcileResponse> ReconcileAsync(ReconcileRequest request,CancellationToken ct){Last=request;if(Offline)throw new HttpRequestException();return Task.FromResult(new ReconcileResponse(DateTimeOffset.UtcNow,new(7,5000,6000),Resume?new("rental",1,"os-boot",DateTimeOffset.UtcNow.AddMinutes(1)):null,request.HealthVerified?(Resume?"ResumeLease":"PrepareAvailable"):"Hold"));}
+  public bool Offline,Resume,NoChallenge;public ReconcileRequest? Last;
+  public Task<ReconcileResponse> ReconcileAsync(ReconcileRequest request,CancellationToken ct){Last=request;if(Offline)throw new HttpRequestException();return Task.FromResult(new ReconcileResponse(DateTimeOffset.UtcNow,new(7,5000,6000),Resume?new("rental",1,"os-boot",DateTimeOffset.UtcNow.AddMinutes(1)):null,request.HealthVerified?(Resume?"ResumeLease":"PrepareAvailable"):"Hold",NoChallenge?null:new("generation-1","os-boot","allocation-1",4,DateTimeOffset.UtcNow.AddSeconds(30))));}
  }
  sealed class Environment:IBootEnvironment {
   public bool Restored=true,Cleaned=true,Healthy=true,LeaseRestored;public Action? OnRestore;
-  public Task<bool> VerifyRestorationAsync(string bootId,CancellationToken ct)=>Task.FromResult(Restored);
-  public Task<bool> FenceAndClearAsync(CancellationToken ct)=>Task.FromResult(Cleaned);
-  public Task<bool> VerifyHealthAsync(CancellationToken ct)=>Task.FromResult(Healthy);
+  public Task<bool> VerifyRestorationAsync(ReconciliationChallenge challenge,CancellationToken ct)=>Task.FromResult(Restored);
+  public Task<bool> FenceAndClearAsync(ReconciliationChallenge challenge,CancellationToken ct)=>Task.FromResult(Cleaned);
+  public Task<bool> VerifyHealthAsync(ReconciliationChallenge challenge,CancellationToken ct)=>Task.FromResult(Healthy);
   public Task<bool> RestoreLeaseAsync(ActiveLeaseConfirmation lease,DateTimeOffset controllerTime,long requestStartedUptime,CancellationToken ct){OnRestore?.Invoke();return Task.FromResult(LeaseRestored);}
  }
 }
