@@ -7,7 +7,7 @@ public interface IStreamGate {Task BlockAsync(CancellationToken ct);}
 public sealed class LeaseEnforcer(LeaseStore store,TimeProvider time,IBootClock boot,IStreamGate gate,IShutdown shutdown) {
  private readonly SemaphoreSlim commands=new(1,1);
  private readonly object state=new();
- private bool initialized;private volatile bool confirmed;private int shutdownState;private int expiryGateInFlight;private long? recoveryDeadline;
+ private bool initialized;private bool requiresControllerTime;private bool controllerTimeObserved;private bool importSaved;private volatile bool confirmed;private int shutdownState;private int expiryGateInFlight;private long? recoveryDeadline;
  private LeaseSnapshot? current;private LeaseSnapshot? pendingInitial;private string? fault;private DateTimeOffset? serverTime;private long serverUptime;
  public LeaseSnapshot? Current=>Volatile.Read(ref current);
  public string? Fault=>Volatile.Read(ref fault);
@@ -16,13 +16,13 @@ public sealed class LeaseEnforcer(LeaseStore store,TimeProvider time,IBootClock 
  public async Task InitializeAsync(CancellationToken ct){await commands.WaitAsync(ct);try{await InitializeCoreAsync(ct);}finally{commands.Release();}}
  private async Task InitializeCoreAsync(CancellationToken ct,bool blockGate=true){if(initialized)return;
   try{var loaded=await store.LoadAsync(ct);
-   lock(state){current=loaded;recoveryDeadline=loaded?.RecoveryDeadlineUptimeMilliseconds;if(loaded is {} s&&(s.BootId!=boot.BootId||s.Revision<=0||s.DeadlineUptimeMilliseconds<=0||string.IsNullOrWhiteSpace(s.LastCommandId)))fault="ReconciliationRequired";initialized=true;}
+   lock(state){current=loaded;requiresControllerTime=loaded is not null;recoveryDeadline=loaded?.RecoveryDeadlineUptimeMilliseconds;if(loaded is {} s&&(s.BootId!=boot.BootId||s.Revision<=0||s.DeadlineUptimeMilliseconds<=0||string.IsNullOrWhiteSpace(s.LastCommandId)))fault="ReconciliationRequired";initialized=true;}
   }catch(Exception ex) when(ex is IOException or JsonException or UnauthorizedAccessException){lock(state){fault="LeaseStorageFailed";initialized=true;}}
   if(blockGate)await gate.BlockAsync(ct);
  }
  public Task ObserveControllerTimeAsync(DateTimeOffset observed,CancellationToken ct)=>ObserveControllerTimeAsync(observed,boot.UptimeMilliseconds,ct);
   public async Task ObserveControllerTimeAsync(DateTimeOffset observed,long requestStartedUptimeMilliseconds,CancellationToken ct){ct.ThrowIfCancellationRequested();LeaseSnapshot? shortened=null;
-  lock(state){var nowUptime=boot.UptimeMilliseconds;if(requestStartedUptimeMilliseconds>nowUptime||requestStartedUptimeMilliseconds<0){fault="InvalidClockSample";confirmed=false;return;}var conservative=observed.AddMilliseconds(nowUptime-requestStartedUptimeMilliseconds);var now=EffectiveNow();serverTime=conservative>now?conservative:now;serverUptime=nowUptime;
+  lock(state){var nowUptime=boot.UptimeMilliseconds;if(requestStartedUptimeMilliseconds>nowUptime||requestStartedUptimeMilliseconds<0){fault="InvalidClockSample";confirmed=false;return;}var conservative=observed.AddMilliseconds(nowUptime-requestStartedUptimeMilliseconds);var now=EffectiveNow();serverTime=conservative>now?conservative:now;serverUptime=nowUptime;controllerTimeObserved=true;
    if(current is {} snapshot&&snapshot.BootId==boot.BootId){var remaining=snapshot.ExpiresAtUtc-serverTime.Value;var deadline=remaining<=TimeSpan.Zero?nowUptime:checked(nowUptime+(long)remaining.TotalMilliseconds);if(deadline<snapshot.DeadlineUptimeMilliseconds){shortened=snapshot with{DeadlineUptimeMilliseconds=deadline};current=shortened;confirmed=false;if(fault is null)fault="ClockPersistenceRequired";}}
   }
   if(shortened is null)return;
@@ -30,7 +30,7 @@ public sealed class LeaseEnforcer(LeaseStore store,TimeProvider time,IBootClock 
    lock(state){if(!ReferenceEquals(current,shortened))return;}
    await gate.BlockAsync(ct);
    try{await store.SaveAsync(shortened,ct);}catch(Exception ex) when(ex is IOException or UnauthorizedAccessException){lock(state){fault="LeaseStorageFailed";}return;}
-   lock(state){if(ReferenceEquals(current,shortened)&&fault=="ClockPersistenceRequired")fault=null;}
+   lock(state){if(ReferenceEquals(current,shortened)&&(fault=="ClockPersistenceRequired"||(fault=="ImportPending"&&importSaved)))fault=null;}
   }finally{commands.Release();}
  }
 private DateTimeOffset EffectiveNow(){var now=time.GetUtcNow();if(serverTime is {} origin){var projected=origin.AddMilliseconds(boot.UptimeMilliseconds-serverUptime);if(projected>now)now=projected;}if(Current is {} s&&s.BootId==boot.BootId){var projected=s.ExpiresAtUtc.AddMilliseconds(boot.UptimeMilliseconds-s.DeadlineUptimeMilliseconds);if(projected>now)now=projected;}return now;}
@@ -38,11 +38,11 @@ private DateTimeOffset EffectiveNow(){var now=time.GetUtcNow();if(serverTime is 
   await InitializeCoreAsync(ct,false);LeaseSnapshot next;
   lock(state){var now=boot.UptimeMilliseconds;var old=current;if(fault!="ReconciliationRequired"||old is null||old.BootId==boot.BootId||old.RecoveryDeadlineUptimeMilliseconds is not null||lease.BootId!=boot.BootId||lease.RentalId!=old.RentalId||lease.LeaseRevision!=old.Revision||lease.ExpiresAtUtc!=old.ExpiresAtUtc||requestStartedUptime<0||requestStartedUptime>now)return false;
    var effective=controllerTime.AddMilliseconds(now-requestStartedUptime);var floor=EffectiveNow();if(floor>effective)effective=floor;if(lease.ExpiresAtUtc<=effective)return false;
-   next=new(lease.RentalId,lease.LeaseRevision,lease.ExpiresAtUtc,lease.BootId,old.LastCommandId,checked(now+(long)(lease.ExpiresAtUtc-effective).TotalMilliseconds));current=next;recoveryDeadline=null;fault="ImportPending";confirmed=false;
+   next=new(lease.RentalId,lease.LeaseRevision,lease.ExpiresAtUtc,lease.BootId,old.LastCommandId,checked(now+(long)(lease.ExpiresAtUtc-effective).TotalMilliseconds));current=next;recoveryDeadline=null;fault="ImportPending";confirmed=false;importSaved=false;controllerTimeObserved=true;
   }
   await gate.BlockAsync(ct);
   try{await store.SaveAsync(next,ct);}catch(Exception ex) when(ex is IOException or UnauthorizedAccessException){lock(state){fault="LeaseStorageFailed";}return false;}
-  lock(state){if(!ReferenceEquals(current,next)||fault!="ImportPending"||boot.BootId!=next.BootId||boot.UptimeMilliseconds>=next.DeadlineUptimeMilliseconds)return false;fault=null;return true;}
+  lock(state){importSaved=true;if(!ReferenceEquals(current,next)||fault!="ImportPending"||boot.BootId!=next.BootId||boot.UptimeMilliseconds>=next.DeadlineUptimeMilliseconds)return false;fault=null;return true;}
  }finally{commands.Release();}}
  public async Task<CommandResult> ApplyAsync(CommandEnvelope command,CancellationToken ct){await commands.WaitAsync(ct);try{
   await InitializeCoreAsync(ct,false);var failed=new CommandResult(command.CommandId,"failed",command.LeaseRevision,"LeaseRejected");LeaseSnapshot? previous;LeaseSnapshot next;
@@ -70,7 +70,7 @@ private DateTimeOffset EffectiveNow(){var now=time.GetUtcNow();if(serverTime is 
   if(candidate?.RecoveryDeadlineUptimeMilliseconds is not null){var finalized=candidate with{RecoveryDeadlineUptimeMilliseconds=null};try{await store.SaveAsync(finalized,ct);}catch(Exception ex) when(ex is IOException or UnauthorizedAccessException){lock(state){fault="LeaseStorageFailed";}return;}lock(state){if(ReferenceEquals(current,candidate)&&Matches(confirmation))current=finalized;}}
   lock(state){confirmed=Matches(confirmation);}if(!confirmed)await gate.BlockAsync(ct);
  }finally{commands.Release();}}
- private bool Matches(ActiveLeaseConfirmation? confirmation)=>fault is null&&current is {} s&&s.BootId==boot.BootId&&boot.UptimeMilliseconds<EnforcementDeadline(s)&&confirmation is {} c&&c.RentalId==s.RentalId&&c.BootId==s.BootId&&c.LeaseRevision==s.Revision&&c.ExpiresAtUtc==s.ExpiresAtUtc;
+ private bool Matches(ActiveLeaseConfirmation? confirmation)=>fault is null&&(!requiresControllerTime||controllerTimeObserved)&&current is {} s&&s.BootId==boot.BootId&&boot.UptimeMilliseconds<EnforcementDeadline(s)&&confirmation is {} c&&c.RentalId==s.RentalId&&c.BootId==s.BootId&&c.LeaseRevision==s.Revision&&c.ExpiresAtUtc==s.ExpiresAtUtc;
  public async Task EnforceAsync(CancellationToken ct){
   // No command semaphore, disk operation, or gate operation may delay known expiry.
   if(Current is null&&!initialized){if(!commands.Wait(0))return;try{await InitializeCoreAsync(ct,false);}finally{commands.Release();}}
