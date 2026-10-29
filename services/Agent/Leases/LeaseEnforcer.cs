@@ -7,15 +7,15 @@ public interface IStreamGate {Task BlockAsync(CancellationToken ct);}
 public sealed class LeaseEnforcer(LeaseStore store,TimeProvider time,IBootClock boot,IStreamGate gate,IShutdown shutdown) {
  private readonly SemaphoreSlim commands=new(1,1);
  private readonly object state=new();
- private bool initialized;private volatile bool confirmed;private int shutdownState;
+ private bool initialized;private volatile bool confirmed;private int shutdownState;private int expiryGateInFlight;private long? recoveryDeadline;
  private LeaseSnapshot? current;private LeaseSnapshot? pendingInitial;private string? fault;private DateTimeOffset? serverTime;private long serverUptime;
  public LeaseSnapshot? Current=>Volatile.Read(ref current);
  public string? Fault=>Volatile.Read(ref fault);
  public bool CanStream=>confirmed&&Fault is null&&Current is {} s&&s.BootId==boot.BootId&&boot.UptimeMilliseconds<s.DeadlineUptimeMilliseconds;
  public async Task InitializeAsync(CancellationToken ct){await commands.WaitAsync(ct);try{await InitializeCoreAsync(ct);}finally{commands.Release();}}
  private async Task InitializeCoreAsync(CancellationToken ct,bool blockGate=true){if(initialized)return;
-  try{var loaded=await store.LoadAsync(ct);if(loaded?.RecoveryDeadlineUptimeMilliseconds is {} guard)loaded=loaded with{DeadlineUptimeMilliseconds=Math.Min(guard,loaded.DeadlineUptimeMilliseconds)};
-   lock(state){current=loaded;if(loaded is {} s&&(s.BootId!=boot.BootId||s.Revision<=0||s.DeadlineUptimeMilliseconds<=0||string.IsNullOrWhiteSpace(s.LastCommandId)))fault="ReconciliationRequired";initialized=true;}
+  try{var loaded=await store.LoadAsync(ct);
+   lock(state){current=loaded;recoveryDeadline=loaded?.RecoveryDeadlineUptimeMilliseconds;if(loaded is {} s&&(s.BootId!=boot.BootId||s.Revision<=0||s.DeadlineUptimeMilliseconds<=0||string.IsNullOrWhiteSpace(s.LastCommandId)))fault="ReconciliationRequired";initialized=true;}
   }catch(Exception ex) when(ex is IOException or JsonException or UnauthorizedAccessException){lock(state){fault="LeaseStorageFailed";initialized=true;}}
   if(blockGate)await gate.BlockAsync(ct);
  }
@@ -29,7 +29,7 @@ public sealed class LeaseEnforcer(LeaseStore store,TimeProvider time,IBootClock 
    DateTimeOffset expires,starts;try{expires=command.Payload.GetProperty("expiresAtUtc").GetDateTimeOffset();starts=command.Payload.GetProperty("startsAtUtc").GetDateTimeOffset();}catch(Exception ex) when(ex is InvalidOperationException or KeyNotFoundException or FormatException){return failed;}
    if(expires<=EffectiveNow()||starts>expires)return failed;
    previous=current;
-   if(previous is not null){if(previous.BootId!=boot.BootId||boot.UptimeMilliseconds>=previous.DeadlineUptimeMilliseconds)return failed;
+   if(previous is not null){if(previous.BootId!=boot.BootId||boot.UptimeMilliseconds>=EnforcementDeadline(previous))return failed;
     if(command.CommandId==previous.LastCommandId)return command.RentalId==previous.RentalId&&command.LeaseRevision==previous.Revision&&expires==previous.ExpiresAtUtc?new(command.CommandId,"applied",previous.Revision):failed;
     if(command.RentalId!=previous.RentalId||command.LeaseRevision!=previous.Revision+1||expires<=previous.ExpiresAtUtc)return failed;}
    confirmed=false;var deadline=checked(boot.UptimeMilliseconds+(long)(expires-EffectiveNow()).TotalMilliseconds);
@@ -42,20 +42,21 @@ public sealed class LeaseEnforcer(LeaseStore store,TimeProvider time,IBootClock 
   // Neither disk nor gate owns the expiry path. Recheck after every await before publishing.
   lock(state){if(!CanCommit(previous,next,command))return failed;current=next;return new(command.CommandId,"applied",command.LeaseRevision);}
  }finally{commands.Release();}}
- private bool CanCommit(LeaseSnapshot? previous,LeaseSnapshot next,CommandEnvelope command)=>fault is null&&ReferenceEquals(previous,current)&&boot.BootId==next.BootId&&boot.UptimeMilliseconds<next.DeadlineUptimeMilliseconds&&(previous is null||boot.UptimeMilliseconds<previous.DeadlineUptimeMilliseconds)&&command.ValidUntilUtc>EffectiveNow();
+ private bool CanCommit(LeaseSnapshot? previous,LeaseSnapshot next,CommandEnvelope command)=>fault is null&&ReferenceEquals(previous,current)&&boot.BootId==next.BootId&&boot.UptimeMilliseconds<next.DeadlineUptimeMilliseconds&&(previous is null||boot.UptimeMilliseconds<EnforcementDeadline(previous))&&command.ValidUntilUtc>EffectiveNow();
  public async Task ConfirmAsync(ActiveLeaseConfirmation? confirmation,CancellationToken ct){await commands.WaitAsync(ct);try{await InitializeCoreAsync(ct);LeaseSnapshot? candidate;
-  lock(state){confirmed=false;candidate=Matches(confirmation)?current:null;}
+  lock(state){confirmed=false;candidate=Matches(confirmation)?current:null;if(candidate is not null)recoveryDeadline=null;}
   if(candidate?.RecoveryDeadlineUptimeMilliseconds is not null){var finalized=candidate with{RecoveryDeadlineUptimeMilliseconds=null};try{await store.SaveAsync(finalized,ct);}catch(Exception ex) when(ex is IOException or UnauthorizedAccessException){lock(state){fault="LeaseStorageFailed";}return;}lock(state){if(ReferenceEquals(current,candidate)&&Matches(confirmation))current=finalized;}}
   lock(state){confirmed=Matches(confirmation);}if(!confirmed)await gate.BlockAsync(ct);
  }finally{commands.Release();}}
- private bool Matches(ActiveLeaseConfirmation? confirmation)=>fault is null&&current is {} s&&s.BootId==boot.BootId&&boot.UptimeMilliseconds<s.DeadlineUptimeMilliseconds&&confirmation is {} c&&c.RentalId==s.RentalId&&c.BootId==s.BootId&&c.LeaseRevision==s.Revision&&c.ExpiresAtUtc==s.ExpiresAtUtc;
+ private bool Matches(ActiveLeaseConfirmation? confirmation)=>fault is null&&current is {} s&&s.BootId==boot.BootId&&boot.UptimeMilliseconds<EnforcementDeadline(s)&&confirmation is {} c&&c.RentalId==s.RentalId&&c.BootId==s.BootId&&c.LeaseRevision==s.Revision&&c.ExpiresAtUtc==s.ExpiresAtUtc;
  public async Task EnforceAsync(CancellationToken ct){
   // No command semaphore, disk operation, or gate operation may delay known expiry.
   if(Current is null&&!initialized){if(!commands.Wait(0))return;try{await InitializeCoreAsync(ct,false);}finally{commands.Release();}}
-  lock(state){if((current??pendingInitial) is not {} s||s.BootId!=boot.BootId||boot.UptimeMilliseconds<s.DeadlineUptimeMilliseconds)return;confirmed=false;fault="LeaseExpired";}
+  lock(state){if((current??pendingInitial) is not {} s||s.BootId!=boot.BootId||boot.UptimeMilliseconds<EnforcementDeadline(s))return;confirmed=false;fault="LeaseExpired";}
   if(Interlocked.CompareExchange(ref shutdownState,1,0)==0){try{await shutdown.RequestImmediateShutdownAsync(ct);Volatile.Write(ref shutdownState,2);lock(state){fault="ShutdownRequested";}}catch(Exception ex) when(ex is not OperationCanceledException){Volatile.Write(ref shutdownState,0);lock(state){fault="ShutdownFailed";}}}
   // Observe eventual failure without awaiting an adapter that could be stalled.
-  _=BlockAfterExpiryAsync();
+  if(Interlocked.CompareExchange(ref expiryGateInFlight,1,0)==0)_=BlockAfterExpiryAsync();
  }
- private async Task BlockAfterExpiryAsync(){try{await gate.BlockAsync(CancellationToken.None);}catch(Exception){lock(state){confirmed=false;}}}
+ private long EnforcementDeadline(LeaseSnapshot snapshot)=>recoveryDeadline is {} guard?Math.Min(guard,snapshot.DeadlineUptimeMilliseconds):snapshot.DeadlineUptimeMilliseconds;
+ private async Task BlockAfterExpiryAsync(){try{await gate.BlockAsync(CancellationToken.None);}catch(Exception){lock(state){confirmed=false;}}finally{Volatile.Write(ref expiryGateInFlight,0);}}
 }
