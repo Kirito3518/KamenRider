@@ -21,8 +21,19 @@ public sealed class LeaseEnforcer(LeaseStore store,TimeProvider time,IBootClock 
   if(blockGate)await gate.BlockAsync(ct);
  }
  public Task ObserveControllerTimeAsync(DateTimeOffset observed,CancellationToken ct)=>ObserveControllerTimeAsync(observed,boot.UptimeMilliseconds,ct);
- public Task ObserveControllerTimeAsync(DateTimeOffset observed,long requestStartedUptimeMilliseconds,CancellationToken ct){ct.ThrowIfCancellationRequested();lock(state){var nowUptime=boot.UptimeMilliseconds;if(requestStartedUptimeMilliseconds>nowUptime||requestStartedUptimeMilliseconds<0){fault="InvalidClockSample";confirmed=false;return Task.CompletedTask;}var conservative=observed.AddMilliseconds(nowUptime-requestStartedUptimeMilliseconds);var now=EffectiveNow();serverTime=conservative>now?conservative:now;serverUptime=nowUptime;}return Task.CompletedTask;}
- private DateTimeOffset EffectiveNow(){var now=time.GetUtcNow();if(serverTime is {} origin){var projected=origin.AddMilliseconds(boot.UptimeMilliseconds-serverUptime);if(projected>now)now=projected;}if(Current is {} s&&s.BootId==boot.BootId){var projected=s.ExpiresAtUtc.AddMilliseconds(boot.UptimeMilliseconds-s.DeadlineUptimeMilliseconds);if(projected>now)now=projected;}return now;}
+  public async Task ObserveControllerTimeAsync(DateTimeOffset observed,long requestStartedUptimeMilliseconds,CancellationToken ct){ct.ThrowIfCancellationRequested();LeaseSnapshot? shortened=null;
+  lock(state){var nowUptime=boot.UptimeMilliseconds;if(requestStartedUptimeMilliseconds>nowUptime||requestStartedUptimeMilliseconds<0){fault="InvalidClockSample";confirmed=false;return;}var conservative=observed.AddMilliseconds(nowUptime-requestStartedUptimeMilliseconds);var now=EffectiveNow();serverTime=conservative>now?conservative:now;serverUptime=nowUptime;
+   if(current is {} snapshot&&snapshot.BootId==boot.BootId){var remaining=snapshot.ExpiresAtUtc-serverTime.Value;var deadline=remaining<=TimeSpan.Zero?nowUptime:checked(nowUptime+(long)remaining.TotalMilliseconds);if(deadline<snapshot.DeadlineUptimeMilliseconds){shortened=snapshot with{DeadlineUptimeMilliseconds=deadline};current=shortened;confirmed=false;if(fault is null)fault="ClockPersistenceRequired";}}
+  }
+  if(shortened is null)return;
+  await commands.WaitAsync(ct);try{
+   lock(state){if(!ReferenceEquals(current,shortened))return;}
+   await gate.BlockAsync(ct);
+   try{await store.SaveAsync(shortened,ct);}catch(Exception ex) when(ex is IOException or UnauthorizedAccessException){lock(state){fault="LeaseStorageFailed";}return;}
+   lock(state){if(ReferenceEquals(current,shortened)&&fault=="ClockPersistenceRequired")fault=null;}
+  }finally{commands.Release();}
+ }
+private DateTimeOffset EffectiveNow(){var now=time.GetUtcNow();if(serverTime is {} origin){var projected=origin.AddMilliseconds(boot.UptimeMilliseconds-serverUptime);if(projected>now)now=projected;}if(Current is {} s&&s.BootId==boot.BootId){var projected=s.ExpiresAtUtc.AddMilliseconds(boot.UptimeMilliseconds-s.DeadlineUptimeMilliseconds);if(projected>now)now=projected;}return now;}
  public async Task<bool> ImportReconciledLeaseAsync(ActiveLeaseConfirmation lease,DateTimeOffset controllerTime,long requestStartedUptime,CancellationToken ct){await commands.WaitAsync(ct);try{
   await InitializeCoreAsync(ct,false);LeaseSnapshot next;
   lock(state){var now=boot.UptimeMilliseconds;var old=current;if(fault!="ReconciliationRequired"||old is null||old.BootId==boot.BootId||old.RecoveryDeadlineUptimeMilliseconds is not null||lease.BootId!=boot.BootId||lease.RentalId!=old.RentalId||lease.LeaseRevision!=old.Revision||lease.ExpiresAtUtc!=old.ExpiresAtUtc||requestStartedUptime<0||requestStartedUptime>now)return false;
