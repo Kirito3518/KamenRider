@@ -58,3 +58,7 @@ services/**/secrets/
 services/**/data/
 *.pfx
 *.p12
+
+# Controller persistence source (Windows paths are case-insensitive)
+!services/Controller/Data/
+!services/Controller/Data/**

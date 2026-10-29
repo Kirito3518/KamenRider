@@ -1,0 +1,47 @@
+using Microsoft.Data.Sqlite;
+using KamenRaider.Contracts;
+using System.Security.Cryptography;
+namespace KamenRaider.Controller.Data;
+public sealed class ControllerDatabase : IDisposable
+{
+    private readonly SqliteConnection connection;
+    private readonly object gate=new();
+    public ControllerDatabase(string path) {
+        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
+        connection=new SqliteConnection(new SqliteConnectionStringBuilder {DataSource=path, ForeignKeys=true, Pooling=false}.ToString()); connection.Open();
+        using var transaction=connection.BeginTransaction();
+        using var resource=typeof(ControllerDatabase).Assembly.GetManifestResourceStream("KamenRaider.Controller.Data.Migrations.001-machines.sql")!;
+        using var reader=new StreamReader(resource);
+        using var cmd=connection.CreateCommand(); cmd.Transaction=transaction; cmd.CommandText=reader.ReadToEnd(); cmd.ExecuteNonQuery(); transaction.Commit();
+    }
+    public void Dispose()=>connection.Dispose();
+    private SqliteCommand Command(string sql, params (string,object?)[] values) { var cmd=connection.CreateCommand();cmd.CommandText=sql; foreach(var (name,value) in values) cmd.Parameters.AddWithValue(name,value??DBNull.Value); return cmd; }
+    public string? PublicKey(string id) { lock(gate) {using var cmd=Command("SELECT public_key FROM machines WHERE machine_id=$id",("$id",id)); return cmd.ExecuteScalar() as string;} }
+    public EnrollmentResult Enroll(EnrollmentRequest request) { lock(gate) {
+        if(string.IsNullOrWhiteSpace(request.MachineId)||request.MachineId.Length>128) throw new ArgumentException("Invalid machine ID");
+        using var key=ECDsa.Create(); key.ImportSubjectPublicKeyInfo(Convert.FromBase64String(request.PublicKey),out var bytes);
+        if(bytes!=Convert.FromBase64String(request.PublicKey).Length) throw new ArgumentException("Invalid key");
+        Ports(request.MoonlightPort,request.SunshinePort);
+        var existing=PublicKey(request.MachineId);
+        if(existing is not null && existing!=request.PublicKey) throw new UnauthorizedAccessException("Identity conflict");
+        using var cmd=Command("INSERT INTO machines(machine_id,public_key,local_ip,mac_address,moonlight_port,sunshine_port) VALUES($id,$key,$ip,$mac,$moon,$sun) ON CONFLICT(machine_id) DO NOTHING",("$id",request.MachineId),("$key",request.PublicKey),("$ip",request.LocalIp),("$mac",request.MacAddress),("$moon",request.MoonlightPort),("$sun",request.SunshinePort));cmd.ExecuteNonQuery();
+        return new(request.MachineId,List().Single(x=>x.MachineId==request.MachineId).ApprovalStatus);
+    } }
+    private static void Ports(int moon,int sun) {if(moon is <1 or >65535 || sun is <1 or >65535)throw new ArgumentException("Invalid port");}
+    public MachineDto[] List() {lock(gate) {
+        using var cmd=Command("SELECT machine_id,approval_status,display_name,hourly_price,local_ip,mac_address,moonlight_port,sunshine_port,revision,approved_by,approved_at FROM machines ORDER BY machine_id"); using var r=cmd.ExecuteReader(); var rows=new List<MachineDto>();
+        while(r.Read()) rows.Add(new(r.GetString(0),r.GetString(1),r.GetString(2),r.GetInt64(3),r.GetString(4),r.GetString(5),r.GetInt32(6),r.GetInt32(7),r.GetInt64(8),null,null,"unknown",null,r.IsDBNull(9)?null:r.GetString(9),r.IsDBNull(10)?null:DateTimeOffset.Parse(r.GetString(10)))); return rows.ToArray();
+    }}
+    public MachineDto Update(string id, MachineUpdate update,long expectedRevision) {lock(gate) {
+        Ports(update.MoonlightPort,update.SunshinePort); if(string.IsNullOrWhiteSpace(update.DisplayName)||update.HourlyPriceMinorUnits<=0)throw new ArgumentException("Name and positive price required");
+        using var cmd=Command("UPDATE machines SET display_name=$name,hourly_price=$price,moonlight_port=$moon,sunshine_port=$sun,revision=revision+1 WHERE machine_id=$id AND revision=$revision",("$name",update.DisplayName.Trim()),("$price",update.HourlyPriceMinorUnits),("$moon",update.MoonlightPort),("$sun",update.SunshinePort),("$id",id),("$revision",expectedRevision));
+        if(cmd.ExecuteNonQuery()!=1)throw new InvalidOperationException("Revision conflict or missing machine"); return List().Single(x=>x.MachineId==id);
+    }}
+    public MachineDto Approve(string id,string actor) {lock(gate) {
+        if(string.IsNullOrWhiteSpace(actor))throw new ArgumentException("Authenticated actor required");
+        var machine=List().SingleOrDefault(x=>x.MachineId==id)??throw new KeyNotFoundException();
+        if(string.IsNullOrWhiteSpace(machine.DisplayName)||machine.HourlyPriceMinorUnits<=0)throw new InvalidOperationException("Name and positive price required before approval");
+        using var tx=connection.BeginTransaction(); var at=DateTimeOffset.UtcNow.ToString("O");
+        using var cmd=Command("UPDATE machines SET approval_status='approved',approved_by=$actor,approved_at=$at,revision=revision+1 WHERE machine_id=$id; INSERT INTO machine_approval_audit(machine_id,actor_id,approved_at) VALUES($id,$actor,$at)",("$actor",actor),("$at",at),("$id",id)); cmd.Transaction=tx;cmd.ExecuteNonQuery();tx.Commit();return List().Single(x=>x.MachineId==id);
+    }}
+}

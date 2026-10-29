@@ -1,3 +1,6 @@
+using KamenRaider.Controller.Data;
+using KamenRaider.Controller.Machines;
+using KamenRaider.Controller.Security;
 using System.Net;
 using System.Security.Cryptography;
 using System.Text;
@@ -37,6 +40,8 @@ public static class ControllerHost
                 server.Listen(IPAddress.Any, agent.Port, endpoint => endpoint.UseHttps());
             });
         }
+        builder.Services.AddSingleton<ControllerDatabase>(sp => new ControllerDatabase(sp.GetRequiredService<IOptions<ControllerOptions>>().Value.DatabasePath));
+        builder.Services.AddSingleton<AgentAuthentication>();
         var app = builder.Build();
         app.Use(async (context, next) => {
             var options = context.RequestServices.GetRequiredService<IOptions<ControllerOptions>>().Value;
@@ -55,6 +60,7 @@ public static class ControllerHost
             await next(context);
         });
         app.MapGet("/internal/health", () => new HealthResponse(Protocol.Version, "ok"));
+        app.MapMachines();
         return app;
     }
 }

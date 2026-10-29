@@ -19,6 +19,7 @@ public static class AgentHost
         builder.Services.AddWindowsService(options => options.ServiceName = "KamenRaider Agent");
         builder.Services.AddOptions<AgentOptions>().Bind(builder.Configuration)
             .Validate(o => o.IsValid(), "HTTPS ControllerUrl, absolute DataDirectory, valid MoonlightPort/SunshinePort and NetworkAdapterId are required.").ValidateOnStart();
+        builder.Services.AddHostedService<KamenRaider.Agent.Enrollment.EnrollmentWorker>();
         return builder.Build();
     }
 }
