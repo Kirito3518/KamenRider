@@ -8,6 +8,7 @@ export type Machine = {
   configRevision: number;
   appliedConfigRevision: number | null;
   readiness: string;
+  canRent: boolean;
   lastSeenAt: string | null;
   publicKeyFingerprint?: string;
 };

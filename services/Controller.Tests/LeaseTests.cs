@@ -39,6 +39,22 @@ public sealed class LeaseFixture : IDisposable {
     public void Dispose() { Db.Dispose(); File.Delete(Path); }
 }
 public class LeaseTests {
+    [Fact] public async Task AvailabilityRequiresFreshReadyAndNoHeldAllocation() {
+        using var f=new LeaseFixture();
+        Assert.True(f.Db.List().Single().CanRent);
+        var lease=await f.Create();
+        Assert.False(f.Db.List().Single().CanRent);
+        var prepare=Assert.Single(f.Sync().Commands);
+        var apply=Assert.Single(f.Sync("boot",new CommandResult(prepare.CommandId,"applied",lease.Revision)).Commands);
+        f.Sync("boot",new CommandResult(apply.CommandId,"applied",lease.Revision));
+        Assert.False(f.Db.List().Single().CanRent);
+        using var g=new LeaseFixture();
+        g.Db.Sync("pc",new("boot","192.0.2.1","001122334455",1,"notReady",[]));
+        Assert.False(g.Db.List().Single().CanRent);
+        g.Sync(); g.Time.Now=g.Time.Now.AddSeconds(21);
+        Assert.False(g.Db.List().Single().CanRent);
+    }
+
     [Fact] public async Task AllocationIsUniqueAcrossConnectionsAndRetriesAreDurable() {
         using var f=new LeaseFixture();
         using var other=new ControllerDatabase(f.Path,clock:f.Time);

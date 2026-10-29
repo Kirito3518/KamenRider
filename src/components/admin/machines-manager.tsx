@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
-import type { Machine } from "@/lib/machine-contracts";
+import type { Lease, Machine } from "@/lib/machine-contracts";
 async function request(path: string, body?: unknown, method = "POST") {
   const r = await fetch(path, {
     method,
@@ -14,6 +14,7 @@ async function request(path: string, body?: unknown, method = "POST") {
 }
 export function MachinesManager() {
   const [machines, setMachines] = useState<Machine[]>([]);
+  const [trialLease, setTrialLease] = useState<Lease | null>(null);
   const [message, setMessage] = useState("กำลังโหลด…");
   async function load() {
     try {
@@ -44,7 +45,8 @@ export function MachinesManager() {
   async function act(path: string, body: unknown, method = "POST") {
     try {
       setMessage("กำลังส่ง…");
-      await request(path, body, method);
+      const result = await request(path, body, method);
+      if (path === "/api/admin/trial-leases" || path.includes("/extend")) setTrialLease(result);
       await load();
       setMessage("บันทึกคำขอแล้ว ตรวจสถานะ Agent ก่อนใช้งาน");
     } catch (e) {
@@ -200,6 +202,7 @@ export function MachinesManager() {
         </label>
         <button className="rounded border p-2">สร้างสิทธิ์ทดลอง</button>
       </form>
+      {trialLease && <p role="status">Rental ID: {trialLease.id} · Revision: {trialLease.revision}{trialLease.pendingRevision !== null ? ` · รอ ACK ${trialLease.pendingRevision}` : ""}</p>}
       <form
         className="grid gap-3 rounded border p-4"
         onSubmit={(e) => {

@@ -26,7 +26,7 @@ public class EnrollmentTests
         }
         using (var restarted = new ControllerDatabase(path)) {
             var machine = restarted.List().Single();
-            Assert.True(machine.CanRent); Assert.Equal("Gaming PC", machine.DisplayName); Assert.Equal(2500, machine.HourlyPriceMinorUnits);
+            Assert.False(machine.CanRent); Assert.Equal("approved", machine.ApprovalStatus); Assert.Equal("Gaming PC", machine.DisplayName); Assert.Equal(2500, machine.HourlyPriceMinorUnits);
         }
         File.Delete(path);
     }

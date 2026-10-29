@@ -5,7 +5,7 @@ public record MachineUpdate(string DisplayName, long HourlyPriceMinorUnits, int 
 public record MachineDto(string MachineId, string ApprovalStatus, string DisplayName, long HourlyPriceMinorUnits, string LocalIp, string MacAddress, int MoonlightPort, int SunshinePort, long ConfigRevision, DateTimeOffset? LastSeenAt, string? BootId, string Readiness, string? AgentVersion, string? ApprovedBy, DateTimeOffset? ApprovedAt) {
     public long? AppliedConfigRevision {get;init;}
     public string? PublicKeyFingerprint {get;init;}
-    public bool CanRent => ApprovalStatus == "approved";
+    public bool CanRent {get;init;}
 }
 
 public record MachineIdentityConfirmation(string Fingerprint);

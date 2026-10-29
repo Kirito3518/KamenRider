@@ -11,7 +11,7 @@ export function GET(request: Request) {
           id: m.machineId,
           name: m.displayName,
           price: m.hourlyPriceMinorUnits / 100,
-          status: m.readiness,
+          status: m.canRent === true ? "available" : m.readiness === "ready" ? "busy" : m.readiness,
           cpu: "โ€”",
           gpu: "โ€”",
           ram: 0,

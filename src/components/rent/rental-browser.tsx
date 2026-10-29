@@ -55,18 +55,38 @@ export function RentalBrowser() {
   >([]);
   const [loadMessage, setLoadMessage] = useState("กำลังโหลดเครื่อง…");
   useEffect(() => {
-    const abort = new AbortController();
-    fetch("/api/machines", { cache: "no-store", signal: abort.signal })
-      .then(async (r) => {
-        if (!r.ok) throw new Error();
-        setMachines(await r.json());
-        setLoadMessage("");
-      })
-      .catch(() => {
-        if (!abort.signal.aborted)
+    let active = true;
+    let current: AbortController | undefined;
+    async function refresh() {
+      current?.abort();
+      const abort = new AbortController();
+      current = abort;
+      try {
+        const response = await fetch("/api/machines", { cache: "no-store", signal: abort.signal });
+        if (!response.ok) throw new Error();
+        const machines = await response.json();
+        if (active && !abort.signal.aborted) {
+          setMachines(machines);
+          setSelected((selected) => selected ? machines.find((machine: RentalMachine) => machine.id === selected.id && machine.status === "available") ?? null : null);
+          setLoadMessage("");
+        }
+      } catch {
+        if (active && !abort.signal.aborted) {
+          setMachines([]);
+          setSelected(null);
           setLoadMessage("ติดต่อระบบเครื่องไม่ได้ กรุณาลองใหม่");
-      });
-    return () => abort.abort();
+        }
+      }
+    }
+    void refresh();
+    const interval = window.setInterval(refresh, 15000);
+    window.addEventListener("focus", refresh);
+    return () => {
+      active = false;
+      current?.abort();
+      window.clearInterval(interval);
+      window.removeEventListener("focus", refresh);
+    };
   }, []);
   const available = rentalMachines.filter(
     (machine) => machine.status === "available",

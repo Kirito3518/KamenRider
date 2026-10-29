@@ -42,12 +42,14 @@ test("machine API session boundaries, validation, redaction and controller failu
             approvalStatus: "approved",
             displayName: "PC",
             hourlyPriceMinorUnits: 100,
-            readiness: "unknown",
+            readiness: "ready",
+            canRent: true,
             localIp: "192.168.1.4",
             macAddress: "001122334455",
             sunshinePort: 47990,
             publicKeyFingerprint: "secret-management-fingerprint",
           },
+          ...[ ["held", "ready"], ["not-ready", "notReady"], ["offline", "unreachable"] ].map(([machineId, readiness]) => ({ machineId, approvalStatus: "approved", displayName: machineId, hourlyPriceMinorUnits: 100, readiness, canRent: false })),
         ]),
       );
       return;
@@ -84,6 +86,8 @@ test("machine API session boundaries, validation, redaction and controller failu
     const inventory = await call("/machines");
     assert.equal(inventory.status, 200);
     const publicData = await inventory.text();
+    const states = Object.fromEntries(JSON.parse(publicData).map(m => [m.id, m.status]));
+    assert.deepEqual(states, { pc: "available", held: "busy", "not-ready": "notReady", offline: "unreachable" });
     for (const secret of [
       "192.168.1.4",
       "001122334455",
