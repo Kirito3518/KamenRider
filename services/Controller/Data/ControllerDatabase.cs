@@ -2,11 +2,17 @@ using Microsoft.Data.Sqlite;
 using KamenRaider.Contracts;
 using System.Security.Cryptography;
 namespace KamenRaider.Controller.Data;
+public record EnrollmentPolicy(int MaxPending = 100, int NewPerMinute = 10);
+public sealed class EnrollmentCapacityException : Exception { }
 public sealed class ControllerDatabase : IDisposable
 {
     private readonly SqliteConnection connection;
     private readonly object gate=new();
-    public ControllerDatabase(string path) {
+    private readonly EnrollmentPolicy policy;
+    private readonly TimeProvider clock;
+    public ControllerDatabase(string path, EnrollmentPolicy? policy = null, TimeProvider? clock = null) {
+        this.policy = policy ?? new(); this.clock = clock ?? TimeProvider.System;
+        if (this.policy.MaxPending <= 0 || this.policy.NewPerMinute <= 0) throw new ArgumentException("Positive enrollment limits required");
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
         connection=new SqliteConnection(new SqliteConnectionStringBuilder {DataSource=path, ForeignKeys=true, Pooling=false}.ToString()); connection.Open();
         using var transaction=connection.BeginTransaction();
@@ -22,11 +28,45 @@ public sealed class ControllerDatabase : IDisposable
         using var key=ECDsa.Create(); key.ImportSubjectPublicKeyInfo(Convert.FromBase64String(request.PublicKey),out var bytes);
         if(bytes!=Convert.FromBase64String(request.PublicKey).Length) throw new ArgumentException("Invalid key");
         Ports(request.MoonlightPort,request.SunshinePort);
-        var existing=PublicKey(request.MachineId);
-        if(existing is not null && existing!=request.PublicKey) throw new UnauthorizedAccessException("Identity conflict");
-        using var cmd=Command("INSERT INTO machines(machine_id,public_key,local_ip,mac_address,moonlight_port,sunshine_port) VALUES($id,$key,$ip,$mac,$moon,$sun) ON CONFLICT(machine_id) DO NOTHING",("$id",request.MachineId),("$key",request.PublicKey),("$ip",request.LocalIp),("$mac",request.MacAddress),("$moon",request.MoonlightPort),("$sun",request.SunshinePort));cmd.ExecuteNonQuery();
-        return new(request.MachineId,List().Single(x=>x.MachineId==request.MachineId).ApprovalStatus);
+        ValidateNetworkMetadata(request.LocalIp, request.MacAddress);
+        using var transaction = connection.BeginTransaction();
+        // Existing identities bypass admission budgets and never rewrite administrator data.
+        using (var lookup = Command("SELECT public_key, approval_status FROM machines WHERE machine_id=$id", ("$id", request.MachineId)))
+        {
+            lookup.Transaction = transaction;
+            using var row = lookup.ExecuteReader();
+            if (row.Read()) {
+                if (row.GetString(0) != request.PublicKey) throw new UnauthorizedAccessException("Identity conflict");
+                return new(request.MachineId, row.GetString(1));
+            }
+        }
+        // The immediate transaction serializes capacity checks and admission across connections.
+        var cutoff = clock.GetUtcNow().AddMinutes(-1).ToUnixTimeMilliseconds();
+        using (var cleanup = Command("DELETE FROM enrollment_admissions WHERE admitted_at <= $cutoff", ("$cutoff", cutoff))) {
+            cleanup.Transaction = transaction; cleanup.ExecuteNonQuery();
+        }
+        using (var capacity = Command("SELECT (SELECT COUNT(*) FROM machines WHERE approval_status='pending'), (SELECT COUNT(*) FROM enrollment_admissions)")) {
+            capacity.Transaction = transaction;
+            using var counts = capacity.ExecuteReader(); counts.Read();
+            if (counts.GetInt64(0) >= policy.MaxPending || counts.GetInt64(1) >= policy.NewPerMinute)
+                throw new EnrollmentCapacityException();
+        }
+        using (var insert = Command("INSERT INTO machines(machine_id,public_key,local_ip,mac_address,moonlight_port,sunshine_port) VALUES($id,$key,$ip,$mac,$moon,$sun); INSERT INTO enrollment_admissions(admitted_at) VALUES($at)",
+            ("$id",request.MachineId),("$key",request.PublicKey),("$ip",request.LocalIp),("$mac",request.MacAddress),("$moon",request.MoonlightPort),("$sun",request.SunshinePort),("$at",clock.GetUtcNow().ToUnixTimeMilliseconds()))) {
+            insert.Transaction = transaction; insert.ExecuteNonQuery();
+        }
+        transaction.Commit();
+        return new(request.MachineId, "pending");
     } }
+    private static void ValidateNetworkMetadata(string? ip, string? mac) {
+        if (string.IsNullOrWhiteSpace(ip) || ip.Length > 45 || !System.Net.IPAddress.TryParse(ip, out var address)
+            || address.ToString().Contains('%') || ip != address.ToString())
+            throw new ArgumentException("Invalid local IP address");
+        // Agent reports six bytes without separators; common colon/dash inventory formats are accepted too.
+        if (mac is null || mac.Length is not (12 or 17)
+            || !System.Text.RegularExpressions.Regex.IsMatch(mac, @"\A(?:[0-9a-fA-F]{12}|(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}|(?:[0-9a-fA-F]{2}-){5}[0-9a-fA-F]{2})\z"))
+            throw new ArgumentException("Invalid MAC address");
+    }
     private static void Ports(int moon,int sun) {if(moon is <1 or >65535 || sun is <1 or >65535)throw new ArgumentException("Invalid port");}
     public MachineDto[] List() {lock(gate) {
         using var cmd=Command("SELECT machine_id,approval_status,display_name,hourly_price,local_ip,mac_address,moonlight_port,sunshine_port,revision,approved_by,approved_at FROM machines ORDER BY machine_id"); using var r=cmd.ExecuteReader(); var rows=new List<MachineDto>();

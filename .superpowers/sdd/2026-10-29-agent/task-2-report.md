@@ -24,3 +24,17 @@ Concerns and deferred boundaries:
 - Atomic CreateNew prevents overwriting an existing identity. Concurrent first startup against one directory is unsupported; partial/corrupt identities fail closed rather than regenerate an approved ID.
 - Polling, heartbeat, boot ID, runtime readiness and configuration acknowledgement are Task 3; MachineDto uses null/unknown until then. Metadata enrollment does not update observed addresses on subsequent enrollment.
 - No public key/private key/service secret is returned from internal machine list or logged. The initial machine public key is available from DeviceIdentity.PublicKey and ControllerDatabase.PublicKey for trusted verification flows.
+
+## Task 2 quality review corrections
+
+Addressed P2 by replacing the full-registry List().Single enrollment read with an indexed single-row key/status query. Existing matching identities return their persisted status before admission checks and preserve administrator metadata. New automatic enrollment is bounded to 100 pending identities and 10 admitted new identities in a rolling minute by default. The admission journal and machine insert share an immediate SQLite transaction, so budgets survive restart and competing connections cannot oversubscribe capacity. The pending count uses a partial index; the rolling journal holds at most the minute's admitted identities, pruning expired entries on new admission. Capacity exhaustion returns HTTP 429. Approving a verified pending machine releases a pending slot, but does not reset the rolling rate budget. EnrollmentPolicy supports alternate positive limits for hosts constructing the repository; current Controller host uses defaults.
+
+Addressed P3 by checking network metadata before SQL: nonnull canonical IPv4/IPv6 address up to 45 characters (no scope identifier), and six-byte hexadecimal MAC in compact, colon or dash form (12/17 characters). Invalid metadata produces ArgumentException, mapped to HTTP 400, with no machine inserted.
+
+Regression evidence:
+- Eight signed HTTP malformed/null/empty/oversized IP/MAC cases failed before the fix: invalid strings returned 200, nulls raised SQLite NOT NULL errors. All now return 400 and leave registry empty.
+- NewIdentityRateAndPendingQuotaPersistWhileExistingEnrollmentRemainsIdempotent failed behaviorally before admission enforcement (expected capacity exception, none thrown). It now checks rate rejection, restart persistence, time-window release, pending-quota rejection without insertion, legitimate matching re-enrollment under both budgets and approval releasing a pending slot.
+- NewEnrollmentBurstReturns429WhileKnownIdentityStillEnrolls exercises 10 accepted signed new identities, an 11th returning 429, and a known identity still returning 200; registry remains exactly 10 rows.
+- Full solution after fixes: dotnet test services/KamenRaider.slnx passed 28 tests (Controller 25, Agent 3), no build/test warnings.
+
+Remaining operational limit: a full pending queue requires operator investigation and verified approvals or an eventual explicit rejection/cleanup workflow. This change bounds database growth; it does not replace network ingress throttling against raw HTTP/signature CPU traffic.

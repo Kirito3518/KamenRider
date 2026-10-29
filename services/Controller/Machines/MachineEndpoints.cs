@@ -23,6 +23,7 @@ public static class MachineEndpoints
     }
     private static IResult Execute<T>(Func<T> action) {
         try{return Results.Ok(action());}
+        catch(EnrollmentCapacityException){return Results.StatusCode(StatusCodes.Status429TooManyRequests);}
         catch(UnauthorizedAccessException){return Results.Unauthorized();}
         catch(ArgumentException){return Results.BadRequest();}
         catch(FormatException){return Results.BadRequest();}

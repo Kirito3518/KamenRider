@@ -6,3 +6,5 @@ CREATE TABLE IF NOT EXISTS machines (
  approved_by TEXT, approved_at TEXT
 );
 CREATE TABLE IF NOT EXISTS machine_approval_audit (id INTEGER PRIMARY KEY, machine_id TEXT NOT NULL REFERENCES machines(machine_id), actor_id TEXT NOT NULL, approved_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS enrollment_admissions (id INTEGER PRIMARY KEY, admitted_at INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS machines_pending ON machines(approval_status) WHERE approval_status='pending';
