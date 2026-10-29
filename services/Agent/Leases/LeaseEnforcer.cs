@@ -25,13 +25,13 @@ public sealed class LeaseEnforcer(LeaseStore store,TimeProvider time,IBootClock 
  private DateTimeOffset EffectiveNow(){var now=time.GetUtcNow();if(serverTime is {} origin){var projected=origin.AddMilliseconds(boot.UptimeMilliseconds-serverUptime);if(projected>now)now=projected;}if(Current is {} s&&s.BootId==boot.BootId){var projected=s.ExpiresAtUtc.AddMilliseconds(boot.UptimeMilliseconds-s.DeadlineUptimeMilliseconds);if(projected>now)now=projected;}return now;}
  public async Task<bool> ImportReconciledLeaseAsync(ActiveLeaseConfirmation lease,DateTimeOffset controllerTime,long requestStartedUptime,CancellationToken ct){await commands.WaitAsync(ct);try{
   await InitializeCoreAsync(ct,false);LeaseSnapshot next;
-  lock(state){var now=boot.UptimeMilliseconds;var old=current;if(fault!="ReconciliationRequired"||old is null||old.BootId==boot.BootId||lease.BootId!=boot.BootId||lease.RentalId!=old.RentalId||lease.LeaseRevision!=old.Revision||lease.ExpiresAtUtc!=old.ExpiresAtUtc||requestStartedUptime<0||requestStartedUptime>now)return false;
-   var effective=controllerTime.AddMilliseconds(now-requestStartedUptime);if(time.GetUtcNow()>effective)effective=time.GetUtcNow();if(lease.ExpiresAtUtc<=effective)return false;
-   next=new(lease.RentalId,lease.LeaseRevision,lease.ExpiresAtUtc,lease.BootId,old.LastCommandId,checked(now+(long)(lease.ExpiresAtUtc-effective).TotalMilliseconds));current=next;recoveryDeadline=null;fault=null;confirmed=false;
+  lock(state){var now=boot.UptimeMilliseconds;var old=current;if(fault!="ReconciliationRequired"||old is null||old.BootId==boot.BootId||old.RecoveryDeadlineUptimeMilliseconds is not null||lease.BootId!=boot.BootId||lease.RentalId!=old.RentalId||lease.LeaseRevision!=old.Revision||lease.ExpiresAtUtc!=old.ExpiresAtUtc||requestStartedUptime<0||requestStartedUptime>now)return false;
+   var effective=controllerTime.AddMilliseconds(now-requestStartedUptime);var floor=EffectiveNow();if(floor>effective)effective=floor;if(lease.ExpiresAtUtc<=effective)return false;
+   next=new(lease.RentalId,lease.LeaseRevision,lease.ExpiresAtUtc,lease.BootId,old.LastCommandId,checked(now+(long)(lease.ExpiresAtUtc-effective).TotalMilliseconds));current=next;recoveryDeadline=null;fault="ImportPending";confirmed=false;
   }
   await gate.BlockAsync(ct);
   try{await store.SaveAsync(next,ct);}catch(Exception ex) when(ex is IOException or UnauthorizedAccessException){lock(state){fault="LeaseStorageFailed";}return false;}
-  lock(state){return ReferenceEquals(current,next)&&fault is null&&boot.BootId==next.BootId&&boot.UptimeMilliseconds<next.DeadlineUptimeMilliseconds;}
+  lock(state){if(!ReferenceEquals(current,next)||fault!="ImportPending"||boot.BootId!=next.BootId||boot.UptimeMilliseconds>=next.DeadlineUptimeMilliseconds)return false;fault=null;return true;}
  }finally{commands.Release();}}
  public async Task<CommandResult> ApplyAsync(CommandEnvelope command,CancellationToken ct){await commands.WaitAsync(ct);try{
   await InitializeCoreAsync(ct,false);var failed=new CommandResult(command.CommandId,"failed",command.LeaseRevision,"LeaseRejected");LeaseSnapshot? previous;LeaseSnapshot next;
