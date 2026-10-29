@@ -20,9 +20,16 @@ public static class AgentHost
         builder.Services.AddOptions<AgentOptions>().Bind(builder.Configuration)
             .Validate(o => o.IsValid(), "HTTPS ControllerUrl, absolute DataDirectory, valid MoonlightPort/SunshinePort and NetworkAdapterId are required.").ValidateOnStart();
         builder.Services.AddHostedService<KamenRaider.Agent.Enrollment.EnrollmentWorker>();
+        builder.Services.AddSingleton(TimeProvider.System);
+        builder.Services.AddSingleton<KamenRaider.Agent.Leases.IBootClock,KamenRaider.Agent.Leases.WindowsBootClock>();
+        builder.Services.AddSingleton<KamenRaider.Agent.Leases.IStreamGate,KamenRaider.Agent.Leases.ClosedStreamGate>();
+        builder.Services.AddSingleton<KamenRaider.Agent.Power.IShutdown,KamenRaider.Agent.Power.WindowsShutdown>();
+        builder.Services.AddSingleton(sp=>new KamenRaider.Agent.Leases.LeaseStore(sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<AgentOptions>>().Value.DataDirectory));
+        builder.Services.AddSingleton<KamenRaider.Agent.Leases.LeaseEnforcer>();
+        builder.Services.AddSingleton<KamenRaider.Agent.Sync.LeaseCommandDispatcher>();
+        builder.Services.AddHostedService<KamenRaider.Agent.Leases.LeaseEnforcementWorker>();
         builder.Services.AddHostedService<KamenRaider.Agent.Sync.SyncWorker>();
         return builder.Build();
     }
 }
 public class Program { public static void Main(string[] args) => AgentHost.Build(args).Run(); }
-
