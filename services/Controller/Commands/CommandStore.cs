@@ -32,7 +32,7 @@ public sealed partial class ControllerDatabase {
             var lease=FindLease(tx,command.RentalId)!;
                         if(command.Type=="PairPin"){
                 if(lease.Boot==request.BootId&&lease.Dto.State=="active"&&lease.Dto.Revision==command.LeaseRevision&&result.Status is "applied" or "failed"){
-                    ExecuteLease(tx,"UPDATE command_outbox SET status=$status,payload='{}' WHERE command_id=$id",("$status",result.Status),("$id",command.CommandId));pairingPins.Remove(command.CommandId);
+                    ExecuteLease(tx,"UPDATE command_outbox SET status=$status,payload='{}' WHERE command_id=$id",("$status",result.Status),("$id",command.CommandId));RemovePairingSecret(command.CommandId);
                 }continue;
             }
             if(lease.Boot!=request.BootId||lease.Dto.PendingRevision!=command.LeaseRevision||lease.Dto.State is not ("preparing" or "active")) continue;

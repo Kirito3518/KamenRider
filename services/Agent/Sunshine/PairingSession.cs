@@ -40,9 +40,10 @@ public sealed class PairingSession(ISunshinePairingApi api,IPairingFence fence,F
   if(current!=scope()||!Valid(current)||time.GetUtcNow()>=offerExpiry||time.GetElapsedTime(offerTimestamp)>=TimeSpan.FromSeconds(30)||time.GetElapsedTime(offerTimestamp)<TimeSpan.Zero)return false;
     using var linked=CancellationTokenSource.CreateLinkedTokenSource(ct);long started;
   lock(lifecycle){if(failed)return false;started=generation;activePair=linked;}
-  try{linked.Token.ThrowIfCancellationRequested();var result=await api.SubmitAsync(id,pin,linked.Token);if(current!=scope()||!Valid(current)){failed=true;return false;}return result&&!linked.IsCancellationRequested&&!failed&&started==Volatile.Read(ref generation);}
+  var submissionStarted=false;var unambiguous=false;
+  try{linked.Token.ThrowIfCancellationRequested();submissionStarted=true;var result=await api.SubmitAsync(id,pin,linked.Token);if(linked.IsCancellationRequested||current!=scope()||!Valid(current))return false;unambiguous=true;return result&&!failed&&started==Volatile.Read(ref generation);}
   catch(OperationCanceledException) when(!ct.IsCancellationRequested){return false;}
-  finally{lock(lifecycle){if(ReferenceEquals(activePair,linked))activePair=null;}}
+  finally{if(submissionStarted&&!unambiguous)failed=true;lock(lifecycle){if(ReferenceEquals(activePair,linked))activePair=null;}}
  }finally{serial.Release();}}
   public async Task<bool> ClearAsync(CancellationToken ct){long clearing;
   lock(lifecycle){failed=true;clearing=++generation;activePair?.Cancel();}

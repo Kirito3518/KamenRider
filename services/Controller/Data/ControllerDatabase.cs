@@ -24,7 +24,8 @@ public sealed partial class ControllerDatabase : IDisposable
         }
         transaction.Commit();
     }
-    public void Dispose()=>connection.Dispose();
+    private bool disposed;
+    public void Dispose(){lock(gate){if(disposed)return;disposed=true;foreach(var timer in pairingPinTimers.Values)timer.Dispose();pairingPinTimers.Clear();pairingPins.Clear();connection.Dispose();}}
     private SqliteCommand Command(string sql, params (string,object?)[] values) { var cmd=connection.CreateCommand();cmd.CommandText=sql; foreach(var (name,value) in values) cmd.Parameters.AddWithValue(name,value??DBNull.Value); return cmd; }
     public string? PublicKey(string id) { lock(gate) {using var cmd=Command("SELECT public_key FROM machines WHERE machine_id=$id",("$id",id)); return cmd.ExecuteScalar() as string;} }
     public EnrollmentResult Enroll(EnrollmentRequest request) { lock(gate) {

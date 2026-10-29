@@ -75,6 +75,27 @@ public class SunshineTests {
  [Fact] public async Task GateWaitCannotExtendOfferLifetime(){var api=new Api();var clock=new PairClock();var scope=new PairingScope("lease",1,"boot",clock.Now.AddMinutes(1));var fence=new PausingFence();var session=new PairingSession(api,fence,()=>scope,clock);await session.ListAsync(default);var pair=session.PairAsync("id","1234",default);await fence.Entered.Task;clock.Ticks=31;clock.Now=clock.Now.AddSeconds(31);fence.Release.SetResult();Assert.False(await pair);Assert.Equal(0,api.PairCalls);}
  private sealed class PausingFence:IPairingFence {private int calls;public TaskCompletionSource Entered=new(TaskCreationOptions.RunContinuationsAsynchronously),Release=new(TaskCreationOptions.RunContinuationsAsynchronously);public async Task<bool> BlockAndVerifyAsync(CancellationToken ct){if(++calls==2){Entered.SetResult();await Release.Task;}return true;}}
  private sealed class PairClock:TimeProvider {public DateTimeOffset Now=DateTimeOffset.Parse("2026-10-30T00:00:00Z");public long Ticks;public override DateTimeOffset GetUtcNow()=>Now;public override long GetTimestamp()=>Ticks;public override long TimestampFrequency=>1;}
+ [Theory][InlineData("timeout")][InlineData("caller")][InlineData("transport")][InlineData("cancelled-success")]
+ public async Task AmbiguousSubmissionRequiresCleanupBeforeAnyNewOffer(string failure){
+  using var caller=new CancellationTokenSource();var api=new AmbiguousApi(failure,caller);var scope=new PairingScope("lease",1,"boot",DateTimeOffset.UtcNow.AddMinutes(1));var session=new PairingSession(api,new Fence(true),()=>scope,TimeProvider.System);
+  await session.ListAsync(default);await Record.ExceptionAsync(()=>session.PairAsync("id","1234",caller.Token));
+  Assert.Empty(await session.ListAsync(default));scope=scope with{RentalId="next"};Assert.Empty(await session.ListAsync(default));
+  Assert.True(await session.ClearAsync(default));Assert.Equal(new[]{"id"},await session.ListAsync(default));
+ }
+ [Theory][InlineData("{}")][InlineData("not json")][InlineData("{\"status\":\"true\"}")]
+ public async Task MalformedSubmissionResponseIsAmbiguousAndRequiresCleanup(string json){
+  const string id="0123456789abcdef0123456789abcdef";var transport=new Transport(HttpStatusCode.OK,"{\"pairings\":[{\"id\":\""+id+"\"}]}");using var api=new SunshineClient(new Uri("https://localhost:47990"),new NetworkCredential("u","p"),transport);var scope=new PairingScope("lease",1,"boot",DateTimeOffset.UtcNow.AddMinutes(1));var session=new PairingSession(api,new Fence(true),()=>scope,TimeProvider.System);await session.ListAsync(default);transport.Json=json;
+  await Assert.ThrowsAsync<InvalidDataException>(()=>session.PairAsync(id,"1234",default));Assert.Empty(await session.ListAsync(default));
+ }
+ private sealed class AmbiguousApi(string failure,CancellationTokenSource caller):ISunshinePairingApi {
+  public Task<string[]> PendingIdsAsync(CancellationToken ct)=>Task.FromResult(new[]{"id"});
+  public Task<bool> SubmitAsync(string id,string pin,CancellationToken ct){
+   if(failure is "caller" or "cancelled-success")caller.Cancel();
+   if(failure=="cancelled-success")return Task.FromResult(true);
+   return Task.FromException<bool>(failure=="transport"?new HttpRequestException("Lost response after acceptance"):new OperationCanceledException());
+  }
+  public Task ClearAsync(CancellationToken ct)=>Task.CompletedTask;
+ }
  private sealed class BlockingApi:ISunshinePairingApi {
   public TaskCompletionSource Started=new(TaskCreationOptions.RunContinuationsAsynchronously),Cancelled=new(TaskCreationOptions.RunContinuationsAsynchronously),Release=new(TaskCreationOptions.RunContinuationsAsynchronously);public bool Cleared;
   public Task<string[]> PendingIdsAsync(CancellationToken ct)=>Task.FromResult(new[]{"id"});

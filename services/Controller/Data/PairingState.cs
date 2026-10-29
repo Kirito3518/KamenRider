@@ -5,6 +5,15 @@ namespace KamenRaider.Controller.Data;
 public sealed partial class ControllerDatabase {
  // PINs never enter SQLite, including WAL/backups. Restart fails queued pairing rather than recovering the secret.
  private readonly Dictionary<string,(string Pin,long Until)> pairingPins=[];
+ private readonly Dictionary<string,ITimer> pairingPinTimers=[];
+ private void RemovePairingSecret(string id){pairingPins.Remove(id);if(pairingPinTimers.Remove(id,out var timer))timer.Dispose();}
+ private void ExpirePairingSecret(string id){lock(gate){
+  if(disposed||!pairingPins.ContainsKey(id))return;
+  // Erase the reference before any SQLite operation: database contention must not prolong secret retention.
+  RemovePairingSecret(id);
+  try{using var cmd=Command("UPDATE command_outbox SET payload='{}',status=CASE WHEN status='pending' THEN 'expired' ELSE status END WHERE command_id=$id",("$id",id));cmd.ExecuteNonQuery();}
+  catch(SqliteException){/* A later database operation reconciles status; the secret is already removed. */}
+ }}
  private static bool PairId(string? id)=>id is {Length:32}&&id.All(c=>c is >= '0' and <= '9' or >= 'a' and <= 'f');
  private void ObservePairingOffer(SqliteTransaction tx,string machine,SyncRequest request,long now){
   ExecuteLease(tx,"DELETE FROM pairing_offers WHERE machine_id=$machine",("$machine",machine));var offer=request.PendingPairing;
@@ -17,7 +26,7 @@ public sealed partial class ControllerDatabase {
  private void PurgePairingSecrets(SqliteTransaction tx,long now){
   using(var cmd=LeaseCommand(tx,"SELECT command_id,status,valid_until FROM command_outbox WHERE type='PairPin'")){
    using var rows=cmd.ExecuteReader();var invalid=new List<string>();while(rows.Read())if(rows.GetString(1)!="pending"||rows.GetInt64(2)<=now||!pairingPins.ContainsKey(rows.GetString(0)))invalid.Add(rows.GetString(0));
-   rows.Close();foreach(var id in invalid){pairingPins.Remove(id);ExecuteLease(tx,"UPDATE command_outbox SET payload='{}',status=CASE WHEN status='pending' THEN 'expired' ELSE status END WHERE command_id=$id",("$id",id));}
+   rows.Close();foreach(var id in invalid){RemovePairingSecret(id);ExecuteLease(tx,"UPDATE command_outbox SET payload='{}',status=CASE WHEN status='pending' THEN 'expired' ELSE status END WHERE command_id=$id",("$id",id));}
   }
  }
  private LeaseRow PairOwner(SqliteTransaction tx,string id,string actor){var lease=FindLease(tx,id)??throw new KeyNotFoundException();if(string.IsNullOrWhiteSpace(actor)||lease.Dto.UserId!=actor)throw new UnauthorizedAccessException();return lease;}
@@ -31,7 +40,10 @@ public sealed partial class ControllerDatabase {
    using(var pending=LeaseCommand(tx,"SELECT COUNT(*) FROM command_outbox WHERE rental_id=$rental AND type='PairPin' AND status='pending'",("$rental",id)))if((long)pending.ExecuteScalar()!>0)throw new InvalidOperationException("Pairing already pending");
    var commandId=Guid.NewGuid().ToString("N");ExecuteLease(tx,"INSERT INTO command_outbox(command_id,type,rental_id,machine_id,lease_revision,boot_id,valid_until,payload) VALUES($command,'PairPin',$rental,$machine,$revision,$boot,$until,$payload)",("$command",commandId),("$rental",id),("$machine",lease.Dto.MachineId),("$revision",lease.Dto.Revision),("$boot",lease.Boot),("$until",until),("$payload",JsonSerializer.Serialize(new{pairingId=request.PairingId})));
    ExecuteLease(tx,"INSERT INTO pairing_requests VALUES($rental,$key,$pairing,$command)",("$rental",id),("$key",request.IdempotencyKey),("$pairing",request.PairingId),("$command",commandId));
-   pairingPins[commandId]=(request.Pin,until);tx.Commit();return new(commandId,"queued");
+   tx.Commit();pairingPins[commandId]=(request.Pin,until);
+   try{pairingPinTimers[commandId]=clock.CreateTimer(_=>ExpirePairingSecret(commandId),null,TimeSpan.FromMilliseconds(Math.Max(0,until-clock.GetUtcNow().ToUnixTimeMilliseconds())),Timeout.InfiniteTimeSpan);}
+   catch{RemovePairingSecret(commandId);throw;}
+   return new(commandId,"queued");
   }
  }
  private PairingCommandStatus ReadPairStatus(SqliteTransaction tx,string id,string commandId){using var cmd=LeaseCommand(tx,"SELECT status FROM command_outbox WHERE rental_id=$rental AND command_id=$command AND type='PairPin'",("$rental",id),("$command",commandId));return new(commandId,(cmd.ExecuteScalar() as string) switch{"pending"=>"queued","applied"=>"succeeded","failed"=>"failed","expired" or "invalidated"=>"expired",_=>throw new KeyNotFoundException()});}

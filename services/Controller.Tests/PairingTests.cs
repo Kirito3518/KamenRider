@@ -25,6 +25,22 @@ public class PairingTests {
   f.Reopen();Assert.Empty(f.Sync().Commands);Assert.Equal("expired",f.Db.PairingStatus(lease.Id,queued.CommandId,"alice").Status);
  }
  [Fact] public async Task OwnerCanReadOfferedIdsAndQueueAgainAfterCompletion(){using var f=new LeaseFixture();var lease=await f.Active();Offer(f,lease);Assert.Equal(new[]{Id},f.Db.GetPairingOffer(lease.Id,"alice")!.PairingIds);Assert.Throws<UnauthorizedAccessException>(()=>f.Db.GetPairingOffer(lease.Id,"bob"));var first=f.Db.QueuePairing(lease.Id,"alice",new("alice",Id,"1234","one"));f.Sync("boot",new CommandResult(first.CommandId,"failed",1));Offer(f,lease);Assert.NotEqual(first.CommandId,f.Db.QueuePairing(lease.Id,"alice",new("alice",Id,"1234","two")).CommandId);}
+ [Fact] public async Task IdlePinExpiresWithoutAnotherControllerRequest(){using var f=new LeaseFixture();var clock=new TimerClock{Now=f.Time.Now};f.Db.Dispose();f.Db=new(f.Path,clock:clock);var lease=await f.Active();Offer(f,lease);var queued=f.Db.QueuePairing(lease.Id,"alice",new("alice",Id,"1234","idle"));Assert.Equal(1,RetainedPinCount(f.Db));
+  clock.Advance(TimeSpan.FromSeconds(29));Assert.Equal(1,RetainedPinCount(f.Db));clock.Advance(TimeSpan.FromSeconds(1));Assert.Equal(0,RetainedPinCount(f.Db));
+  using var connection=new Microsoft.Data.Sqlite.SqliteConnection("Data Source="+f.Path+";Pooling=False");connection.Open();using var cmd=connection.CreateCommand();cmd.CommandText="SELECT status FROM command_outbox WHERE command_id=$id";cmd.Parameters.AddWithValue("$id",queued.CommandId);Assert.Equal("expired",cmd.ExecuteScalar());
+ }
+ [Fact] public async Task DisposeClearsRetainedPinsAndCancelsExpiration(){using var f=new LeaseFixture();var clock=new TimerClock{Now=f.Time.Now};f.Db.Dispose();f.Db=new(f.Path,clock:clock);var lease=await f.Active();Offer(f,lease);f.Db.QueuePairing(lease.Id,"alice",new("alice",Id,"1234","dispose"));Assert.Equal(1,RetainedPinCount(f.Db));f.Db.Dispose();Assert.Equal(0,RetainedPinCount(f.Db));Assert.All(clock.Timers,t=>Assert.True(t.Disposed));clock.Advance(TimeSpan.FromMinutes(1));}
+ // Inspect retention directly: calling any production query would itself purge and hide the idle-memory defect.
+ static int RetainedPinCount(KamenRaider.Controller.Data.ControllerDatabase db)=>((System.Collections.IDictionary)typeof(KamenRaider.Controller.Data.ControllerDatabase).GetField("pairingPins",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic)!.GetValue(db)!).Count;
+ sealed class TimerClock:TimeProvider {
+  public DateTimeOffset Now;public List<ManualTimer> Timers=[];public override DateTimeOffset GetUtcNow()=>Now;
+  public override ITimer CreateTimer(TimerCallback callback,object? state,TimeSpan dueTime,TimeSpan period){var timer=new ManualTimer(callback,state,Now+dueTime);Timers.Add(timer);return timer;}
+  public void Advance(TimeSpan elapsed){Now+=elapsed;foreach(var timer in Timers.ToArray())if(!timer.Disposed&&timer.Due<=Now){timer.Dispose();timer.Callback(timer.State);}}
+ }
+ sealed class ManualTimer(TimerCallback callback,object? state,DateTimeOffset due):ITimer {
+  public TimerCallback Callback=callback;public object? State=state;public DateTimeOffset Due=due;public bool Disposed;
+  public bool Change(TimeSpan dueTime,TimeSpan period)=>throw new NotSupportedException();public void Dispose()=>Disposed=true;public ValueTask DisposeAsync(){Dispose();return ValueTask.CompletedTask;}
+ }
  static void Offer(LeaseFixture f,LeaseDto lease)=>f.Db.Sync("pc",new("boot","192.0.2.1","001122334455",1,"ready",[],new(lease.Id,1,"boot",f.Time.Now.AddSeconds(30),[Id])));
 }
 

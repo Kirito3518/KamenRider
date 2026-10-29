@@ -31,8 +31,8 @@ public sealed class SunshineClient:ISunshinePairingApi,IDisposable {
  private async Task<bool> MutationAsync(HttpMethod method,string path,object payload,CancellationToken ct){
   using var request=new HttpRequestMessage(method,path){Content=JsonContent.Create(payload)};
   using var response=await http.SendAsync(request,ct);response.EnsureSuccessStatusCode();
-  try{using var json=JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));return json.RootElement.TryGetProperty("status",out var status)&&status.ValueKind==JsonValueKind.True;}
-  catch(JsonException){return false;}
+  try{using var json=JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));if(!json.RootElement.TryGetProperty("status",out var status)||status.ValueKind is not (JsonValueKind.True or JsonValueKind.False))throw new InvalidDataException("Unsupported Sunshine mutation response");return status.GetBoolean();}
+  catch(JsonException){throw new InvalidDataException("Unsupported Sunshine mutation response");}
  }
  // Caller must already fence new connections and in-flight handshakes before this sequence.
  public async Task ClearAsync(CancellationToken ct){
