@@ -39,7 +39,13 @@ public class RentalLifecycleTests {
         Assert.Equal("PrepareAvailable", result.Action);
         Assert.Null(result.Lease);
         Assert.Equal(0L, Held(f));
+        var beforeSync = Assert.Single(f.Db.List());
+        Assert.Equal("notReady", beforeSync.Readiness);
+        Assert.False(beforeSync.CanRent);
         Assert.Empty(f.Sync("new").Commands);
+        var afterSync = Assert.Single(f.Db.List());
+        Assert.Equal("ready", afterSync.Readiness);
+        Assert.True(afterSync.CanRent);
         Assert.Throws<ArgumentException>(() => f.Sync("boot"));
         var next = await f.Create("next", "bob");
         Assert.NotEqual(lease.Id, next.Id);
