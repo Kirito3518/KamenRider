@@ -6,6 +6,14 @@ public static class LeaseEndpoints {
     private static string Actor(HttpContext context) => context.Request.Headers["X-Authenticated-Actor-Id"].ToString();
     private static bool IsAdmin(HttpContext context) => context.Request.Headers["X-Authenticated-Actor-Role"] == "admin";
     public static void MapLeases(this WebApplication app) {
+        app.MapGet("/internal/leases/{id}/connection",async(string id,HttpContext context,LeaseService leases,KamenRaider.Controller.Data.ControllerDatabase db,IServiceProvider services,CancellationToken ct)=>{
+            var lease=await leases.GetLeaseAsync(id,ct);if(lease is null)return Results.NotFound();
+            if(string.IsNullOrWhiteSpace(Actor(context))||lease.UserId!=Actor(context))return Results.StatusCode(403);
+            var ip=services.GetService<KamenRaider.Controller.Network.PublicIpJob>();
+            var machine=db.List().Single(x=>x.MachineId==lease.MachineId);
+            var address=lease.State=="active"&&ip?.Address is string publicIp?$"{publicIp}:{machine.MoonlightPort}":null;
+            return Results.Ok(new {address,stale=ip?.Stale??true});
+        });
         app.MapPost("/internal/trial-leases",async (TrialLeaseRequest request,HttpContext context,LeaseService leases,CancellationToken ct)=> {
             if(string.IsNullOrWhiteSpace(Actor(context))||(!IsAdmin(context)&&Actor(context)!=request.UserId)) return Results.StatusCode(403);
             try { return Results.Ok(await leases.CreateTrialLeaseAsync(request.UserId,request.MachineId,request.DurationSeconds,request.IdempotencyKey,ct)); }

@@ -7,6 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
+    "test:machines": "node tests/run-machines.mjs",
     "test:auth": "node tests/run-auth.mjs"
   },
   "dependencies": {

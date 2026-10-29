@@ -8,7 +8,8 @@ public static class MachineEndpoints
     public static void MapMachines(this WebApplication app) {
         app.MapGet("/internal/machines",(ControllerDatabase db)=>db.List());
         app.MapPatch("/internal/machines/{id}",(string id,MachineUpdate update,long expectedRevision,ControllerDatabase db)=>Execute(()=>db.Update(id,update,expectedRevision)));
-        app.MapPost("/internal/machines/{id}/approve",(string id,HttpContext context,ControllerDatabase db)=>Execute(()=>db.Approve(id,context.Request.Headers["X-Authenticated-Actor-Id"].ToString())));
+        app.MapPost("/internal/machines/{id}/approve",(string id,MachineIdentityConfirmation confirmation,HttpContext context,ControllerDatabase db)=>Execute(()=>db.ApproveVerified(id,context.Request.Headers["X-Authenticated-Actor-Id"].ToString(),confirmation.Fingerprint)));
+        app.MapPost("/internal/machines/{id}/reject",(string id,MachineIdentityConfirmation confirmation,ControllerDatabase db)=>Execute(()=>db.RejectPending(id,confirmation.Fingerprint)));
         app.MapPost("/agent/enroll",async (HttpContext context,ControllerDatabase db,AgentAuthentication auth)=> {
             using var reader=new StreamReader(context.Request.Body);var body=await reader.ReadToEndAsync();
             EnrollmentRequest? request;

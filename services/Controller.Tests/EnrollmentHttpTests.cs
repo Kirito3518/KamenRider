@@ -32,9 +32,9 @@ public class EnrollmentHttpTests
             Assert.Equal(HttpStatusCode.Unauthorized,(await client.PostAsync("/agent/enroll",new StringContent(body,Encoding.UTF8,"application/json"))).StatusCode);
             client.DefaultRequestHeaders.Remove("Test-Local-Port");client.DefaultRequestHeaders.Add("X-Service-Credential","secret");
             Assert.Equal(HttpStatusCode.OK,(await client.PatchAsJsonAsync("/internal/machines/pc?expectedRevision=1",new MachineUpdate("PC",500,3,4))).StatusCode);
-            Assert.Equal(HttpStatusCode.BadRequest,(await client.PostAsync("/internal/machines/pc/approve",null)).StatusCode);
+            Assert.Equal(HttpStatusCode.BadRequest,(await client.PostAsJsonAsync("/internal/machines/pc/approve",new MachineIdentityConfirmation(Convert.ToHexString(SHA256.HashData(key.ExportSubjectPublicKeyInfo()))))).StatusCode);
             client.DefaultRequestHeaders.Add("X-Authenticated-Actor-Id","admin-user");
-            Assert.Equal(HttpStatusCode.OK,(await client.PostAsync("/internal/machines/pc/approve",null)).StatusCode);
+            Assert.Equal(HttpStatusCode.OK,(await client.PostAsJsonAsync("/internal/machines/pc/approve",new MachineIdentityConfirmation(Convert.ToHexString(SHA256.HashData(key.ExportSubjectPublicKeyInfo()))))).StatusCode);
             await app.StopAsync();
         }
         await using(var app=Build(path)) {

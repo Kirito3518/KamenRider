@@ -17,6 +17,7 @@ export function AppSidebar() {
     <SidebarContent><ScrollArea className="h-full"><nav aria-label="เมนูผู้ดูแล">
       <NavMain title="จัดการระบบ" items={[
         { title: "ภาพรวม", href: "/admin", icon: LayoutDashboard },
+        { title: "เครื่องและ Agent", href: "/admin/machines", icon: Monitor },
         { title: "สมาชิก", href: "/admin/users", icon: Users },
         { title: "ยอดเงินสมาชิก", href: "/admin/balances", icon: Wallet },
       ]} />

@@ -9,6 +9,7 @@ public sealed partial class ControllerDatabase {
             var machine=List().SingleOrDefault(x=>x.MachineId==id)??throw new KeyNotFoundException();var now=clock.GetUtcNow();
             using var tx=connection.BeginTransaction();
             RegisterBoot(tx,id,request.BootId);
+            if(request.AppliedConfigRevision>=0)ExecuteLease(tx,"INSERT INTO machine_config_acks(machine_id,applied_revision) VALUES($id,$revision) ON CONFLICT(machine_id) DO UPDATE SET applied_revision=$revision",("$id",id),("$revision",request.AppliedConfigRevision));
             ExpireLeases(tx,now.ToUnixTimeMilliseconds());
             ExecuteLease(tx,"INSERT INTO machine_heartbeats(machine_id,last_seen,boot_id,readiness) VALUES($id,$at,$boot,$ready) ON CONFLICT(machine_id) DO UPDATE SET last_seen=$at,boot_id=$boot,readiness=$ready; UPDATE machines SET local_ip=$ip,mac_address=$mac WHERE machine_id=$id",("$id",id),("$at",now.ToString("O")),("$boot",request.BootId),("$ready",request.Readiness),("$ip",request.LocalIp),("$mac",request.MacAddress));
             string? unbound;
