@@ -52,8 +52,13 @@ public sealed partial class ControllerDatabase {
             ExecuteLease(tx,"INSERT INTO leases(id,user_id,machine_id,state,pending_revision,duration_seconds,preparation_deadline) VALUES($id,$user,$machine,'preparing',1,$duration,$deadline)",("$id",id),("$user",userId),("$machine",machineId),("$duration",durationSeconds),("$deadline",now+300000));
             SaveRequest(tx,scope,idempotencyKey,fp,id);
             // An offline machine acquires a boot-bound command only when its next heartbeat arrives.
-            using(var boot=LeaseCommand(tx,"SELECT boot_id FROM machine_heartbeats WHERE machine_id=$id",("$id",machineId))) {
-                if(boot.ExecuteScalar() is string bootId) PrepareCommand(tx,FindLease(tx,id)!,bootId);
+            using(var boot=LeaseCommand(tx,"SELECT boot_id,last_seen FROM machine_heartbeats WHERE machine_id=$id",("$id",machineId))) {
+                string? currentBoot=null;
+                using(var row=boot.ExecuteReader()) {
+                    if(row.Read() && now-DateTimeOffset.Parse(row.GetString(1)).ToUnixTimeMilliseconds()<=20000)
+                        currentBoot=row.GetString(0);
+                }
+                if(currentBoot is not null) PrepareCommand(tx,FindLease(tx,id)!,currentBoot);
             }
             var result=FindLease(tx,id)!.Dto;tx.Commit();return result;
         }
