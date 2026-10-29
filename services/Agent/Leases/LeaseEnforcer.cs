@@ -12,6 +12,7 @@ public sealed class LeaseEnforcer(LeaseStore store,TimeProvider time,IBootClock 
  public LeaseSnapshot? Current=>Volatile.Read(ref current);
  public string? Fault=>Volatile.Read(ref fault);
  public bool CanStream=>confirmed&&Fault is null&&Current is {} s&&s.BootId==boot.BootId&&boot.UptimeMilliseconds<s.DeadlineUptimeMilliseconds;
+ public TimeSpan PairingCommandTimeRemaining(CommandEnvelope command){lock(state){if(!CanStream||Current is not {} s||command.Type!="PairPin"||command.RentalId!=s.RentalId||command.LeaseRevision!=s.Revision||command.BootId!=s.BootId)return TimeSpan.Zero;var until=command.ValidUntilUtc<s.ExpiresAtUtc?command.ValidUntilUtc:s.ExpiresAtUtc;var remaining=until-EffectiveNow();return remaining>TimeSpan.Zero?remaining:TimeSpan.Zero;}}
  public async Task InitializeAsync(CancellationToken ct){await commands.WaitAsync(ct);try{await InitializeCoreAsync(ct);}finally{commands.Release();}}
  private async Task InitializeCoreAsync(CancellationToken ct,bool blockGate=true){if(initialized)return;
   try{var loaded=await store.LoadAsync(ct);

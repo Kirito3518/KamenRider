@@ -1,7 +1,8 @@
 using KamenRaider.Agent.Leases;
 using KamenRaider.Contracts;
 namespace KamenRaider.Agent.Sync;
-public sealed class LeaseCommandDispatcher(LeaseEnforcer enforcer) {
+public sealed class LeaseCommandDispatcher(LeaseEnforcer enforcer,KamenRaider.Agent.Sunshine.PairingSession? pairing=null) {
+ public Task<PairingOffer?> GetPairingOfferAsync(CancellationToken ct)=>enforcer.CanStream&&pairing is not null?pairing.CreateOfferAsync(ct):Task.FromResult<PairingOffer?>(null);
  private CommandResult[] pending=[];
  public CommandResult[] PendingResults=>pending.ToArray();
  public async Task AcceptAsync(SyncResponse response,long requestStartedUptimeMilliseconds,CancellationToken ct){await enforcer.ObserveControllerTimeAsync(response.ServerTimeUtc,requestStartedUptimeMilliseconds,ct);await ProcessAsync(response,ct);}
@@ -11,5 +12,12 @@ public sealed class LeaseCommandDispatcher(LeaseEnforcer enforcer) {
   pending=[];
   foreach(var command in response.Commands.Where(c=>c.Type=="ApplyLease"))pending=[..pending,await enforcer.ApplyAsync(command,ct)];
   await enforcer.ConfirmAsync(response.ActiveLease,ct);
+  foreach(var command in response.Commands.Where(c=>c.Type=="PairPin"))pending=[..pending,await ExecutePairAsync(command,ct)];
+ }
+ private async Task<CommandResult> ExecutePairAsync(CommandEnvelope command,CancellationToken ct){
+  var rejected=new CommandResult(command.CommandId,"failed",command.LeaseRevision,"PairingUnavailable");var remaining=enforcer.PairingCommandTimeRemaining(command);if(pairing is null||remaining<=TimeSpan.Zero)return rejected;
+  using var timeout=CancellationTokenSource.CreateLinkedTokenSource(ct);timeout.CancelAfter(remaining);
+  try{var result=await pairing.ExecuteAsync(command,timeout.Token);return !timeout.IsCancellationRequested&&enforcer.PairingCommandTimeRemaining(command)>TimeSpan.Zero?result:rejected;}
+  catch(OperationCanceledException) when(!ct.IsCancellationRequested){return rejected;}
  }
 }

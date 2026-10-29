@@ -75,6 +75,7 @@ public static class ControllerHost
         app.MapMachines();
         app.MapSync();
         app.MapLeases();
+        app.MapPairing();
         return app;
     }
 }

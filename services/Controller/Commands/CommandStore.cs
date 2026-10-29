@@ -14,7 +14,7 @@ public sealed partial class ControllerDatabase {
         using var cmd=LeaseCommand(tx,"SELECT command_id,type,rental_id,lease_revision,boot_id,valid_until,payload FROM command_outbox WHERE machine_id=$id AND boot_id=$boot AND status='pending' ORDER BY rowid",("$id",machineId),("$boot",boot));
         using var r=cmd.ExecuteReader();var commands=new List<CommandEnvelope>();
         while(r.Read()) commands.Add(new(r.GetString(0),r.GetString(1),r.GetString(2),r.GetInt64(3),r.GetString(4),DateTimeOffset.FromUnixTimeMilliseconds(r.GetInt64(5)),JsonSerializer.Deserialize<JsonElement>(r.GetString(6))));
-        return commands.ToArray();
+                return commands.Select(c=>c.Type=="PairPin"&&pairingPins.TryGetValue(c.CommandId,out var secret)?c with{Payload=JsonSerializer.SerializeToElement(new{pairingId=c.Payload.GetProperty("pairingId").GetString(),pin=secret.Pin})}:c).ToArray();
     }
     private void RegisterBoot(SqliteTransaction tx,string machineId,string boot) {
         using(var check=LeaseCommand(tx,"SELECT retired FROM machine_boots WHERE machine_id=$id AND boot_id=$boot",("$id",machineId),("$boot",boot)))
@@ -30,6 +30,11 @@ public sealed partial class ControllerDatabase {
             var command=PendingCommands(tx,machineId,request.BootId).SingleOrDefault(c=>c.CommandId==result.CommandId);
             if(command is null||command.ValidUntilUtc.ToUnixTimeMilliseconds()<=now||result.AppliedRevision!=command.LeaseRevision) continue;
             var lease=FindLease(tx,command.RentalId)!;
+                        if(command.Type=="PairPin"){
+                if(lease.Boot==request.BootId&&lease.Dto.State=="active"&&lease.Dto.Revision==command.LeaseRevision&&result.Status is "applied" or "failed"){
+                    ExecuteLease(tx,"UPDATE command_outbox SET status=$status,payload='{}' WHERE command_id=$id",("$status",result.Status),("$id",command.CommandId));pairingPins.Remove(command.CommandId);
+                }continue;
+            }
             if(lease.Boot!=request.BootId||lease.Dto.PendingRevision!=command.LeaseRevision||lease.Dto.State is not ("preparing" or "active")) continue;
             if(result.Status=="failed") {
                 // Do not persist or echo arbitrary agent text (it can contain secrets).

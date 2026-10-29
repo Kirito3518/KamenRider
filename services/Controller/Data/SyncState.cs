@@ -15,6 +15,7 @@ public sealed partial class ControllerDatabase {
             using(var cmd=LeaseCommand(tx,"SELECT id FROM leases WHERE machine_id=$id AND state='preparing' AND boot_id IS NULL",("$id",id))) unbound=cmd.ExecuteScalar() as string;
             if(unbound is not null) PrepareCommand(tx,FindLease(tx,unbound)!,request.BootId);
             ApplyResults(tx,id,request,now.ToUnixTimeMilliseconds());
+            ObservePairingOffer(tx,id,request,now.ToUnixTimeMilliseconds());PurgePairingSecrets(tx,now.ToUnixTimeMilliseconds());
             var response=new SyncResponse(now,new(machine.ConfigRevision,machine.MoonlightPort,machine.SunshinePort),PendingCommands(tx,id,request.BootId),ConfirmLease(tx,id,request.BootId,request.Readiness));
             tx.Commit(); return response;
         }
