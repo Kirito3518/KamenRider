@@ -1,6 +1,6 @@
 using System.Text.Json;
 namespace KamenRaider.Agent.Leases;
-public record LeaseSnapshot(string RentalId,long Revision,DateTimeOffset ExpiresAtUtc,string BootId,string LastCommandId,long DeadlineUptimeMilliseconds);
+public record LeaseSnapshot(string RentalId,long Revision,DateTimeOffset ExpiresAtUtc,string BootId,string LastCommandId,long DeadlineUptimeMilliseconds,long? RecoveryDeadlineUptimeMilliseconds=null);
 public class LeaseStore(string directory) {
  private string FilePath=>Path.Combine(directory,"lease.json");
  public virtual async Task SaveAsync(LeaseSnapshot snapshot,CancellationToken ct) {
