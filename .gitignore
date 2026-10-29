@@ -49,3 +49,12 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# .NET service outputs and machine-local configuration
+**/bin/
+**/obj/
+services/**/appsettings.Local.json
+services/**/secrets/
+services/**/data/
+*.pfx
+*.p12
