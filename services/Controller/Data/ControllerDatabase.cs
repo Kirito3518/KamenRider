@@ -4,7 +4,7 @@ using System.Security.Cryptography;
 namespace KamenRaider.Controller.Data;
 public record EnrollmentPolicy(int MaxPending = 100, int NewPerMinute = 10);
 public sealed class EnrollmentCapacityException : Exception { }
-public sealed class ControllerDatabase : IDisposable
+public sealed partial class ControllerDatabase : IDisposable
 {
     private readonly SqliteConnection connection;
     private readonly object gate=new();
@@ -70,7 +70,7 @@ public sealed class ControllerDatabase : IDisposable
     private static void Ports(int moon,int sun) {if(moon is <1 or >65535 || sun is <1 or >65535)throw new ArgumentException("Invalid port");}
     public MachineDto[] List() {lock(gate) {
         using var cmd=Command("SELECT machine_id,approval_status,display_name,hourly_price,local_ip,mac_address,moonlight_port,sunshine_port,revision,approved_by,approved_at FROM machines ORDER BY machine_id"); using var r=cmd.ExecuteReader(); var rows=new List<MachineDto>();
-        while(r.Read()) rows.Add(new(r.GetString(0),r.GetString(1),r.GetString(2),r.GetInt64(3),r.GetString(4),r.GetString(5),r.GetInt32(6),r.GetInt32(7),r.GetInt64(8),null,null,"unknown",null,r.IsDBNull(9)?null:r.GetString(9),r.IsDBNull(10)?null:DateTimeOffset.Parse(r.GetString(10)))); return rows.ToArray();
+        while(r.Read()) rows.Add(new(r.GetString(0),r.GetString(1),r.GetString(2),r.GetInt64(3),r.GetString(4),r.GetString(5),r.GetInt32(6),r.GetInt32(7),r.GetInt64(8),null,null,"unknown",null,r.IsDBNull(9)?null:r.GetString(9),r.IsDBNull(10)?null:DateTimeOffset.Parse(r.GetString(10)))); for(var i=0;i<rows.Count;i++) {using var heartbeat=Command("SELECT last_seen,boot_id,readiness FROM machine_heartbeats WHERE machine_id=$id",("$id",rows[i].MachineId));using var h=heartbeat.ExecuteReader();if(h.Read()){var seen=DateTimeOffset.Parse(h.GetString(0));rows[i]=rows[i] with {LastSeenAt=seen,BootId=h.GetString(1),Readiness=clock.GetUtcNow()-seen>TimeSpan.FromSeconds(20)?"unreachable":h.GetString(2)};}} return rows.ToArray();
     }}
     public MachineDto Update(string id, MachineUpdate update,long expectedRevision) {lock(gate) {
         Ports(update.MoonlightPort,update.SunshinePort); if(string.IsNullOrWhiteSpace(update.DisplayName)||update.HourlyPriceMinorUnits<=0)throw new ArgumentException("Name and positive price required");
@@ -85,3 +85,4 @@ public sealed class ControllerDatabase : IDisposable
         using var cmd=Command("UPDATE machines SET approval_status='approved',approved_by=$actor,approved_at=$at,revision=revision+1 WHERE machine_id=$id; INSERT INTO machine_approval_audit(machine_id,actor_id,approved_at) VALUES($id,$actor,$at)",("$actor",actor),("$at",at),("$id",id)); cmd.Transaction=tx;cmd.ExecuteNonQuery();tx.Commit();return List().Single(x=>x.MachineId==id);
     }}
 }
+

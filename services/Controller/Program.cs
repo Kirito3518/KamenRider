@@ -1,3 +1,5 @@
+using Microsoft.Extensions.DependencyInjection.Extensions;
+using KamenRaider.Controller.Agents;
 using KamenRaider.Controller.Data;
 using KamenRaider.Controller.Machines;
 using KamenRaider.Controller.Security;
@@ -10,6 +12,9 @@ namespace KamenRaider.Controller;
 
 public sealed class ControllerOptions
 {
+    public string WakeInterfaceAddress { get; set; } = "";
+    public string WakeBroadcastAddress { get; set; } = "";
+    public string PublicIpEndpoint { get; set; } = "";
     public string InternalUrl { get; set; } = "";
     public string AgentUrl { get; set; } = "";
     public string DatabasePath { get; set; } = "";
@@ -42,6 +47,11 @@ public static class ControllerHost
         }
         builder.Services.AddSingleton<ControllerDatabase>(sp => new ControllerDatabase(sp.GetRequiredService<IOptions<ControllerOptions>>().Value.DatabasePath));
         builder.Services.AddSingleton<AgentAuthentication>();
+        builder.Services.TryAddSingleton<KamenRaider.Controller.Network.IWakeSender>(_ => new KamenRaider.Controller.Network.WakeService(settings.WakeInterfaceAddress));
+        if (Uri.TryCreate(settings.PublicIpEndpoint, UriKind.Absolute, out var publicIp) && publicIp.Scheme == "https") {
+            builder.Services.AddSingleton(_ => new KamenRaider.Controller.Network.PublicIpJob(new HttpClient(),publicIp));
+            builder.Services.AddHostedService(sp=>sp.GetRequiredService<KamenRaider.Controller.Network.PublicIpJob>());
+        }
         var app = builder.Build();
         app.Use(async (context, next) => {
             var options = context.RequestServices.GetRequiredService<IOptions<ControllerOptions>>().Value;
@@ -61,7 +71,10 @@ public static class ControllerHost
         });
         app.MapGet("/internal/health", () => new HealthResponse(Protocol.Version, "ok"));
         app.MapMachines();
+        app.MapSync();
         return app;
     }
 }
 public class Program { public static void Main(string[] args) => ControllerHost.Build(args).Run(); }
+
+

@@ -8,3 +8,4 @@ CREATE TABLE IF NOT EXISTS machines (
 CREATE TABLE IF NOT EXISTS machine_approval_audit (id INTEGER PRIMARY KEY, machine_id TEXT NOT NULL REFERENCES machines(machine_id), actor_id TEXT NOT NULL, approved_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS enrollment_admissions (id INTEGER PRIMARY KEY, admitted_at INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS machines_pending ON machines(approval_status) WHERE approval_status='pending';
+CREATE TABLE IF NOT EXISTS machine_heartbeats(machine_id TEXT PRIMARY KEY REFERENCES machines(machine_id),last_seen TEXT NOT NULL,boot_id TEXT NOT NULL,readiness TEXT NOT NULL);
