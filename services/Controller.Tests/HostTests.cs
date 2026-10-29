@@ -51,17 +51,15 @@ public class HostTests
         Assert.False(new ControllerOptions { InternalUrl = internalUrl, AgentUrl = agentUrl, DatabasePath = Path.GetFullPath("unused.db"), ServiceCredential = "test" }.IsValid());
     }
     [Fact]
-    public void Build_DoesNotCreateProductionDatabase()
+    public async Task Build_DoesNotCreateProductionDatabase()
     {
         var path = Path.Combine(Path.GetTempPath(), Guid.NewGuid()+".db");
         using var app = ControllerHost.Build([], b => b.Configuration["DatabasePath"] = path);
         Assert.False(File.Exists(path));
         var project = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../Controller/Controller.csproj"));
         using var build = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("dotnet") { ArgumentList = { "build", project, "--no-restore", "--no-dependencies", "-p:DatabasePath=" + path }, RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false })!;
-        var output = build.StandardOutput.ReadToEnd();
-        var error = build.StandardError.ReadToEnd();
-        Assert.True(build.WaitForExit(60000), "Build timed out");
-        Assert.True(build.ExitCode == 0, output + error);
+        var result = await ChildProcess.RunAsync(build, TimeSpan.FromSeconds(60));
+        Assert.True(result.ExitCode == 0, result.Output + result.Error);
         Assert.False(File.Exists(path));
     }
 }
