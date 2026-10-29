@@ -50,6 +50,11 @@ test("real credential/session lifecycle and account boundaries", async () => {
   const session = await (await request("/get-session")).json();
   assert.equal(session.user.id, created.user.id);
   assert.equal(session.user.role, "user");
+  const memberEndpoint = `${base}/api/admin/users/${created.user.id}`;
+  const changeBody = { requestId: crypto.randomUUID(), action: "credit", amount: "2.50", reason: "ทดสอบการปรับยอด" };
+  const changeHeaders = { "Content-Type": "application/json", Origin: base };
+  assert.equal((await fetch(memberEndpoint, { method: "POST", headers: changeHeaders, body: JSON.stringify(changeBody) })).status, 401);
+  assert.equal((await fetch(memberEndpoint, { method: "POST", headers: { ...changeHeaders, Cookie: cookie }, body: JSON.stringify(changeBody) })).status, 403);
   for (const path of ["/admin", "/admin/users", "/admin/balances"]) {
     const guest = await fetch(`${base}${path}`, { redirect: "manual" });
     const guestHtml = await guest.text();
@@ -116,13 +121,27 @@ test("real credential/session lifecycle and account boundaries", async () => {
   assert.equal(restored.user.id, created.user.id);
   assert.equal(restored.user.role, process.env.TEST_AUTH_DB ? "admin" : "user");
   if (process.env.TEST_AUTH_DB) {
+    const targetEndpoint = `${base}/api/admin/users/${ownAccounts[0].userId}`;
+    const requestBody = { requestId: crypto.randomUUID(), action: "credit", amount: "2.50", reason: "ปรับยอดโดยผู้ดูแล" };
+    const sendChange = (body, origin = base) => fetch(targetEndpoint, { method: "POST", headers: { ...changeHeaders, Origin: origin, Cookie: cookie }, body: JSON.stringify(body) });
+    assert.equal((await sendChange(requestBody, "https://untrusted.example")).status, 403);
+    const credited = await sendChange(requestBody);
+    assert.equal(credited.status, 200);
+    assert.equal((await credited.json()).balanceSatang, 250);
+    assert.equal((await (await sendChange(requestBody)).json()).balanceSatang, 250);
+    assert.equal((await sendChange({ ...requestBody, requestId: crypto.randomUUID(), action: "debit", amount: "3.00" })).status, 400);
+    assert.equal((await sendChange({ requestId: crypto.randomUUID(), action: "role", role: "admin", reason: "ทดสอบเพิ่มสิทธิ์" })).status, 200);
+    assert.equal((await sendChange({ requestId: crypto.randomUUID(), action: "role", role: "user", reason: "คืนสิทธิ์สมาชิก" })).status, 200);
     for (const path of ["/admin", "/admin/users", "/admin/balances"]) {
       const response = await fetch(`${base}${path}`, { headers: { Cookie: cookie }, redirect: "manual" });
       const html = await response.text();
       assert.equal(response.status, 200, `${path} must open for admin`);
       assert.ok(!html.includes("NEXT_REDIRECT"));
       assert.ok(html.includes("KamenRaiderPlay Admin"));
-      if (path === "/admin/users") assert.ok(html.includes(user.email));
+      if (path === "/admin/users") {
+        assert.ok(html.includes(user.email));
+        assert.ok(html.includes("รายชื่อสมาชิกและการจัดการบัญชี"), "member table must render without streaming errors");
+      }
     }
     const { default: Database } = await import("better-sqlite3");
     const database = new Database(process.env.TEST_AUTH_DB);

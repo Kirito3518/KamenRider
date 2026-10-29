@@ -19,6 +19,6 @@ export function AdminShell({ user, children }: { user: AdminMember; children: Re
       <div className="flex min-w-0 items-center gap-3"><SidebarTrigger aria-label="เปิดหรือปิดเมนูผู้ดูแล" /><Separator orientation="vertical" className="h-5" /><span className="truncate text-sm font-medium">{titles[pathname] || "ผู้ดูแลระบบ"}</span></div>
       <div className="flex items-center gap-2"><Button variant="ghost" size="icon" onClick={toggleTheme} aria-label="สลับโหมดสว่างและโหมดมืด"><SunMoon /></Button><AccountDropdown user={user} /></div>
     </header>
-    <main className="mx-auto flex w-full max-w-7xl flex-1 flex-col gap-6 p-4 sm:p-6 lg:p-8">{children}</main>
+    <main className="flex min-w-0 w-full flex-1 flex-col gap-6 p-4 sm:p-6">{children}</main>
   </SidebarInset></SidebarProvider></TooltipProvider>;
 }
