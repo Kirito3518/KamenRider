@@ -6,6 +6,8 @@ import {
   CircleHelp,
   History,
   Home,
+  LoaderCircle,
+  LogIn,
   Menu,
   Monitor,
   MonitorPlay,
@@ -17,6 +19,8 @@ import { useRef, useState, type MouseEventHandler } from "react";
 import { useThemeTransition } from "@/hooks/use-theme-transition";
 import { Button } from "@/components/ui/button";
 import { AuthDialog } from "@/components/auth/auth-dialog";
+import { authClient } from "@/lib/auth-client";
+import { AccountDropdown } from "@/components/auth/account-dropdown";
 import { cn } from "@/lib/utils";
 import {
   Navbar as ResizableNavbar,
@@ -63,12 +67,11 @@ function ThemeToggle() {
   );
 }
 
-function LoginButton({ onClick }: { onClick: MouseEventHandler<HTMLButtonElement> }) {
-  return (
-    <Button onClick={onClick}>
-      เข้าสู่ระบบ
-    </Button>
-  );
+function LoginButton({ onClick, onNavigate, mobile = false }: { onClick: MouseEventHandler<HTMLButtonElement>; onNavigate?: () => void; mobile?: boolean }) {
+  const { data: session, isPending } = authClient.useSession();
+  if (isPending) return <Button disabled aria-label="กำลังโหลดบัญชี" className={mobile ? "size-9 px-0" : undefined}><LoaderCircle className="size-4 animate-spin" /><span className={mobile ? "sr-only" : undefined}>กำลังโหลด…</span></Button>;
+  if (session) return <AccountDropdown user={session.user} onNavigate={onNavigate} />;
+  return <Button onClick={onClick} className={mobile ? "max-[399px]:size-9 max-[399px]:px-0" : undefined}>{mobile && <LogIn className="min-[400px]:hidden" />}<span className={mobile ? "max-[399px]:sr-only" : undefined}>เข้าสู่ระบบ</span></Button>;
 }
 
 export function Navbar() {
@@ -119,9 +122,7 @@ export function Navbar() {
           <Brand />
           <div className="flex items-center gap-1 sm:gap-2">
             <ThemeToggle />
-            <span className="hidden min-[400px]:inline-flex">
-              <LoginButton onClick={openLogin} />
-            </span>
+            <LoginButton mobile onClick={openLogin} onNavigate={() => setMenuOpen(false)} />
             <Button
               variant="outline"
               size="icon"
@@ -161,9 +162,6 @@ export function Navbar() {
               <History className="size-[18px]" />
               ประวัติการเช่า
             </Link>
-            <div className="mt-2 min-[400px]:hidden">
-              <LoginButton onClick={openLogin} />
-            </div>
           </nav>
         </MobileNavMenu>
       </MobileNav>

@@ -3,6 +3,7 @@ import { Geist_Mono, IBM_Plex_Sans_Thai } from "next/font/google";
 import "./globals.css";
 import { cn } from "@/lib/utils";
 import { ThemeProvider } from "@/components/theme-provider";
+import { AuthToaster } from "@/components/auth/auth-toaster";
 
 const ibmPlexSansThai = IBM_Plex_Sans_Thai({
   variable: "--font-ibm-plex-sans-thai",
@@ -27,7 +28,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
       lang="th" suppressHydrationWarning
       className={cn("h-full", "antialiased", ibmPlexSansThai.variable, geistMono.variable, "font-sans")}
     >
-      <body className="min-h-full flex flex-col"><ThemeProvider attribute="class" defaultTheme="light" enableSystem>{children}</ThemeProvider></body>
+      <body className="min-h-full flex flex-col"><ThemeProvider attribute="class" defaultTheme="light" enableSystem>{children}<AuthToaster /></ThemeProvider></body>
     </html>
   );
 }
