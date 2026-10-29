@@ -57,7 +57,7 @@ public class HostTests
         using var app = ControllerHost.Build([], b => b.Configuration["DatabasePath"] = path);
         Assert.False(File.Exists(path));
         var project = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../Controller/Controller.csproj"));
-        using var build = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("dotnet") { ArgumentList = { "build", project, "--no-restore", "--no-dependencies", "-p:DatabasePath=" + path }, RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false })!;
+        using var build = ContainedProcess.Start(new System.Diagnostics.ProcessStartInfo("dotnet") { ArgumentList = { "build", project, "--no-restore", "--no-dependencies", "-p:DatabasePath=" + path }, RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false });
         var result = await ChildProcess.RunAsync(build, TimeSpan.FromSeconds(60));
         Assert.True(result.ExitCode == 0, result.Output + result.Error);
         Assert.False(File.Exists(path));
