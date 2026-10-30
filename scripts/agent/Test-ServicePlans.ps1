@@ -6,6 +6,13 @@ $agent=& $install -Role Agent -PublishDirectory $root -DataDirectory (Join-Path 
 if($agent.Startup -ne 'disabled' -or $agent.Account -ne 'NT SERVICE\KamenRaider Agent'){throw 'Agent installation must remain disabled and use the virtual service account.'}
 $controller=& $install -Role Controller -PublishDirectory $root -DataDirectory (Join-Path $root 'data') -ConfigurationFile (Join-Path $root 'config.json') -TrustedRootThumbprint ('A'*40) -Plan
 if($controller.Startup -ne 'auto'){throw 'Controller automatic startup missing.'}
+$installationBlocked=$false
+try {
+ & $install -Role Controller -PublishDirectory $root -DataDirectory (Join-Path $root 'data') -ConfigurationFile (Join-Path $root 'config.json') -TrustedRootThumbprint ('A'*40)
+} catch {
+ $installationBlocked=$_.Exception.Message -like 'Service installation is disabled*'
+}
+if(-not $installationBlocked){throw 'Live installation must remain blocked until security review is complete.'}
 $plans=@(& $publish -Role Both -OutputDirectory $root -Plan)
 if($plans.Count -ne 2 -or $plans[0].Output -eq $plans[1].Output){throw 'Publish roles must have distinct output directories.'}
 if(Test-Path -LiteralPath $root){throw 'Plan must not create files.'}
