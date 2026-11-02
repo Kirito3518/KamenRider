@@ -1,6 +1,10 @@
 # Sunshine compatibility and deployment qualification
 
-Status on 2026-10-30: **operational streaming protection is unverified; do not deploy this as an access-control gate.** Installed Sunshine version, Windows startup ordering, certificates, desktop capture and effective firewall policy have not been inspected. No live Sunshine requests, firewall changes, service changes or shutdowns were performed.
+Status on 2026-10-30: **operational streaming protection is unverified; do not deploy this as an access-control gate.** The local version and listener inventory is recorded below, but Windows startup ordering, certificates, desktop capture and effective firewall policy have not been qualified. No live Sunshine requests, firewall changes, service changes or shutdowns were performed.
+
+## Read-only inventory on this computer
+
+On 2026-10-30, Windows reported `SunshineService` as running with automatic startup. Its service executable was `C:\Program Files\Sunshine\tools\sunshinesvc.exe`; the installed `C:\Program Files\Sunshine\sunshine.exe` reported a product version beginning `v2026.823.92127` and SHA-256 `3B108A0DD4A3BB5A5231825A500A6C20B5421D65F6AA7FF4BAB88CEBAEF0F20A`. TCP ports 47984, 47989, 47990 and 48010 were listening on `0.0.0.0`. This is only a local, point-in-time inventory, not an API, TLS, firewall, desktop or stream-isolation test. No credentials or Sunshine requests were used, and no service, firewall or power settings were changed. Qualification must be repeated for the actual rental machine and installed version.
 
 ## Researched contract
 
@@ -8,7 +12,7 @@ The [current official API documentation](https://docs.lizardbyte.dev/projects/su
 
 Current pairing requires an explicitly selected `pairing_id`, four ASCII numeric PIN characters, and a client name. `GET /api/pin` supplies pending IDs; `DELETE /api/pin` cancels a selected request. Pair submission waits for the cryptographic handshake and its returned status must be checked. Friendly names and addresses are untrusted metadata and are never used to select a request. Older endpoints or response formats are not automatically detected or silently substituted.
 
-The candidate cleanup sequence cancels pending IDs, requests `/api/clients/unpair-all`, requests `/api/apps/close`, then checks that no pending IDs remain. These API statuses do **not** prove a running stream was disconnected or that an in-flight handshake cannot add a certificate afterward. A separately proved ingress/handshake fence must precede cleanup. Failed cleanup leaves the pairing session unavailable. This adapter assumes a dedicated tenant Sunshine instance: unpair-all is inappropriate for a shared instance containing administrator clients.
+The candidate cleanup sequence cancels pending IDs, requests `/api/clients/unpair-all`, requests `/api/apps/close`, then checks that no pending IDs or paired clients remain using `/api/clients/list`. Missing, malformed or unsuccessful client-list responses fail cleanup closed. These API statuses do **not** prove a running stream was disconnected or that an in-flight handshake cannot add a certificate afterward. A separately proved ingress/handshake fence must precede cleanup. Failed cleanup leaves the pairing session unavailable. This adapter assumes a dedicated tenant Sunshine instance: unpair-all is inappropriate for a shared instance containing administrator clients. The response schema follows current upstream source and has not been verified against the installed build.
 
 ## Implemented software boundary
 

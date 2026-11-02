@@ -57,10 +57,12 @@ public class SunshineTests {
  }
  [Theory][InlineData("{}")] [InlineData("{\"pairings\":[{\"id\":\"invalid\"}]}")] [InlineData("{\"pairings\":[{\"id\":\"0123456789abcdef0123456789abcdef\"},{\"id\":\"0123456789abcdef0123456789abcdef\"}]}")]
  public async Task MalformedOrAmbiguousPendingListFails(string json){using var api=new SunshineClient(new Uri("https://localhost:47990"),new NetworkCredential("u","p"),new Transport(HttpStatusCode.OK,json));await Assert.ThrowsAsync<InvalidDataException>(()=>api.PendingIdsAsync(default));}
- [Fact] public async Task CleanupCancelsPendingBeforeUnpairAndClose(){var transport=new CleanupTransport();using var api=new SunshineClient(new Uri("https://localhost:47990"),new NetworkCredential("u","p"),transport);await api.ClearAsync(default);Assert.Equal(new[]{"GET /api/pin","DELETE /api/pin","POST /api/clients/unpair-all","POST /api/apps/close","GET /api/pin"},transport.Paths);}
+ [Fact] public async Task CleanupCancelsPendingBeforeUnpairAndClose(){var transport=new CleanupTransport();using var api=new SunshineClient(new Uri("https://localhost:47990"),new NetworkCredential("u","p"),transport);await api.ClearAsync(default);Assert.Equal(new[]{"GET /api/pin","DELETE /api/pin","POST /api/clients/unpair-all","POST /api/apps/close","GET /api/pin","GET /api/clients/list"},transport.Paths);}
+ [Theory][InlineData("{\"status\":true,\"named_certs\":[{\"uuid\":\"still-paired\"}]}")][InlineData("{\"status\":true}")][InlineData("{\"status\":false,\"named_certs\":[]}")][InlineData("not-json")]
+ public async Task CleanupFailsClosedWhenClientsRemainOrClientListIsUnverifiable(string clients){var transport=new CleanupTransport{Clients=clients};using var api=new SunshineClient(new Uri("https://localhost:47990"),new NetworkCredential("u","p"),transport);var error=await Record.ExceptionAsync(()=>api.ClearAsync(default));Assert.True(error is IOException or InvalidDataException);}
  private sealed class CleanupTransport:HttpMessageHandler {
-  public List<string> Paths=[];
-  protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,CancellationToken ct){Paths.Add(request.Method+" "+request.RequestUri!.AbsolutePath);return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK){Content=new StringContent(Paths.Count==1?"{\"pairings\":[{\"id\":\"0123456789abcdef0123456789abcdef\"}]}":request.Method==HttpMethod.Get?"{\"pairings\":[]}":"{\"status\":true}")});}
+  public List<string> Paths=[];public string Clients="{\"status\":true,\"named_certs\":[]}";
+  protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,CancellationToken ct){Paths.Add(request.Method+" "+request.RequestUri!.AbsolutePath);return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK){Content=new StringContent(request.RequestUri!.AbsolutePath=="/api/clients/list"?Clients:Paths.Count==1?"{\"pairings\":[{\"id\":\"0123456789abcdef0123456789abcdef\"}]}":request.Method==HttpMethod.Get?"{\"pairings\":[]}":"{\"status\":true}")});}
  }
  private sealed class Transport(HttpStatusCode status,string json):HttpMessageHandler {
   public string Json=json;public string? Url,Auth,Body;

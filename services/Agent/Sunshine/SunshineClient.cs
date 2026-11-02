@@ -39,6 +39,13 @@ public sealed class SunshineClient:ISunshinePairingApi,IDisposable {
   foreach(var id in await PendingIdsAsync(ct))if(!await MutationAsync(HttpMethod.Delete,"/api/pin",new{pairing_id=id},ct))throw new IOException("Sunshine cancellation failed");
   if(!await MutationAsync(HttpMethod.Post,"/api/clients/unpair-all",new{},ct)||!await MutationAsync(HttpMethod.Post,"/api/apps/close",new{},ct))throw new IOException("Sunshine cleanup failed");
   if((await PendingIdsAsync(ct)).Length!=0)throw new IOException("Sunshine pending requests remain");
+  using var clients=await http.GetAsync("/api/clients/list",ct);clients.EnsureSuccessStatusCode();
+  try {
+   using var json=JsonDocument.Parse(await clients.Content.ReadAsStringAsync(ct));
+   if(json.RootElement.ValueKind!=JsonValueKind.Object||!json.RootElement.TryGetProperty("status",out var status)||status.ValueKind!=JsonValueKind.True||!json.RootElement.TryGetProperty("named_certs",out var certs)||certs.ValueKind!=JsonValueKind.Array)
+    throw new InvalidDataException("Unsupported Sunshine client-list schema");
+   if(certs.GetArrayLength()!=0)throw new IOException("Sunshine paired clients remain");
+  } catch(JsonException){throw new InvalidDataException("Unsupported Sunshine client-list schema");}
  }
  public void Dispose()=>http.Dispose();
 }
