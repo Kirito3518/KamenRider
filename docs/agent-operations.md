@@ -6,6 +6,8 @@ This repository is **not operationally ready for rentals**. There is no qualifie
 
 ## Installation preparation
 
+Run `scripts/agent/Test-HostReadiness.ps1` in PowerShell 7 for a read-only inventory of local service, Sunshine firewall, elevation and certificate prerequisites. It does not change Restore Rx, firewall rules, services or credentials. A certificate count is not TLS qualification, and the report deliberately keeps `StreamFenceQualified` and `ReadyForRental` false until a real fence and live rental test exist.
+
 Publish without installing: `./scripts/agent/Publish-Services.ps1 -Role Both -OutputDirectory C:\KamenRaiderPublish -Plan`. Remove `-Plan` to publish self-contained Windows binaries into separate Controller/Agent directories. This does not start them.
 
 Use a protected executable directory (normally under Program Files); standard users and tenants must have no write access. Provision role-specific config using absolute data paths, then inspect `Install-Service.ps1 -Plan` with Role, PublishDirectory, DataDirectory, ConfigurationFile and TrustedRootThumbprint. **Live installation is disabled** until the directory trust and reparse-point race, service-creation rollback, and operational qualification are resolved. The plan describes intended service accounts and recovery settings; it does not install or configure services.
