@@ -39,6 +39,9 @@ try {
 $events=[Collections.Generic.List[string]]::new()
 try { Invoke-ServiceInstallTransaction { $events.Add('create') } { $events.Add('configure'); throw 'failure' } { $events.Add('rollback') }; throw 'Failure was swallowed' } catch { if($_.Exception.Message -ne 'failure') {throw} }
 if(($events -join ',') -ne 'create,configure,rollback'){throw 'Created service was not rolled back on failure.'}
+$events.Clear()
+try { Invoke-ServiceInstallTransaction { $events.Add('create'); throw 'create failure' } { $events.Add('configure') } { $events.Add('rollback') }; throw 'Create failure was swallowed' } catch { if($_.Exception.Message -ne 'create failure') {throw} }
+if(($events -join ',') -ne 'create,rollback'){throw 'Partially created service was not rolled back.'}
 # Dependency files need the same trust checks as the executable, including
 # hidden and nested files. This fixture only reads and writes disposable data.
 $treeRoot=Join-Path ([IO.Path]::GetTempPath()) ('kr-tree-test-'+[guid]::NewGuid().ToString('N'))

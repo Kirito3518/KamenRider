@@ -48,8 +48,10 @@ if($PSCmdlet.ShouldProcess($serviceName,'Create service and grant private data/c
  & sc.exe config $serviceName start= $startup
  if($LASTEXITCODE -ne 0){throw 'Startup configuration failed.'}
  } {
-  & sc.exe delete $serviceName
-  if($LASTEXITCODE -ne 0){throw 'Unable to remove the service after configuration failure.'}
+  if(Get-Service -Name $serviceName -ErrorAction SilentlyContinue){
+   & sc.exe delete $serviceName
+   if($LASTEXITCODE -ne 0){throw 'Unable to remove the service after installation failure.'}
+  }
  }
  Write-Output "Installed $serviceName as $account, startup=$startup. No service was started."
 }

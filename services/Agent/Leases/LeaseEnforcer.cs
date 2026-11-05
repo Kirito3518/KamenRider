@@ -44,7 +44,7 @@ private DateTimeOffset EffectiveNow(){var now=time.GetUtcNow();if(serverTime is 
   try{await store.SaveAsync(next,ct);}catch(Exception ex) when(ex is IOException or UnauthorizedAccessException){lock(state){fault="LeaseStorageFailed";}return false;}
   lock(state){importSaved=true;if(!ReferenceEquals(current,next)||fault!="ImportPending"||boot.BootId!=next.BootId||boot.UptimeMilliseconds>=next.DeadlineUptimeMilliseconds)return false;fault=null;return true;}
  }finally{commands.Release();}}
- public async Task<CommandResult> ApplyAsync(CommandEnvelope command,CancellationToken ct){await commands.WaitAsync(ct);try{
+ public async Task<CommandResult> ApplyAsync(CommandEnvelope command,CancellationToken ct){await commands.WaitAsync(ct);LeaseSnapshot? initialCandidate=null;var initialMayBeDurable=false;try{
   await InitializeCoreAsync(ct,false);var failed=new CommandResult(command.CommandId,"failed",command.LeaseRevision,"LeaseRejected");LeaseSnapshot? previous;LeaseSnapshot next;
   lock(state){
    if(fault is not null||command.Type!="ApplyLease"||command.BootId!=boot.BootId||command.LeaseRevision<=0||string.IsNullOrWhiteSpace(command.RentalId)||command.ValidUntilUtc<=EffectiveNow())return failed;
@@ -56,14 +56,20 @@ private DateTimeOffset EffectiveNow(){var now=time.GetUtcNow();if(serverTime is 
     if(command.RentalId!=previous.RentalId||command.LeaseRevision!=previous.Revision+1||expires<=previous.ExpiresAtUtc)return failed;}
    confirmed=false;var deadline=checked(boot.UptimeMilliseconds+(long)(expires-EffectiveNow()).TotalMilliseconds);
    next=new(command.RentalId,command.LeaseRevision,expires,boot.BootId,command.CommandId,deadline,previous?.RecoveryDeadlineUptimeMilliseconds??previous?.DeadlineUptimeMilliseconds);
-   if(previous is null)pendingInitial=next;
+   if(previous is null)pendingInitial=initialCandidate=next;
   }
   await gate.BlockAsync(ct);
   lock(state){if(!CanCommit(previous,next,command))return failed;}
-  try{await store.SaveAsync(next,ct);}catch(Exception ex) when(ex is IOException or UnauthorizedAccessException){lock(state){fault="LeaseStorageFailed";}return failed;}
+  try{await store.SaveAsync(next,ct);if(previous is null)initialMayBeDurable=true;}catch(Exception ex) when(ex is IOException or UnauthorizedAccessException){
+   if(previous is null) {
+    try {var saved=await store.LoadAsync(CancellationToken.None);initialMayBeDurable=saved==next;}
+    catch(Exception){initialMayBeDurable=true;}
+   }
+   lock(state){fault="LeaseStorageFailed";}return failed;
+  }
   // Neither disk nor gate owns the expiry path. Recheck after every await before publishing.
   lock(state){if(!CanCommit(previous,next,command))return failed;current=next;return new(command.CommandId,"applied",command.LeaseRevision);}
- }finally{commands.Release();}}
+ }finally{lock(state){if(ReferenceEquals(pendingInitial,initialCandidate)&&(!initialMayBeDurable||ReferenceEquals(current,initialCandidate)))pendingInitial=null;}commands.Release();}}
  private bool CanCommit(LeaseSnapshot? previous,LeaseSnapshot next,CommandEnvelope command)=>fault is null&&ReferenceEquals(previous,current)&&boot.BootId==next.BootId&&boot.UptimeMilliseconds<next.DeadlineUptimeMilliseconds&&(previous is null||boot.UptimeMilliseconds<EnforcementDeadline(previous))&&command.ValidUntilUtc>EffectiveNow();
  public async Task ConfirmAsync(ActiveLeaseConfirmation? confirmation,CancellationToken ct){await commands.WaitAsync(ct);try{await InitializeCoreAsync(ct);LeaseSnapshot? candidate;
   lock(state){confirmed=false;candidate=Matches(confirmation)?current:null;if(candidate is not null)recoveryDeadline=null;}
