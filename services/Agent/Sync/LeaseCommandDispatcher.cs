@@ -11,8 +11,10 @@ public sealed class LeaseCommandDispatcher(LeaseEnforcer enforcer,KamenRaider.Ag
  public async Task AcceptBlockedAsync(SyncResponse response,long requestStartedUptimeMilliseconds,CancellationToken ct){
   // Presence-only responses do not process command results; retain the batch until a ready sync acknowledges it.
   await ObserveResponseTimeAsync(response,requestStartedUptimeMilliseconds,ct);
-  await enforcer.ConfirmAsync(null,ct);
+  await BlockWithoutAcknowledgingAsync(ct);
  }
+ internal async Task AcceptAcknowledgedBlockedResponseAsync(CancellationToken ct){pending=[];await enforcer.ConfirmAsync(null,ct);}
+ internal Task BlockWithoutAcknowledgingAsync(CancellationToken ct)=>enforcer.ConfirmAsync(null,ct);
  internal async Task AcceptObservedResponseAsync(SyncResponse response,CancellationToken ct){
   // A successful sync response acknowledges the results sent in that request.
   pending=[];

@@ -51,6 +51,31 @@ public class AgentSyncCycleTests {
         Assert.Equal(0,preparation.Calls);Assert.Equal(new CommandResult("prepare-again","failed",1,"PreparationUnavailable"),Assert.Single(dispatcher.PendingResults));
     }
 
+    [Fact] public async Task ReadySyncWithNewerConfigurationDoesNotUseOldReadinessForPreparation() {
+        using var f=new Fixture();await f.Configuration.ApplyAsync(new(1,5000,6000),default);
+        var preparation=new TestMachinePreparation(true);var dispatcher=new LeaseCommandDispatcher(f.Enforcer,machinePreparation:preparation);
+        var command=new CommandEnvelope("prepare","PrepareMachine","rental",1,"boot",f.Clock.Now.AddMinutes(3),JsonSerializer.SerializeToElement(new{}));
+        using var transport=new Transport((_,_)=>new(f.Clock.Now,new(2,5001,6001),[command]));
+        using var identity=DeviceIdentity.LoadOrCreate(Path.Combine(f.Directory,"identity"));using var http=new HttpClient(transport);
+        var cycle=new AgentSyncCycle(new SyncClient(http,identity),new("https://controller.test"),f.Clock,f.Configuration,dispatcher);
+
+        await cycle.RunAsync("boot","192.0.2.1","001122334455",Readiness.Ready,default);
+
+        Assert.Equal(2,f.Configuration.Current!.Revision);Assert.Equal(0,preparation.Calls);Assert.Empty(dispatcher.PendingResults);Assert.False(f.Enforcer.CanStream);
+    }
+
+    [Fact] public async Task ReadySyncWithNewerConfigurationDoesNotApplyLeaseOrConfirmActiveLease() {
+        using var f=new Fixture();await f.Configuration.ApplyAsync(new(1,5000,6000),default);await f.Enforcer.ApplyAsync(f.Command(),default);
+        var active=new ActiveLeaseConfirmation("rental",1,"boot",f.Clock.Now.AddSeconds(60));await f.Enforcer.ConfirmAsync(active,default);
+        var extension=f.Command(2,120,"extension");using var transport=new Transport((_,_)=>new(f.Clock.Now,new(2,5001,6001),[extension],active));
+        using var identity=DeviceIdentity.LoadOrCreate(Path.Combine(f.Directory,"identity"));using var http=new HttpClient(transport);
+        var cycle=new AgentSyncCycle(new SyncClient(http,identity),new("https://controller.test"),f.Clock,f.Configuration,new LeaseCommandDispatcher(f.Enforcer));
+
+        await cycle.RunAsync("boot","192.0.2.1","001122334455",Readiness.Ready,default);
+
+        Assert.Equal(2,f.Configuration.Current!.Revision);Assert.Equal(1,f.Enforcer.Current!.Revision);Assert.False(f.Enforcer.CanStream);
+    }
+
     [Fact] public async Task ReadyResponseObservesTimeBeforeFailedConfigurationWriteWithoutProcessingCommandsOrAcknowledgments() {
         using var f=new Fixture();var dispatcher=new LeaseCommandDispatcher(f.Enforcer);
         await dispatcher.AcceptAsync(new(f.Clock.Now,new(1,5000,6000),[f.Command()]),f.Clock.UptimeMilliseconds,default);
@@ -101,7 +126,7 @@ public class AgentSyncCycleTests {
     }
 
     [Fact] public async Task PairingDiscoveryDelayIsExcludedFromHeartbeatRoundTripClockSample() {
-        using var f=new Fixture();await f.Enforcer.ApplyAsync(f.Command(),default);
+        using var f=new Fixture();await f.Configuration.ApplyAsync(new(1,5000,6000),default);await f.Enforcer.ApplyAsync(f.Command(),default);
         var confirmation=new ActiveLeaseConfirmation("rental",1,"boot",f.Clock.Now.AddSeconds(60));
         await f.Enforcer.ConfirmAsync(confirmation,default);
         var pairing=new PairingSession(new DelayedPairingApi(f.Clock),new PairingFence(),()=>f.Enforcer.CanStream?new("rental",1,"boot",confirmation.ExpiresAtUtc):null,f.Clock);

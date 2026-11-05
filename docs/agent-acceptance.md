@@ -17,9 +17,10 @@ No designated and available test client was supplied. Record machine, installed 
 
 ## Software checks (2026-11-06)
 
-- The isolated .NET solution test run passed 275 tests: Agent 140/140 and Controller 135/135.
+- The isolated .NET solution test run passed 277 tests: Agent 142/142 and Controller 135/135.
 - Agent lease confirmation now opens the stream gate only after an exact active-lease confirmation; failed gate opens stay closed, record a fault and can retry. This is contract-level behavior only; no production gate is registered or hardware-qualified.
 - Agent dispatches `PrepareMachine` only for a current, unleased boot and returns a failed command result when no preparation provider is available. The default provider is intentionally unavailable; no preparation hardware action ran.
+- A Ready sync response is accepted only when its configuration revision matches the revision that was validated before the request. If the response advances config, Agent applies it, closes the gate, and defers lease/preparation/confirmation commands until reconciliation proves readiness against the new revision.
 - Eight installer/package/readiness test scripts passed under both Windows PowerShell 5.1 and PowerShell 7. The package-build checks wrote only to temporary artifacts; no services changed.
 - Targeted ESLint and `pnpm exec tsc --noEmit` passed after the renter pairing UI update.
 
