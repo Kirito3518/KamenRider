@@ -31,11 +31,26 @@ public class BootTests {
   using var f=new Fixture();Assert.Equal(Readiness.Ready,await f.Run());var before=f.Gate.Calls;await f.Configuration.ApplyAsync(new(8,6001,6002),default);Assert.Equal(Readiness.NotReady,await f.Reconciler.RevalidateRuntimeAsync(default));Assert.False(f.Reconciler.HasRuntimeEvidence);Assert.True(f.Gate.Calls>before);
  }
  [Fact] public async Task ResumeCannotBecomeReadyUntilLeaseIsDurablyRestored() {
-  using var f=new Fixture();f.Client.Resume=true;Assert.Equal(Readiness.NotReady,await f.Run());f.Environment.LeaseRestored=true;Assert.Equal(Readiness.Ready,await f.Run());
+  using var f=new Fixture();f.Client.Resume=true;Assert.Equal(Readiness.NotReady,await f.Run());f.Importer.Result=true;Assert.Equal(Readiness.Ready,await f.Run());
+  Assert.Equal(2,f.Importer.Calls);Assert.Equal(f.Client.LastResponse!.Lease,f.Importer.Lease);Assert.Equal(f.Client.LastResponse.ServerTimeUtc,f.Importer.ControllerTime);Assert.Equal(f.Clock.UptimeMilliseconds,f.Importer.RequestStartedUptime);
  }
  [Fact] public async Task LeaseExpiryDuringImportCannotReportReady() {
-  using var f=new Fixture();f.Client.Resume=true;f.Environment.LeaseRestored=true;f.Environment.OnRestore=()=>f.Clock.Uptime=120010;
+  using var f=new Fixture();f.Client.Resume=true;f.Importer.Result=true;f.Importer.OnImport=()=>f.Clock.Uptime=120010;
   Assert.Equal(Readiness.NotReady,await f.Run());
+ }
+ [Fact] public async Task AvailableMachineDoesNotImportAnActiveLease() {
+  using var f=new Fixture();Assert.Equal(Readiness.Ready,await f.Run());Assert.Equal(0,f.Importer.Calls);Assert.Equal(1,f.Importer.ClearCalls);Assert.Equal(f.Clock.BootId,f.Importer.ClearedBootId);
+ }
+ [Fact] public async Task AvailableMachineCannotBecomeReadyUntilOldLeaseSnapshotIsCleared() {
+  using var f=new Fixture();f.Importer.ClearResult=false;Assert.Equal(Readiness.NotReady,await f.Run());Assert.Equal(1,f.Importer.ClearCalls);Assert.Equal(0,f.Importer.Calls);
+ }
+ [Theory][InlineData(true,false)][InlineData(false,true)] public async Task ResumeLeaseMustMatchAllocationAndRevisionBoundToChallenge(bool mismatchAllocation,bool mismatchRevision) {
+  using var f=new Fixture();f.Client.Resume=true;f.Client.MismatchAllocation=mismatchAllocation;f.Client.MismatchRevision=mismatchRevision;f.Importer.Result=true;
+  Assert.Equal(Readiness.NotReady,await f.Run());Assert.Equal(0,f.Importer.Calls);
+ }
+ [Theory][InlineData(false,true,true)][InlineData(true,false,true)][InlineData(true,true,false)] public async Task ActiveLeaseIsNotImportedBeforeAllBootEvidencePasses(bool restored,bool cleaned,bool healthy) {
+  using var f=new Fixture();f.Client.Resume=true;f.Environment.Restored=restored;f.Environment.Cleaned=cleaned;f.Environment.Healthy=healthy;f.Importer.Result=true;
+  Assert.Equal(Readiness.NotReady,await f.Run());Assert.Equal(0,f.Importer.Calls);
  }
  [Fact] public async Task MissingControllerChallengeCannotSubmitProofOrBecomeReady() {
   using var f=new Fixture();f.Client.NoChallenge=true;Assert.Equal(Readiness.NotReady,await f.Run());Assert.False(f.Client.Last!.HealthVerified);
@@ -44,23 +59,27 @@ public class BootTests {
   using var f=new Fixture();Assert.Equal(Readiness.Ready,await f.Run());Assert.Equal("generation-1",f.Client.Last!.Challenge?.Token);Assert.Equal("allocation-1",f.Client.Last.Challenge?.AllocationId);Assert.Equal(4,f.Client.Last.Challenge?.LeaseRevision);
  }
  sealed class Fixture:IDisposable {
-  readonly string path=Path.Combine(Path.GetTempPath(),Guid.NewGuid().ToString());public Clock Clock=new();public Gate Gate=new();public Client Client=new();public Environment Environment=new();public AppliedConfiguration Configuration;public BootReconciler Reconciler;
-  public Fixture(){Directory.CreateDirectory(path);Configuration=new(path);Reconciler=new BootReconciler(Clock,Gate,Configuration,Client,Environment,true);}
+  readonly string path=Path.Combine(Path.GetTempPath(),Guid.NewGuid().ToString());public Clock Clock=new();public Gate Gate=new();public Client Client=new();public Environment Environment=new();public Importer Importer=new();public AppliedConfiguration Configuration;public BootReconciler Reconciler;
+  public Fixture(){Directory.CreateDirectory(path);Configuration=new(path);Reconciler=new BootReconciler(Clock,Gate,Configuration,Client,Environment,Importer,true);}
   public Task<Readiness> Run()=>Reconciler.ReconcileAsync(default);
   public void Dispose()=>Directory.Delete(path,true);
  }
  sealed class Clock:IBootClock {public string BootId{get;set;}="os-boot";public long Uptime=10;public long UptimeMilliseconds=>Uptime;}
  sealed class Gate:IStreamGate {public bool Blocked;public bool Fail;public int Calls;public Task BlockAsync(CancellationToken ct){Calls++;if(Fail)return Task.FromException(new IOException("Stream gate unavailable"));Blocked=true;return Task.CompletedTask;}}
  sealed class Client:IBootReconciliationClient {
-  public bool Offline,Resume,NoChallenge;public ReconcileRequest? Last;
-  public Task<ReconcileResponse> ReconcileAsync(ReconcileRequest request,CancellationToken ct){Last=request;if(Offline)throw new HttpRequestException();return Task.FromResult(new ReconcileResponse(DateTimeOffset.UtcNow,new(7,5000,6000),Resume?new("rental",1,"os-boot",DateTimeOffset.UtcNow.AddMinutes(1)):null,request.HealthVerified?(Resume?"ResumeLease":"PrepareAvailable"):"Hold",NoChallenge?null:new("generation-1","os-boot","allocation-1",4,DateTimeOffset.UtcNow.AddSeconds(30))));}
+  public bool Offline,Resume,NoChallenge,MismatchAllocation,MismatchRevision;public ReconcileRequest? Last;public ReconcileResponse? LastResponse;
+  public Task<ReconcileResponse> ReconcileAsync(ReconcileRequest request,CancellationToken ct){Last=request;if(Offline)throw new HttpRequestException();var lease=Resume?new ActiveLeaseConfirmation("rental",1,"os-boot",DateTimeOffset.UtcNow.AddMinutes(1)):null;var allocation=Resume?(MismatchAllocation?"another-rental":"rental"):"allocation-1";var revision=Resume?(MismatchRevision?2:1):4;LastResponse=new ReconcileResponse(DateTimeOffset.UtcNow,new(7,5000,6000),lease,request.HealthVerified?(Resume?"ResumeLease":"PrepareAvailable"):"Hold",NoChallenge?null:new("generation-1","os-boot",allocation,revision,DateTimeOffset.UtcNow.AddSeconds(30)));return Task.FromResult(LastResponse);}
  }
  sealed class Environment:IBootEnvironment {
-  public bool Restored=true,Cleaned=true,Healthy=true,RuntimeHealthy=true,LeaseRestored;public Action? OnRestore;
+  public bool Restored=true,Cleaned=true,Healthy=true,RuntimeHealthy=true;
   public Task<bool> VerifyRestorationAsync(ReconciliationChallenge challenge,CancellationToken ct)=>Task.FromResult(Restored);
   public Task<bool> FenceAndClearAsync(ReconciliationChallenge challenge,CancellationToken ct)=>Task.FromResult(Cleaned);
   public Task<bool> VerifyHealthAsync(ReconciliationChallenge challenge,CancellationToken ct)=>Task.FromResult(Healthy);
   public Task<bool> VerifyRuntimeHealthAsync(string bootId,long configurationRevision,CancellationToken ct)=>Task.FromResult(RuntimeHealthy);
-  public Task<bool> RestoreLeaseAsync(ActiveLeaseConfirmation lease,DateTimeOffset controllerTime,long requestStartedUptime,CancellationToken ct){OnRestore?.Invoke();return Task.FromResult(LeaseRestored);}
+ }
+ sealed class Importer:IReconciledLeaseImporter {
+  public bool Result,ClearResult=true;public int Calls,ClearCalls;public string? ClearedBootId;public ActiveLeaseConfirmation? Lease;public DateTimeOffset ControllerTime;public long RequestStartedUptime;public Action? OnImport;
+  public Task<bool> ClearAsync(string bootId,CancellationToken ct){ClearCalls++;ClearedBootId=bootId;return Task.FromResult(ClearResult);}
+  public Task<bool> ImportAsync(ActiveLeaseConfirmation lease,DateTimeOffset controllerTime,long requestStartedUptime,CancellationToken ct){Calls++;Lease=lease;ControllerTime=controllerTime;RequestStartedUptime=requestStartedUptime;OnImport?.Invoke();return Task.FromResult(Result);}
  }
 }

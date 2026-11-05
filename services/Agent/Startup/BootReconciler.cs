@@ -6,6 +6,7 @@ public enum Readiness { NotReady,Ready,Fault }
 public interface IBootReconciliationClient {Task<ReconcileResponse> ReconcileAsync(ReconcileRequest request,CancellationToken ct);}
 public interface IBootBaselineEvidence {bool HasValidatedBaseline {get;}}
 public sealed class UnvalidatedBootBaselineEvidence:IBootBaselineEvidence {public bool HasValidatedBaseline=>false;}
+public interface IReconciledLeaseImporter {Task<bool> ImportAsync(ActiveLeaseConfirmation lease,DateTimeOffset controllerTime,long requestStartedUptime,CancellationToken ct);Task<bool> ClearAsync(string bootId,CancellationToken ct);}
 // Implementations must independently verify restoration for this boot, a real stream fence,
 // empty pairing/client state, and desktop/capture/input/audio health. Never infer these from uptime.
 public interface IBootEnvironment {
@@ -14,9 +15,8 @@ public interface IBootEnvironment {
  Task<bool> VerifyHealthAsync(ReconciliationChallenge challenge,CancellationToken ct);
  // Recheck volatile runtime health each sync cycle without reusing an expired one-time challenge.
  Task<bool> VerifyRuntimeHealthAsync(string bootId,long configurationRevision,CancellationToken ct);
- Task<bool> RestoreLeaseAsync(ActiveLeaseConfirmation lease,DateTimeOffset controllerTime,long requestStartedUptime,CancellationToken ct);
 }
-public sealed class BootReconciler(IBootClock clock,IStreamGate gate,AppliedConfiguration configuration,IBootReconciliationClient client,IBootEnvironment environment,bool baselineValidated) {
+public sealed class BootReconciler(IBootClock clock,IStreamGate gate,AppliedConfiguration configuration,IBootReconciliationClient client,IBootEnvironment environment,IReconciledLeaseImporter leaseImporter,bool baselineValidated) {
   private readonly SemaphoreSlim serial=new(1,1);private string? readyBootId;private long readyConfigurationRevision=-1;
  public bool HasRuntimeEvidence=>readyBootId==clock.BootId&&readyConfigurationRevision==(configuration.Current?.Revision??0);
  public async Task<Readiness> RevalidateRuntimeAsync(CancellationToken ct){await serial.WaitAsync(ct);try{
@@ -43,9 +43,9 @@ public sealed class BootReconciler(IBootClock clock,IStreamGate gate,AppliedConf
    var response=await client.ReconcileAsync(new(boot,configuration.Current!.Revision,true,true,true,true,challenge),ct);
    await configuration.ApplyAsync(response.Configuration,ct);
    if(clock.BootId!=boot||response.Configuration.Revision!=initial.Configuration.Revision)return Readiness.NotReady;
-   if(response.Action=="PrepareAvailable"&&response.Lease is null){readyBootId=boot;readyConfigurationRevision=response.Configuration.Revision;return Readiness.Ready;}
-   if(response.Action!="ResumeLease"||response.Lease is not {} lease||lease.BootId!=boot||lease.ExpiresAtUtc<=response.ServerTimeUtc.AddMilliseconds(clock.UptimeMilliseconds-started))return Readiness.NotReady;
-   var restored=await environment.RestoreLeaseAsync(lease,response.ServerTimeUtc,started,ct);
+   if(response.Action=="PrepareAvailable"&&response.Lease is null){var cleared=await leaseImporter.ClearAsync(boot,ct);if(!cleared||clock.BootId!=boot||response.Configuration.Revision!=initial.Configuration.Revision)return Readiness.NotReady;readyBootId=boot;readyConfigurationRevision=response.Configuration.Revision;return Readiness.Ready;}
+   if(response.Action!="ResumeLease"||response.Lease is not {} lease||lease.BootId!=boot||challenge.AllocationId is null||challenge.LeaseRevision is null||challenge.AllocationId!=lease.RentalId||challenge.LeaseRevision.Value!=lease.LeaseRevision||lease.ExpiresAtUtc<=response.ServerTimeUtc.AddMilliseconds(clock.UptimeMilliseconds-started))return Readiness.NotReady;
+   var restored=await leaseImporter.ImportAsync(lease,response.ServerTimeUtc,started,ct);
    if(!restored||clock.BootId!=boot||lease.ExpiresAtUtc<=response.ServerTimeUtc.AddMilliseconds(clock.UptimeMilliseconds-started))return Readiness.NotReady;
    readyBootId=boot;readyConfigurationRevision=response.Configuration.Revision;return Readiness.Ready;
   }catch(HttpRequestException){return Readiness.NotReady;}

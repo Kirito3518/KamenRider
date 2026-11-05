@@ -44,7 +44,7 @@ VNC/noVNC เป็นความสามารถของระบบฉบ�
 - ถ้า Controller ติดต่อไม่ได้ภายใน 90 วินาที service จะอยู่ต่อและ retry; script แจ้ง pending แล้วเปิดหน้าเว็บ; ticket ถูกลบหลังบันทึก receipt สำเร็จ
 - ถ้า service หยุดหรือ ticket หมดอายุก่อน enrollment คำสั่ง admin ใหม่จะตรวจ service, binary, config และ identity เดิม แล้วเปลี่ยนเฉพาะ ticket ส่วนตัวก่อนเริ่ม/ resume service; ปฏิเสธ installation ที่ไม่ครบหรือค่าไม่ตรงกัน
 - service/ข้อมูลเดิมที่มีอยู่และ package ที่ hash ไม่ตรงถูกปฏิเสธ; service ที่สร้างโดยรอบติดตั้งนี้เท่านั้นที่ถูกลบเมื่อ rollback
-- ยังไม่ได้สั่งติดตั้ง service จริงบนเครื่องพัฒนา; PowerShell 5.1/7 Plan และ ACL suites, Next.js production build, machine route integration 14 scenarios, Agent 112 tests และ Controller 129 tests ผ่าน; Controller build test ใช้ artifacts ชั่วคราวเพื่อไม่ชน Controller dev
+- ยังไม่ได้สั่งติดตั้ง service จริงบนเครื่องพัฒนา; PowerShell 5.1/7 Plan และ ACL suites, Agent package/bootstrap tests, Next.js production build, machine route integration 14 scenarios, Agent 127 tests และ Controller 135 tests ผ่าน; C# test outputs ใช้ artifacts ชั่วคราวเพื่อไม่ชน Controller dev
 - ก่อนทดสอบเครื่องลูก ต้องยืนยัน root certificate อยู่ใน `LocalMachine\Root`, ตั้งค่า env ใน `.env.local`, build package แล้วใส่ SHA-256 และตั้ง `AGENT_INSTALL_ENABLED=true`; ทดสอบการติดตั้ง, enrollment receipt/pending, approve, service recovery และ reboot บนเครื่องลูกจริง
 - Inventory แบบอ่านอย่างเดียวล่าสุด (2026-11-06): ไม่มี Windows service ชื่อ `KamenRaider Controller` หรือ `KamenRaider Agent`; มี service แยกชื่อ `0jay-agent` กำลังทำงานเป็น LocalSystem/Automatic ซึ่งยังไม่ได้ตรวจว่าเข้ากันได้; `SunshineService` ทำงานแบบ Automatic, มีกฎ inbound TCP/UDP ที่ local port เป็น Any, ไม่มี private-certificate candidate และการตรวจไม่ elevated; `StreamFenceQualified=false` และ `ReadyForRental=false`
 
@@ -92,13 +92,13 @@ VNC/noVNC เป็นความสามารถของระบบฉบ�
 - เครื่องนี้ติดตั้ง Sunshine รุ่น fork; ตรวจ schema/API กับ binary รุ่นนี้ก่อนเปิด adapter
 - ทดสอบ Moonlight client ใหม่/เก่าและ stream ที่เปิดค้างเมื่อหมดเวลา
 
-### 7. Reconcile หลังบูตและพร้อมเช่ารอบใหม่ — runtime heartbeat ต่อแล้ว; boot evidence ยังขาด
+### 7. Reconcile หลังบูตและพร้อมเช่ารอบใหม่ — lease import ต่อ production แล้ว; boot evidence ยังขาด
 
 - Agent ปิด stream fence ก่อน sync/reconcile ทุกครั้ง
 - Agent ส่ง signed heartbeat สถานะ notReady ได้ระหว่างรอ reconciliation โดย Controller อัปเดต presence/config ACK แต่ไม่เปลี่ยน boot history, lease, command หรือผลคำสั่ง และไม่ส่ง command/lease confirmation; Agent เก็บผลคำสั่งค้างไว้จน Ready sync
-- สถานะปัจจุบัน: boot environment และหลักฐาน baseline ต่อผ่าน DI แล้ว โดยค่าเริ่มต้นเป็น UnavailableBootEnvironment/Unvalidated; หลัง reconciliation ผ่าน Agent ตรวจ runtime health ซ้ำทุกรอบ sync; เมื่อ health/boot/config ไม่ตรงจะปิด gate และรายงาน notReady; ถ้าปิด gate ล้มเหลวจะทิ้งหลักฐาน readiness และต้อง reconcile ใหม่ แต่ production ยังใช้ ClosedStreamGate; ห้ามอ้างว่า Sunshine ถูกกั้นหรือเครื่องพร้อมเช่า
+- สถานะปัจจุบัน: boot environment และหลักฐาน baseline ต่อผ่าน DI แล้ว โดยค่าเริ่มต้นเป็น UnavailableBootEnvironment/Unvalidated; BootReconciler ใช้ production lease importer ที่ต่อกับ LeaseEnforcer หลังได้รับ proof ครบและ Controller ยืนยัน ResumeLease แล้ว โดยนำ controller time กับเวลาเริ่ม request มาคำนวณ monotonic deadline; เมื่อ Controller ยืนยัน PrepareAvailable หลัง proof จะล้าง snapshot เก่าด้วย atomic tombstone เฉพาะข้าม boot และปฏิเสธการล้าง lease ที่ยังอยู่ใน boot เดียวกัน; หลัง reconciliation ผ่าน Agent ตรวจ runtime health ซ้ำทุกรอบ sync; เมื่อ health/boot/config ไม่ตรงจะปิด gate และรายงาน notReady; ถ้าปิด gate ล้มเหลวจะทิ้งหลักฐาน readiness และต้อง reconcile ใหม่ แต่ production ยังใช้ ClosedStreamGate และไม่มี restoration/stream/desktop evidence provider; ห้ามอ้างว่า Sunshine ถูกกั้นหรือเครื่องพร้อมเช่า
 - ดึง config ล่าสุดและ reconcile lease/boot ก่อนรายงาน ready
-- lease ที่ยัง active และไม่หมดให้กลับเข้า lease เดิมด้วย expiry เดิม; ห้ามเพิ่มเวลา
+- lease ที่ยัง active และไม่หมดมีทาง import เข้า LeaseEnforcer ด้วย expiry เดิมหลัง proof ครบ; lease เก่าจะถูกล้างเมื่อ Controller ยืนยัน PrepareAvailable หลัง proof และ OS boot เปลี่ยนแล้ว; ห้ามเพิ่มเวลา; ยังต้องทดสอบกับ Agent/Controller และ boot จริง
 - lease ที่จบแล้วไม่สั่ง shutdown ซ้ำ; allocation ปล่อยได้หลัง cleanup/health ผ่าน
 - ถ้า Controller ติดต่อไม่ได้ ให้คง gate ปิดและ not-ready
 - ใช้ Restore Rx ตามการตั้งค่าภายนอกของผู้ใช้ ไม่เรียก CLI/API และไม่แก้ baseline จาก Agent

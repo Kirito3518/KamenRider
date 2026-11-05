@@ -6,5 +6,4 @@ public sealed class UnavailableBootEnvironment:IBootEnvironment {
  public Task<bool> FenceAndClearAsync(ReconciliationChallenge challenge,CancellationToken ct)=>Task.FromResult(false);
  public Task<bool> VerifyHealthAsync(ReconciliationChallenge challenge,CancellationToken ct)=>Task.FromResult(false);
  public Task<bool> VerifyRuntimeHealthAsync(string bootId,long configurationRevision,CancellationToken ct)=>Task.FromResult(false);
- public Task<bool> RestoreLeaseAsync(ActiveLeaseConfirmation lease,DateTimeOffset controllerTime,long requestStartedUptime,CancellationToken ct)=>Task.FromResult(false);
 }

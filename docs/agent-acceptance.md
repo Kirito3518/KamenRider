@@ -1,6 +1,6 @@
 # Agent acceptance record
 
-Status: **NOT READY for rentals**. The software lifecycle test uses simulated Agent messages, command results and boot proof. It does not exercise a production Agent, Sunshine, Restore Rx, a stream fence, or a physical machine. The production gate, restoration evidence, Agent reconciliation wiring and health checks remain incomplete; see [agent operations](agent-operations.md) and [Sunshine compatibility](sunshine-compatibility.md).
+Status: **NOT READY for rentals**. The software lifecycle test uses simulated Agent messages, command results and boot proof. It does not exercise a production Agent, Sunshine, Restore Rx, a real stream fence, or a physical machine. Production reconciliation now wires lease import into `LeaseEnforcer`, but restoration evidence, an enforcing gate and desktop health checks remain unavailable; see [agent operations](agent-operations.md) and [Sunshine compatibility](sunshine-compatibility.md).
 
 | Hardware scenario | Result | Evidence required before acceptance |
 | --- | --- | --- |
