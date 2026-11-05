@@ -44,7 +44,7 @@ VNC/noVNC เป็นความสามารถของระบบฉบ�
 - ถ้า Controller ติดต่อไม่ได้ภายใน 90 วินาที service จะอยู่ต่อและ retry; script แจ้ง pending แล้วเปิดหน้าเว็บ; ticket ถูกลบหลังบันทึก receipt สำเร็จ
 - ถ้า service หยุดหรือ ticket หมดอายุก่อน enrollment คำสั่ง admin ใหม่จะตรวจ service, binary, config และ identity เดิม แล้วเปลี่ยนเฉพาะ ticket ส่วนตัวก่อนเริ่ม/ resume service; ปฏิเสธ installation ที่ไม่ครบหรือค่าไม่ตรงกัน
 - service/ข้อมูลเดิมที่มีอยู่และ package ที่ hash ไม่ตรงถูกปฏิเสธ; service ที่สร้างโดยรอบติดตั้งนี้เท่านั้นที่ถูกลบเมื่อ rollback
-- ยังไม่ได้สั่งติดตั้ง service จริงบนเครื่องพัฒนา; PowerShell 5.1/7 Plan และ ACL suites, Next.js production build, machine route integration 14 scenarios, Agent 106 tests และ Controller 126 tests ผ่าน; Controller build test ใช้ artifacts ชั่วคราวเพื่อไม่ชน Controller dev
+- ยังไม่ได้สั่งติดตั้ง service จริงบนเครื่องพัฒนา; PowerShell 5.1/7 Plan และ ACL suites, Next.js production build, machine route integration 14 scenarios, Agent 110 tests และ Controller 126 tests ผ่าน; Controller build test ใช้ artifacts ชั่วคราวเพื่อไม่ชน Controller dev
 - ก่อนทดสอบเครื่องลูก ต้องยืนยัน root certificate อยู่ใน `LocalMachine\Root`, ตั้งค่า env ใน `.env.local`, build package แล้วใส่ SHA-256 และตั้ง `AGENT_INSTALL_ENABLED=true`; ทดสอบการติดตั้ง, enrollment receipt/pending, approve, service recovery และ reboot บนเครื่องลูกจริง
 
 ### 3. Enrollment, identity และการอนุมัติเครื่อง — โค้ดหลักเสร็จ; ยังไม่ผ่านทดสอบติดตั้งจริง
@@ -95,7 +95,7 @@ VNC/noVNC เป็นความสามารถของระบบฉบ�
 
 - Agent ปิด stream fence ก่อน sync/reconcile ทุกครั้ง
 - Agent ส่ง signed heartbeat สถานะ notReady ได้ระหว่างรอ reconciliation โดย Controller อัปเดต presence/config ACK แต่ไม่เปลี่ยน boot history, lease, command หรือผลคำสั่ง และไม่ส่ง command/lease confirmation; Agent เก็บผลคำสั่งค้างไว้จน Ready sync
-- สถานะปัจจุบัน: runtime heartbeat ต่อแล้ว แต่ production ยังใช้ UnavailableBootEnvironment และ ClosedStreamGate; ห้ามอ้างว่า Sunshine ถูกกั้นหรือเครื่องพร้อมเช่า
+- สถานะปัจจุบัน: หลัง reconciliation ผ่าน Agent ตรวจ runtime health ซ้ำทุกรอบ sync; เมื่อ health/boot/config ไม่ตรงจะปิด gate และรายงาน notReady; ถ้าปิด gate ล้มเหลวจะทิ้งหลักฐาน readiness และต้อง reconcile ใหม่ แต่ production ยังใช้ UnavailableBootEnvironment และ ClosedStreamGate; ห้ามอ้างว่า Sunshine ถูกกั้นหรือเครื่องพร้อมเช่า
 - ดึง config ล่าสุดและ reconcile lease/boot ก่อนรายงาน ready
 - lease ที่ยัง active และไม่หมดให้กลับเข้า lease เดิมด้วย expiry เดิม; ห้ามเพิ่มเวลา
 - lease ที่จบแล้วไม่สั่ง shutdown ซ้ำ; allocation ปล่อยได้หลัง cleanup/health ผ่าน

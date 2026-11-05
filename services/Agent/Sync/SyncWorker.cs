@@ -13,7 +13,7 @@ public sealed class SyncWorker(IOptions<AgentOptions> options,ILogger<SyncWorker
  var reconciler=new BootReconciler(clock,gate,configuration,new ReconciliationClient(http,identity,new Uri(settings.ControllerUrl)),new UnavailableBootEnvironment(),false);
  while(!stoppingToken.IsCancellationRequested) {
  try {
- await BootSyncBarrier.RunAsync(async ()=>{if(reconciled&&clock.BootId==bootId)return Readiness.Ready;var readiness=await reconciler.ReconcileAsync(stoppingToken);reconciled=readiness==Readiness.Ready;return readiness;},async readiness=>{var adapter=NetworkInterface.GetAllNetworkInterfaces().Single(x=>x.Id==settings.NetworkAdapterId);var ip=adapter.GetIPProperties().UnicastAddresses.First(x=>x.Address.AddressFamily==AddressFamily.InterNetwork).Address.ToString();
+ await BootSyncBarrier.RunAsync(async ()=>{if(reconciled&&clock.BootId==bootId){var runtime=await reconciler.RevalidateRuntimeAsync(stoppingToken);if(runtime!=Readiness.Ready)reconciled=reconciler.HasRuntimeEvidence;return runtime;}var readiness=await reconciler.ReconcileAsync(stoppingToken);reconciled=readiness==Readiness.Ready;if(reconciled)bootId=clock.BootId;return readiness;},async readiness=>{var adapter=NetworkInterface.GetAllNetworkInterfaces().Single(x=>x.Id==settings.NetworkAdapterId);var ip=adapter.GetIPProperties().UnicastAddresses.First(x=>x.Address.AddressFamily==AddressFamily.InterNetwork).Address.ToString();
  // A heartbeat reports presence, not proof of restoration, desktop health, or stream readiness.
  await cycle.RunAsync(bootId,ip,adapter.GetPhysicalAddress().ToString(),readiness,stoppingToken);failures=0;
  });

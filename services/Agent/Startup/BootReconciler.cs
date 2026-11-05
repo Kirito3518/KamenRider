@@ -10,13 +10,24 @@ public interface IBootEnvironment {
  Task<bool> VerifyRestorationAsync(ReconciliationChallenge challenge,CancellationToken ct);
  Task<bool> FenceAndClearAsync(ReconciliationChallenge challenge,CancellationToken ct);
  Task<bool> VerifyHealthAsync(ReconciliationChallenge challenge,CancellationToken ct);
+ // Recheck volatile runtime health each sync cycle without reusing an expired one-time challenge.
+ Task<bool> VerifyRuntimeHealthAsync(string bootId,long configurationRevision,CancellationToken ct);
  Task<bool> RestoreLeaseAsync(ActiveLeaseConfirmation lease,DateTimeOffset controllerTime,long requestStartedUptime,CancellationToken ct);
 }
 public sealed class BootReconciler(IBootClock clock,IStreamGate gate,AppliedConfiguration configuration,IBootReconciliationClient client,IBootEnvironment environment,bool baselineValidated) {
-  private readonly SemaphoreSlim serial=new(1,1);
+  private readonly SemaphoreSlim serial=new(1,1);private string? readyBootId;private long readyConfigurationRevision=-1;
+ public bool HasRuntimeEvidence=>readyBootId==clock.BootId&&readyConfigurationRevision==(configuration.Current?.Revision??0);
+ public async Task<Readiness> RevalidateRuntimeAsync(CancellationToken ct){await serial.WaitAsync(ct);try{
+  var boot=readyBootId;
+  if(boot is null||!baselineValidated||boot!=clock.BootId||readyConfigurationRevision!=(configuration.Current?.Revision??0))return await InvalidateReadinessAsync(ct);
+  if(!await environment.VerifyRuntimeHealthAsync(boot,readyConfigurationRevision,ct)){await gate.BlockAsync(ct);return Readiness.NotReady;}
+  return Readiness.Ready;
+ }catch(OperationCanceledException) when(ct.IsCancellationRequested){throw;}catch(Exception){try{await gate.BlockAsync(ct);}catch(Exception){readyBootId=null;readyConfigurationRevision=-1;}return Readiness.Fault;}finally{serial.Release();}}
+ private async Task<Readiness> InvalidateReadinessAsync(CancellationToken ct){readyBootId=null;readyConfigurationRevision=-1;await gate.BlockAsync(ct);return Readiness.NotReady;}
  public async Task<Readiness> ReconcileAsync(CancellationToken ct) {
   await serial.WaitAsync(ct);
   try {
+   readyBootId=null;readyConfigurationRevision=-1;
    await gate.BlockAsync(ct);
    var boot=clock.BootId;
    var initialStarted=clock.UptimeMilliseconds;
@@ -30,10 +41,11 @@ public sealed class BootReconciler(IBootClock clock,IStreamGate gate,AppliedConf
    var response=await client.ReconcileAsync(new(boot,configuration.Current!.Revision,true,true,true,true,challenge),ct);
    await configuration.ApplyAsync(response.Configuration,ct);
    if(clock.BootId!=boot||response.Configuration.Revision!=initial.Configuration.Revision)return Readiness.NotReady;
-   if(response.Action=="PrepareAvailable"&&response.Lease is null)return Readiness.Ready;
+   if(response.Action=="PrepareAvailable"&&response.Lease is null){readyBootId=boot;readyConfigurationRevision=response.Configuration.Revision;return Readiness.Ready;}
    if(response.Action!="ResumeLease"||response.Lease is not {} lease||lease.BootId!=boot||lease.ExpiresAtUtc<=response.ServerTimeUtc.AddMilliseconds(clock.UptimeMilliseconds-started))return Readiness.NotReady;
    var restored=await environment.RestoreLeaseAsync(lease,response.ServerTimeUtc,started,ct);
-   return restored&&clock.BootId==boot&&lease.ExpiresAtUtc>response.ServerTimeUtc.AddMilliseconds(clock.UptimeMilliseconds-started)?Readiness.Ready:Readiness.NotReady;
+   if(!restored||clock.BootId!=boot||lease.ExpiresAtUtc<=response.ServerTimeUtc.AddMilliseconds(clock.UptimeMilliseconds-started))return Readiness.NotReady;
+   readyBootId=boot;readyConfigurationRevision=response.Configuration.Revision;return Readiness.Ready;
   }catch(HttpRequestException){return Readiness.NotReady;}
   catch(OperationCanceledException) when(ct.IsCancellationRequested){throw;}
   catch(Exception){return Readiness.Fault;}
