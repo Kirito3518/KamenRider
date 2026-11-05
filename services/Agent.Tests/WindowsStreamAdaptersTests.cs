@@ -197,6 +197,22 @@ public class WindowsStreamAdaptersTests
     }
 
     [Fact]
+    public void WindowsFirewallComApiReadsExistingRulesUsingSupportedComProperties()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+
+        var api = new WindowsFirewallComApi();
+        var rule = api.FindRule("Sunshine");
+
+        if (rule is not null)
+        {
+            Assert.Equal(SunshineImage, rule.ApplicationPath);
+            Assert.Equal(WindowsStreamIngressPolicy.AllProfiles, rule.Profiles);
+            Assert.False(rule.OverrideBlockRules);
+        }
+    }
+
+    [Fact]
     public async Task SunshineServiceControlStartsAndStopsOnlyTheValidatedService()
     {
         var api = new ServiceApi();

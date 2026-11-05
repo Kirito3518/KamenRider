@@ -254,6 +254,8 @@ public sealed class WindowsFirewallComApi : IWindowsFirewallApi
     public void AddRule(FirewallRuleDefinition definition)
     {
         ArgumentNullException.ThrowIfNull(definition);
+        if (definition.OverrideBlockRules)
+            throw new InvalidOperationException("OverrideBlockRules is not valid for the managed inbound block rule.");
         dynamic policy = CreateComObject("HNetCfg.FwPolicy2");
         dynamic rule = CreateComObject("HNetCfg.FWRule");
         object? rulesObject = null;
@@ -274,7 +276,6 @@ public sealed class WindowsFirewallComApi : IWindowsFirewallApi
             rule.Action = definition.Action;
             rule.Profiles = definition.Profiles;
             rule.EdgeTraversal = definition.EdgeTraversal;
-            rule.OverrideBlockRules = definition.OverrideBlockRules;
             rule.Enabled = definition.Enabled;
 
             rulesObject = policy.Rules;
@@ -330,7 +331,7 @@ public sealed class WindowsFirewallComApi : IWindowsFirewallApi
             (string?)rule.InterfaceTypes,
             interfacesUnrestricted,
             (bool)rule.EdgeTraversal,
-            (bool)rule.OverrideBlockRules);
+            false);
     }
 
     private static object CreateComObject(string progId)
