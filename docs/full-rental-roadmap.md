@@ -85,9 +85,11 @@ VNC/noVNC เป็นความสามารถของระบบฉบ�
 - เครื่องนี้ติดตั้ง Sunshine รุ่น fork; ตรวจ schema/API กับ binary รุ่นนี้ก่อนเปิด adapter
 - ทดสอบ Moonlight client ใหม่/เก่าและ stream ที่เปิดค้างเมื่อหมดเวลา
 
-### 7. Reconcile หลังบูตและพร้อมเช่ารอบใหม่ — Controller protocol มี; Agent wiring ยังขาด
+### 7. Reconcile หลังบูตและพร้อมเช่ารอบใหม่ — runtime heartbeat ต่อแล้ว; boot evidence ยังขาด
 
 - Agent ปิด stream fence ก่อน sync/reconcile ทุกครั้ง
+- Agent ส่ง signed heartbeat สถานะ notReady ได้ระหว่างรอ reconciliation และไม่รับคำสั่ง/lease confirmation จนกว่าจะ Ready
+- สถานะปัจจุบัน: runtime heartbeat ต่อแล้ว แต่ production ยังใช้ UnavailableBootEnvironment และ ClosedStreamGate; ห้ามอ้างว่า Sunshine ถูกกั้นหรือเครื่องพร้อมเช่า
 - ดึง config ล่าสุดและ reconcile lease/boot ก่อนรายงาน ready
 - lease ที่ยัง active และไม่หมดให้กลับเข้า lease เดิมด้วย expiry เดิม; ห้ามเพิ่มเวลา
 - lease ที่จบแล้วไม่สั่ง shutdown ซ้ำ; allocation ปล่อยได้หลัง cleanup/health ผ่าน
@@ -126,4 +128,4 @@ VNC/noVNC เป็นความสามารถของระบบฉบ�
 
 ## สถานะสรุปวันนี้
 
-เว็บ/Controller/Agent มีโครงและ business logic หลายส่วนแล้ว; Controller dev เปิด localhost ได้ แต่ Agent ยังไม่ได้ติดตั้งเป็น Windows Service บนเครื่องนี้ การติดตั้งจากหน้าแอดมินยังถูกปิด VNC/noVNC ยังไม่เริ่ม และ production readiness ยังไม่ผ่านเพราะ stream gate, boot wiring, crash-durable expiry และ hardware acceptance ยังขาด
+เว็บ/Controller/Agent มีโครงและ business logic หลายส่วนแล้ว; Controller dev เปิด localhost ได้ Agent runtime ส่ง heartbeat notReady ระหว่างรอหลักฐาน boot ได้แล้ว แต่ยังไม่ได้ติดตั้งเป็น Windows Service บนเครื่องนี้ การติดตั้งจากหน้าแอดมินยังถูกปิด VNC/noVNC ยังไม่เริ่ม และ production readiness ยังไม่ผ่านเพราะ stream fence จริง, restoration evidence, installer และ hardware acceptance ยังขาด

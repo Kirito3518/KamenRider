@@ -7,6 +7,12 @@ public sealed class LeaseCommandDispatcher(LeaseEnforcer enforcer,KamenRaider.Ag
  public CommandResult[] PendingResults=>pending.ToArray();
  public async Task AcceptAsync(SyncResponse response,long requestStartedUptimeMilliseconds,CancellationToken ct){await enforcer.ObserveControllerTimeAsync(response.ServerTimeUtc,requestStartedUptimeMilliseconds,ct);await ProcessAsync(response,ct);}
  public async Task AcceptAsync(SyncResponse response,CancellationToken ct){await enforcer.ObserveControllerTimeAsync(response.ServerTimeUtc,ct);await ProcessAsync(response,ct);}
+ public async Task AcceptBlockedAsync(SyncResponse response,long requestStartedUptimeMilliseconds,CancellationToken ct){
+  // A successful response acknowledges the prior result batch, but its commands and lease proof are not trusted before reconciliation.
+  pending=[];
+  await enforcer.ObserveControllerTimeAsync(response.ServerTimeUtc,requestStartedUptimeMilliseconds,ct);
+  await enforcer.ConfirmAsync(null,ct);
+ }
  private async Task ProcessAsync(SyncResponse response,CancellationToken ct){
   // A successful sync response acknowledges the results sent in that request.
   pending=[];
