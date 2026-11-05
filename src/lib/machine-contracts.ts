@@ -2,6 +2,8 @@ export type Machine = {
   machineId: string;
   approvalStatus: string;
   displayName: string;
+  localIp: string;
+  vncLocalIp: string | null;
   hourlyPriceMinorUnits: number;
   moonlightPort: number;
   sunshinePort: number;

@@ -21,6 +21,7 @@ const call = (path, body, cookie, method) =>
 test("machine API session boundaries, validation, redaction and controller failures", async () => {
   assert.equal((await call("/my-leases")).status, 401);
   assert.equal((await call("/admin/machines/pc/approve", {})).status, 401);
+  assert.equal((await call("/admin/vnc-ticket", { machineId: "pc" })).status, 401);
   assert.equal((await call("/machines")).status, 503);
   const seen = [];
   const server = createServer(async (req, res) => {
@@ -41,6 +42,11 @@ test("machine API session boundaries, validation, redaction and controller failu
       res.end(JSON.stringify({ ticket: "A".repeat(43), expiresAtUtc: new Date(Date.now() + 86_400_000).toISOString() }));
       return;
     }
+    if (req.url === "/internal/admin-vnc-tickets") {
+      assert.equal(req.method, "POST");
+      res.end(JSON.stringify({ ticket: "V".repeat(43), expiresAtUtc: new Date(Date.now() + 60_000).toISOString() }));
+      return;
+    }
     if (req.url === "/internal/machines") {
       res.end(
         JSON.stringify([
@@ -52,6 +58,7 @@ test("machine API session boundaries, validation, redaction and controller failu
             readiness: "ready",
             canRent: true,
             localIp: "192.168.1.4",
+            vncLocalIp: "192.168.1.5",
             macAddress: "001122334455",
             sunshinePort: 47990,
             publicKeyFingerprint: "secret-management-fingerprint",
@@ -90,6 +97,7 @@ test("machine API session boundaries, validation, redaction and controller failu
       (await call("/admin/machines/pc/approve", {}, cookie)).status,
       403,
     );
+    assert.equal((await call("/admin/vnc-ticket", { machineId: "pc" }, cookie)).status, 403);
     const inventory = await call("/machines");
     assert.equal(inventory.status, 200);
     const publicData = await inventory.text();
@@ -97,6 +105,7 @@ test("machine API session boundaries, validation, redaction and controller failu
     assert.deepEqual(states, { pc: "available", held: "busy", "not-ready": "notReady", offline: "unreachable" });
     for (const secret of [
       "192.168.1.4",
+      "192.168.1.5",
       "001122334455",
       "47990",
       "secret-management-fingerprint",
@@ -140,6 +149,7 @@ test("machine API session boundaries, validation, redaction and controller failu
       hourlyPriceMinorUnits: 100,
       moonlightPort: 47989,
       sunshinePort: 47990,
+      vncLocalIp: "192.168.1.4",
       expectedRevision: 999,
     };
     for (const invalid of [
@@ -159,6 +169,22 @@ test("machine API session boundaries, validation, redaction and controller failu
       created.user.id,
     );
     assert.equal(seen.at(-1).headers["x-authenticated-actor-role"], "admin");
+    const adminMachines = await call("/admin/machines", undefined, cookie);
+    assert.equal(adminMachines.status, 200);
+    assert.equal((await adminMachines.json())[0].vncLocalIp, "192.168.1.5");
+    assert.equal((await call("/admin/vnc-ticket", { machineId: " " }, cookie)).status, 400);
+    const vncTicket = await call("/admin/vnc-ticket", { machineId: "pc" }, cookie);
+    assert.equal(vncTicket.status, 200);
+    assert.equal(vncTicket.headers.get("cache-control"), "no-store");
+    const vncResult = await vncTicket.json();
+    assert.equal(vncResult.ticket, "V".repeat(43));
+    assert.equal(vncResult.webSocketUrl, "wss://localhost:7443/admin/vnc");
+    assert.ok(Number.isFinite(Date.parse(vncResult.expiresAtUtc)));
+    const vncRequest = seen.at(-1);
+    assert.equal(vncRequest.url, "/internal/admin-vnc-tickets");
+    assert.equal(vncRequest.headers["x-authenticated-actor-id"], created.user.id);
+    assert.equal(vncRequest.headers["x-authenticated-actor-role"], "admin");
+    assert.deepEqual(vncRequest.body, { machineId: "pc", allowedOrigin: base });
     assert.equal(
       (
         await fetch(`${base}/api/admin/machines/pc/wake`, {

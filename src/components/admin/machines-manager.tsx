@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
+import { AdminVncViewerButton } from "@/components/admin/admin-vnc-viewer";
 import type { Lease, Machine } from "@/lib/machine-contracts";
 async function request(path: string, body?: unknown, method = "POST") {
   const r = await fetch(path, {
@@ -138,6 +139,9 @@ export function MachinesManager() {
           <p className="break-all font-mono text-sm">
             Fingerprint: {m.publicKeyFingerprint || "ยังไม่มีข้อมูลยืนยัน"}
           </p>
+          <p className="break-all font-mono text-sm">
+            IP ที่ Agent รายงาน: {m.localIp}
+          </p>
           <form
             className="grid gap-3 sm:grid-cols-2"
             onSubmit={(e) => {
@@ -150,6 +154,7 @@ export function MachinesManager() {
                   hourlyPriceMinorUnits: Number(d.get("price")),
                   moonlightPort: Number(d.get("moon")),
                   sunshinePort: Number(d.get("sun")),
+                  vncLocalIp: d.get("vncIp"),
                   expectedRevision: m.configRevision,
                 },
                 "PATCH",
@@ -175,6 +180,10 @@ export function MachinesManager() {
             <label>
               Management port
               <Input name="sun" value={m.sunshinePort} type="number" />
+            </label>
+            <label>
+              IP เป้าหมาย VNC (ตรวจสอบกับเครื่องจริงก่อนบันทึก)
+              <Input name="vncIp" value={m.vncLocalIp || m.localIp} />
             </label>
             <button className="rounded border p-2">บันทึก metadata</button>
           </form>
@@ -216,17 +225,20 @@ export function MachinesManager() {
               </button>
             </form>
           ) : (
-            <button
-              className="rounded border p-2"
-              onClick={() =>
-                act(
-                  `/api/admin/machines/${encodeURIComponent(m.machineId)}/wake`,
-                  {},
-                )
-              }
-            >
-              Wake-on-LAN
-            </button>
+            <div className="flex flex-wrap gap-2">
+              <button
+                className="rounded border p-2"
+                onClick={() =>
+                  act(
+                    `/api/admin/machines/${encodeURIComponent(m.machineId)}/wake`,
+                    {},
+                  )
+                }
+              >
+                Wake-on-LAN
+              </button>
+              <AdminVncViewerButton machineId={m.machineId} />
+            </div>
           )}
         </section>
       ))}

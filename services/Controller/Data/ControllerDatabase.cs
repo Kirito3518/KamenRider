@@ -16,8 +16,13 @@ public sealed partial class ControllerDatabase : IDisposable
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
         connection=new SqliteConnection(new SqliteConnectionStringBuilder {DataSource=path, ForeignKeys=true, Pooling=false}.ToString()); connection.Open();
         using var transaction=connection.BeginTransaction();
-        foreach (var name in new[] { "001-machines.sql", "002-leases-commands.sql", "003-pairing.sql", "004-boot-challenges.sql", "005-config-acks.sql", "006-enrollment-tickets.sql" }) {
+        foreach (var name in new[] { "001-machines.sql", "002-leases-commands.sql", "003-pairing.sql", "004-boot-challenges.sql", "005-config-acks.sql", "006-enrollment-tickets.sql", "007-admin-vnc-sessions.sql", "008-vnc-approved-target.sql" }) {
             if(name=="003-pairing.sql"){using var version=connection.CreateCommand();version.Transaction=transaction;version.CommandText="PRAGMA user_version";if((long)version.ExecuteScalar()!>=3)continue;}
+            if(name=="008-vnc-approved-target.sql") {
+                using var columns=connection.CreateCommand();columns.Transaction=transaction;columns.CommandText="PRAGMA table_info(machines)";using var rows=columns.ExecuteReader();
+                var hasVncLocalIp=false;while(rows.Read())if(rows.GetString(1)=="vnc_local_ip")hasVncLocalIp=true;
+                if(hasVncLocalIp)continue;
+            }
             using var resource=typeof(ControllerDatabase).Assembly.GetManifestResourceStream("KamenRaider.Controller.Data.Migrations."+name)!;
             using var reader=new StreamReader(resource);
             using var cmd=connection.CreateCommand(); cmd.Transaction=transaction; cmd.CommandText=reader.ReadToEnd(); cmd.ExecuteNonQuery();
@@ -81,6 +86,66 @@ public sealed partial class ControllerDatabase : IDisposable
         if(ticket is null||!System.Text.RegularExpressions.Regex.IsMatch(ticket,@"\A[A-Za-z0-9_-]{43}\z",System.Text.RegularExpressions.RegexOptions.CultureInvariant))return null;
         return Convert.ToHexString(SHA256.HashData(System.Text.Encoding.ASCII.GetBytes(ticket)));
     }
+    public AdminVncTicketResponse CreateAdminVncTicket(string machineId,string adminUserId,string allowedOrigin) {
+        Identifier(machineId);Identifier(adminUserId);var origin=AdminVncOrigin(allowedOrigin);lock(gate) {
+            var now=clock.GetUtcNow();var nowMs=now.ToUnixTimeMilliseconds();
+            using var transaction=connection.BeginTransaction();
+            using(var cleanup=Command("DELETE FROM admin_vnc_sessions WHERE (expires_at_unix_ms <= $now AND (used_at_unix_ms IS NULL OR ended_at_unix_ms IS NOT NULL)) OR ended_at_unix_ms <= $old",("$now",nowMs),("$old",now.AddDays(-30).ToUnixTimeMilliseconds()))) {cleanup.Transaction=transaction;cleanup.ExecuteNonQuery();}
+            string address;DateTimeOffset lastSeen;
+            using(var machine=Command("SELECT m.vnc_local_ip,h.last_seen,m.approval_status FROM machines m JOIN machine_heartbeats h ON h.machine_id=m.machine_id WHERE m.machine_id=$id",("$id",machineId))) {
+                machine.Transaction=transaction;using var row=machine.ExecuteReader();
+                if(!row.Read()||row.IsDBNull(0)||row.GetString(2)!="approved")throw new UnauthorizedAccessException("Machine must be approved and have an administrator-confirmed VNC target");
+                address=row.GetString(0);lastSeen=DateTimeOffset.Parse(row.GetString(1));
+            }
+            if(lastSeen>now||now-lastSeen>TimeSpan.FromSeconds(20)||!IsPrivateNetworkAddress(address))throw new UnauthorizedAccessException("Machine is not currently reachable on a private network");
+            var token=Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)).TrimEnd('=').Replace('+','-').Replace('/','_');
+            var hash=Convert.ToHexString(SHA256.HashData(System.Text.Encoding.ASCII.GetBytes(token)));var sessionId=Guid.NewGuid().ToString("N");var expires=now.AddMinutes(1);
+            using(var insert=Command("INSERT INTO admin_vnc_sessions(session_id,ticket_hash,machine_id,admin_user_id,allowed_origin,issued_at_unix_ms,expires_at_unix_ms) VALUES($session,$hash,$machine,$admin,$origin,$issued,$expires)",("$session",sessionId),("$hash",hash),("$machine",machineId),("$admin",adminUserId),("$origin",origin),("$issued",nowMs),("$expires",expires.ToUnixTimeMilliseconds()))) {insert.Transaction=transaction;insert.ExecuteNonQuery();}
+            transaction.Commit();return new(token,expires);
+        }
+    }
+    public AdminVncTarget ConsumeAdminVncTicket(string ticket,string origin) {
+        if(ticket is null||!System.Text.RegularExpressions.Regex.IsMatch(ticket,@"\A[A-Za-z0-9_-]{43}\z",System.Text.RegularExpressions.RegexOptions.CultureInvariant))throw new UnauthorizedAccessException("VNC session ticket is invalid");
+        var hash=Convert.ToHexString(SHA256.HashData(System.Text.Encoding.ASCII.GetBytes(ticket)));var requestOrigin=AdminVncOrigin(origin);lock(gate) {
+            var now=clock.GetUtcNow();var nowMs=now.ToUnixTimeMilliseconds();using var transaction=connection.BeginTransaction();
+            string sessionId,machineId,adminUserId,allowedOrigin;
+            using(var ticketRow=Command("SELECT session_id,machine_id,admin_user_id,allowed_origin FROM admin_vnc_sessions WHERE ticket_hash=$hash AND expires_at_unix_ms > $now AND used_at_unix_ms IS NULL",("$hash",hash),("$now",nowMs))) {
+                ticketRow.Transaction=transaction;using var row=ticketRow.ExecuteReader();if(!row.Read())throw new UnauthorizedAccessException("VNC session ticket is expired or already used");
+                sessionId=row.GetString(0);machineId=row.GetString(1);adminUserId=row.GetString(2);allowedOrigin=row.GetString(3);
+            }
+            if(!string.Equals(allowedOrigin,requestOrigin,StringComparison.Ordinal))throw new UnauthorizedAccessException("VNC session origin is invalid");
+            string address;DateTimeOffset lastSeen;
+            using(var machine=Command("SELECT m.vnc_local_ip,h.last_seen,m.approval_status FROM machines m JOIN machine_heartbeats h ON h.machine_id=m.machine_id WHERE m.machine_id=$id",("$id",machineId))) {
+                machine.Transaction=transaction;using var row=machine.ExecuteReader();if(!row.Read()||row.IsDBNull(0)||row.GetString(2)!="approved")throw new UnauthorizedAccessException("Machine must be approved and have an administrator-confirmed VNC target");address=row.GetString(0);lastSeen=DateTimeOffset.Parse(row.GetString(1));
+            }
+            if(lastSeen>now||now-lastSeen>TimeSpan.FromSeconds(20)||!IsPrivateNetworkAddress(address))throw new UnauthorizedAccessException("Machine is not currently reachable on a private network");
+            using(var consume=Command("UPDATE admin_vnc_sessions SET used_at_unix_ms=$now WHERE ticket_hash=$hash AND used_at_unix_ms IS NULL AND expires_at_unix_ms > $now",("$now",nowMs),("$hash",hash))) {consume.Transaction=transaction;if(consume.ExecuteNonQuery()!=1)throw new UnauthorizedAccessException("VNC session ticket is expired or already used");}
+            transaction.Commit();return new(sessionId,machineId,adminUserId,System.Net.IPAddress.Parse(address),5900,allowedOrigin);
+        }
+    }
+    public void FinishAdminVncSession(string sessionId) {if(string.IsNullOrWhiteSpace(sessionId)||sessionId.Length>64)return;lock(gate)using(var command=Command("UPDATE admin_vnc_sessions SET ended_at_unix_ms=$now WHERE session_id=$session AND used_at_unix_ms IS NOT NULL AND ended_at_unix_ms IS NULL",("$now",clock.GetUtcNow().ToUnixTimeMilliseconds()),("$session",sessionId)))command.ExecuteNonQuery();}
+    private static string AdminVncOrigin(string value) {
+        if(!Uri.TryCreate(value,UriKind.Absolute,out var origin)||origin.UserInfo!=""||origin.Query!=""||origin.Fragment!=""||origin.AbsolutePath!="/")throw new ArgumentException("Invalid admin VNC origin");
+        if(origin.Scheme=="http") {
+            var host=origin.Host.Trim('[',']');
+            if(!host.Equals("localhost",StringComparison.OrdinalIgnoreCase)&&(!System.Net.IPAddress.TryParse(host,out var address)||!System.Net.IPAddress.IsLoopback(address)))throw new ArgumentException("HTTP admin VNC origins must use loopback");
+        } else if(origin.Scheme!="https")throw new ArgumentException("Invalid admin VNC origin");
+        return origin.GetLeftPart(UriPartial.Authority).TrimEnd('/');
+    }
+    private static string? VncTargetAddress(string? value) {
+        if(string.IsNullOrEmpty(value))return null;
+        if(value.Length>45||value!=value.Trim()||!System.Net.IPAddress.TryParse(value,out var address)||address.ToString().Contains('%')||!IsPrivateNetworkAddress(address.ToString()))throw new ArgumentException("VNC target must be a private LAN IP address");
+        if(address.IsIPv4MappedToIPv6)address=address.MapToIPv4();
+        return address.ToString();
+    }
+    private static bool IsPrivateNetworkAddress(string value) {
+        if(!System.Net.IPAddress.TryParse(value,out var address))return false;
+        if(address.IsIPv4MappedToIPv6)address=address.MapToIPv4();
+        var bytes=address.GetAddressBytes();
+        if(address.AddressFamily==System.Net.Sockets.AddressFamily.InterNetwork)
+            return bytes[0]==10||bytes[0]==172&&bytes[1] is >=16 and <=31||bytes[0]==192&&bytes[1]==168;
+        return address.AddressFamily==System.Net.Sockets.AddressFamily.InterNetworkV6&&address.IsIPv6UniqueLocal;
+    }
     private static void ValidateNetworkMetadata(string? ip, string? mac) {
         if (string.IsNullOrWhiteSpace(ip) || ip.Length > 45 || !System.Net.IPAddress.TryParse(ip, out var address)
             || address.ToString().Contains('%') || ip != address.ToString())
@@ -93,12 +158,12 @@ public sealed partial class ControllerDatabase : IDisposable
     private static void Ports(int moon,int sun) {if(moon is <1 or >65535 || sun is <1 or >65535)throw new ArgumentException("Invalid port");}
     public MachineDto[] List() {lock(gate) {
         // Read heartbeat, configuration acknowledgment and allocation from the same SQLite snapshot.
-        using var cmd=Command("SELECT m.machine_id,m.approval_status,m.display_name,m.hourly_price,m.local_ip,m.mac_address,m.moonlight_port,m.sunshine_port,m.revision,m.approved_by,m.approved_at,h.last_seen,h.boot_id,h.readiness,EXISTS(SELECT 1 FROM leases l WHERE l.machine_id=m.machine_id AND l.allocation_held=1),a.applied_revision FROM machines m LEFT JOIN machine_heartbeats h ON h.machine_id=m.machine_id LEFT JOIN machine_config_acks a ON a.machine_id=m.machine_id ORDER BY m.machine_id");
+        using var cmd=Command("SELECT m.machine_id,m.approval_status,m.display_name,m.hourly_price,m.local_ip,m.mac_address,m.moonlight_port,m.sunshine_port,m.revision,m.approved_by,m.approved_at,h.last_seen,h.boot_id,h.readiness,EXISTS(SELECT 1 FROM leases l WHERE l.machine_id=m.machine_id AND l.allocation_held=1),a.applied_revision,m.vnc_local_ip FROM machines m LEFT JOIN machine_heartbeats h ON h.machine_id=m.machine_id LEFT JOIN machine_config_acks a ON a.machine_id=m.machine_id ORDER BY m.machine_id");
         using var r=cmd.ExecuteReader(); var rows=new List<MachineDto>(); var now=clock.GetUtcNow();
         while(r.Read()) {
             DateTimeOffset? seen=r.IsDBNull(11)?null:DateTimeOffset.Parse(r.GetString(11));
             var readiness=seen is null?"unknown":now-seen.Value>TimeSpan.FromSeconds(20)?"unreachable":r.GetString(13);
-            rows.Add(new MachineDto(r.GetString(0),r.GetString(1),r.GetString(2),r.GetInt64(3),r.GetString(4),r.GetString(5),r.GetInt32(6),r.GetInt32(7),r.GetInt64(8),seen,r.IsDBNull(12)?null:r.GetString(12),readiness,null,r.IsDBNull(9)?null:r.GetString(9),r.IsDBNull(10)?null:DateTimeOffset.Parse(r.GetString(10))) {AppliedConfigRevision=r.IsDBNull(15)?null:r.GetInt64(15),CanRent=r.GetString(1)=="approved" && readiness=="ready" && r.GetInt64(14)==0 && !r.IsDBNull(15) && r.GetInt64(15)==r.GetInt64(8)});
+            rows.Add(new MachineDto(r.GetString(0),r.GetString(1),r.GetString(2),r.GetInt64(3),r.GetString(4),r.GetString(5),r.GetInt32(6),r.GetInt32(7),r.GetInt64(8),seen,r.IsDBNull(12)?null:r.GetString(12),readiness,null,r.IsDBNull(9)?null:r.GetString(9),r.IsDBNull(10)?null:DateTimeOffset.Parse(r.GetString(10))) {AppliedConfigRevision=r.IsDBNull(15)?null:r.GetInt64(15),VncLocalIp=r.IsDBNull(16)?null:r.GetString(16),CanRent=r.GetString(1)=="approved" && readiness=="ready" && r.GetInt64(14)==0 && !r.IsDBNull(15) && r.GetInt64(15)==r.GetInt64(8)});
         }
         r.Close();
         for(var i=0;i<rows.Count;i++){var row=rows[i];rows[i]=row with {PublicKeyFingerprint=Convert.ToHexString(SHA256.HashData(Convert.FromBase64String(PublicKey(row.MachineId)!)))};}
@@ -106,7 +171,8 @@ public sealed partial class ControllerDatabase : IDisposable
     }}
     public MachineDto Update(string id, MachineUpdate update,long expectedRevision) {lock(gate) {
         Ports(update.MoonlightPort,update.SunshinePort); if(string.IsNullOrWhiteSpace(update.DisplayName)||update.HourlyPriceMinorUnits<=0)throw new ArgumentException("Name and positive price required");
-        using var cmd=Command("UPDATE machines SET display_name=$name,hourly_price=$price,moonlight_port=$moon,sunshine_port=$sun,revision=revision+1 WHERE machine_id=$id AND revision=$revision",("$name",update.DisplayName.Trim()),("$price",update.HourlyPriceMinorUnits),("$moon",update.MoonlightPort),("$sun",update.SunshinePort),("$id",id),("$revision",expectedRevision));
+        var vncLocalIp=VncTargetAddress(update.VncLocalIp);
+        using var cmd=Command("UPDATE machines SET display_name=$name,hourly_price=$price,moonlight_port=$moon,sunshine_port=$sun,vnc_local_ip=$vnc,revision=revision+1 WHERE machine_id=$id AND revision=$revision",("$name",update.DisplayName.Trim()),("$price",update.HourlyPriceMinorUnits),("$moon",update.MoonlightPort),("$sun",update.SunshinePort),("$vnc",vncLocalIp),("$id",id),("$revision",expectedRevision));
         if(cmd.ExecuteNonQuery()!=1)throw new InvalidOperationException("Revision conflict or missing machine"); return List().Single(x=>x.MachineId==id);
     }}
     public MachineDto Approve(string id,string actor) {lock(gate) {

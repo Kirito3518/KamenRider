@@ -16,4 +16,8 @@
     <ImplicitUsings>enable</ImplicitUsings>
   </PropertyGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="Controller.Tests" />
+  </ItemGroup>
+
   <ItemGroup><EmbeddedResource Include="Data\Migrations\*.sql" LogicalName="KamenRaider.Controller.Data.Migrations.%(Filename)%(Extension)" /></ItemGroup></Project>

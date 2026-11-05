@@ -4,6 +4,7 @@ using KamenRaider.Controller.Leases;
 using KamenRaider.Controller.Data;
 using KamenRaider.Controller.Machines;
 using KamenRaider.Controller.Security;
+using KamenRaider.Controller.RemoteDesktop;
 using System.Net;
 using System.Security.Cryptography;
 using System.Text;
@@ -59,6 +60,7 @@ public static class ControllerHost
             builder.Services.AddHostedService(sp=>sp.GetRequiredService<KamenRaider.Controller.Network.PublicIpJob>());
         }
         var app = builder.Build();
+        app.UseWebSockets();
         app.Use(async (context, next) => {
             var options = context.RequestServices.GetRequiredService<IOptions<ControllerOptions>>().Value;
             var internalPort = new Uri(options.InternalUrl).Port;
@@ -80,6 +82,7 @@ public static class ControllerHost
         app.MapSync();
         app.MapLeases();
         app.MapPairing();
+        app.MapAdminVnc();
         return app;
     }
 }

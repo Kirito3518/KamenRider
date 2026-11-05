@@ -44,7 +44,7 @@ VNC/noVNC เป็นความสามารถของระบบฉบ�
 - ถ้า Controller ติดต่อไม่ได้ภายใน 90 วินาที service จะอยู่ต่อและ retry; script แจ้ง pending แล้วเปิดหน้าเว็บ; ticket ถูกลบหลังบันทึก receipt สำเร็จ
 - ถ้า service หยุดหรือ ticket หมดอายุก่อน enrollment คำสั่ง admin ใหม่จะตรวจ service, binary, config และ identity เดิม แล้วเปลี่ยนเฉพาะ ticket ส่วนตัวก่อนเริ่ม/ resume service; ปฏิเสธ installation ที่ไม่ครบหรือค่าไม่ตรงกัน
 - service/ข้อมูลเดิมที่มีอยู่และ package ที่ hash ไม่ตรงถูกปฏิเสธ; service ที่สร้างโดยรอบติดตั้งนี้เท่านั้นที่ถูกลบเมื่อ rollback
-- ยังไม่ได้สั่งติดตั้ง service จริงบนเครื่องพัฒนา; PowerShell 5.1/7 Plan และ ACL suites, Next.js production build, machine route integration 14 scenarios, Agent 100 tests และ Controller 102 tests ผ่าน; Controller build test ใช้ artifacts ชั่วคราวเพื่อไม่ชน Controller dev
+- ยังไม่ได้สั่งติดตั้ง service จริงบนเครื่องพัฒนา; PowerShell 5.1/7 Plan และ ACL suites, Next.js production build, machine route integration 14 scenarios, Agent 100 tests และ Controller 126 tests ผ่าน; Controller build test ใช้ artifacts ชั่วคราวเพื่อไม่ชน Controller dev
 - ก่อนทดสอบเครื่องลูก ต้องยืนยัน root certificate อยู่ใน `LocalMachine\Root`, ตั้งค่า env ใน `.env.local`, build package แล้วใส่ SHA-256 และตั้ง `AGENT_INSTALL_ENABLED=true`; ทดสอบการติดตั้ง, enrollment receipt/pending, approve, service recovery และ reboot บนเครื่องลูกจริง
 
 ### 3. Enrollment, identity และการอนุมัติเครื่อง — โค้ดหลักเสร็จ; ยังไม่ผ่านทดสอบติดตั้งจริง
@@ -104,14 +104,17 @@ VNC/noVNC เป็นความสามารถของระบบฉบ�
 - กำหนดวิธีตรวจผล restore ร่วมกับผู้ดูแล โดยไม่แอบอ้างว่า boot ID อย่างเดียวพิสูจน์การล้างข้อมูล
 - ทดสอบ cold boot, Agent restart ใน boot เดิม, network outage, lease หมดระหว่าง offline และ config revision เก่า
 
-### 8. VNC/noVNC สำหรับแอดมิน — ยังไม่เริ่ม
+### 8. VNC/noVNC สำหรับแอดมิน — gateway/viewer เสร็จบางส่วน; ยังไม่พร้อมใช้กับเครื่องจริง
 
-- ติดตั้ง VNC server ในเครื่องลูกและ noVNC gateway ในเครื่องแม่ หรือเลือก implementation ที่ผ่านการตรวจความปลอดภัย
-- เปิด viewer เฉพาะ admin ที่ login; ตรวจสิทธิ์เครื่องทุกครั้งก่อนออก short-lived session token
-- เริ่มด้วยดูอย่างเดียว; ถ้าจะเปิด keyboard/mouse control ให้เป็นสิทธิ์แยกและมี audit
-- VNC endpoint ต้องไม่รับ host/port จาก browser; gateway เลือกปลายทางจากเครื่องที่ Controller รู้จัก
-- จำกัด VNC ให้เข้าผ่าน gateway/LAN ตามนโยบาย; ห้ามเปิด VNC ตรงสู่อินเทอร์เน็ต
-- บันทึก admin, machine, เวลาเริ่ม/จบ และโหมดดู/ควบคุม; แสดงสถานะว่ามี admin ดูอยู่
+- มี noVNC core แบบ vendored, ปุ่ม viewer ในหน้าเครื่องแอดมิน และ API ที่ตรวจ session/admin และ same-origin
+- แอดมินเห็น IP ที่ Agent รายงานและต้องบันทึก IP เป้าหมาย VNC ที่ตรวจสอบกับเครื่องจริง; Controller ใช้ IP ที่แอดมินบันทึกไว้ ไม่ใช้ค่าที่ Agent เปลี่ยนใน heartbeat และปฏิเสธ IP ที่ไม่ใช่ private LAN
+- Controller ออก ticket ใช้ครั้งเดียว อายุ 1 นาที ผูกกับ origin; WSS ใช้ IP ที่แอดมินยืนยันกับ port 5900 ที่กำหนดฝั่ง server ไม่รับ host/port จาก browser
+- Controller จำกัด session ไว้ 1 ชั่วโมงและรับเฉพาะ RFB 3.7/3.8 ที่ใช้ VNC authentication; gateway ส่ง RFB handshake, Raw framebuffer, desktop-size และ control message ที่รู้ความยาวแน่นอน, ปฏิเสธ keyboard, mouse, clipboard จาก browser, XVP หรือข้อความที่ไม่รู้จัก, ตัด standard ServerCutText และปิด session เมื่อเจอ extended clipboard ที่ไม่ได้ต่อรอง
+- noVNC เปิด view-only และตัด clipboard negotiation; viewer ไม่ส่ง clipboard ไปยังเครื่องหรือใส่ clipboard ของเครื่องแอดมิน; VNC server ต้องเริ่มด้วย true-color 32 bpp และรองรับ Raw encoding
+- ฐานข้อมูลเก็บ admin, machine, เวลาเริ่ม/จบ; noVNC ตั้ง view-only เพิ่มอีกชั้นหนึ่ง
+- ยังไม่มี VNC server ที่ติดตั้งและตั้งค่าบนเครื่องลูก; ต้องกำหนดวิธีแจกจ่าย/credential/firewall ให้ยอมรับ VNC authentication และเข้าถึงได้เฉพาะ gateway ใน LAN ก่อนใช้งาน
+- ห้ามเปิด VNC port ตรงสู่อินเทอร์เน็ต; ห้ามเปิด keyboard/mouse control จนกว่าจะเพิ่มสิทธิ์แยกและ audit
+- ยังไม่แสดงสถานะ admin ที่กำลังดูเครื่อง และยังไม่ผ่าน desktop จริง, Windows lock/UAC, การสลับ session, ระหว่าง Moonlight stream และกรณี Agent offline
 - ทดสอบ desktop จริง, Windows lock/UAC, การสลับ session, ระหว่าง Moonlight stream และเมื่อ Agent offline
 
 ### 9. หน้าผู้เช่าและการเชื่อมต่อภายนอก — มีเส้นทางพื้นฐาน; ยังเป็นระบบทดลอง
@@ -134,4 +137,4 @@ VNC/noVNC เป็นความสามารถของระบบฉบ�
 
 ## สถานะสรุปวันนี้
 
-เว็บ/Controller/Agent มีโครงและ business logic หลายส่วนแล้ว; Controller dev เปิด localhost ได้ Agent runtime ส่ง heartbeat notReady ระหว่างรอหลักฐาน boot ได้ และ flow ติดตั้งจากหน้าแอดมินผ่าน code/integration checks แล้ว แต่ยังไม่ได้ติดตั้งเป็น Windows Service บนเครื่องนี้ VNC/noVNC ยังไม่เริ่ม และ production readiness ยังไม่ผ่านเพราะ installation จริง, stream fence, restoration evidence, reboot reconciliation และ hardware acceptance ยังขาด
+เว็บ/Controller/Agent มีโครงและ business logic หลายส่วนแล้ว; Controller dev เปิด localhost ได้ Agent runtime ส่ง heartbeat notReady ระหว่างรอหลักฐาน boot ได้ และ flow ติดตั้งจากหน้าแอดมินผ่าน code/integration checks แล้ว ส่วน noVNC viewer และ read-only WSS gateway มีโค้ดกับ ticket/API/protocol tests แล้ว แต่ยังไม่มี VNC server บนเครื่องลูกและยังไม่ผ่าน hardware acceptance ยังไม่ได้ติดตั้ง Agent Windows Service บนเครื่องพัฒนา และ production readiness ยังไม่ผ่านเพราะ installation จริง, stream fence, restoration evidence, reboot reconciliation และ hardware acceptance ยังขาด
