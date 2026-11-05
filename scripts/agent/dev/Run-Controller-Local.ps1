@@ -18,7 +18,7 @@ foreach ($name in @('CONTROLLER_INTERNAL_URL','CONTROLLER_SERVICE_CREDENTIAL','C
 if ($values.CONTROLLER_INTERNAL_URL -ne 'http://127.0.0.1:5081' -or $values.CONTROLLER_AGENT_URL -ne 'https://localhost:7443') {
     throw 'This launcher is restricted to the configured localhost test endpoints.'
 }
-if (-not [IO.Path]::IsPathFullyQualified($values.CONTROLLER_DATABASE_PATH)) { throw 'CONTROLLER_DATABASE_PATH must be absolute.' }
+if ($values.CONTROLLER_DATABASE_PATH -notmatch '^[A-Za-z]:\\') { throw 'CONTROLLER_DATABASE_PATH must be an absolute drive path.' }
 
 $env:InternalUrl = $values.CONTROLLER_INTERNAL_URL
 $env:AgentUrl = $values.CONTROLLER_AGENT_URL
