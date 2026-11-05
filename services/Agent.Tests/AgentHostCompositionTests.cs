@@ -16,6 +16,7 @@ public class AgentHostCompositionTests
         Assert.IsType<UnavailableBootEnvironment>(host.Services.GetRequiredService<IBootEnvironment>());
         Assert.False(host.Services.GetRequiredService<IBootBaselineEvidence>().HasValidatedBaseline);
         await Assert.ThrowsAsync<InvalidOperationException>(() => host.Services.GetRequiredService<KamenRaider.Agent.Leases.IStreamGate>().BlockAsync(default));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => host.Services.GetRequiredService<KamenRaider.Agent.Leases.IStreamGate>().AllowAsync(default));
         Assert.Null(host.Services.GetService<KamenRaider.Agent.Sunshine.SunshineClient>());
         Assert.Null(host.Services.GetService<KamenRaider.Agent.Sunshine.PairingSession>());
         Assert.IsType<LeaseEnforcerReconciledLeaseImporter>(host.Services.GetRequiredService<IReconciledLeaseImporter>());

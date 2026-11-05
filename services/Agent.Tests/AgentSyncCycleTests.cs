@@ -96,7 +96,7 @@ public class AgentSyncCycleTests {
         public override DateTimeOffset GetUtcNow()=>Now;
         public void Advance(int seconds){Now=Now.AddSeconds(seconds);UptimeMilliseconds+=seconds*1000;}
     }
-    private sealed class Gate:IStreamGate {public Task BlockAsync(CancellationToken ct)=>Task.CompletedTask;}
+    private sealed class Gate:IStreamGate {public Task BlockAsync(CancellationToken ct)=>Task.CompletedTask;public Task AllowAsync(CancellationToken ct)=>Task.CompletedTask;}
     private sealed class Power:IShutdown {public Task RequestImmediateShutdownAsync(CancellationToken ct)=>Task.CompletedTask;}
     private sealed class PairingFence:IPairingFence {public Task<bool> BlockAndVerifyAsync(CancellationToken ct)=>Task.FromResult(true);}
     private sealed class DelayedPairingApi(Clock clock):ISunshinePairingApi {

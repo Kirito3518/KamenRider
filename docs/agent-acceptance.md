@@ -17,7 +17,8 @@ No designated and available test client was supplied. Record machine, installed 
 
 ## Software checks (2026-11-06)
 
-- The isolated .NET solution test run passed 269 tests: Agent 134/134 and Controller 135/135.
+- The isolated .NET solution test run passed 271 tests: Agent 136/136 and Controller 135/135.
+- Agent lease confirmation now opens the stream gate only after an exact active-lease confirmation; failed gate opens stay closed, record a fault and can retry. This is contract-level behavior only; no production gate is registered or hardware-qualified.
 - Eight installer/package/readiness test scripts passed under both Windows PowerShell 5.1 and PowerShell 7. The package-build checks wrote only to temporary artifacts; no services changed.
 - Targeted ESLint and `pnpm exec tsc --noEmit` passed after the renter pairing UI update.
 

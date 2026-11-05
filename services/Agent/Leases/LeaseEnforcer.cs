@@ -3,7 +3,7 @@ using KamenRaider.Contracts;
 using KamenRaider.Agent.Power;
 namespace KamenRaider.Agent.Leases;
 public interface IBootClock {string BootId {get;} long UptimeMilliseconds {get;}}
-public interface IStreamGate {Task BlockAsync(CancellationToken ct);}
+public interface IStreamGate {Task BlockAsync(CancellationToken ct);Task AllowAsync(CancellationToken ct);}
 public sealed class LeaseEnforcer(LeaseStore store,TimeProvider time,IBootClock boot,IStreamGate gate,IShutdown shutdown) {
  private readonly SemaphoreSlim commands=new(1,1);
  private readonly object state=new();
@@ -96,13 +96,23 @@ private DateTimeOffset EffectiveNow(){var now=time.GetUtcNow();if(serverTime is 
  }finally{lock(state){if(ReferenceEquals(pendingInitial,initialCandidate)&&(!initialMayBeDurable||ReferenceEquals(current,initialCandidate)))pendingInitial=null;}commands.Release();}}
  private bool CanCommit(LeaseSnapshot? previous,LeaseSnapshot next,CommandEnvelope command)=>fault is null&&ReferenceEquals(previous,current)&&boot.BootId==next.BootId&&boot.UptimeMilliseconds<next.DeadlineUptimeMilliseconds&&(previous is null||boot.UptimeMilliseconds<EnforcementDeadline(previous))&&command.ValidUntilUtc>EffectiveNow();
  public async Task ConfirmAsync(ActiveLeaseConfirmation? confirmation,CancellationToken ct){await commands.WaitAsync(ct);try{await InitializeCoreAsync(ct);LeaseSnapshot? candidate;
-  lock(state){confirmed=false;candidate=Matches(confirmation)?current:null;}
+  lock(state){confirmed=false;candidate=CanTryOpenGate(confirmation)?current:null;}
   if(candidate?.RecoveryDeadlineUptimeMilliseconds is not null){var finalized=candidate with{RecoveryDeadlineUptimeMilliseconds=null};try{
     await store.SaveIfAsync(finalized,publish=>{lock(state){if(!ReferenceEquals(current,candidate)||!Matches(confirmation))return false;publish();current=finalized;recoveryDeadline=null;return true;}},ct);
    }catch(Exception ex) when(ex is IOException or UnauthorizedAccessException){lock(state){fault="LeaseStorageFailed";}return;}}
-  lock(state){confirmed=Matches(confirmation);}if(!confirmed)await gate.BlockAsync(ct);
+  lock(state){confirmed=false;candidate=CanTryOpenGate(confirmation)?current:null;}
+  if(candidate is null){await gate.BlockAsync(ct);return;}
+  try{await gate.AllowAsync(ct);}catch(Exception openError){
+   lock(state){confirmed=false;if(fault is null or "StreamGateFailed")fault="StreamGateFailed";}
+   try{await gate.BlockAsync(CancellationToken.None);}catch(Exception blockError){throw new AggregateException("The stream gate failed to open and could not be confirmed closed.",openError,blockError);}
+   throw;
+  }
+  lock(state){if(ReferenceEquals(current,candidate)&&CanTryOpenGate(confirmation)){if(fault=="StreamGateFailed")fault=null;confirmed=Matches(confirmation);}else confirmed=false;}
+  if(!CanStream)await gate.BlockAsync(ct);
  }finally{commands.Release();}}
- private bool Matches(ActiveLeaseConfirmation? confirmation)=>fault is null&&(!requiresControllerTime||controllerTimeObserved)&&current is {} s&&s.BootId==boot.BootId&&boot.UptimeMilliseconds<EnforcementDeadline(s)&&confirmation is {} c&&c.RentalId==s.RentalId&&c.BootId==s.BootId&&c.LeaseRevision==s.Revision&&c.ExpiresAtUtc==s.ExpiresAtUtc;
+ private bool CanTryOpenGate(ActiveLeaseConfirmation? confirmation)=>(fault is null or "StreamGateFailed")&&LeaseMatches(confirmation);
+ private bool Matches(ActiveLeaseConfirmation? confirmation)=>fault is null&&LeaseMatches(confirmation);
+ private bool LeaseMatches(ActiveLeaseConfirmation? confirmation)=>(!requiresControllerTime||controllerTimeObserved)&&current is {} s&&s.BootId==boot.BootId&&boot.UptimeMilliseconds<EnforcementDeadline(s)&&confirmation is {} c&&c.RentalId==s.RentalId&&c.BootId==s.BootId&&c.LeaseRevision==s.Revision&&c.ExpiresAtUtc==s.ExpiresAtUtc;
  public async Task EnforceAsync(CancellationToken ct){
   // No command semaphore, disk operation, or gate operation may delay known expiry.
   if(Current is null&&!initialized){if(!commands.Wait(0))return;try{await InitializeCoreAsync(ct,false);}finally{commands.Release();}}
