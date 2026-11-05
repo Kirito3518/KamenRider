@@ -30,6 +30,7 @@ public static class AgentHost
         builder.Services.AddSingleton<KamenRaider.Agent.Power.IShutdown>(sp=>new KamenRaider.Agent.Power.BoundedShutdown(sp.GetRequiredService<KamenRaider.Agent.Power.WindowsShutdown>(),TimeSpan.FromSeconds(15)));
         builder.Services.AddSingleton(sp=>new KamenRaider.Agent.Leases.LeaseStore(sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<AgentOptions>>().Value.DataDirectory));
         builder.Services.AddSingleton<KamenRaider.Agent.Leases.LeaseEnforcer>();
+        builder.Services.TryAddSingleton<KamenRaider.Agent.Preparation.IMachinePreparation,KamenRaider.Agent.Preparation.UnavailableMachinePreparation>();
         builder.Services.TryAddSingleton<KamenRaider.Agent.Startup.IReconciledLeaseImporter,KamenRaider.Agent.Startup.LeaseEnforcerReconciledLeaseImporter>();
         builder.Services.AddSingleton<KamenRaider.Agent.Sync.LeaseCommandDispatcher>();
         builder.Services.AddHostedService<KamenRaider.Agent.Leases.LeaseEnforcementWorker>();

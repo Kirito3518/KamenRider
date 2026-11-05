@@ -1,4 +1,5 @@
 using KamenRaider.Agent.Startup;
+using KamenRaider.Agent.Preparation;
 using KamenRaider.Contracts;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -20,6 +21,7 @@ public class AgentHostCompositionTests
         Assert.Null(host.Services.GetService<KamenRaider.Agent.Sunshine.SunshineClient>());
         Assert.Null(host.Services.GetService<KamenRaider.Agent.Sunshine.PairingSession>());
         Assert.IsType<LeaseEnforcerReconciledLeaseImporter>(host.Services.GetRequiredService<IReconciledLeaseImporter>());
+        Assert.IsType<UnavailableMachinePreparation>(host.Services.GetRequiredService<IMachinePreparation>());
         Assert.Single(host.Services.GetServices<IHostedService>().OfType<KamenRaider.Agent.Sync.SyncWorker>());
     }
 

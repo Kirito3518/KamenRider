@@ -5,6 +5,7 @@ using KamenRaider.Agent.Configuration;
 using KamenRaider.Agent.Identity;
 using KamenRaider.Agent.Leases;
 using KamenRaider.Agent.Power;
+using KamenRaider.Agent.Preparation;
 using KamenRaider.Agent.Startup;
 using KamenRaider.Agent.Sunshine;
 using KamenRaider.Agent.Sync;
@@ -13,6 +14,43 @@ using KamenRaider.Contracts;
 namespace Agent.Tests;
 
 public class AgentSyncCycleTests {
+    [Fact] public async Task PrepareMachineWithoutProviderFailsInsteadOfBeingIgnored() {
+        using var f=new Fixture();var dispatcher=new LeaseCommandDispatcher(f.Enforcer);
+        var command=new CommandEnvelope("prepare","PrepareMachine","rental",1,"boot",f.Clock.Now.AddMinutes(3),JsonSerializer.SerializeToElement(new{}));
+
+        await dispatcher.AcceptAsync(new(f.Clock.Now,new(1,5000,6000),[command]),f.Clock.UptimeMilliseconds,default);
+
+        Assert.Equal(new CommandResult("prepare","failed",1,"PreparationUnavailable"),Assert.Single(dispatcher.PendingResults));
+    }
+
+    [Fact] public async Task PrepareMachineUsesProviderOnlyForCurrentUnleasedBoot() {
+        using var f=new Fixture();var preparation=new TestMachinePreparation(true);var dispatcher=new LeaseCommandDispatcher(f.Enforcer,machinePreparation:preparation);
+        var command=new CommandEnvelope("prepare","PrepareMachine","rental",1,"boot",f.Clock.Now.AddMinutes(3),JsonSerializer.SerializeToElement(new{}));
+
+        await dispatcher.AcceptAsync(new(f.Clock.Now,new(1,5000,6000),[command]),f.Clock.UptimeMilliseconds,default);
+
+        Assert.Equal(1,preparation.Calls);Assert.Equal(new CommandResult("prepare","applied",1),Assert.Single(dispatcher.PendingResults));
+    }
+
+    [Fact] public async Task PrepareMachineRejectsWrongBootWithoutCallingProvider() {
+        using var f=new Fixture();var preparation=new TestMachinePreparation(true);var dispatcher=new LeaseCommandDispatcher(f.Enforcer,machinePreparation:preparation);
+        var command=new CommandEnvelope("prepare","PrepareMachine","rental",1,"stale-boot",f.Clock.Now.AddMinutes(3),JsonSerializer.SerializeToElement(new{}));
+
+        await dispatcher.AcceptAsync(new(f.Clock.Now,new(1,5000,6000),[command]),f.Clock.UptimeMilliseconds,default);
+
+        Assert.Equal(0,preparation.Calls);Assert.Equal(new CommandResult("prepare","failed",1,"PreparationUnavailable"),Assert.Single(dispatcher.PendingResults));
+    }
+
+    [Fact] public async Task PrepareMachineRejectsWhenLeaseSnapshotAlreadyExists() {
+        using var f=new Fixture();await f.Enforcer.ApplyAsync(f.Command(),default);await f.Enforcer.ConfirmAsync(new("rental",1,"boot",f.Clock.Now.AddSeconds(60)),default);
+        var preparation=new TestMachinePreparation(true);var dispatcher=new LeaseCommandDispatcher(f.Enforcer,machinePreparation:preparation);
+        var command=new CommandEnvelope("prepare-again","PrepareMachine","another-rental",1,"boot",f.Clock.Now.AddMinutes(3),JsonSerializer.SerializeToElement(new{}));
+
+        await dispatcher.AcceptAsync(new(f.Clock.Now,new(1,5000,6000),[command]),f.Clock.UptimeMilliseconds,default);
+
+        Assert.Equal(0,preparation.Calls);Assert.Equal(new CommandResult("prepare-again","failed",1,"PreparationUnavailable"),Assert.Single(dispatcher.PendingResults));
+    }
+
     [Fact] public async Task ReadyResponseObservesTimeBeforeFailedConfigurationWriteWithoutProcessingCommandsOrAcknowledgments() {
         using var f=new Fixture();var dispatcher=new LeaseCommandDispatcher(f.Enforcer);
         await dispatcher.AcceptAsync(new(f.Clock.Now,new(1,5000,6000),[f.Command()]),f.Clock.UptimeMilliseconds,default);
@@ -98,6 +136,7 @@ public class AgentSyncCycleTests {
     }
     private sealed class Gate:IStreamGate {public Task BlockAsync(CancellationToken ct)=>Task.CompletedTask;public Task AllowAsync(CancellationToken ct)=>Task.CompletedTask;}
     private sealed class Power:IShutdown {public Task RequestImmediateShutdownAsync(CancellationToken ct)=>Task.CompletedTask;}
+    private sealed class TestMachinePreparation(bool result):IMachinePreparation {public int Calls;public Task<bool> PrepareAsync(CommandEnvelope command,CancellationToken cancellationToken){Calls++;return Task.FromResult(result);}}
     private sealed class PairingFence:IPairingFence {public Task<bool> BlockAndVerifyAsync(CancellationToken ct)=>Task.FromResult(true);}
     private sealed class DelayedPairingApi(Clock clock):ISunshinePairingApi {
         public Task<string[]> PendingIdsAsync(CancellationToken ct){clock.Advance(20);return Task.FromResult(new[]{"pending-client"});}
