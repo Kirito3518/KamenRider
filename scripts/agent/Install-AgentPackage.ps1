@@ -7,11 +7,47 @@ param(
     [ValidateRange(1, 65535)][int]$SunshinePort = 47990,
     [string]$NetworkAdapterId,
     [string]$InstallReturnUrl,
+    [string]$VncAllowedSourceAddress,
     [string]$PackageRoot,
     [switch]$Plan
 )
 
 $ErrorActionPreference = 'Stop'
+
+function ConvertTo-AgentVncSourceAddress {
+    param([Parameter(Mandatory)][Uri]$Controller,[string]$Address)
+    $candidate = $Address
+    if ([string]::IsNullOrWhiteSpace($candidate)) {
+        if ($Controller.IsLoopback) { $candidate = '127.0.0.1' }
+        else { $candidate = $Controller.DnsSafeHost }
+    }
+    $parsed = $null
+    if (-not [Net.IPAddress]::TryParse($candidate, [ref]$parsed) -or $parsed.AddressFamily -ne [Net.Sockets.AddressFamily]::InterNetwork) {
+        throw 'VncAllowedSourceAddress must be one private or loopback IPv4 address; configure it when ControllerUrl uses a hostname.'
+    }
+    $bytes = $parsed.GetAddressBytes()
+    $private = $bytes[0] -eq 10 -or $bytes[0] -eq 127 -or
+        ($bytes[0] -eq 172 -and $bytes[1] -ge 16 -and $bytes[1] -le 31) -or
+        ($bytes[0] -eq 192 -and $bytes[1] -eq 168)
+    if (-not $private -or $parsed.ToString() -cne $candidate) { throw 'VncAllowedSourceAddress must be one private or loopback IPv4 address.' }
+    return $parsed.ToString()
+}
+
+function Invoke-AgentVncSetup {
+    param([Parameter(Mandatory)][string]$InstallerPath,[Parameter(Mandatory)][string]$AllowedSourceAddress,[Parameter(Mandatory)][string]$DataDirectory)
+    if (-not (Test-Path -LiteralPath $InstallerPath -PathType Leaf)) { throw 'TightVNC installer is missing from the Agent package.' }
+    $installerBlock = [ScriptBlock]::Create([IO.File]::ReadAllText($InstallerPath))
+    & $installerBlock -AllowedSourceAddress $AllowedSourceAddress -DataDirectory $DataDirectory
+}
+
+function Open-AgentInstallReturnPage {
+    param([string]$Url)
+    if ($Url) {
+        try { Start-Process -FilePath $Url }
+        catch { Write-Warning 'Agent installation completed, but the admin page could not be opened automatically.' }
+    }
+}
+
 $effectivePackageRoot = if ([string]::IsNullOrWhiteSpace($PackageRoot)) { $PSScriptRoot } else { $PackageRoot }
 if ([string]::IsNullOrWhiteSpace($effectivePackageRoot) -or -not [IO.Path]::IsPathRooted($effectivePackageRoot)) { throw 'PackageRoot must identify the absolute Agent package directory.' }
 $effectivePackageRoot = [IO.Path]::GetFullPath($effectivePackageRoot)
@@ -22,6 +58,7 @@ if ($controller.Scheme -ne 'https' -or $controller.UserInfo -or $controller.Quer
     throw 'ControllerUrl must be an HTTPS origin without credentials, path, query or fragment.'
 }
 $controllerUrlNormalized = $controller.GetLeftPart([UriPartial]::Authority) + '/'
+$vncAllowedSourceAddress = ConvertTo-AgentVncSourceAddress -Controller $controller -Address $VncAllowedSourceAddress
 
 $returnUrlNormalized = $null
 if (-not [string]::IsNullOrWhiteSpace($InstallReturnUrl)) {
@@ -42,14 +79,23 @@ if (-not [string]::IsNullOrWhiteSpace($NetworkAdapterId)) {
 
 $sourceDirectory = Join-Path $effectivePackageRoot 'Agent'
 $serviceInstaller = Join-Path $effectivePackageRoot 'Install-Service.ps1'
+$tightVncInstaller = Join-Path $effectivePackageRoot 'Install-TightVncServer.ps1'
 if (-not (Test-Path -LiteralPath (Join-Path $sourceDirectory 'Agent.exe') -PathType Leaf)) { throw 'Agent.exe is missing from the package.' }
 if (-not (Test-Path -LiteralPath $serviceInstaller -PathType Leaf)) { throw 'Install-Service.ps1 is missing from the package.' }
+if (-not (Test-Path -LiteralPath $tightVncInstaller -PathType Leaf)) { throw 'Install-TightVncServer.ps1 is missing from the package.' }
 
 $installDirectory = Join-Path (Join-Path $env:ProgramFiles 'KamenRaider') 'Agent'
 $dataDirectory = Join-Path (Join-Path $env:ProgramData 'KamenRaider') 'Agent'
 if ($Plan) {
     [pscustomobject]@{
         ControllerUrl = $controllerUrlNormalized
+        VncSetup = [pscustomobject]@{
+            Version = '2.8.90'
+            Port = 5900
+            AllowedSourceAddress = $vncAllowedSourceAddress
+            RemoteInputBlocked = $true
+            FirewallProfile = 'Private'
+        }
         PublishDirectory = $installDirectory
         InstallDirectory = $installDirectory
         DataDirectory = $dataDirectory
@@ -99,12 +145,24 @@ if ($installMode -eq 'repair-enrollment') {
     try {
         Invoke-AgentEnrollmentRepair -ServiceName $serviceName -InstallDirectory $installDirectory `
             -DataDirectory $dataDirectory -ControllerUrl $controllerUrlNormalized `
-            -EnrollmentTicket $EnrollmentTicket -ServiceSid $serviceSid -InstallReturnUrl $returnUrlNormalized
+            -EnrollmentTicket $EnrollmentTicket -ServiceSid $serviceSid
     } catch {
         $service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
         if ($service) { Write-Warning (Get-AgentEnrollmentRecoveryInstruction -ServiceStatus $service.Status.ToString()) }
         throw
     }
+    $enrollmentStatus = Get-AgentEnrollmentStatusFromDataDirectory -DataDirectory $dataDirectory
+    if ((Get-AgentVncSetupDecision -EnrollmentStatus $enrollmentStatus) -eq 'Configure') {
+        try {
+            Invoke-AgentVncSetup -InstallerPath $tightVncInstaller -AllowedSourceAddress $vncAllowedSourceAddress -DataDirectory $dataDirectory
+        } catch {
+            Write-Warning 'Agent enrollment remains installed, but TightVNC setup failed. VNC may be unavailable; rerun the admin install command to retry.'
+            throw
+        }
+    } else {
+        Write-Warning 'TightVNC setup was skipped because Agent enrollment is still pending. Rerun the admin install command after the Agent reaches the Controller.'
+    }
+    Open-AgentInstallReturnPage -Url $returnUrlNormalized
     return
 }
 
@@ -134,6 +192,7 @@ $configStage = $null
 $publishStage = $null
 $publishMoved = $false
 $serviceCreatedByThisRun = $false
+$vncSetupAttempted = $false
 $dataParentCreatedByThisRun = $false
 $publishParentExisted = Test-Path -LiteralPath $publishParent
 $publishParentCreatedByThisRun = $false
@@ -218,16 +277,23 @@ try {
         $pendingStatus = Get-AgentEnrollmentStatus
         Write-Warning $pendingStatus.Message
     }
-    if ($returnUrlNormalized) {
-        try { Start-Process -FilePath $returnUrlNormalized }
-        catch { Write-Warning 'Agent installation completed, but the admin page could not be opened automatically.' }
+    if ((Get-AgentVncSetupDecision -EnrollmentStatus $receiptStatus) -eq 'Configure') {
+        $vncSetupAttempted = $true
+        Invoke-AgentVncSetup -InstallerPath $tightVncInstaller -AllowedSourceAddress $vncAllowedSourceAddress -DataDirectory $dataDirectory
+    } else {
+        Write-Warning 'TightVNC setup was skipped because Agent enrollment is still pending. Rerun the admin install command after the Agent reaches the Controller.'
     }
+    Open-AgentInstallReturnPage -Url $returnUrlNormalized
     Write-Output "Agent service installed and started with automatic startup. Data directory: $dataDirectory"
 } catch {
     $original = $_
     if ($serviceCreatedByThisRun) {
         $failedService = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
-        if ($failedService) { Write-Warning (Get-AgentEnrollmentRecoveryInstruction -ServiceStatus $failedService.Status.ToString()) }
+        if ($failedService -and $vncSetupAttempted) {
+            Write-Warning 'The Agent service remains installed, but TightVNC setup did not finish. VNC may be unavailable; rerun the admin install command to retry.'
+        } elseif ($failedService) {
+            Write-Warning (Get-AgentEnrollmentRecoveryInstruction -ServiceStatus $failedService.Status.ToString())
+        }
     }
     if ($configStage -and (Test-Path -LiteralPath $configStage)) {
         $resolvedConfigStage = [IO.Path]::GetFullPath($configStage)

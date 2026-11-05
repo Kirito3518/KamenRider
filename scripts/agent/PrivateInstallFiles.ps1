@@ -345,6 +345,17 @@ function Get-AgentEnrollmentStatus {
   Message=('Enrollment received: MachineId={0}; Status={1}; Fingerprint={2}' -f $Receipt.MachineId,$Receipt.ApprovalStatus,$fingerprint)
  }
 }
+function Get-AgentEnrollmentStatusFromDataDirectory {
+ param([Parameter(Mandatory)][string]$DataDirectory)
+ $receiptPath=Join-Path $DataDirectory 'enrollment-receipt.json'
+ if(-not (Test-Path -LiteralPath $receiptPath -PathType Leaf)){return Get-AgentEnrollmentStatus}
+ try{$receipt=[IO.File]::ReadAllText($receiptPath)|ConvertFrom-Json -ErrorAction Stop;return Get-AgentEnrollmentStatus -Receipt $receipt}catch{throw 'Agent enrollment receipt is invalid; TightVNC setup was skipped.'}
+}
+function Get-AgentVncSetupDecision {
+ param([psobject]$EnrollmentStatus)
+ if($EnrollmentStatus -and $EnrollmentStatus.State -eq 'enrolled'){return 'Configure'}
+ return 'SkipPendingEnrollment'
+}
 function New-PrivateInstallSecurity {
  param([Security.Principal.SecurityIdentifier]$ServiceSid,[switch]$Directory,[switch]$ReadOnly)
  $acl=if($Directory){[Security.AccessControl.DirectorySecurity]::new()}else{[Security.AccessControl.FileSecurity]::new()}
