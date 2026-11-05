@@ -4,6 +4,8 @@ using KamenRaider.Agent.Leases;
 namespace KamenRaider.Agent.Startup;
 public enum Readiness { NotReady,Ready,Fault }
 public interface IBootReconciliationClient {Task<ReconcileResponse> ReconcileAsync(ReconcileRequest request,CancellationToken ct);}
+public interface IBootBaselineEvidence {bool HasValidatedBaseline {get;}}
+public sealed class UnvalidatedBootBaselineEvidence:IBootBaselineEvidence {public bool HasValidatedBaseline=>false;}
 // Implementations must independently verify restoration for this boot, a real stream fence,
 // empty pairing/client state, and desktop/capture/input/audio health. Never infer these from uptime.
 public interface IBootEnvironment {
