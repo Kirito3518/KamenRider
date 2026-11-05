@@ -114,7 +114,47 @@ try {
         $unexpected = @(Get-ChildItem -LiteralPath $root -Force -Recurse | Where-Object { $_.FullName -notlike ($root + '\package*') })
         if ($unexpected.Count) { throw 'Install plan created unexpected files outside its test fixture.' }
     }
-    Write-Output 'Agent install plan tests passed; configuration, adapter selection and service start remain mutation-free.'
+    # Keep real tree/link checks, but substitute ACL reads for external ancestors
+    # and service-owned identity objects so this regression needs no elevation.
+    $aclTree = Join-Path $package 'private-data'
+    $identityTree = Join-Path $aclTree 'identity'
+    $identityFile = Join-Path $identityTree 'identity.json'
+    $realServiceSid = Get-ServiceSid 'KamenRaider Agent'
+    New-PrivateInstallDirectory $aclTree $realServiceSid | Out-Null
+    New-PrivateInstallDirectory $identityTree $realServiceSid | Out-Null
+    [IO.File]::WriteAllText($identityFile, '{}')
+    $safeAncestorAcl = New-PrivateInstallSecurity $realServiceSid -Directory -ReadOnly
+    $identityAcl = New-PrivateInstallSecurity $realServiceSid -Directory
+    $identityAcl.SetOwner($realServiceSid)
+    $identityFileAcl = New-PrivateInstallSecurity $realServiceSid
+    $identityFileAcl.SetOwner($realServiceSid)
+    $identityFileAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($realServiceSid,[Security.AccessControl.FileSystemRights]::FullControl,[Security.AccessControl.AccessControlType]::Allow))
+    $badAclPath = $null
+    $badAcl = $null
+    function Get-Acl {
+        param([string]$LiteralPath)
+        if ([IO.Path]::GetFullPath($LiteralPath).TrimEnd('\') -eq [IO.Path]::GetPathRoot($aclTree).TrimEnd('\')) { return Microsoft.PowerShell.Security\Get-Acl -LiteralPath $LiteralPath }
+        if ($LiteralPath -eq $badAclPath) { return $badAcl }
+        if ($LiteralPath -eq $identityTree) { return $identityAcl }
+        if ($LiteralPath -eq $identityFile) { return $identityFileAcl }
+        if ($LiteralPath -eq $aclTree) { return Microsoft.PowerShell.Security\Get-Acl -LiteralPath $LiteralPath }
+        return $safeAncestorAcl
+    }
+    try {
+        Assert-TrustedPublishTree $aclTree -ServiceSid $realServiceSid -Private
+        $untrustedSid = [Security.Principal.SecurityIdentifier]::new('S-1-1-0')
+        foreach ($target in @($aclTree, $identityTree, $identityFile)) {
+            foreach ($right in @([Security.AccessControl.FileSystemRights]::WriteData,[Security.AccessControl.FileSystemRights]::ReadData)) {
+                $badAcl = if ($target -eq $identityFile) { New-PrivateInstallSecurity $realServiceSid } else { New-PrivateInstallSecurity $realServiceSid -Directory }
+                $badAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($untrustedSid,$right,[Security.AccessControl.AccessControlType]::Allow))
+                $badAclPath = $target
+                $rejected = $false
+                try { Assert-TrustedPublishTree $aclTree -ServiceSid $realServiceSid -Private } catch { $rejected = $true }
+                if (-not $rejected) { throw "Private service tree accepted untrusted $right on $target" }
+            }
+        }
+    } finally { Remove-Item Function:\Get-Acl -Force }
+    Write-Output 'Agent install plan and private service-tree ACL tests passed; no services changed.'
 } finally {
     $resolved = [IO.Path]::GetFullPath($root)
     $tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\') + '\'

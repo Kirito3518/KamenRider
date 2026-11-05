@@ -44,7 +44,7 @@ VNC/noVNC เป็นความสามารถของระบบฉบ�
 - ถ้า Controller ติดต่อไม่ได้ภายใน 90 วินาที service จะอยู่ต่อและ retry; script แจ้ง pending แล้วเปิดหน้าเว็บ; ticket ถูกลบหลังบันทึก receipt สำเร็จ
 - ถ้า service หยุดหรือ ticket หมดอายุก่อน enrollment คำสั่ง admin ใหม่จะตรวจ service, binary, config และ identity เดิม แล้วเปลี่ยนเฉพาะ ticket ส่วนตัวก่อนเริ่ม/ resume service; ปฏิเสธ installation ที่ไม่ครบหรือค่าไม่ตรงกัน
 - service/ข้อมูลเดิมที่มีอยู่และ package ที่ hash ไม่ตรงถูกปฏิเสธ; service ที่สร้างโดยรอบติดตั้งนี้เท่านั้นที่ถูกลบเมื่อ rollback
-- ยังไม่ได้สั่งติดตั้ง service จริงบนเครื่องพัฒนา; PowerShell 5.1/7 Plan และ ACL suites, Next.js production build, machine route integration 14 scenarios, Agent 100 tests และ Controller 126 tests ผ่าน; Controller build test ใช้ artifacts ชั่วคราวเพื่อไม่ชน Controller dev
+- ยังไม่ได้สั่งติดตั้ง service จริงบนเครื่องพัฒนา; PowerShell 5.1/7 Plan และ ACL suites, Next.js production build, machine route integration 14 scenarios, Agent 103 tests และ Controller 126 tests ผ่าน; Controller build test ใช้ artifacts ชั่วคราวเพื่อไม่ชน Controller dev
 - ก่อนทดสอบเครื่องลูก ต้องยืนยัน root certificate อยู่ใน `LocalMachine\Root`, ตั้งค่า env ใน `.env.local`, build package แล้วใส่ SHA-256 และตั้ง `AGENT_INSTALL_ENABLED=true`; ทดสอบการติดตั้ง, enrollment receipt/pending, approve, service recovery และ reboot บนเครื่องลูกจริง
 
 ### 3. Enrollment, identity และการอนุมัติเครื่อง — โค้ดหลักเสร็จ; ยังไม่ผ่านทดสอบติดตั้งจริง
@@ -77,7 +77,7 @@ VNC/noVNC เป็นความสามารถของระบบฉบ�
 - ต่อเวลาเพิ่ม revision และยังไม่รายงานสำเร็จจน Agent ACK
 - เวลาใช้ UTC, deadline ฝั่ง Agent ใช้ monotonic clock และทำงานได้เมื่อ offline
 - หมดเวลาแล้ว Agent สั่ง Windows shutdown ทันทีโดยไม่มี warning/grace period
-- แก้และพิสูจน์ crash-durable deadline เมื่อ Agent ล่มก่อนบันทึก server time; ทดสอบ shutdown failure และ retry
+- Agent บันทึก deadline ที่สั้นลงจาก Controller ก่อนรอ stream gate; regression tests ครอบคลุม restart ระหว่าง gate ค้าง, extension ที่ยังไม่ยืนยัน, และ shutdown failure/retry ด้วย fake adapter ส่วนการจำลอง process crash ระหว่าง atomic file replacement และการทดสอบ shutdown/retry บนเครื่องจริงยังต้องยืนยัน
 - ระยะแรกใช้ trial lease ของแอดมิน ไม่หัก balance; payment/refund เป็นงานแยก
 
 ### 6. Moonlight/Sunshine และ stream fence — pairing มี; ตัวกั้นสตรีมจริงยังขาด

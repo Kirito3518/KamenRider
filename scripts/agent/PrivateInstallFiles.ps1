@@ -240,7 +240,7 @@ namespace KamenRaider.Install {
 }
 function Assert-TrustedInstallFile {
  param([Parameter(Mandatory)][string]$Path,[Security.Principal.SecurityIdentifier]$ServiceSid,[switch]$Private)
- Assert-TrustedInstallParent $Path
+ Assert-TrustedInstallParent $Path -ServiceSid $ServiceSid
  $file=Get-Item -LiteralPath $Path -Force
  if($file.PSIsContainer -or ($file.Attributes -band [IO.FileAttributes]::ReparsePoint)){throw 'Installation file must be a regular file, not a reparse point.'}
  if((Get-InstallFileLinkCount $Path) -ne 1){throw 'Installation file must not have multiple hard links.'}
@@ -248,7 +248,7 @@ function Assert-TrustedInstallFile {
  if(-not (Test-TrustedInstallAcl (Get-Acl -LiteralPath $Path) $trusted -Private:$Private)){throw 'Installation file has untrusted access or ownership.'}
 }
 function Assert-TrustedPublishTree {
- param([Parameter(Mandatory)][string]$Path)
+ param([Parameter(Mandatory)][string]$Path,[Security.Principal.SecurityIdentifier]$ServiceSid,[switch]$Private)
  # Walk one directory at a time so a junction is rejected before traversal.
  $root=Get-Item -LiteralPath $Path -Force -ErrorAction Stop
  if(-not $root.PSIsContainer -or ($root.Attributes -band [IO.FileAttributes]::ReparsePoint)){throw 'Publish directory must be a real directory.'}
@@ -256,12 +256,13 @@ function Assert-TrustedPublishTree {
  $pending.Push($root.FullName)
  while($pending.Count -gt 0){
   $directory=$pending.Pop()
-  Assert-TrustedInstallParent $directory
+  Assert-TrustedInstallParent $directory -ServiceSid $ServiceSid
+  if($Private -and -not (Test-TrustedInstallAcl (Get-Acl -LiteralPath $directory) (Get-TrustedInstallSids @($ServiceSid)) -IncludeInheritedChildRules -Private)){throw 'Private tree directory has untrusted access or ownership.'}
   foreach($item in @(Get-ChildItem -LiteralPath $directory -Force -ErrorAction Stop)){
    if($item.Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'Publish tree must not contain reparse points.'}
    if($item.PSIsContainer){$pending.Push($item.FullName);continue}
    if((Get-InstallFileLinkCount $item.FullName) -ne 1){throw 'Publish tree files must not have multiple hard links.'}
-   Assert-TrustedInstallFile $item.FullName
+   Assert-TrustedInstallFile $item.FullName -ServiceSid $ServiceSid -Private:$Private
   }
  }
 }
@@ -433,7 +434,7 @@ function Invoke-AgentEnrollmentRepair {
  $dataItem=Get-Item -LiteralPath $DataDirectory -Force -ErrorAction Stop
  if(-not $dataItem.PSIsContainer -or ($dataItem.Attributes -band [IO.FileAttributes]::ReparsePoint)){throw 'Existing Agent data directory is not a real directory.'}
  if(-not (Test-TrustedInstallAcl (Get-Acl -LiteralPath $DataDirectory) (Get-TrustedInstallSids @($ServiceSid)) -IncludeInheritedChildRules -Private -RequireModifySid $ServiceSid)){throw 'Existing Agent data directory ACL is not safe for enrollment repair.'}
- Assert-TrustedPublishTree $DataDirectory
+ Assert-TrustedPublishTree $DataDirectory -ServiceSid $ServiceSid -Private
 
  $receiptPath=Join-Path $DataDirectory 'enrollment-receipt.json'
  $receiptStatus=$null
