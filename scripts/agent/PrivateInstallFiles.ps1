@@ -87,8 +87,56 @@ function Assert-EmptyInstallDirectory {
   if(@(Get-ChildItem -LiteralPath $Path -Force).Count -ne 0){throw 'Data directory must be empty.'}
  }
 }
+function Assert-ServiceIsAbsent {
+ param([Parameter(Mandatory)][string]$ServiceName)
+ if(Get-Service -Name $ServiceName -ErrorAction SilentlyContinue){throw 'Service already exists; use a reviewed upgrade procedure.'}
+}
+function Resolve-AgentNetworkAdapter {
+ param([Parameter(Mandatory)][object[]]$Candidates,[string]$RequestedId,[scriptblock]$ReadSelection={param($Prompt) Read-Host -Prompt $Prompt})
+ if($Candidates.Count -eq 0){throw 'No active IPv4 network adapter with a default gateway was found.'}
+ $normalizedCandidates=@($Candidates | ForEach-Object {
+  $candidate=$_
+  try{$guid=[Guid]::Parse([string]$candidate.Id)}catch{throw 'Network adapter inventory returned an invalid interface GUID.'}
+  [pscustomobject]@{Id=[string]$candidate.Id;GuidKey=$guid.ToString('D');Name=[string]$candidate.Name;Address=[string]$candidate.Address}
+ } | Sort-Object -Property Id -Unique)
+ if(-not [string]::IsNullOrWhiteSpace($RequestedId)){
+  try{$requested=([Guid]::Parse($RequestedId)).ToString('D')}catch{throw 'NetworkAdapterId must be a network interface GUID.'}
+  $selected=@($normalizedCandidates | Where-Object {$_.GuidKey -eq $requested})
+  if($selected.Count -ne 1){throw 'NetworkAdapterId does not identify an active IPv4 network adapter with a default gateway.'}
+  return $selected[0].Id
+ }
+ if($normalizedCandidates.Count -eq 1){return $normalizedCandidates[0].Id}
+ Write-Host 'Select the active network adapter for Controller enrollment:'
+ for($index=0;$index -lt $normalizedCandidates.Count;$index++){
+  Write-Host ('[{0}] {1} ({2}) {3}' -f ($index+1),$normalizedCandidates[$index].Name,$normalizedCandidates[$index].Id,$normalizedCandidates[$index].Address)
+ }
+ $selection=0
+ while($selection -lt 1 -or $selection -gt $normalizedCandidates.Count){
+  $answer=& $ReadSelection ('Enter a number from 1 to {0}' -f $normalizedCandidates.Count)
+  $parsed=0
+  if([int]::TryParse([string]$answer,[ref]$parsed)){$selection=$parsed}else{$selection=0}
+ }
+ return $normalizedCandidates[$selection-1].Id
+}
+function New-AgentInstallConfiguration {
+ param(
+  [Parameter(Mandatory)][string]$ControllerUrl,
+  [Parameter(Mandatory)][string]$DataDirectory,
+  [Parameter(Mandatory)][ValidateRange(1,65535)][int]$MoonlightPort,
+  [Parameter(Mandatory)][ValidateRange(1,65535)][int]$SunshinePort,
+  [Parameter(Mandatory)][string]$NetworkAdapterId
+ )
+ $configuration=[ordered]@{
+  ControllerUrl=$ControllerUrl
+  DataDirectory=$DataDirectory
+  MoonlightPort=$MoonlightPort
+  SunshinePort=$SunshinePort
+  NetworkAdapterId=$NetworkAdapterId
+ }
+ return ConvertTo-Json -InputObject $configuration -Depth 3
+}
 function Set-PrivateInstallAcl {
- param([string]$Path,[Security.Principal.SecurityIdentifier]$ServiceSid,[switch]$Directory)
+ param([string]$Path,[Security.Principal.SecurityIdentifier]$ServiceSid,[switch]$Directory,[switch]$ReadOnly)
  $acl=if($Directory){[Security.AccessControl.DirectorySecurity]::new()}else{[Security.AccessControl.FileSecurity]::new()}
  $acl.SetAccessRuleProtection($true,$false)
  $systemSid=[Security.Principal.SecurityIdentifier]::new('S-1-5-18')
@@ -97,7 +145,11 @@ function Set-PrivateInstallAcl {
  # The service installer requires this principal to be an elevated administrator.
  $installerSid=[Security.Principal.WindowsIdentity]::GetCurrent().User
  foreach($sid in @($ServiceSid,$systemSid,$adminSid,$installerSid)){
-  $rights=if($sid -eq $ServiceSid -and $sid -ne $installerSid){if($Directory){[Security.AccessControl.FileSystemRights]::Modify}else{[Security.AccessControl.FileSystemRights]::Read}}else{[Security.AccessControl.FileSystemRights]::FullControl}
+  $rights=if($sid -eq $ServiceSid -and $sid -ne $installerSid){
+   if($ReadOnly){[Security.AccessControl.FileSystemRights]::ReadAndExecute}
+   elseif($Directory){[Security.AccessControl.FileSystemRights]::Modify}
+   else{[Security.AccessControl.FileSystemRights]::Read}
+  }else{[Security.AccessControl.FileSystemRights]::FullControl}
   $rule=if($Directory){[Security.AccessControl.FileSystemAccessRule]::new($sid,$rights,[Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit',[Security.AccessControl.PropagationFlags]::None,[Security.AccessControl.AccessControlType]::Allow)}else{[Security.AccessControl.FileSystemAccessRule]::new($sid,$rights,[Security.AccessControl.AccessControlType]::Allow)}
   $acl.AddAccessRule($rule)
  }

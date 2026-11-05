@@ -1,57 +1,101 @@
-[CmdletBinding(SupportsShouldProcess=$true)]
+[CmdletBinding(SupportsShouldProcess = $true)]
 param(
- [Parameter(Mandatory)][ValidateSet('Controller','Agent')][string]$Role,
- [Parameter(Mandatory)][string]$PublishDirectory,
- [Parameter(Mandatory)][string]$DataDirectory,
- [Parameter(Mandatory)][string]$ConfigurationFile,
- [Parameter(Mandatory)][ValidatePattern('^[A-Fa-f0-9]{40}$')][string]$TrustedRootThumbprint,
- [switch]$Plan
+    [Parameter(Mandatory)][ValidateSet('Controller', 'Agent')][string]$Role,
+    [Parameter(Mandatory)][string]$PublishDirectory,
+    [Parameter(Mandatory)][string]$DataDirectory,
+    [Parameter(Mandatory)][string]$ConfigurationFile,
+    [Parameter(Mandatory)][ValidatePattern('^[A-Fa-f0-9]{40}$')][string]$TrustedRootThumbprint,
+    [switch]$StartAfterInstall,
+    [switch]$Plan
 )
-$ErrorActionPreference='Stop'
-foreach($path in @($PublishDirectory,$DataDirectory,$ConfigurationFile)) {
- if(-not [IO.Path]::IsPathRooted($path)){throw 'All installation paths must be absolute.'}
+
+$ErrorActionPreference = 'Stop'
+foreach ($path in @($PublishDirectory, $DataDirectory, $ConfigurationFile)) {
+    if (-not [IO.Path]::IsPathRooted($path)) { throw 'All installation paths must be absolute.' }
 }
-$serviceName="KamenRaider $Role"
-$account="NT SERVICE\$serviceName"
-$executable=Join-Path $PublishDirectory "$Role.exe"
-# Agent remains disabled until real default-closed fencing, restore proof and readiness are qualified.
-$startup=if($Role -eq 'Agent'){'disabled'}else{'auto'}
-if($Plan){[pscustomobject]@{ServiceName=$serviceName;Account=$account;Binary=$executable;DataDirectory=$DataDirectory;Startup=$startup;TrustedRootThumbprint=$TrustedRootThumbprint;Recovery='restart after 5/15/60 seconds'};return}
-throw 'Service installation is disabled until directory trust and failure recovery are verified. Use -Plan for inspection only.'
-if(-not $IsWindows -and $PSVersionTable.PSEdition -eq 'Core'){throw 'Windows is required.'}
-if(-not ([Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)){throw 'Run installation as an elevated administrator.'}
+
+$serviceName = "KamenRaider $Role"
+$account = "NT SERVICE\$serviceName"
+$executable = Join-Path $PublishDirectory "$Role.exe"
+$startup = 'auto'
+if ($Plan) {
+    [pscustomobject]@{
+        ServiceName = $serviceName
+        Account = $account
+        Binary = $executable
+        DataDirectory = $DataDirectory
+        Startup = $startup
+        StartAfterInstall = [bool]$StartAfterInstall
+        TrustedRootThumbprint = $TrustedRootThumbprint
+        Recovery = 'restart after 5/15/60 seconds'
+    }
+    return
+}
+
+if ($env:OS -ne 'Windows_NT') { throw 'Windows is required.' }
+if (-not ([Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    throw 'Run service installation from an elevated PowerShell session.'
+}
+
 . (Join-Path $PSScriptRoot 'PrivateInstallFiles.ps1')
 . (Join-Path $PSScriptRoot 'ServiceInstallTransaction.ps1')
 Assert-TrustedInstallParent $PublishDirectory
 Assert-TrustedInstallParent $DataDirectory
 Assert-TrustedInstallParent $ConfigurationFile
 Assert-EmptyInstallDirectory $DataDirectory
-if(-not (Test-Path -LiteralPath $executable -PathType Leaf)){throw 'Publish executable is missing.'}
-if(-not (Test-Path -LiteralPath $ConfigurationFile -PathType Leaf)){throw 'Provide a provisioned configuration file.'}
+if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) { throw 'Publish executable is missing.' }
+if (-not (Test-Path -LiteralPath $ConfigurationFile -PathType Leaf)) { throw 'Provide a provisioned configuration file.' }
+if (Test-Path -LiteralPath (Join-Path $PublishDirectory 'appsettings.json')) { throw 'Service configuration already exists; reviewed upgrade or repair is required.' }
 Assert-TrustedPublishTree $PublishDirectory
 Assert-TrustedInstallFile $executable
 Assert-TrustedInstallFile $ConfigurationFile -Private
-if(-not (Test-Path -LiteralPath "Cert:\LocalMachine\Root\$TrustedRootThumbprint")){throw 'Provision and verify the certificate trust chain before installation.'}
-if(Get-Service -Name $serviceName -ErrorAction SilentlyContinue){throw 'Service already exists; use a reviewed upgrade procedure.'}
-if($PSCmdlet.ShouldProcess($serviceName,'Create service and grant private data/config ACLs')) {
- $binaryPath='"'+$executable+'" --contentRoot "'+$PublishDirectory+'"'
- Invoke-ServiceInstallTransaction {
-  & sc.exe create $serviceName binPath= $binaryPath start= disabled obj= $account
-  if($LASTEXITCODE -ne 0){throw 'Service creation failed.'}
- } {
- $serviceSid=([Security.Principal.NTAccount]::new($account)).Translate([Security.Principal.SecurityIdentifier])
- # No Users/Everyone grants. Data must be empty; existing descendants are never reused.
- Initialize-PrivateDataDirectory $DataDirectory $serviceSid
- Publish-PrivateConfiguration $ConfigurationFile $PublishDirectory $serviceSid
- & sc.exe failure $serviceName reset= 86400 actions= restart/5000/restart/15000/restart/60000
- if($LASTEXITCODE -ne 0){throw 'Recovery configuration failed.'}
- & sc.exe config $serviceName start= $startup
- if($LASTEXITCODE -ne 0){throw 'Startup configuration failed.'}
- } {
-  if(Get-Service -Name $serviceName -ErrorAction SilentlyContinue){
-   & sc.exe delete $serviceName
-   if($LASTEXITCODE -ne 0){throw 'Unable to remove the service after installation failure.'}
-  }
- }
- Write-Output "Installed $serviceName as $account, startup=$startup. No service was started."
+if (-not (Test-Path -LiteralPath "Cert:\LocalMachine\Root\$TrustedRootThumbprint")) {
+    throw 'Provision and verify the certificate trust chain before installation.'
 }
+Assert-ServiceIsAbsent $serviceName
+
+if (-not $PSCmdlet.ShouldProcess($serviceName, 'Create service, secure configuration and data, and configure startup')) { return }
+
+$binaryPath = '"' + $executable + '" --contentRoot "' + $PublishDirectory + '"'
+Invoke-ServiceInstallTransaction -Create {
+    & sc.exe create $serviceName binPath= $binaryPath start= disabled obj= $account | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'Service creation failed; ownership of any partially created service could not be confirmed.' }
+    return $true
+} -Configure {
+    $serviceSid = ([Security.Principal.NTAccount]::new($account)).Translate([Security.Principal.SecurityIdentifier])
+    Initialize-PrivateDataDirectory $DataDirectory $serviceSid
+    Publish-PrivateConfiguration $ConfigurationFile $PublishDirectory $serviceSid
+    & sc.exe failure $serviceName reset= 86400 actions= restart/5000/restart/15000/restart/60000 | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'Recovery configuration failed.' }
+    & sc.exe config $serviceName start= $startup | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'Automatic startup configuration failed.' }
+    if ($StartAfterInstall) {
+        Start-Service -Name $serviceName -ErrorAction Stop
+        $deadline = [Diagnostics.Stopwatch]::StartNew()
+        do {
+            $service = Get-Service -Name $serviceName -ErrorAction Stop
+            if ($service.Status -eq [ServiceProcess.ServiceControllerStatus]::Running) { break }
+            if ($service.Status -eq [ServiceProcess.ServiceControllerStatus]::Stopped) { throw 'Agent service stopped during startup.' }
+            Start-Sleep -Milliseconds 250
+        } while ($deadline.Elapsed.TotalSeconds -lt 30)
+        if ($service.Status -ne [ServiceProcess.ServiceControllerStatus]::Running) { throw 'Agent service did not reach Running state within 30 seconds.' }
+    }
+} -Rollback {
+    $service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+    if ($service) {
+        if ($service.Status -ne [ServiceProcess.ServiceControllerStatus]::Stopped) {
+            Stop-Service -Name $serviceName -Force -ErrorAction Stop
+            $deadline = [Diagnostics.Stopwatch]::StartNew()
+            do {
+                Start-Sleep -Milliseconds 250
+                $service = Get-Service -Name $serviceName -ErrorAction Stop
+            } while ($service.Status -ne [ServiceProcess.ServiceControllerStatus]::Stopped -and $deadline.Elapsed.TotalSeconds -lt 15)
+            if ($service.Status -ne [ServiceProcess.ServiceControllerStatus]::Stopped) { throw 'New service could not be stopped safely.' }
+        }
+        & sc.exe delete $serviceName | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw 'Unable to remove the service created by this installation.' }
+    }
+}
+
+$startState = if ($StartAfterInstall) { 'started' } else { 'not started' }
+Write-Output "Installed $serviceName as $account, startup=$startup, $startState."

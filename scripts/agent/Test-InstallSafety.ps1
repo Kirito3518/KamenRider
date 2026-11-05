@@ -1,6 +1,16 @@
 $ErrorActionPreference='Stop'
 . (Join-Path $PSScriptRoot 'PrivateInstallFiles.ps1')
 . (Join-Path $PSScriptRoot 'ServiceInstallTransaction.ps1')
+function Get-Service {
+ param([string]$Name,[string]$ErrorAction)
+ if($Name -eq 'KamenRaider Agent'){return [pscustomobject]@{Name=$Name}}
+ return $null
+}
+$existingServiceRejected=$false
+try { Assert-ServiceIsAbsent -ServiceName 'KamenRaider Agent' } catch { $existingServiceRejected=$_.Exception.Message -eq 'Service already exists; use a reviewed upgrade procedure.' }
+if(-not $existingServiceRejected){throw 'Existing service guard must reject without deleting the service.'}
+Assert-ServiceIsAbsent -ServiceName 'KamenRaider Controller'
+Remove-Item Function:\Get-Service -Force
 $safe=[Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
 $untrusted=[Security.Principal.SecurityIdentifier]::new('S-1-1-0')
 $acl=[Security.AccessControl.DirectorySecurity]::new()
@@ -37,11 +47,17 @@ try {
  Remove-Item -LiteralPath $resolved -Recurse -Force
 }
 $events=[Collections.Generic.List[string]]::new()
-try { Invoke-ServiceInstallTransaction { $events.Add('create') } { $events.Add('configure'); throw 'failure' } { $events.Add('rollback') }; throw 'Failure was swallowed' } catch { if($_.Exception.Message -ne 'failure') {throw} }
+try { Invoke-ServiceInstallTransaction -WarningAction SilentlyContinue -Create { $events.Add('create'); return $true } -Configure { $events.Add('configure'); throw 'failure' } -Rollback { $events.Add('rollback') }; throw 'Failure was swallowed' } catch { if($_.Exception.Message -ne 'failure') {throw} }
 if(($events -join ',') -ne 'create,configure,rollback'){throw 'Created service was not rolled back on failure.'}
 $events.Clear()
-try { Invoke-ServiceInstallTransaction { $events.Add('create'); throw 'create failure' } { $events.Add('configure') } { $events.Add('rollback') }; throw 'Create failure was swallowed' } catch { if($_.Exception.Message -ne 'create failure') {throw} }
-if(($events -join ',') -ne 'create,rollback'){throw 'Partially created service was not rolled back.'}
+try { Invoke-ServiceInstallTransaction -WarningAction SilentlyContinue -Create { $events.Add('create'); return $true } -Configure { $events.Add('start'); throw 'service start failure' } -Rollback { $events.Add('stop'); $events.Add('delete') }; throw 'Service start failure was swallowed' } catch { if($_.Exception.Message -ne 'service start failure') {throw} }
+if(($events -join ',') -ne 'create,start,stop,delete'){throw 'Service start failure must stop and delete only the newly created service.'}
+$events.Clear()
+try { Invoke-ServiceInstallTransaction -WarningAction SilentlyContinue -Create { $events.Add('create'); throw 'create failure' } -Configure { $events.Add('configure') } -Rollback { $events.Add('rollback') }; throw 'Create failure was swallowed' } catch { if($_.Exception.Message -ne 'create failure') {throw} }
+if(($events -join ',') -ne 'create'){throw 'Unconfirmed service creation must not delete a service that may belong to another invocation.'}
+$events.Clear()
+try { Invoke-ServiceInstallTransaction -WarningAction SilentlyContinue -Create { $events.Add('create'); return $false } -Configure { $events.Add('configure') } -Rollback { $events.Add('rollback') }; throw 'Unconfirmed ownership was accepted' } catch { if($_.Exception.Message -ne 'Service creation did not confirm ownership.') {throw} }
+if(($events -join ',') -ne 'create'){throw 'Unconfirmed service ownership must not trigger rollback.'}
 # Dependency files need the same trust checks as the executable, including
 # hidden and nested files. This fixture only reads and writes disposable data.
 $treeRoot=Join-Path ([IO.Path]::GetTempPath()) ('kr-tree-test-'+[guid]::NewGuid().ToString('N'))
@@ -67,7 +83,7 @@ try {
   $rejected=$false
   try { Assert-TrustedPublishTree $treeRoot } catch { $rejected=$true }
   if(-not $rejected){throw 'Publish tree must reject junctions without following them.'}
- } finally { Remove-Item -LiteralPath $junction -Force }
+ } finally { [IO.Directory]::Delete($junction, $false) }
 } finally {
  $resolved=[IO.Path]::GetFullPath($treeRoot);$temp=[IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\')+'\'
  if(-not $resolved.StartsWith($temp,[StringComparison]::OrdinalIgnoreCase) -or [IO.Path]::GetFileName($resolved) -notlike 'kr-tree-test-*'){throw 'Unsafe cleanup path.'}

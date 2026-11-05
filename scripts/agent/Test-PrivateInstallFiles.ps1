@@ -19,6 +19,14 @@ try {
  $allowed=@($currentSid.Value,'S-1-5-18','S-1-5-32-544')
  if(-not $acl.AreAccessRulesProtected){throw 'Data ACL must be protected'}
  foreach($rule in $acl.Access){if($rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value -notin $allowed){throw 'Unexpected data access'}}
+ $readOnly=Join-Path $root 'read-only-publish';New-Item -ItemType Directory -Path $readOnly | Out-Null
+ $serviceSid=[Security.Principal.SecurityIdentifier]::new('S-1-5-80-1111111111-2222222222-3333333333-4444444444-5555555555')
+ Set-PrivateInstallAcl $readOnly $serviceSid -Directory -ReadOnly
+ $readOnlyAcl=Get-Acl -LiteralPath $readOnly
+ $serviceRules=@($readOnlyAcl.Access | Where-Object {$_.IdentityReference -eq $serviceSid})
+ if($serviceRules.Count -ne 1 -or ($serviceRules[0].FileSystemRights -band [Security.AccessControl.FileSystemRights]::ReadAndExecute) -ne [Security.AccessControl.FileSystemRights]::ReadAndExecute){throw 'Service account must read and execute published binaries.'}
+ $writeRights=[Security.AccessControl.FileSystemRights]::WriteData -bor [Security.AccessControl.FileSystemRights]::AppendData -bor [Security.AccessControl.FileSystemRights]::Delete -bor [Security.AccessControl.FileSystemRights]::ChangePermissions
+ if($serviceRules[0].FileSystemRights -band $writeRights){throw 'Service account must not modify published binaries.'}
  $publish=Join-Path $root 'publish';New-Item -ItemType Directory -Path $publish | Out-Null
  $source=Join-Path $root 'secret.json';[IO.File]::WriteAllText($source,'{"credential":"test-only-secret"}')
  $destination=Join-Path $publish 'appsettings.json';[IO.File]::WriteAllText($destination,'old')

@@ -62,12 +62,12 @@
 - Produces: Install-AgentPackage.ps1 -ControllerUrl <HTTPS-origin> -TrustedRootThumbprint <40 hex> [-NetworkAdapterId <GUID>] [-InstallReturnUrl <URL>] [-Plan]. Runtime installation writes appsettings.json with ControllerUrl, DataDirectory, MoonlightPort, SunshinePort, NetworkAdapterId; invokes Install-Service.ps1 with -StartAfterInstall; polls enrollment-receipt.json for at most 90 seconds; and opens the validated return URL.
 - Install-Service.ps1 adds -StartAfterInstall; for Agent the service uses startup=auto, service recovery, protected config/data ACLs, and starts only after successful setup. Plan mode remains mutation-free.
 
-- [ ] Step 1: Add failing plan/config tests for Windows PowerShell compatibility, network adapter selection, valid local/HTTPS URLs, config values, auto startup, and receipt timeout policy.
-- [ ] Step 2: Run tests to observe the disabled installer and missing config plan behavior.
-- [ ] Step 3: Implement config staging, adapter selection, startup, enrollment wait, browser return, and rollback of only the service created by this invocation.
-- [ ] Step 4: Add failure tests for invalid URLs, existing service/data, hash mismatch, configuration publication failure, and service start failure; verify no service is created in Plan mode.
-- [ ] Step 5: Run all script tests using temporary directories; do not run live installation.
-- [ ] Step 6: Commit installer.
+- [x] Step 1: Add failing plan/config tests for Windows PowerShell compatibility, network adapter selection, valid local/HTTPS URLs, config values, auto startup, and receipt timeout policy.
+- [x] Step 2: Run tests to observe missing install return URL, appsettings plan and service-start behavior.
+- [x] Step 3: Implement config staging, adapter selection, startup, enrollment wait, browser return, and rollback of only the service created by this invocation.
+- [x] Step 4: Add failure tests for invalid URLs, existing service/data, configuration publication failure, and service start failure; verify no service is created in Plan mode. Archive hash mismatch is verified at the download/extraction boundary in Task 4.
+- [x] Step 5: Run all Agent installer/package script tests under Windows PowerShell 5.1 and PowerShell 7 using temporary directories; do not run live installation.
+- [x] Step 6: Commit installer.
 
 ### Task 3: Complete the admin bootstrap command
 
