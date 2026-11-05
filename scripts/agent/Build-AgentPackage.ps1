@@ -6,6 +6,15 @@ param(
 )
 $ErrorActionPreference='Stop'
 $repo=Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
+$revisionLines=@(& git -C $repo rev-parse --short=12 HEAD)
+if($LASTEXITCODE -ne 0){throw 'Git source revision is required to version the Agent package.'}
+$revision=($revisionLines -join '').Trim().ToLowerInvariant()
+if($revision -notmatch '\A[0-9a-f]{12,40}\z'){throw 'Git returned an invalid source revision.'}
+if($revision.Length -gt 12){$revision=$revision.Substring(0,12)}
+$statusLines=@(& git -C $repo status --porcelain --untracked-files=all)
+if($LASTEXITCODE -ne 0){throw 'Git working-tree status is required to version the Agent package.'}
+$agentVersion="1.0.0+g$revision"
+if($statusLines.Count -gt 0){$agentVersion+='.dirty.'+[DateTime]::UtcNow.ToString('yyyyMMddHHmmss',[Globalization.CultureInfo]::InvariantCulture)}
 if(-not $OutputDirectory){$OutputDirectory=Join-Path $repo 'public/agent'}
 if(-not [IO.Path]::IsPathRooted($OutputDirectory)){throw 'OutputDirectory must be absolute.'}
 $OutputDirectory=[IO.Path]::GetFullPath($OutputDirectory)
@@ -15,7 +24,7 @@ $hashFile=Join-Path $OutputDirectory 'AgentPackage.sha256'
 $scriptNames=@('Install-AgentPackage.ps1','Install-Service.ps1','PrivateInstallFiles.ps1','ServiceInstallTransaction.ps1')
 $entries=@('Agent')+$scriptNames
 if($Plan){
- [pscustomobject]@{ProjectPath=$project;OutputDirectory=$OutputDirectory;Runtime=$Runtime;SelfContained=$true;ArchivePath=$archive;HashFilePath=$hashFile;PackageEntries=$entries}
+ [pscustomobject]@{ProjectPath=$project;OutputDirectory=$OutputDirectory;Runtime=$Runtime;SelfContained=$true;ArchivePath=$archive;HashFilePath=$hashFile;PackageEntries=$entries;AgentVersion=$agentVersion}
  return
 }
 if(-not (Test-Path -LiteralPath $project -PathType Leaf)){throw 'Agent project is missing.'}
@@ -30,7 +39,7 @@ try {
  $packageRoot=Join-Path $stage 'package'
  New-Item -ItemType Directory -Path $stage | Out-Null
  $publishScript=Join-Path $PSScriptRoot 'Publish-Services.ps1'
- & $publishScript -Role Agent -OutputDirectory $publishRoot -Runtime $Runtime
+ & $publishScript -Role Agent -OutputDirectory $publishRoot -Runtime $Runtime -Version $agentVersion
  if($LASTEXITCODE -ne 0){throw 'Agent publish failed.'}
  $publishedAgent=Join-Path $publishRoot 'Agent'
  if(-not (Test-Path -LiteralPath (Join-Path $publishedAgent 'Agent.exe') -PathType Leaf)){throw 'Published Agent.exe is missing.'}
@@ -68,7 +77,7 @@ try {
  }
  $hash=(Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToUpperInvariant()
  [IO.File]::WriteAllText($hashFile,$hash+[Environment]::NewLine,[Text.Encoding]::ASCII)
- [pscustomobject]@{PackagePath=$archive;Sha256=$hash;HashFilePath=$hashFile;Runtime=$Runtime}
+ [pscustomobject]@{PackagePath=$archive;Sha256=$hash;HashFilePath=$hashFile;Runtime=$Runtime;AgentVersion=$agentVersion}
 } finally {
  if($outputTemp -and (Test-Path -LiteralPath $outputTemp)){Remove-Item -LiteralPath $outputTemp -Force}
  if($outputBackup -and (Test-Path -LiteralPath $outputBackup)){Remove-Item -LiteralPath $outputBackup -Force}

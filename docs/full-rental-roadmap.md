@@ -1,7 +1,7 @@
 # แผนระบบเช่าคอม KamenRaiderPlay ฉบับเต็ม
 
 สถานะเอกสาร: roadmap รวมของระบบเว็บ, Controller, Agent และช่องทางดูแลเครื่อง  
-อัปเดต: 2026-11-05
+อัปเดต: 2026-11-06
 
 ## เป้าหมายระบบ
 
@@ -44,7 +44,7 @@ VNC/noVNC เป็นความสามารถของระบบฉบ�
 - ถ้า Controller ติดต่อไม่ได้ภายใน 90 วินาที service จะอยู่ต่อและ retry; script แจ้ง pending แล้วเปิดหน้าเว็บ; ticket ถูกลบหลังบันทึก receipt สำเร็จ
 - ถ้า service หยุดหรือ ticket หมดอายุก่อน enrollment คำสั่ง admin ใหม่จะตรวจ service, binary, config และ identity เดิม แล้วเปลี่ยนเฉพาะ ticket ส่วนตัวก่อนเริ่ม/ resume service; ปฏิเสธ installation ที่ไม่ครบหรือค่าไม่ตรงกัน
 - service/ข้อมูลเดิมที่มีอยู่และ package ที่ hash ไม่ตรงถูกปฏิเสธ; service ที่สร้างโดยรอบติดตั้งนี้เท่านั้นที่ถูกลบเมื่อ rollback
-- ยังไม่ได้สั่งติดตั้ง service จริงบนเครื่องพัฒนา; PowerShell 5.1/7 Plan และ ACL suites, Next.js production build, machine route integration 14 scenarios, Agent 112 tests และ Controller 126 tests ผ่าน; Controller build test ใช้ artifacts ชั่วคราวเพื่อไม่ชน Controller dev
+- ยังไม่ได้สั่งติดตั้ง service จริงบนเครื่องพัฒนา; PowerShell 5.1/7 Plan และ ACL suites, Next.js production build, machine route integration 14 scenarios, Agent 112 tests และ Controller 129 tests ผ่าน; Controller build test ใช้ artifacts ชั่วคราวเพื่อไม่ชน Controller dev
 - ก่อนทดสอบเครื่องลูก ต้องยืนยัน root certificate อยู่ใน `LocalMachine\Root`, ตั้งค่า env ใน `.env.local`, build package แล้วใส่ SHA-256 และตั้ง `AGENT_INSTALL_ENABLED=true`; ทดสอบการติดตั้ง, enrollment receipt/pending, approve, service recovery และ reboot บนเครื่องลูกจริง
 
 ### 3. Enrollment, identity และการอนุมัติเครื่อง — โค้ดหลักเสร็จ; ยังไม่ผ่านทดสอบติดตั้งจริง
@@ -53,7 +53,7 @@ VNC/noVNC เป็นความสามารถของระบบฉบ�
 - Admin route ออก ticket ที่มีอายุ 24 ชั่วโมง; Controller เก็บ hash, บังคับ single-use ตอนสร้าง identity ใหม่ และอนุญาต same-identity retries โดยไม่สร้างเครื่องซ้ำ
 - คำขอ enrollment ลงลายเซ็นและมี replay protection
 - Controller สร้าง pending machine โดยไม่ให้เช่าได้
-- รายงาน local IP, MAC และพอร์ตเริ่มต้น; การส่งซ้ำใช้ identity เดิม
+- รายงาน local IP, MAC, พอร์ตเริ่มต้น และ Agent informational version ผ่าน signed heartbeat; package ใส่ Git revision และติดธง dirty build เพื่อให้แอดมินแยกรุ่นได้; การส่งซ้ำใช้ identity เดิม
 - Admin ตรวจ fingerprint, ตั้งชื่อ ราคา พอร์ต และอนุมัติ
 - หน้าเว็บ poll รายการเครื่องทุก 5 วินาที
 - ต้องทดสอบ flow จริงจาก PowerShell install จนเครื่องปรากฏในหน้าแอดมิน

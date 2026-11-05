@@ -130,7 +130,7 @@ export function MachinesManager() {
             {m.machineId} · {m.approvalStatus}
           </h2>
           <p>
-            Readiness: {m.readiness} · Config revision: {m.configRevision} ·
+            Agent: {m.agentVersion || "ยังไม่รายงาน"} · Readiness: {m.readiness} · Config revision: {m.configRevision} ·
             ACK: {m.appliedConfigRevision ?? "ยังไม่ยืนยัน"}{" "}
             {m.appliedConfigRevision === m.configRevision
               ? "(ตรงกับ config)"

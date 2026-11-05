@@ -12,6 +12,7 @@ export type Machine = {
   readiness: string;
   canRent: boolean;
   lastSeenAt: string | null;
+  agentVersion: string | null;
   publicKeyFingerprint?: string;
   activeAdminVncSessions: number;
 };
