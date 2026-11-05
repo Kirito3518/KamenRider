@@ -73,6 +73,7 @@
 
 **Files:**
 - Modify: src/app/api/admin/agent-install-command/route.ts
+- Modify: .env.example
 - Test: tests/machines.test.mjs
 - Modify: tests/run-machines.mjs
 
@@ -80,12 +81,12 @@
 - Consumes: AGENT_INSTALL_ENABLED, AGENT_INSTALL_BASE_URL, AGENT_PACKAGE_URL, AGENT_PACKAGE_SHA256, AGENT_CONTROLLER_URL, and AGENT_TRUST_ROOT_THUMBPRINT.
 - Produces: authenticated GET /api/admin/agent-install-command returns no-store JSON; 401/403 for non-admins; when configured returns one PowerShell command that downloads the bootstrap, verifies its SHA-256, invokes it with package/controller/trust/return URL values, and removes its temp script. HTTP loopback is allowed only for local development URLs; ControllerUrl remains HTTPS.
 
-- [ ] Step 1: Add integration tests for logged-out/user/admin sessions and configured/unconfigured URL/hash cases.
-- [ ] Step 2: Run tests to verify new route validation cases fail.
-- [ ] Step 3: Generate a PowerShell 5.1-compatible command; include -UseBasicParsing and quote all generated arguments safely.
-- [ ] Step 4: Verify disallowed scheme, credentials, query, fragment, bad hash, or missing environment values return unavailable/deny instead of a command.
-- [ ] Step 5: Run route and admin-machine integration tests plus lint/type checks.
-- [ ] Step 6: Commit route.
+- [x] Step 1: Add integration tests for logged-out/user/admin sessions and configured/unconfigured URL/hash cases.
+- [x] Step 2: Run tests and observe the configured command omit PowerShell 5.1's -UseBasicParsing and install return URL arguments.
+- [x] Step 3: Generate a PowerShell 5.1-compatible command; include -UseBasicParsing and quote all generated arguments safely.
+- [x] Step 4: Verify disallowed scheme, credentials, query, fragment, bad hash, or missing environment values return unavailable/deny instead of a command.
+- [x] Step 5: Run route and admin-machine integration tests plus a production build/type check and targeted ESLint.
+- [x] Step 6: Commit route.
 
 ### Task 4: Admin install-to-pending handoff
 

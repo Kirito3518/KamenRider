@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { createHash } from "node:crypto";
 import { createServer } from "node:http";
+import { readFileSync } from "node:fs";
 import Database from "better-sqlite3";
 const base = process.env.TEST_AUTH_URL || "http://localhost:3002";
 const headers = {
@@ -166,4 +168,71 @@ test("machine API session boundaries, validation, redaction and controller failu
     await new Promise((resolve) => server.close(resolve));
   }
   assert.equal((await call("/machines")).status, 503);
+});
+
+test("agent install command is admin-only and withheld until configuration validates", async () => {
+  const unauthenticated = await call("/admin/agent-install-command");
+  assert.equal(unauthenticated.status, 401);
+
+  const suffix = crypto.randomUUID().replaceAll("-", "").slice(0, 10);
+  const signup = await call("/auth/sign-up/email", {
+    name: "Agent install test",
+    username: `agent_${suffix}`,
+    email: `${suffix}@example.com`,
+    password: "Test-password-928!",
+  });
+  assert.equal(signup.status, 200);
+  const created = await signup.json();
+  let cookie = signup.headers
+    .getSetCookie()
+    .map((value) => value.split(";")[0])
+    .join("; ");
+  assert.equal((await call("/admin/agent-install-command", undefined, cookie)).status, 403);
+
+  const db = new Database(process.env.TEST_AUTH_DB);
+  try {
+    db.prepare("UPDATE user SET role='admin' WHERE id=?").run(created.user.id);
+  } finally {
+    db.close();
+  }
+  const login = await call("/auth/sign-in/email", {
+    email: `${suffix}@example.com`,
+    password: "Test-password-928!",
+  });
+  cookie = login.headers
+    .getSetCookie()
+    .map((value) => value.split(";")[0])
+    .join("; ");
+
+  const response = await call("/admin/agent-install-command", undefined, cookie);
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("cache-control"), "no-store");
+  const result = await response.json();
+  const expected = process.env.TEST_AGENT_INSTALL_EXPECTED || "available";
+  if (expected === "unavailable") {
+    assert.equal(result.available, false);
+    assert.equal("command" in result, false);
+    assert.equal("scriptUrl" in result, false);
+    return;
+  }
+
+  assert.equal(result.available, true);
+  const baseUrl = process.env.AGENT_INSTALL_BASE_URL || process.env.BETTER_AUTH_URL;
+  const packageUrl = new URL(process.env.AGENT_PACKAGE_URL);
+  const controllerUrl = new URL(process.env.AGENT_CONTROLLER_URL);
+  const scriptUrl = new URL("/agent/Bootstrap-Agent.ps1", baseUrl).toString();
+  const returnUrl = new URL("/admin/machines", baseUrl).toString();
+  const scriptHash = createHash("sha256")
+    .update(readFileSync(new URL("../public/agent/Bootstrap-Agent.ps1", import.meta.url)))
+    .digest("hex")
+    .toUpperCase();
+  const quoted = (value) => `'${value.replaceAll("'", "''")}'`;
+  assert.equal(result.scriptUrl, scriptUrl);
+  assert.ok(result.command.includes(`-UseBasicParsing`));
+  assert.ok(result.command.includes(`-ControllerUrl ${quoted(controllerUrl.toString())}`));
+  assert.ok(result.command.includes(`-PackageUrl ${quoted(packageUrl.toString())}`));
+  assert.ok(result.command.includes(`-InstallReturnUrl ${quoted(returnUrl)}`));
+  assert.ok(result.command.includes(`-PackageSha256 ${quoted(process.env.AGENT_PACKAGE_SHA256.toUpperCase())}`));
+  assert.ok(result.command.includes(`-TrustedRootThumbprint ${quoted(process.env.AGENT_TRUST_ROOT_THUMBPRINT.toUpperCase())}`));
+  assert.ok(result.command.includes(quoted(scriptHash)));
 });
