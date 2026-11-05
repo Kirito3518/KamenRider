@@ -42,7 +42,7 @@ VNC/noVNC เป็นความสามารถของระบบฉบ�
 - หน้าแอดมินแสดงคำสั่งให้คัดลอก; หลังติดตั้งจะกลับมาหน้าเครื่อง และรายการ poll แสดงเครื่องที่ลงทะเบียนเป็น pending ให้ตั้งชื่อ ราคา พอร์ตและอนุมัติ
 - ถ้า Controller ติดต่อไม่ได้ภายใน 90 วินาที service จะอยู่ต่อและ retry; script แจ้ง pending แล้วเปิดหน้าเว็บ
 - service/ข้อมูลเดิมที่มีอยู่และ package ที่ hash ไม่ตรงถูกปฏิเสธ; service ที่สร้างโดยรอบติดตั้งนี้เท่านั้นที่ถูกลบเมื่อ rollback
-- ยังไม่ได้สั่งติดตั้ง service จริงบนเครื่องพัฒนา; tests, package build, route integration และ Plan ผ่านบน PowerShell 5.1/7; Agent ผ่าน 90 tests และ Controller ผ่าน 94 tests โดยข้ามเฉพาะ test ที่ rebuild Controller ขณะ dev process จับไฟล์อยู่
+- ยังไม่ได้สั่งติดตั้ง service จริงบนเครื่องพัฒนา; tests, package build, route integration และ Plan ผ่านบน PowerShell 5.1/7; Agent ผ่าน 98 tests และ Controller ผ่าน 94 tests โดยข้ามเฉพาะ test ที่ rebuild Controller ขณะ dev process จับไฟล์อยู่
 - ก่อนทดสอบเครื่องลูก ต้องยืนยัน root certificate อยู่ใน `LocalMachine\Root`, ตั้งค่า env ใน `.env.local`, build package แล้วใส่ SHA-256 และตั้ง `AGENT_INSTALL_ENABLED=true`; ทดสอบการติดตั้ง, enrollment receipt/pending, approve, service recovery และ reboot บนเครื่องลูกจริง
 
 ### 3. Enrollment, identity และการอนุมัติเครื่อง — โค้ดหลักเสร็จ; ยังไม่ผ่านทดสอบติดตั้งจริง

@@ -1,15 +1,91 @@
 # File-only helpers: tests use disposable directories without SCM changes.
 function Test-TrustedInstallAcl {
- param([Parameter(Mandatory)][Security.AccessControl.FileSystemSecurity]$Acl,[Parameter(Mandatory)][Security.Principal.SecurityIdentifier[]]$TrustedSids,[switch]$IncludeInheritedChildRules,[switch]$Private)
+ param([Parameter(Mandatory)][Security.AccessControl.FileSystemSecurity]$Acl,[Parameter(Mandatory)][Security.Principal.SecurityIdentifier[]]$TrustedSids,[switch]$IncludeInheritedChildRules,[switch]$Private,[Security.Principal.SecurityIdentifier]$RequireModifySid)
  $trusted=@($TrustedSids | ForEach-Object {$_.Value})
  if($Acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -notin $trusted){return $false}
- $write=[Security.AccessControl.FileSystemRights]::WriteData -bor [Security.AccessControl.FileSystemRights]::AppendData -bor [Security.AccessControl.FileSystemRights]::WriteAttributes -bor [Security.AccessControl.FileSystemRights]::WriteExtendedAttributes -bor [Security.AccessControl.FileSystemRights]::Delete -bor [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor [Security.AccessControl.FileSystemRights]::ChangePermissions -bor [Security.AccessControl.FileSystemRights]::TakeOwnership
- if($Private){$write=$write -bor [Security.AccessControl.FileSystemRights]::ReadData}
- foreach($rule in $Acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])) {
+ $rules=@($Acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier]))
+ foreach($rule in $rules) {
   if(($rule.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) -and -not $IncludeInheritedChildRules){continue}
-  if($rule.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and $rule.IdentityReference.Value -notin $trusted -and ($rule.FileSystemRights -band $write)){return $false}
+  if($rule.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and $rule.IdentityReference.Value -notin $trusted -and (Test-DisallowedInstallAceRights ([int]$rule.FileSystemRights) -Private:$Private)){return $false}
+ }
+ if($RequireModifySid){
+  $modify=[Security.AccessControl.FileSystemRights]::Modify
+  $serviceRules=@($rules | Where-Object {$_.IdentityReference.Value -eq $RequireModifySid.Value})
+  $hasModify=@($serviceRules | Where-Object {$_.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and ((([int]$_.FileSystemRights -band [int]$modify) -eq [int]$modify) -or (([int]$_.FileSystemRights -band [int]268435456) -ne 0)) }).Count -gt 0
+  $deniesModify=@($serviceRules | Where-Object {$_.AccessControlType -eq [Security.AccessControl.AccessControlType]::Deny -and (Test-DisallowedInstallAceRights ([int]$_.FileSystemRights) -Private) }).Count -gt 0
+  if(-not $hasModify -or $deniesModify){return $false}
  }
  return $true
+}
+function Test-DisallowedInstallAceRights {
+ param([Parameter(Mandatory)][int]$Rights,[switch]$Private)
+ $write=[Security.AccessControl.FileSystemRights]::WriteData -bor [Security.AccessControl.FileSystemRights]::AppendData -bor [Security.AccessControl.FileSystemRights]::WriteAttributes -bor [Security.AccessControl.FileSystemRights]::WriteExtendedAttributes -bor [Security.AccessControl.FileSystemRights]::Delete -bor [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor [Security.AccessControl.FileSystemRights]::ChangePermissions -bor [Security.AccessControl.FileSystemRights]::TakeOwnership
+ if($Private){$write=$write -bor [Security.AccessControl.FileSystemRights]::Read}
+ $genericAll=($Rights -band [int]268435456) -ne 0
+ $genericWrite=($Rights -band [int]1073741824) -ne 0
+ $genericRead=($Rights -band [int]-2147483648) -ne 0
+ return (($Rights -band [int]$write) -ne 0 -or $genericAll -or $genericWrite -or ($Private -and $genericRead))
+}
+
+function Get-ServiceSid {
+ param([Parameter(Mandatory)][string]$ServiceName)
+ $scPath=Join-Path $env:SystemRoot 'System32\sc.exe'
+ $output=@(& $scPath showsid $ServiceName 2>&1)
+ if($LASTEXITCODE -ne 0){throw "Unable to derive the virtual service SID for $ServiceName."}
+ $matches=[regex]::Matches(($output -join "`n"),'S-1-5-80(?:-\d+){5}')
+ if($matches.Count -ne 1){throw "Service SID output for $ServiceName did not contain exactly one service SID."}
+ return [Security.Principal.SecurityIdentifier]::new($matches[0].Value)
+}
+function Assert-ServiceSidMatchesVirtualAccount {
+ param([Parameter(Mandatory)][string]$ServiceName,[Parameter(Mandatory)][Security.Principal.SecurityIdentifier]$ExpectedSid)
+ $account=([Security.Principal.NTAccount]::new("NT SERVICE\$ServiceName")).Translate([Security.Principal.SecurityIdentifier])
+ if($account.Value -ne $ExpectedSid.Value){throw "The created virtual account SID for $ServiceName does not match its precomputed service SID."}
+}
+function Get-ServiceBinaryPath {
+ param([Parameter(Mandatory)][string]$Executable,[Parameter(Mandatory)][string]$ContentRoot)
+ $executablePath=[IO.Path]::GetFullPath($Executable)
+ $contentRootPath=[IO.Path]::GetFullPath($ContentRoot)
+ if($executablePath.Contains('"') -or $contentRootPath.Contains('"')){throw 'Service paths cannot contain quotes.'}
+ return ('"{0}" --contentRoot "{1}"' -f $executablePath,$contentRootPath)
+}
+function Initialize-ServiceManagerNativeType {
+ if(-not ('KamenRaider.Install.NativeServiceManager' -as [type])){
+  Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+namespace KamenRaider.Install {
+ public static class NativeServiceManager {
+  [DllImport("advapi32.dll", EntryPoint="OpenSCManagerW", CharSet=CharSet.Unicode, SetLastError=true)]
+  private static extern IntPtr OpenSCManager(string machineName,string databaseName,uint desiredAccess);
+  [DllImport("advapi32.dll", EntryPoint="CreateServiceW", CharSet=CharSet.Unicode, SetLastError=true)]
+  private static extern IntPtr CreateService(IntPtr manager,string serviceName,string displayName,uint desiredAccess,uint serviceType,uint startType,uint errorControl,string binaryPathName,string loadOrderGroup,IntPtr tagId,string dependencies,string serviceStartName,string password);
+  [DllImport("advapi32.dll", SetLastError=true)] [return: MarshalAs(UnmanagedType.Bool)]
+  private static extern bool CloseServiceHandle(IntPtr handle);
+  public static void CreateDisabledService(string serviceName,string displayName,string binaryPath,string account) {
+   IntPtr manager=OpenSCManager(null,null,0x0002);
+   if(manager==IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
+   try {
+    IntPtr service=CreateService(manager,serviceName,displayName,0x000F01FF,0x00000010,0x00000004,0x00000001,binaryPath,null,IntPtr.Zero,null,account,null);
+    if(service==IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
+    try {} finally {CloseServiceHandle(service);}
+   } finally {CloseServiceHandle(manager);}
+  }
+ }
+}
+'@
+ }
+}
+function New-DisabledWindowsService {
+ param([Parameter(Mandatory)][string]$ServiceName,[Parameter(Mandatory)][string]$BinaryPath,[Parameter(Mandatory)][string]$Account)
+ Initialize-ServiceManagerNativeType
+ [KamenRaider.Install.NativeServiceManager]::CreateDisabledService($ServiceName,$ServiceName,$BinaryPath,$Account)
+}
+function Get-AgentEnrollmentWaitState {
+ param([Parameter(Mandatory)][string]$ServiceStatus,[psobject]$ReceiptStatus)
+ if($ServiceStatus -eq 'Stopped'){return 'stopped'}
+ if($ReceiptStatus -and $ReceiptStatus.State -eq 'enrolled'){return 'enrolled'}
+ return 'pending'
 }
 function Get-TrustedInstallSids {
  param([Security.Principal.SecurityIdentifier[]]$AdditionalSid=@())
@@ -31,22 +107,23 @@ function Test-TrustedProgramDataRootAcl {
  if($Acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne 'S-1-5-18'){return $false}
  $usersSid='S-1-5-32-545'
  $trusted=@(Get-TrustedInstallSids | ForEach-Object {$_.Value})
- $write=[Security.AccessControl.FileSystemRights]::WriteData -bor [Security.AccessControl.FileSystemRights]::AppendData -bor [Security.AccessControl.FileSystemRights]::WriteAttributes -bor [Security.AccessControl.FileSystemRights]::WriteExtendedAttributes -bor [Security.AccessControl.FileSystemRights]::Delete -bor [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor [Security.AccessControl.FileSystemRights]::ChangePermissions -bor [Security.AccessControl.FileSystemRights]::TakeOwnership
  foreach($rule in $Acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])){
   if($rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow){continue}
   if($rule.IdentityReference.Value -in $trusted){continue}
+  $ruleWrites=(Test-DisallowedInstallAceRights ([int]$rule.FileSystemRights))
   if($rule.IdentityReference.Value -eq $usersSid){
-   if(-not ($rule.FileSystemRights -band $write)){continue}
+   if(-not $ruleWrites){continue}
    if((Remove-InstallSynchronizeRight ([int]$rule.FileSystemRights)) -ne [int][Security.AccessControl.FileSystemRights]::Write -or
       $rule.InheritanceFlags -ne [Security.AccessControl.InheritanceFlags]::ContainerInherit -or
       $rule.PropagationFlags -ne [Security.AccessControl.PropagationFlags]::None -or $rule.IsInherited){return $false}
    continue
   }
-  if($rule.FileSystemRights -band $write){return $false}
+  if($ruleWrites){return $false}
  }
  $usersWrite=@($Acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier]) | Where-Object {
   $_.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and
   $_.IdentityReference.Value -eq $usersSid -and
+  (Test-DisallowedInstallAceRights ([int]$_.FileSystemRights)) -and
   (Remove-InstallSynchronizeRight ([int]$_.FileSystemRights)) -eq [int][Security.AccessControl.FileSystemRights]::Write -and
   $_.InheritanceFlags -eq [Security.AccessControl.InheritanceFlags]::ContainerInherit -and
   $_.PropagationFlags -eq [Security.AccessControl.PropagationFlags]::None -and
@@ -60,21 +137,21 @@ function Test-TrustedSystemRootAcl {
  if($Acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $trustedInstallerSid){return $false}
  $authenticatedUsersSid='S-1-5-11'
  $trusted=@(Get-TrustedInstallSids | ForEach-Object {$_.Value})
- $write=[Security.AccessControl.FileSystemRights]::WriteData -bor [Security.AccessControl.FileSystemRights]::AppendData -bor [Security.AccessControl.FileSystemRights]::WriteAttributes -bor [Security.AccessControl.FileSystemRights]::WriteExtendedAttributes -bor [Security.AccessControl.FileSystemRights]::Delete -bor [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor [Security.AccessControl.FileSystemRights]::ChangePermissions -bor [Security.AccessControl.FileSystemRights]::TakeOwnership
  foreach($rule in $Acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])){
   if($rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow){continue}
   if($rule.IdentityReference.Value -in $trusted){continue}
+  $ruleWrites=(Test-DisallowedInstallAceRights ([int]$rule.FileSystemRights))
   if($rule.IdentityReference.Value -eq $authenticatedUsersSid){
    if([int]$rule.FileSystemRights -eq -536805376 -and
       $rule.InheritanceFlags -eq [Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit' -and
       $rule.PropagationFlags -eq [Security.AccessControl.PropagationFlags]::InheritOnly -and -not $rule.IsInherited){continue}
-   if(-not ($rule.FileSystemRights -band $write)){continue}
+   if(-not $ruleWrites){continue}
    if((Remove-InstallSynchronizeRight ([int]$rule.FileSystemRights)) -ne [int][Security.AccessControl.FileSystemRights]::CreateDirectories -or
       $rule.InheritanceFlags -ne [Security.AccessControl.InheritanceFlags]::None -or
       $rule.PropagationFlags -ne [Security.AccessControl.PropagationFlags]::None -or $rule.IsInherited){return $false}
    continue
   }
-  if($rule.FileSystemRights -band $write){return $false}
+  if($ruleWrites){return $false}
  }
  $createDirectory=@($Acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier]) | Where-Object {
   $_.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and
@@ -313,7 +390,8 @@ function New-PrivateInstallDirectory {
  if(-not $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)){throw 'Private directory must be a real directory.'}
  $actual=Get-Acl -LiteralPath $Path
  $trusted=Get-TrustedInstallSids @($ServiceSid)
- if(-not $actual.AreAccessRulesProtected -or -not (Test-TrustedInstallAcl $actual $trusted -IncludeInheritedChildRules)){throw 'Private directory was already present with unsafe access or ownership.'}
+ $secure=if($ReadOnly){Test-TrustedInstallAcl $actual $trusted -IncludeInheritedChildRules}else{Test-TrustedInstallAcl $actual $trusted -IncludeInheritedChildRules -Private -RequireModifySid $ServiceSid}
+ if(-not $actual.AreAccessRulesProtected -or -not $secure){throw 'Private directory was already present with unsafe access, ownership or service rights.'}
  return $item
 }
 function Initialize-PrivateDataDirectory {
@@ -323,7 +401,7 @@ function Initialize-PrivateDataDirectory {
  if(Test-Path -LiteralPath $Path){
   $existingAcl=Get-Acl -LiteralPath $Path
   $trusted=Get-TrustedInstallSids @($ServiceSid)
-  if(-not $existingAcl.AreAccessRulesProtected -or -not (Test-TrustedInstallAcl $existingAcl $trusted -IncludeInheritedChildRules)){throw 'Existing data directory has unsafe access or ownership.'}
+   if(-not $existingAcl.AreAccessRulesProtected -or -not (Test-TrustedInstallAcl $existingAcl $trusted -IncludeInheritedChildRules -Private -RequireModifySid $ServiceSid)){throw 'Existing data directory has unsafe access, ownership or missing service write access.'}
  }else{
   New-PrivateInstallDirectory $Path $ServiceSid | Out-Null
   $created=$true

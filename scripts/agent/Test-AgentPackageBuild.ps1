@@ -16,7 +16,14 @@ try {
   $entries=@($zip.Entries | ForEach-Object FullName)
   foreach($entry in $entries){if($entry.Contains('\') -or $entry.StartsWith('/') -or $entry.Split('/') -contains '..'){throw "Unsafe or non-portable ZIP path: $entry"}}
   foreach($required in @('Agent/Agent.exe','Install-AgentPackage.ps1','Install-Service.ps1','PrivateInstallFiles.ps1','ServiceInstallTransaction.ps1')){if($required -notin $entries){throw "Package is missing $required."}}
+  if('Agent/appsettings.json' -in $entries){throw 'Package must not include the default appsettings.json; the installer publishes the protected configuration.'}
  } finally {$zip.Dispose()}
+ $secondOutput=@(& $build -OutputDirectory $outputDirectory)
+ $secondResult=@($secondOutput | Where-Object {$_ -and $_.PSObject.Properties['PackagePath']}) | Select-Object -Last 1
+ if(-not $secondResult){throw 'Repeated builder run did not return its package result.'}
+ $secondHash=(Get-FileHash -LiteralPath $secondResult.PackagePath -Algorithm SHA256).Hash.ToUpperInvariant()
+ if($secondHash -ne $secondResult.Sha256 -or $secondHash -ne [IO.File]::ReadAllText($secondResult.HashFilePath).Trim()){throw 'Repeated build archive SHA-256 did not match.'}
+ if(@(Get-ChildItem -LiteralPath $outputDirectory -Force | Where-Object {$_.Name -like '.AgentPackage-*' -or $_.Name -like '*.bak'}).Count -ne 0){throw 'Repeated build left a package staging or backup file.'}
  Write-Output "Agent package build test passed for $($result.Runtime); SHA256=$actual."
 } finally {
  $resolved=[IO.Path]::GetFullPath($outputDirectory)

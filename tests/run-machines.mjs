@@ -8,6 +8,8 @@ const port = 3002;
 const scenarios = [
   { name: "configured", expected: "available", full: true, overrides: {} },
   { name: "disabled", expected: "unavailable", overrides: { AGENT_INSTALL_ENABLED: "false" } },
+  { name: "missing-install-base-url", expected: "unavailable", overrides: { AGENT_INSTALL_BASE_URL: "" } },
+  { name: "localhost-subdomain-base", expected: "unavailable", overrides: { AGENT_INSTALL_BASE_URL: "http://shop.localhost:3002" } },
   { name: "non-loopback-http-base", expected: "unavailable", overrides: { AGENT_INSTALL_BASE_URL: "http://192.0.2.20:3002" } },
   { name: "package-credentials", expected: "unavailable", overrides: { AGENT_PACKAGE_URL: "https://user:secret@packages.example/AgentPackage.zip" } },
   { name: "package-query", expected: "unavailable", overrides: { AGENT_PACKAGE_URL: "https://packages.example/AgentPackage.zip?token=secret" } },

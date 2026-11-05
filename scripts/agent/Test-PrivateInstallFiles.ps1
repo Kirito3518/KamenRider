@@ -37,6 +37,13 @@ try {
  $servicePrivateAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($serviceSid,[Security.AccessControl.FileSystemRights]::Read,[Security.AccessControl.AccessControlType]::Allow))
  if(-not (Test-TrustedInstallAcl $servicePrivateAcl (Get-TrustedInstallSids @($serviceSid)) -Private)){throw 'The Agent service SID must be allowed to read its private configuration.'}
  if(Test-TrustedInstallAcl $servicePrivateAcl (Get-TrustedInstallSids) -Private){throw 'A private file must not allow an untrusted service SID to read it.'}
+ $dataReadOnlyAcl=[Security.AccessControl.DirectorySecurity]::new();$dataReadOnlyAcl.SetOwner($currentSid)
+ $dataReadOnlyAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($serviceSid,[Security.AccessControl.FileSystemRights]::ReadAndExecute,[Security.AccessControl.AccessControlType]::Allow))
+ if(Test-TrustedInstallAcl $dataReadOnlyAcl (Get-TrustedInstallSids @($serviceSid)) -RequireModifySid $serviceSid){throw 'A private data directory without Agent service modify rights must be rejected.'}
+ foreach($generic in @([int]268435456,[int]1073741824)){
+  if(-not (Test-DisallowedInstallAceRights $generic)){throw ('Untrusted generic ACL mask was not rejected: {0}' -f $generic)}
+ }
+ if(-not (Test-DisallowedInstallAceRights ([int]-2147483648) -Private)){throw 'Untrusted GENERIC_READ access to a private file was not rejected.'}
  Set-PrivateInstallAcl $readOnly $serviceSid -Directory -ReadOnly
  $readOnlyAcl=Get-Acl -LiteralPath $readOnly
  $serviceRules=@($readOnlyAcl.Access | Where-Object {$_.IdentityReference -eq $serviceSid})

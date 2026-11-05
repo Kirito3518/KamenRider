@@ -21,12 +21,27 @@ function Get-BootstrapTrustedSids {
     )
 }
 
+function Get-BootstrapServiceSid {
+    param([Parameter(Mandatory)][string]$ServiceName)
+    $scPath = Join-Path $env:SystemRoot 'System32\sc.exe'
+    $output = @(& $scPath showsid $ServiceName 2>&1)
+    if ($LASTEXITCODE -ne 0) { throw "Unable to derive the virtual service SID for $ServiceName." }
+    $matches = [regex]::Matches(($output -join "`n"), 'S-1-5-80(?:-\d+){5}')
+    if ($matches.Count -ne 1) { throw "Service SID output for $ServiceName did not contain exactly one service SID." }
+    return [Security.Principal.SecurityIdentifier]::new($matches[0].Value)
+}
+
+function Test-BootstrapWritableAceRights {
+    param([Parameter(Mandatory)][int]$Rights)
+    $write = [Security.AccessControl.FileSystemRights]::WriteData -bor [Security.AccessControl.FileSystemRights]::AppendData -bor [Security.AccessControl.FileSystemRights]::WriteAttributes -bor [Security.AccessControl.FileSystemRights]::WriteExtendedAttributes -bor [Security.AccessControl.FileSystemRights]::Delete -bor [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor [Security.AccessControl.FileSystemRights]::ChangePermissions -bor [Security.AccessControl.FileSystemRights]::TakeOwnership
+    return (($Rights -band [int]$write) -ne 0 -or ($Rights -band [int]268435456) -ne 0 -or ($Rights -band [int]1073741824) -ne 0)
+}
+
 function Assert-BootstrapTrustedPath {
     param([Parameter(Mandatory)][string]$Path)
     $full = [IO.Path]::GetFullPath($Path)
     if ($full.StartsWith('\\')) { throw 'Network installer paths are not supported.' }
     $trusted = @(Get-BootstrapTrustedSids | ForEach-Object { $_.Value })
-    $write = [Security.AccessControl.FileSystemRights]::WriteData -bor [Security.AccessControl.FileSystemRights]::AppendData -bor [Security.AccessControl.FileSystemRights]::WriteAttributes -bor [Security.AccessControl.FileSystemRights]::WriteExtendedAttributes -bor [Security.AccessControl.FileSystemRights]::Delete -bor [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor [Security.AccessControl.FileSystemRights]::ChangePermissions -bor [Security.AccessControl.FileSystemRights]::TakeOwnership
     $current = $full
     while (-not (Test-Path -LiteralPath $current)) {
         $parent = [IO.Path]::GetDirectoryName($current)
@@ -50,17 +65,17 @@ function Assert-BootstrapTrustedPath {
             $childInheritance = @($rootRules | Where-Object { $_.IdentityReference.Value -eq $authUsersSid -and [int]$_.FileSystemRights -eq -536805376 -and $_.InheritanceFlags -eq [Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit' -and $_.PropagationFlags -eq [Security.AccessControl.PropagationFlags]::InheritOnly -and -not $_.IsInherited })
             if ($createDirectory.Count -ne 1 -or $childInheritance.Count -ne 1) { throw 'System drive root permissions are not the expected Windows defaults.' }
             foreach ($rule in $rootRules) {
-                if ($rule.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and $rule.IdentityReference.Value -eq $authUsersSid -and ($rule.FileSystemRights -band $write)) {
+                if ($rule.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and $rule.IdentityReference.Value -eq $authUsersSid -and (Test-BootstrapWritableAceRights ([int]$rule.FileSystemRights))) {
                     $rightsWithoutSync = ([int]$rule.FileSystemRights) -band (-bnot [int][Security.AccessControl.FileSystemRights]::Synchronize)
                     $isExpectedDirectoryCreate = $rightsWithoutSync -eq [int][Security.AccessControl.FileSystemRights]::CreateDirectories -and $rule.InheritanceFlags -eq [Security.AccessControl.InheritanceFlags]::None -and $rule.PropagationFlags -eq [Security.AccessControl.PropagationFlags]::None -and -not $rule.IsInherited
                     $isExpectedChildInheritance = [int]$rule.FileSystemRights -eq -536805376 -and $rule.InheritanceFlags -eq [Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit' -and $rule.PropagationFlags -eq [Security.AccessControl.PropagationFlags]::InheritOnly -and -not $rule.IsInherited
                     if (-not $isExpectedDirectoryCreate -and -not $isExpectedChildInheritance) { throw 'System drive root has unexpected writable access.' }
                 }
-                if ($rule.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and $rule.IdentityReference.Value -notin $trusted -and $rule.IdentityReference.Value -ne $authUsersSid -and ($rule.FileSystemRights -band $write)) { throw 'System drive root has unexpected writable access.' }
+                if ($rule.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and $rule.IdentityReference.Value -notin $trusted -and $rule.IdentityReference.Value -ne $authUsersSid -and (Test-BootstrapWritableAceRights ([int]$rule.FileSystemRights))) { throw 'System drive root has unexpected writable access.' }
             }
         } else {
             foreach ($rule in $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
-                if ($rule.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and $rule.IdentityReference.Value -notin $trusted -and ($rule.FileSystemRights -band $write)) {
+                if ($rule.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and $rule.IdentityReference.Value -notin $trusted -and (Test-BootstrapWritableAceRights ([int]$rule.FileSystemRights))) {
                     throw 'Bootstrap path has an untrusted writable ancestor.'
                 }
             }
@@ -169,8 +184,7 @@ if (-not ([Security.Principal.WindowsPrincipal]::new([Security.Principal.Windows
 
 $productDirectory = Join-Path $env:ProgramFiles 'KamenRaider'
 $stage = Join-Path $productDirectory ('.agent-bootstrap-' + [Guid]::NewGuid().ToString('N'))
-$serviceAccount = 'NT SERVICE\KamenRaider Agent'
-$serviceSid = ([Security.Principal.NTAccount]::new($serviceAccount)).Translate([Security.Principal.SecurityIdentifier])
+$serviceSid = Get-BootstrapServiceSid -ServiceName 'KamenRaider Agent'
 Assert-BootstrapTrustedPath $env:ProgramFiles
 if (Test-Path -LiteralPath $productDirectory) {
     Assert-BootstrapTrustedPath $productDirectory
@@ -187,7 +201,9 @@ try {
     Expand-Archive -LiteralPath $archive -DestinationPath $expanded -ErrorAction Stop
     $installer = Join-Path $expanded 'Install-AgentPackage.ps1'
     if (-not (Test-Path -LiteralPath $installer -PathType Leaf)) { throw 'Agent package has no qualified installer.' }
-    & $installer -ControllerUrl $normalizedController -TrustedRootThumbprint $TrustedRootThumbprint -InstallReturnUrl $returnUri.AbsoluteUri
+    $installerBlock = [ScriptBlock]::Create([IO.File]::ReadAllText($installer))
+    & $installerBlock -PackageRoot $expanded -ControllerUrl $normalizedController `
+        -TrustedRootThumbprint $TrustedRootThumbprint -InstallReturnUrl $returnUri.AbsoluteUri
 } finally {
     $resolved = [IO.Path]::GetFullPath($stage)
     if (-not [string]::Equals([IO.Path]::GetDirectoryName($resolved), [IO.Path]::GetFullPath($productDirectory), [StringComparison]::OrdinalIgnoreCase) -or [IO.Path]::GetFileName($resolved) -notlike '.agent-bootstrap-*') {

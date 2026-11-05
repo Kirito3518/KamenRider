@@ -11,6 +11,7 @@ try {
     [IO.File]::WriteAllText((Join-Path $agentDirectory 'Agent.exe'), 'test fixture')
 
     $installerSource = [IO.File]::ReadAllText((Join-Path $package 'Install-AgentPackage.ps1'))
+    if (-not $installerSource.Contains('Get-AgentEnrollmentWaitState -ServiceStatus $service.Status.ToString()')) { throw 'Installer must inspect Windows service state throughout the enrollment receipt wait.' }
     $shouldProcessPosition = $installerSource.IndexOf('$PSCmdlet.ShouldProcess', [StringComparison]::Ordinal)
     $firstMutationPosition = $installerSource.IndexOf('New-Item -ItemType Directory', [StringComparison]::Ordinal)
     if ($shouldProcessPosition -lt 0 -or $firstMutationPosition -lt 0 -or $shouldProcessPosition -gt $firstMutationPosition) {
@@ -38,6 +39,12 @@ try {
     $plan = & $installer -ControllerUrl 'https://localhost:7443' -TrustedRootThumbprint ('A' * 40) `
         -NetworkAdapterId $adapterId -InstallReturnUrl 'http://localhost:3000/admin/machines' -Plan
 
+    $memoryInstaller = [ScriptBlock]::Create($installerSource)
+    $memoryPlan = & $memoryInstaller -PackageRoot $package -ControllerUrl 'https://localhost:7443' `
+        -TrustedRootThumbprint ('A' * 40) -NetworkAdapterId $adapterId `
+        -InstallReturnUrl 'http://localhost:3000/admin/machines' -Plan
+    if ($memoryPlan.InstallDirectory -ne $plan.InstallDirectory) { throw 'In-memory installer did not honor its explicit PackageRoot.' }
+
     if ($plan.ControllerUrl -ne 'https://localhost:7443/') { throw 'Controller URL must be normalized as an HTTPS origin.' }
     if ($plan.NetworkAdapterId -ne $adapterId) { throw 'Explicit network adapter selection was not preserved.' }
     if ($plan.MoonlightPort -ne 47989 -or $plan.SunshinePort -ne 47990) { throw 'Initial stream ports are incorrect.' }
@@ -47,6 +54,9 @@ try {
     }
     if ($plan.ServiceStartup -ne 'auto' -or -not $plan.StartAfterInstall) { throw 'Agent service must start automatically after installation.' }
     if ($plan.EnrollmentWaitSeconds -ne 90) { throw 'Enrollment wait must be bounded at 90 seconds.' }
+    if ((Get-AgentEnrollmentWaitState -ServiceStatus 'Stopped') -ne 'stopped') { throw 'Enrollment wait must fail if the service stops.' }
+    if ((Get-AgentEnrollmentWaitState -ServiceStatus 'Running' -ReceiptStatus ([pscustomobject]@{ State = 'enrolled' })) -ne 'enrolled') { throw 'Enrollment wait must recognize an enrolled receipt while the service is running.' }
+    if ((Get-AgentEnrollmentWaitState -ServiceStatus 'Running') -ne 'pending') { throw 'Enrollment wait must remain pending while the service is running without a receipt.' }
     if ($plan.InstallReturnUrl -ne 'http://localhost:3000/admin/machines') { throw 'Validated return URL was not preserved.' }
     if ($plan.ConfigurationStagingParent -ne $plan.InstallDirectory) { throw 'Configuration staging must stay inside the protected Agent installation directory.' }
     if (Test-Path -LiteralPath $plan.DataDirectory) { throw 'Plan mode created the data directory.' }
@@ -65,6 +75,7 @@ try {
         @{ ControllerUrl = 'https://localhost:7443'; ReturnUrl = 'https://localhost:3000/admin/machines?x=1'; AdapterId = $adapterId },
         @{ ControllerUrl = 'https://localhost:7443'; ReturnUrl = 'https://localhost:3000/admin/machines#setup'; AdapterId = $adapterId },
         @{ ControllerUrl = 'https://localhost:7443'; ReturnUrl = 'http://192.168.1.10:3000/admin/machines'; AdapterId = $adapterId },
+        @{ ControllerUrl = 'https://localhost:7443'; ReturnUrl = 'http://shop.localhost:3000/admin/machines'; AdapterId = $adapterId },
         @{ ControllerUrl = 'https://localhost:7443'; ReturnUrl = 'https://localhost:3000/admin/machines'; AdapterId = 'not-a-guid' }
     )
     foreach ($case in $invalidCases) {

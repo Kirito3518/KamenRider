@@ -6,10 +6,14 @@ param(
     [ValidateRange(1, 65535)][int]$SunshinePort = 47990,
     [string]$NetworkAdapterId,
     [string]$InstallReturnUrl,
+    [string]$PackageRoot,
     [switch]$Plan
 )
 
 $ErrorActionPreference = 'Stop'
+$effectivePackageRoot = if ([string]::IsNullOrWhiteSpace($PackageRoot)) { $PSScriptRoot } else { $PackageRoot }
+if ([string]::IsNullOrWhiteSpace($effectivePackageRoot) -or -not [IO.Path]::IsPathRooted($effectivePackageRoot)) { throw 'PackageRoot must identify the absolute Agent package directory.' }
+$effectivePackageRoot = [IO.Path]::GetFullPath($effectivePackageRoot)
 
 try { $controller = [Uri]::new($ControllerUrl, [UriKind]::Absolute) }
 catch { throw 'ControllerUrl must be an absolute HTTPS origin.' }
@@ -35,8 +39,8 @@ if (-not [string]::IsNullOrWhiteSpace($NetworkAdapterId)) {
     catch { throw 'NetworkAdapterId must be a network interface GUID.' }
 }
 
-$sourceDirectory = Join-Path $PSScriptRoot 'Agent'
-$serviceInstaller = Join-Path $PSScriptRoot 'Install-Service.ps1'
+$sourceDirectory = Join-Path $effectivePackageRoot 'Agent'
+$serviceInstaller = Join-Path $effectivePackageRoot 'Install-Service.ps1'
 if (-not (Test-Path -LiteralPath (Join-Path $sourceDirectory 'Agent.exe') -PathType Leaf)) { throw 'Agent.exe is missing from the package.' }
 if (-not (Test-Path -LiteralPath $serviceInstaller -PathType Leaf)) { throw 'Install-Service.ps1 is missing from the package.' }
 
@@ -73,7 +77,7 @@ if ($env:OS -ne 'Windows_NT') { throw 'Windows is required.' }
 if (-not ([Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     throw 'Run installation from an elevated PowerShell session.'
 }
-. (Join-Path $PSScriptRoot 'PrivateInstallFiles.ps1')
+. ([ScriptBlock]::Create([IO.File]::ReadAllText((Join-Path $effectivePackageRoot 'PrivateInstallFiles.ps1'))))
 
 $dotnetInterfaces = [Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces()
 $adapterCandidates = @(
@@ -106,7 +110,7 @@ $dataParentCreatedByThisRun = $false
 $publishParentExisted = Test-Path -LiteralPath $publishParent
 $publishParentCreatedByThisRun = $false
 
-$serviceSid = ([Security.Principal.NTAccount]::new($serviceAccount)).Translate([Security.Principal.SecurityIdentifier])
+$serviceSid = Get-ServiceSid -ServiceName $serviceName
 
 Assert-TrustedInstallParent $publishParent
 Assert-TrustedInstallParent $dataDirectory -ServiceSid $serviceSid
@@ -159,21 +163,27 @@ try {
         -MoonlightPort $MoonlightPort -SunshinePort $SunshinePort -NetworkAdapterId $normalizedAdapterId
     [IO.File]::WriteAllText($configSource, $configuration, [Text.UTF8Encoding]::new($false))
 
-    $serviceInstaller = Join-Path $PSScriptRoot 'Install-Service.ps1'
-    & $serviceInstaller -Role Agent -PublishDirectory $installDirectory -DataDirectory $dataDirectory `
+    $serviceInstallerBlock = [ScriptBlock]::Create([IO.File]::ReadAllText($serviceInstaller))
+    & $serviceInstallerBlock -Role Agent -PublishDirectory $installDirectory -DataDirectory $dataDirectory `
+        -InstallScriptRoot $effectivePackageRoot `
         -ConfigurationFile $configSource -TrustedRootThumbprint $TrustedRootThumbprint -StartAfterInstall
 
     $receiptPath = Join-Path $dataDirectory 'enrollment-receipt.json'
     $timer = [Diagnostics.Stopwatch]::StartNew()
     $receiptStatus = $null
     while ($timer.Elapsed.TotalSeconds -lt 90) {
+        $candidateStatus = $null
         if (Test-Path -LiteralPath $receiptPath -PathType Leaf) {
             try {
                 $candidate = [IO.File]::ReadAllText($receiptPath) | ConvertFrom-Json -ErrorAction Stop
                 $candidateStatus = Get-AgentEnrollmentStatus -Receipt $candidate
-                if ($candidateStatus.State -eq 'enrolled') { $receiptStatus = $candidateStatus; break }
             } catch { }
         }
+        $service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+        if (-not $service) { throw 'Agent service disappeared while waiting for its enrollment receipt.' }
+        $waitState = Get-AgentEnrollmentWaitState -ServiceStatus $service.Status.ToString() -ReceiptStatus $candidateStatus
+        if ($waitState -eq 'stopped') { throw 'Agent service stopped while waiting for its enrollment receipt; installation did not complete.' }
+        if ($waitState -eq 'enrolled') { $receiptStatus = $candidateStatus; break }
         $remaining = 90 - $timer.Elapsed.TotalSeconds
         if ($remaining -gt 0) { Start-Sleep -Milliseconds ([int][Math]::Min(2000, [Math]::Ceiling($remaining * 1000))) }
     }

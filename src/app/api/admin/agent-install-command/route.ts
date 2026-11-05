@@ -5,7 +5,7 @@ import { getAuth } from "@/lib/auth";
 
 function isLoopback(hostname: string) {
   const host = hostname.replace(/^\[(.*)\]$/, "$1").toLowerCase();
-  if (host === "localhost" || host.endsWith(".localhost") || host === "::1") return true;
+  if (host === "localhost" || host === "::1") return true;
   const octets = host.split(".").map(Number);
   return octets.length === 4 && octets[0] === 127 && octets.every((part) => Number.isInteger(part) && part >= 0 && part <= 255);
 }
@@ -28,7 +28,7 @@ export async function GET(request: Request) {
   if (!session) return Response.json({ error: "Authentication required" }, { status: 401, headers: { "Cache-Control": "no-store" } });
   if (session.user.role !== "admin") return Response.json({ error: "Forbidden" }, { status: 403, headers: { "Cache-Control": "no-store" } });
 
-  const base = allowedUrl(process.env.AGENT_INSTALL_BASE_URL || process.env.BETTER_AUTH_URL, true);
+  const base = allowedUrl(process.env.AGENT_INSTALL_BASE_URL, true);
   const packageUrl = allowedUrl(process.env.AGENT_PACKAGE_URL);
   const controllerUrl = allowedUrl(process.env.AGENT_CONTROLLER_URL, true);
   const packageHash = process.env.AGENT_PACKAGE_SHA256?.toUpperCase();

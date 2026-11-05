@@ -24,6 +24,7 @@ if(-not $PSCmdlet.ShouldProcess($archive,"Publish self-contained Agent package f
 $tempRoot=[IO.Path]::GetTempPath()
 $stage=Join-Path $tempRoot ('kr-agent-package-'+[guid]::NewGuid().ToString('N'))
 $outputTemp=$null
+$outputBackup=$null
 try {
  $publishRoot=Join-Path $stage 'publish'
  $packageRoot=Join-Path $stage 'package'
@@ -34,7 +35,12 @@ try {
  $publishedAgent=Join-Path $publishRoot 'Agent'
  if(-not (Test-Path -LiteralPath (Join-Path $publishedAgent 'Agent.exe') -PathType Leaf)){throw 'Published Agent.exe is missing.'}
  New-Item -ItemType Directory -Path $packageRoot | Out-Null
- Copy-Item -LiteralPath $publishedAgent -Destination (Join-Path $packageRoot 'Agent') -Recurse
+ $packageAgent=Join-Path $packageRoot 'Agent'
+ New-Item -ItemType Directory -Path $packageAgent | Out-Null
+ foreach($item in @(Get-ChildItem -LiteralPath $publishedAgent -Force)){
+  if(-not $item.PSIsContainer -and $item.Name -ieq 'appsettings.json'){continue}
+  Copy-Item -LiteralPath $item.FullName -Destination $packageAgent -Recurse
+ }
  foreach($name in $scriptNames){Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination (Join-Path $packageRoot $name)}
  Add-Type -AssemblyName System.IO.Compression
  Add-Type -AssemblyName System.IO.Compression.FileSystem
@@ -50,13 +56,22 @@ try {
  $null=New-Item -ItemType Directory -Path $OutputDirectory -Force
  $outputTemp=Join-Path $OutputDirectory ('.AgentPackage-'+[guid]::NewGuid().ToString('N')+'.tmp')
  [IO.File]::Copy($stagedArchive,$outputTemp,$false)
- if(Test-Path -LiteralPath $archive){[IO.File]::Replace($outputTemp,$archive,$null)}else{[IO.File]::Move($outputTemp,$archive)}
- $outputTemp=$null
+ if(Test-Path -LiteralPath $archive){
+  $outputBackup=Join-Path $OutputDirectory ('.AgentPackage-'+[guid]::NewGuid().ToString('N')+'.bak')
+  [IO.File]::Replace($outputTemp,$archive,$outputBackup)
+  $outputTemp=$null
+  [IO.File]::Delete($outputBackup)
+  $outputBackup=$null
+ }else{
+  [IO.File]::Move($outputTemp,$archive)
+  $outputTemp=$null
+ }
  $hash=(Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToUpperInvariant()
  [IO.File]::WriteAllText($hashFile,$hash+[Environment]::NewLine,[Text.Encoding]::ASCII)
  [pscustomobject]@{PackagePath=$archive;Sha256=$hash;HashFilePath=$hashFile;Runtime=$Runtime}
 } finally {
  if($outputTemp -and (Test-Path -LiteralPath $outputTemp)){Remove-Item -LiteralPath $outputTemp -Force}
+ if($outputBackup -and (Test-Path -LiteralPath $outputBackup)){Remove-Item -LiteralPath $outputBackup -Force}
  $resolved=[IO.Path]::GetFullPath($stage)
  $temp=[IO.Path]::GetFullPath($tempRoot).TrimEnd('\')+'\'
  if(-not $resolved.StartsWith($temp,[StringComparison]::OrdinalIgnoreCase) -or [IO.Path]::GetFileName($resolved) -notlike 'kr-agent-package-*'){throw 'Unsafe package staging cleanup path.'}

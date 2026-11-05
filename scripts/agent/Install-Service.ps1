@@ -5,6 +5,7 @@ param(
     [Parameter(Mandatory)][string]$DataDirectory,
     [Parameter(Mandatory)][string]$ConfigurationFile,
     [Parameter(Mandatory)][ValidatePattern('^[A-Fa-f0-9]{40}$')][string]$TrustedRootThumbprint,
+    [string]$InstallScriptRoot,
     [switch]$StartAfterInstall,
     [switch]$Plan
 )
@@ -32,14 +33,19 @@ if ($Plan) {
     return
 }
 
+if ($Role -eq 'Controller') { throw 'Controller service installation is not enabled until separately reviewed.' }
+
 if ($env:OS -ne 'Windows_NT') { throw 'Windows is required.' }
 if (-not ([Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     throw 'Run service installation from an elevated PowerShell session.'
 }
 
-. (Join-Path $PSScriptRoot 'PrivateInstallFiles.ps1')
-. (Join-Path $PSScriptRoot 'ServiceInstallTransaction.ps1')
-$serviceSid = ([Security.Principal.NTAccount]::new($account)).Translate([Security.Principal.SecurityIdentifier])
+$scriptRoot = if ([string]::IsNullOrWhiteSpace($InstallScriptRoot)) { $PSScriptRoot } else { $InstallScriptRoot }
+if ([string]::IsNullOrWhiteSpace($scriptRoot) -or -not [IO.Path]::IsPathRooted($scriptRoot)) { throw 'InstallScriptRoot must identify the absolute Agent package directory.' }
+$scriptRoot = [IO.Path]::GetFullPath($scriptRoot)
+. ([ScriptBlock]::Create([IO.File]::ReadAllText((Join-Path $scriptRoot 'PrivateInstallFiles.ps1'))))
+. ([ScriptBlock]::Create([IO.File]::ReadAllText((Join-Path $scriptRoot 'ServiceInstallTransaction.ps1'))))
+$serviceSid = Get-ServiceSid -ServiceName $serviceName
 Assert-TrustedInstallParent $PublishDirectory
 Assert-TrustedInstallParent $DataDirectory -ServiceSid $serviceSid
 Assert-TrustedInstallParent $ConfigurationFile
@@ -49,7 +55,7 @@ if (-not (Test-Path -LiteralPath $ConfigurationFile -PathType Leaf)) { throw 'Pr
 if (Test-Path -LiteralPath (Join-Path $PublishDirectory 'appsettings.json')) { throw 'Service configuration already exists; reviewed upgrade or repair is required.' }
 Assert-TrustedPublishTree $PublishDirectory
 Assert-TrustedInstallFile $executable
-Assert-TrustedInstallFile $ConfigurationFile -ServiceSid ([Security.Principal.NTAccount]::new($account).Translate([Security.Principal.SecurityIdentifier])) -Private
+Assert-TrustedInstallFile $ConfigurationFile -ServiceSid $serviceSid -Private
 if (-not (Test-Path -LiteralPath "Cert:\LocalMachine\Root\$TrustedRootThumbprint")) {
     throw 'Provision and verify the certificate trust chain before installation.'
 }
@@ -57,13 +63,13 @@ Assert-ServiceIsAbsent $serviceName
 
 if (-not $PSCmdlet.ShouldProcess($serviceName, 'Create service, secure configuration and data, and configure startup')) { return }
 
-$binaryPath = '"' + $executable + '" --contentRoot "' + $PublishDirectory + '"'
+$binaryPath = Get-ServiceBinaryPath -Executable $executable -ContentRoot $PublishDirectory
 $dataDirectoryCreatedByThisRun = $false
 Invoke-ServiceInstallTransaction -Create {
-    & sc.exe create $serviceName binPath= $binaryPath start= disabled obj= $account | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw 'Service creation failed; ownership of any partially created service could not be confirmed.' }
+    New-DisabledWindowsService -ServiceName $serviceName -BinaryPath $binaryPath -Account $account
     return $true
 } -Configure {
+    Assert-ServiceSidMatchesVirtualAccount -ServiceName $serviceName -ExpectedSid $serviceSid
     $dataDirectoryCreatedByThisRun = Initialize-PrivateDataDirectory $DataDirectory $serviceSid
     Publish-PrivateConfiguration $ConfigurationFile $PublishDirectory $serviceSid
     & sc.exe failure $serviceName reset= 86400 actions= restart/5000/restart/15000/restart/60000 | Out-Null

@@ -4,6 +4,7 @@ $bootstrapText = [IO.File]::ReadAllText($bootstrap)
 if ($bootstrapText -match '\$IsWindows') { throw 'Bootstrap must not depend on the PowerShell 7-only IsWindows variable.' }
 if (-not $bootstrapText.Contains('Invoke-WebRequest -UseBasicParsing')) { throw 'Bootstrap downloads must support Windows PowerShell 5.1.' }
 if ($bootstrapText -match 'GetTempPath|\$env:TEMP') { throw 'Privileged bootstrap content must not be staged under a shared temporary directory.' }
+if (-not $bootstrapText.Contains('[ScriptBlock]::Create([IO.File]::ReadAllText($installer))') -or -not $bootstrapText.Contains('-PackageRoot $expanded')) { throw 'Bootstrap must invoke the hash-verified package installer in memory with its explicit package root.' }
 
 $root = Join-Path ([IO.Path]::GetTempPath()) ('kr-bootstrap-plan-' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $root | Out-Null
@@ -40,7 +41,9 @@ try {
         @{ Controller = 'https://localhost:7443'; Package = 'http://192.168.1.20:3000/AgentPackage.zip'; Return = $returnUrl },
         @{ Controller = 'https://localhost:7443'; Package = 'https://user@packages.example/AgentPackage.zip'; Return = $returnUrl },
         @{ Controller = 'https://localhost:7443'; Package = 'https://packages.example/AgentPackage.zip?token=x'; Return = $returnUrl },
+        @{ Controller = 'https://localhost:7443'; Package = 'http://shop.localhost:3000/AgentPackage.zip'; Return = $returnUrl },
         @{ Controller = 'https://localhost:7443'; Package = $packageUrl; Return = 'http://192.168.1.20:3000/admin/machines' },
+        @{ Controller = 'https://localhost:7443'; Package = $packageUrl; Return = 'http://shop.localhost:3000/admin/machines' },
         @{ Controller = 'https://localhost:7443'; Package = $packageUrl; Return = 'http://localhost:3000/admin/machines?token=x' },
         @{ Controller = 'https://localhost:7443'; Package = $packageUrl; Return = 'https://localhost:3000/admin/machines#setup' }
     )
