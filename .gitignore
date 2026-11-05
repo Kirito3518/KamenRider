@@ -53,6 +53,8 @@ next-env.d.ts
 # .NET service outputs and machine-local configuration
 **/bin/
 **/obj/
+public/agent/AgentPackage.zip
+public/agent/AgentPackage.sha256
 services/**/appsettings.Local.json
 services/**/secrets/
 services/**/data/
