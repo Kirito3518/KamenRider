@@ -92,18 +92,18 @@
 **Files:**
 - Create: services/Agent/Sunshine/WindowsStreamIngressPolicy.cs
 - Create: services/Agent/Sunshine/WindowsSunshineServiceControl.cs
-- Create: services/Agent.Tests/WindowsStreamIngressPolicyTests.cs
+- Create: services/Agent.Tests/WindowsStreamAdaptersTests.cs
 - Modify: services/Agent/Program.cs
 
 **Interfaces:**
 - Consumes: exact Sunshine executable path and service name discovered from the installed Windows service.
 - Produces: providers that verify all firewall profiles are enabled, create/validate a program-scoped all-profile block rule, control only SunshineService, and report success only from verified firewall and SCM state.
 
-- [ ] Add Windows-only adapter tests for exact rule shape, conflicting rule rejection, profile-policy failure, quoted service path parsing, missing service, start/stop timeout, and wrong service image rejection.
-- [ ] Run the adapter tests and observe the absent Windows providers fail to compile.
-- [ ] Implement Windows COM/SCM providers with injectable boundaries and no mutation during construction or plan checks.
-- [ ] Run all Agent.Tests on Windows and inspect firewall/service state read-only to prove tests created no host changes.
-- [ ] Commit as feat(agent): add Windows stream gate providers.
+- [x] Add Windows-only adapter tests for exact rule shape, conflicting rule rejection, profile-policy failure, quoted service path parsing, missing service, start/stop timeout, and wrong service image rejection.
+- [x] Run the adapter tests and observe the absent Windows providers fail to compile.
+- [x] Implement Windows COM/SCM providers with injectable boundaries and no mutation during construction or plan checks.
+- [x] Run all Agent.Tests on Windows and inspect firewall/service state read-only to prove tests created no host changes.
+- [x] Commit as feat(agent): add Windows stream gate providers.
 
 ### Task 5: Install the guard and default-closed policy transactionally
 

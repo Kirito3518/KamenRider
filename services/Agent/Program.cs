@@ -48,8 +48,23 @@ public static class StreamGuardHost
         builder.Services.AddWindowsService(options => options.ServiceName = "KamenRaider Stream Guard");
         builder.Services.AddSingleton(TimeProvider.System);
         builder.Services.AddSingleton<KamenRaider.Agent.Leases.IBootClock,KamenRaider.Agent.Leases.WindowsBootClock>();
-        builder.Services.TryAddSingleton<KamenRaider.Agent.Sunshine.IStreamIngressPolicy,UnavailableStreamIngressPolicy>();
-        builder.Services.TryAddSingleton<KamenRaider.Agent.Sunshine.ISunshineServiceControl,UnavailableSunshineServiceControl>();
+        builder.Services.TryAddSingleton<KamenRaider.Agent.Sunshine.IWindowsServiceApi>(_ =>
+        {
+            if (!OperatingSystem.IsWindows())
+                throw new PlatformNotSupportedException("The Stream Guard service requires Windows.");
+            return new KamenRaider.Agent.Sunshine.WindowsServiceApi();
+        });
+        builder.Services.TryAddSingleton<KamenRaider.Agent.Sunshine.SunshineServiceInstallation>(sp =>
+            new KamenRaider.Agent.Sunshine.WindowsSunshineInstallationDiscovery(
+                sp.GetRequiredService<KamenRaider.Agent.Sunshine.IWindowsServiceApi>()).Discover());
+        builder.Services.TryAddSingleton<KamenRaider.Agent.Sunshine.IWindowsFirewallApi>(_ =>
+        {
+            if (!OperatingSystem.IsWindows())
+                throw new PlatformNotSupportedException("The Stream Guard firewall provider requires Windows.");
+            return new KamenRaider.Agent.Sunshine.WindowsFirewallComApi();
+        });
+        builder.Services.TryAddSingleton<KamenRaider.Agent.Sunshine.IStreamIngressPolicy,KamenRaider.Agent.Sunshine.WindowsStreamIngressPolicy>();
+        builder.Services.TryAddSingleton<KamenRaider.Agent.Sunshine.ISunshineServiceControl,KamenRaider.Agent.Sunshine.WindowsSunshineServiceControl>();
         builder.Services.AddSingleton<KamenRaider.Agent.Sunshine.StreamGateCoordinator>();
         builder.Services.AddSingleton<KamenRaider.Agent.Leases.IStreamGate>(sp => sp.GetRequiredService<KamenRaider.Agent.Sunshine.StreamGateCoordinator>());
         builder.Services.TryAddSingleton<KamenRaider.Agent.Sunshine.IStreamGuardPipeServerFactory>(_ =>
@@ -64,20 +79,6 @@ public static class StreamGuardHost
         return builder.Build();
     }
 
-    private sealed class UnavailableStreamIngressPolicy : KamenRaider.Agent.Sunshine.IStreamIngressPolicy
-    {
-        private static Task Unavailable() => Task.FromException(new InvalidOperationException("Windows Sunshine firewall provider is not configured."));
-        public Task SetBlockedAsync(bool blocked, CancellationToken cancellationToken) => Unavailable();
-        public Task<bool> IsBlockedAsync(CancellationToken cancellationToken) => Task.FromException<bool>(new InvalidOperationException("Windows Sunshine firewall provider is not configured."));
-    }
-
-    private sealed class UnavailableSunshineServiceControl : KamenRaider.Agent.Sunshine.ISunshineServiceControl
-    {
-        private static Task Unavailable() => Task.FromException(new InvalidOperationException("Windows Sunshine service provider is not configured."));
-        public Task StartAndWaitAsync(CancellationToken cancellationToken) => Unavailable();
-        public Task StopAndWaitAsync(CancellationToken cancellationToken) => Unavailable();
-        public Task<bool> IsRunningAsync(CancellationToken cancellationToken) => Task.FromException<bool>(new InvalidOperationException("Windows Sunshine service provider is not configured."));
-    }
 }
 
 public class Program

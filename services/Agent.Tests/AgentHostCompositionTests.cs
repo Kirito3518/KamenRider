@@ -28,13 +28,23 @@ public class AgentHostCompositionTests
     }
 
     [Fact]
-    public async Task StreamGuardHostOwnsCoordinatorAndFailsClosedWithoutWindowsProviders()
+    public async Task StreamGuardHostOwnsCoordinatorAndHonorsInjectedProviders()
     {
-        using var host = KamenRaider.Agent.StreamGuardHost.Build([]);
+        var ingress = new TestIngressPolicy();
+        var sunshine = new TestSunshineServiceControl();
+        using var host = KamenRaider.Agent.StreamGuardHost.Build([], builder =>
+        {
+            builder.Services.AddSingleton<KamenRaider.Agent.Sunshine.IStreamIngressPolicy>(ingress);
+            builder.Services.AddSingleton<KamenRaider.Agent.Sunshine.ISunshineServiceControl>(sunshine);
+        });
         var coordinator = host.Services.GetRequiredService<KamenRaider.Agent.Sunshine.StreamGateCoordinator>();
 
         Assert.Same(coordinator, host.Services.GetRequiredService<KamenRaider.Agent.Leases.IStreamGate>());
-        await Assert.ThrowsAsync<AggregateException>(() => coordinator.BlockAsync(default));
+        await coordinator.BlockAsync(default);
+        Assert.True(ingress.Blocked);
+        Assert.False(sunshine.Running);
+        Assert.Equal(1, ingress.BlockCalls);
+        Assert.Equal(1, sunshine.StopCalls);
     }
 
     [Fact]
@@ -76,5 +86,41 @@ public class AgentHostCompositionTests
         public Task<bool> FenceAndClearAsync(ReconciliationChallenge challenge, CancellationToken ct) => Task.FromResult(false);
         public Task<bool> VerifyHealthAsync(ReconciliationChallenge challenge, CancellationToken ct) => Task.FromResult(false);
         public Task<bool> VerifyRuntimeHealthAsync(string bootId, long configurationRevision, CancellationToken ct) => Task.FromResult(false);
+    }
+
+    private sealed class TestIngressPolicy : KamenRaider.Agent.Sunshine.IStreamIngressPolicy
+    {
+        public bool Blocked { get; private set; }
+        public int BlockCalls { get; private set; }
+
+        public Task SetBlockedAsync(bool blocked, CancellationToken cancellationToken)
+        {
+            BlockCalls++;
+            Blocked = blocked;
+            return Task.CompletedTask;
+        }
+
+        public Task<bool> IsBlockedAsync(CancellationToken cancellationToken) => Task.FromResult(Blocked);
+    }
+
+    private sealed class TestSunshineServiceControl : KamenRaider.Agent.Sunshine.ISunshineServiceControl
+    {
+        public bool Running { get; private set; } = true;
+        public int StopCalls { get; private set; }
+
+        public Task StartAndWaitAsync(CancellationToken cancellationToken)
+        {
+            Running = true;
+            return Task.CompletedTask;
+        }
+
+        public Task StopAndWaitAsync(CancellationToken cancellationToken)
+        {
+            StopCalls++;
+            Running = false;
+            return Task.CompletedTask;
+        }
+
+        public Task<bool> IsRunningAsync(CancellationToken cancellationToken) => Task.FromResult(Running);
     }
 }
