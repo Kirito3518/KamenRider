@@ -43,7 +43,11 @@ public static class ControllerHost
             var agent = new Uri(settings.AgentUrl);
             builder.WebHost.ConfigureKestrel(server => {
                 server.Listen(IPAddress.Parse(local.Host), local.Port);
-                server.Listen(IPAddress.Any, agent.Port, endpoint => endpoint.UseHttps());
+                if (agent.Host.Equals("localhost", StringComparison.OrdinalIgnoreCase)
+                    || IPAddress.TryParse(agent.Host.Trim('[', ']'), out var agentAddress) && IPAddress.IsLoopback(agentAddress))
+                    server.ListenLocalhost(agent.Port, endpoint => endpoint.UseHttps());
+                else
+                    server.Listen(IPAddress.Any, agent.Port, endpoint => endpoint.UseHttps());
             });
         }
         builder.Services.AddSingleton<ControllerDatabase>(sp => new ControllerDatabase(sp.GetRequiredService<IOptions<ControllerOptions>>().Value.DatabasePath));
