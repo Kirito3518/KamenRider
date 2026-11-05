@@ -39,8 +39,9 @@ if (-not ([Security.Principal.WindowsPrincipal]::new([Security.Principal.Windows
 
 . (Join-Path $PSScriptRoot 'PrivateInstallFiles.ps1')
 . (Join-Path $PSScriptRoot 'ServiceInstallTransaction.ps1')
+$serviceSid = ([Security.Principal.NTAccount]::new($account)).Translate([Security.Principal.SecurityIdentifier])
 Assert-TrustedInstallParent $PublishDirectory
-Assert-TrustedInstallParent $DataDirectory
+Assert-TrustedInstallParent $DataDirectory -ServiceSid $serviceSid
 Assert-TrustedInstallParent $ConfigurationFile
 Assert-EmptyInstallDirectory $DataDirectory
 if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) { throw 'Publish executable is missing.' }
@@ -48,7 +49,7 @@ if (-not (Test-Path -LiteralPath $ConfigurationFile -PathType Leaf)) { throw 'Pr
 if (Test-Path -LiteralPath (Join-Path $PublishDirectory 'appsettings.json')) { throw 'Service configuration already exists; reviewed upgrade or repair is required.' }
 Assert-TrustedPublishTree $PublishDirectory
 Assert-TrustedInstallFile $executable
-Assert-TrustedInstallFile $ConfigurationFile -Private
+Assert-TrustedInstallFile $ConfigurationFile -ServiceSid ([Security.Principal.NTAccount]::new($account).Translate([Security.Principal.SecurityIdentifier])) -Private
 if (-not (Test-Path -LiteralPath "Cert:\LocalMachine\Root\$TrustedRootThumbprint")) {
     throw 'Provision and verify the certificate trust chain before installation.'
 }
@@ -57,13 +58,13 @@ Assert-ServiceIsAbsent $serviceName
 if (-not $PSCmdlet.ShouldProcess($serviceName, 'Create service, secure configuration and data, and configure startup')) { return }
 
 $binaryPath = '"' + $executable + '" --contentRoot "' + $PublishDirectory + '"'
+$dataDirectoryCreatedByThisRun = $false
 Invoke-ServiceInstallTransaction -Create {
     & sc.exe create $serviceName binPath= $binaryPath start= disabled obj= $account | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'Service creation failed; ownership of any partially created service could not be confirmed.' }
     return $true
 } -Configure {
-    $serviceSid = ([Security.Principal.NTAccount]::new($account)).Translate([Security.Principal.SecurityIdentifier])
-    Initialize-PrivateDataDirectory $DataDirectory $serviceSid
+    $dataDirectoryCreatedByThisRun = Initialize-PrivateDataDirectory $DataDirectory $serviceSid
     Publish-PrivateConfiguration $ConfigurationFile $PublishDirectory $serviceSid
     & sc.exe failure $serviceName reset= 86400 actions= restart/5000/restart/15000/restart/60000 | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'Recovery configuration failed.' }
@@ -94,6 +95,9 @@ Invoke-ServiceInstallTransaction -Create {
         }
         & sc.exe delete $serviceName | Out-Null
         if ($LASTEXITCODE -ne 0) { throw 'Unable to remove the service created by this installation.' }
+    }
+    if ($dataDirectoryCreatedByThisRun -and (Test-Path -LiteralPath $DataDirectory) -and @(Get-ChildItem -LiteralPath $DataDirectory -Force).Count -eq 0) {
+        [IO.Directory]::Delete([IO.Path]::GetFullPath($DataDirectory), $false)
     }
 }
 

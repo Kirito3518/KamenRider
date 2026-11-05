@@ -1,6 +1,25 @@
 $ErrorActionPreference='Stop'
 . (Join-Path $PSScriptRoot 'PrivateInstallFiles.ps1')
 . (Join-Path $PSScriptRoot 'ServiceInstallTransaction.ps1')
+Assert-TrustedInstallParent $env:ProgramFiles
+Assert-TrustedInstallParent $env:ProgramData
+$temporaryParentRejected=$false
+try { Assert-TrustedInstallParent $env:TEMP } catch { $temporaryParentRejected=$true }
+if(-not $temporaryParentRejected){throw 'Shared TEMP directories must remain rejected as privileged installation ancestors.'}
+$usersSid=[Security.Principal.SecurityIdentifier]::new('S-1-5-32-545')
+$programDataAcl=[Security.AccessControl.DirectorySecurity]::new()
+$programDataAcl.SetOwner([Security.Principal.SecurityIdentifier]::new('S-1-5-18'))
+$programDataAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($usersSid,[Security.AccessControl.FileSystemRights]::Write,[Security.AccessControl.InheritanceFlags]::ContainerInherit,[Security.AccessControl.PropagationFlags]::None,[Security.AccessControl.AccessControlType]::Allow))
+if(-not (Test-TrustedProgramDataRootAcl $programDataAcl)){throw 'ProgramData exception should accept the exact standard Users child-creation ACE.'}
+$programDataAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($usersSid,[Security.AccessControl.FileSystemRights]::FullControl,[Security.AccessControl.AccessControlType]::Allow))
+if(Test-TrustedProgramDataRootAcl $programDataAcl){throw 'ProgramData exception must reject any additional writable Users ACE.'}
+$driveRootAcl=Get-Acl -LiteralPath ([IO.Path]::GetPathRoot($env:SystemRoot))
+if(-not (Test-TrustedSystemRootAcl $driveRootAcl)){throw 'System root exception should accept the standard protected Windows root ACL.'}
+$authUsersSid=[Security.Principal.SecurityIdentifier]::new('S-1-5-11')
+$unsafeDriveRootAcl=[Security.AccessControl.DirectorySecurity]::new()
+$unsafeDriveRootAcl.SetSecurityDescriptorSddlForm($driveRootAcl.GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]::Owner -bor [Security.AccessControl.AccessControlSections]::Group -bor [Security.AccessControl.AccessControlSections]::Access))
+$unsafeDriveRootAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($authUsersSid,[Security.AccessControl.FileSystemRights]::FullControl,[Security.AccessControl.AccessControlType]::Allow))
+if(Test-TrustedSystemRootAcl $unsafeDriveRootAcl){throw 'System root exception must reject any additional writable Authenticated Users ACE.'}
 function Get-Service {
  param([string]$Name,[string]$ErrorAction)
  if($Name -eq 'KamenRaider Agent'){return [pscustomobject]@{Name=$Name}}

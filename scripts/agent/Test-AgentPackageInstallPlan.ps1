@@ -48,6 +48,7 @@ try {
     if ($plan.ServiceStartup -ne 'auto' -or -not $plan.StartAfterInstall) { throw 'Agent service must start automatically after installation.' }
     if ($plan.EnrollmentWaitSeconds -ne 90) { throw 'Enrollment wait must be bounded at 90 seconds.' }
     if ($plan.InstallReturnUrl -ne 'http://localhost:3000/admin/machines') { throw 'Validated return URL was not preserved.' }
+    if ($plan.ConfigurationStagingParent -ne $plan.InstallDirectory) { throw 'Configuration staging must stay inside the protected Agent installation directory.' }
     if (Test-Path -LiteralPath $plan.DataDirectory) { throw 'Plan mode created the data directory.' }
     if (Test-Path -LiteralPath (Join-Path $plan.InstallDirectory 'appsettings.json')) { throw 'Plan mode published configuration.' }
 

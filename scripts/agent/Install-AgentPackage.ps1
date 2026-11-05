@@ -48,6 +48,7 @@ if ($Plan) {
         PublishDirectory = $installDirectory
         InstallDirectory = $installDirectory
         DataDirectory = $dataDirectory
+        ConfigurationStagingParent = $installDirectory
         MoonlightPort = $MoonlightPort
         SunshinePort = $SunshinePort
         NetworkAdapterId = $normalizedAdapterId
@@ -96,14 +97,19 @@ $normalizedAdapterId = Resolve-AgentNetworkAdapter -Candidates $adapterCandidate
 $serviceName = 'KamenRaider Agent'
 $serviceAccount = "NT SERVICE\$serviceName"
 $publishParent = Split-Path -Parent $installDirectory
-$dataExisted = Test-Path -LiteralPath $dataDirectory
-$dataCreatedByThisRun = -not $dataExisted
+$dataParent = Split-Path -Parent $dataDirectory
+$dataParentExisted = Test-Path -LiteralPath $dataParent
 $configStage = $null
 $publishStage = $null
 $publishMoved = $false
+$dataParentCreatedByThisRun = $false
+$publishParentExisted = Test-Path -LiteralPath $publishParent
+$publishParentCreatedByThisRun = $false
+
+$serviceSid = ([Security.Principal.NTAccount]::new($serviceAccount)).Translate([Security.Principal.SecurityIdentifier])
 
 Assert-TrustedInstallParent $publishParent
-Assert-TrustedInstallParent $dataDirectory
+Assert-TrustedInstallParent $dataDirectory -ServiceSid $serviceSid
 Assert-EmptyInstallDirectory $dataDirectory
 if (Test-Path -LiteralPath $installDirectory) { throw 'Agent installation directory already exists; reviewed upgrade or repair is required.' }
 Assert-ServiceIsAbsent $serviceName
@@ -112,16 +118,20 @@ if (-not (Test-Path -LiteralPath "Cert:\LocalMachine\Root\$TrustedRootThumbprint
     throw 'Provision and verify the certificate trust chain before installation.'
 }
 
-$serviceSid = ([Security.Principal.NTAccount]::new($serviceAccount)).Translate([Security.Principal.SecurityIdentifier])
-$parentExisted = Test-Path -LiteralPath $publishParent
-if (-not $parentExisted) {
-    New-Item -ItemType Directory -Path $publishParent -Force | Out-Null
-}
 $publishStage = Join-Path $publishParent ('.Agent-install-' + [Guid]::NewGuid().ToString('N'))
-$configStage = Join-Path ([IO.Path]::GetTempPath()) ('kr-agent-config-' + [Guid]::NewGuid().ToString('N'))
+$configStage = Join-Path $installDirectory ('.agent-config-' + [Guid]::NewGuid().ToString('N'))
 try {
-    New-Item -ItemType Directory -Path $publishStage | Out-Null
-    Set-PrivateInstallAcl $publishStage $serviceSid -Directory -ReadOnly
+    if (-not $dataParentExisted) {
+        New-PrivateInstallDirectory $dataParent $serviceSid -ReadOnly | Out-Null
+        $dataParentCreatedByThisRun = $true
+    } else {
+        Assert-TrustedInstallParent $dataParent -ServiceSid $serviceSid
+    }
+    if (-not $publishParentExisted) {
+        New-PrivateInstallDirectory $publishParent $serviceSid -ReadOnly | Out-Null
+        $publishParentCreatedByThisRun = $true
+    }
+    New-PrivateInstallDirectory $publishStage $serviceSid -ReadOnly | Out-Null
     $sourceRoot = [IO.Path]::GetFullPath($sourceDirectory).TrimEnd('\')
     foreach ($item in @(Get-ChildItem -LiteralPath $sourceRoot -Force -Recurse | Sort-Object { $_.FullName.Length })) {
         if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Agent package must not contain reparse points.' }
@@ -140,8 +150,7 @@ try {
     $publishStage = $null
     $publishMoved = $true
 
-    New-Item -ItemType Directory -Path $configStage | Out-Null
-    Set-PrivateInstallAcl $configStage $serviceSid -Directory
+    New-PrivateInstallDirectory $configStage $serviceSid -ReadOnly | Out-Null
     $configSource = Join-Path $configStage 'appsettings.json'
     $configFile = [IO.File]::Open($configSource, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
     $configFile.Dispose()
@@ -156,25 +165,24 @@ try {
 
     $receiptPath = Join-Path $dataDirectory 'enrollment-receipt.json'
     $timer = [Diagnostics.Stopwatch]::StartNew()
-    $receipt = $null
+    $receiptStatus = $null
     while ($timer.Elapsed.TotalSeconds -lt 90) {
         if (Test-Path -LiteralPath $receiptPath -PathType Leaf) {
             try {
                 $candidate = [IO.File]::ReadAllText($receiptPath) | ConvertFrom-Json -ErrorAction Stop
-                if ($candidate.MachineId -and $candidate.ApprovalStatus -in @('pending', 'approved') -and $candidate.PublicKeyFingerprint -match '^[A-Fa-f0-9]{64}$') {
-                    $receipt = $candidate
-                    break
-                }
+                $candidateStatus = Get-AgentEnrollmentStatus -Receipt $candidate
+                if ($candidateStatus.State -eq 'enrolled') { $receiptStatus = $candidateStatus; break }
             } catch { }
         }
         $remaining = 90 - $timer.Elapsed.TotalSeconds
         if ($remaining -gt 0) { Start-Sleep -Milliseconds ([int][Math]::Min(2000, [Math]::Ceiling($remaining * 1000))) }
     }
-    if ($receipt) {
-        Write-Output ('Enrollment received: MachineId={0}; Status={1}; Fingerprint={2}' -f $receipt.MachineId, $receipt.ApprovalStatus, $receipt.PublicKeyFingerprint)
+    if ($receiptStatus) {
+        Write-Output $receiptStatus.Message
         Write-Output 'The machine still requires administrator configuration and approval before it can be rented.'
     } else {
-        Write-Warning 'Enrollment receipt was not received within 90 seconds. The installed service remains running and will retry enrollment.'
+        $pendingStatus = Get-AgentEnrollmentStatus
+        Write-Warning $pendingStatus.Message
     }
     if ($returnUrlNormalized) {
         try { Start-Process -FilePath $returnUrlNormalized }
@@ -185,8 +193,7 @@ try {
     $original = $_
     if ($configStage -and (Test-Path -LiteralPath $configStage)) {
         $resolvedConfigStage = [IO.Path]::GetFullPath($configStage)
-        $tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\') + '\'
-        if (-not $resolvedConfigStage.StartsWith($tempRoot, [StringComparison]::OrdinalIgnoreCase) -or [IO.Path]::GetFileName($resolvedConfigStage) -notlike 'kr-agent-config-*') { throw 'Unsafe configuration staging cleanup path.' }
+        if (-not [string]::Equals([IO.Path]::GetDirectoryName($resolvedConfigStage),[IO.Path]::GetFullPath($installDirectory),[StringComparison]::OrdinalIgnoreCase) -or [IO.Path]::GetFileName($resolvedConfigStage) -notlike '.agent-config-*') { throw 'Unsafe configuration staging cleanup path.' }
         Remove-Item -LiteralPath $resolvedConfigStage -Recurse -Force
     }
     $serviceExists = [bool](Get-Service -Name $serviceName -ErrorAction SilentlyContinue)
@@ -194,9 +201,6 @@ try {
         $safeInstall = [IO.Path]::GetFullPath($installDirectory)
         $expectedInstall = [IO.Path]::GetFullPath((Join-Path $env:ProgramFiles 'KamenRaider\Agent'))
         if ($safeInstall -eq $expectedInstall) { Remove-Item -LiteralPath $safeInstall -Recurse -Force }
-    }
-    if ($dataCreatedByThisRun -and (Test-Path -LiteralPath $dataDirectory) -and @(Get-ChildItem -LiteralPath $dataDirectory -Force).Count -eq 0) {
-        Remove-Item -LiteralPath $dataDirectory -Force
     }
     throw $original
 } finally {
@@ -208,8 +212,13 @@ try {
     }
     if ($configStage -and (Test-Path -LiteralPath $configStage)) {
         $resolvedConfigStage = [IO.Path]::GetFullPath($configStage)
-        $tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\') + '\'
-        if (-not $resolvedConfigStage.StartsWith($tempRoot, [StringComparison]::OrdinalIgnoreCase) -or [IO.Path]::GetFileName($resolvedConfigStage) -notlike 'kr-agent-config-*') { throw 'Unsafe configuration staging cleanup path.' }
+        if (-not [string]::Equals([IO.Path]::GetDirectoryName($resolvedConfigStage),[IO.Path]::GetFullPath($installDirectory),[StringComparison]::OrdinalIgnoreCase) -or [IO.Path]::GetFileName($resolvedConfigStage) -notlike '.agent-config-*') { throw 'Unsafe configuration staging cleanup path.' }
         Remove-Item -LiteralPath $resolvedConfigStage -Recurse -Force
+    }
+    if ($publishParentCreatedByThisRun -and (Test-Path -LiteralPath $publishParent) -and @(Get-ChildItem -LiteralPath $publishParent -Force).Count -eq 0) {
+        Remove-Item -LiteralPath $publishParent -Force
+    }
+    if ($dataParentCreatedByThisRun -and (Test-Path -LiteralPath $dataParent) -and @(Get-ChildItem -LiteralPath $dataParent -Force).Count -eq 0) {
+        Remove-Item -LiteralPath $dataParent -Force
     }
 }

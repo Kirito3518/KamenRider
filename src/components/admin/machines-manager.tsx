@@ -16,6 +16,7 @@ export function MachinesManager() {
   const [machines, setMachines] = useState<Machine[]>([]);
   const [installCommand, setInstallCommand] = useState<string | null>(null);
   const [installStatus, setInstallStatus] = useState("กำลังตรวจชุดติดตั้ง…");
+  const [copyStatus, setCopyStatus] = useState("");
   const [trialLease, setTrialLease] = useState<Lease | null>(null);
   const [loadStatus, setLoadStatus] = useState("กำลังโหลด…");
   const [message, setMessage] = useState("");
@@ -66,11 +67,20 @@ export function MachinesManager() {
       .then((result: { available: boolean; command?: string; reason?: string }) => {
         if (!active) return;
         setInstallCommand(result.available ? result.command || null : null);
-        setInstallStatus(result.available ? "เปิด PowerShell แบบ Administrator บนเครื่องลูก แล้ววางคำสั่งนี้" : result.reason || "ชุดติดตั้งยังไม่พร้อม");
+        setInstallStatus(result.available ? "ชุดติดตั้งพร้อมใช้งาน" : result.reason || "ชุดติดตั้งยังไม่พร้อม");
       })
-      .catch((error) => { if (active) setInstallStatus(String(error)); });
+      .catch((error) => { if (active) setInstallStatus(`ตรวจชุดติดตั้งไม่ได้: ${String(error)}`); });
     return () => { active = false; };
   }, []);
+  async function copyInstallCommand() {
+    if (!installCommand) return;
+    try {
+      await navigator.clipboard.writeText(installCommand);
+      setCopyStatus("คัดลอกคำสั่งแล้ว");
+    } catch {
+      setCopyStatus("คัดลอกอัตโนมัติไม่ได้ เลือกข้อความในช่องแล้วกด Ctrl+C");
+    }
+  }
   async function act(path: string, body: unknown, method = "POST") {
     try {
       setMessage("กำลังส่ง…");
@@ -87,10 +97,16 @@ export function MachinesManager() {
       <h1 className="text-3xl font-bold">เครื่องและ Agent</h1>
       <section className="space-y-2 rounded-xl border p-4">
         <h2 className="text-xl font-semibold">ติดตั้งเครื่องลูก</h2>
-        <p role="status">{installStatus}</p>
+        <p role="status" aria-live="polite">{installStatus}</p>
         {installCommand ? <>
-          <textarea className="w-full rounded border p-2 font-mono text-xs" rows={5} readOnly value={installCommand} aria-label="คำสั่งติดตั้ง Agent" />
-          <button className="rounded border p-2" onClick={async () => { await navigator.clipboard.writeText(installCommand); setInstallStatus("คัดลอกคำสั่งแล้ว"); }}>คัดลอกคำสั่ง PowerShell</button>
+          <ol className="list-inside list-decimal space-y-1 text-sm">
+            <li>เปิด PowerShell แบบ Administrator บนเครื่องลูก</li>
+            <li>คัดลอกคำสั่งด้านล่างไปรันบนเครื่องนั้น</li>
+            <li>หลังลงทะเบียนแล้ว หน้าแอดมินจะเปิดขึ้นและเครื่องจะแสดงเป็น pending</li>
+          </ol>
+          <textarea id="agent-install-command" className="w-full rounded border p-2 font-mono text-xs" rows={5} readOnly spellCheck={false} value={installCommand} aria-label="คำสั่งติดตั้ง Agent" />
+          <button className="rounded border p-2" onClick={copyInstallCommand}>คัดลอกคำสั่ง PowerShell</button>
+          <p role="status" aria-live="polite">{copyStatus}</p>
         </> : null}
       </section>
       <p>

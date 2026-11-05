@@ -99,8 +99,8 @@
 - Consumes: Task 3 command response and install return URL.
 - Produces: the admin page shows a copyable elevated-PowerShell command and clear setup-unavailable status; the client script prints enrolled MachineId/fingerprint or a retrying/pending message and opens the configured /admin/machines URL after install setup.
 
-- [ ] Step 1: Add route/flow tests for no command when disabled and correct status for successful or pending enrollment.
-- [ ] Step 2: Implement script validation that accepts HTTPS plus loopback HTTP only where specified, compatible with Windows PowerShell 5.1.
-- [ ] Step 3: Keep the page's no-store polling and ensure it surfaces the new pending machine without claiming readiness.
-- [ ] Step 4: Run installer plan/private ACL tests, admin-route tests, Agent/Controller suites, and app lint/type checks.
-- [ ] Step 5: Update roadmap status with the exact remaining physical/hardware gates, then commit.
+- [x] Step 1: Add route/flow tests for no command when disabled and correct status for successful or pending enrollment; reject TEMP staging and require in-memory script execution after SHA-256 verification.
+- [x] Step 2: Implement script validation that accepts HTTPS plus loopback HTTP only where specified, compatible with Windows PowerShell 5.1; stage package/config under protected Program Files and reject insecure pre-existing directories.
+- [x] Step 3: Keep the page's no-store polling and ensure it surfaces the new pending machine without claiming readiness.
+- [x] Step 4: Run installer plan/private ACL tests under Windows PowerShell 5.1 and 7, package builds, admin-route integration matrix, Agent tests, filtered Controller tests, Next build/type checks, and targeted ESLint.
+- [x] Step 5: Update roadmap status with the exact remaining physical/hardware gates, then commit.

@@ -14,13 +14,29 @@ try {
  Write-Output 'PASS: pre-existing insecure descendants are rejected without mutation'
 } catch {$failures+=$_.Exception.Message}
 try {
- $empty=Join-Path $root 'empty';Initialize-PrivateDataDirectory $empty $currentSid
+ $empty=Join-Path $root 'empty';$created=Initialize-PrivateDataDirectory $empty $currentSid
+ if(-not $created){throw 'New private data directory creation was not reported.'}
+ if(Initialize-PrivateDataDirectory $empty $currentSid){throw 'Existing private data directory was incorrectly reported as newly created.'}
  $acl=Get-Acl -LiteralPath $empty
  $allowed=@($currentSid.Value,'S-1-5-18','S-1-5-32-544')
  if(-not $acl.AreAccessRulesProtected){throw 'Data ACL must be protected'}
  foreach($rule in $acl.Access){if($rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value -notin $allowed){throw 'Unexpected data access'}}
+ $squatted=Join-Path $root 'squatted-empty';New-Item -ItemType Directory -Path $squatted | Out-Null
+ $squattedAcl=Get-Acl -LiteralPath $squatted
+ $squattedAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new('S-1-1-0'),[Security.AccessControl.FileSystemRights]::FullControl,[Security.AccessControl.AccessControlType]::Allow))
+ Set-Acl -LiteralPath $squatted -AclObject $squattedAcl
+ $beforeSddl=(Get-Acl -LiteralPath $squatted).Sddl
+ $squatRejected=$false
+ try { Initialize-PrivateDataDirectory $squatted $currentSid } catch { $squatRejected=$true }
+ if(-not $squatRejected){throw 'A pre-existing empty directory with untrusted access must be rejected, not repaired in place.'}
+ if((Get-Acl -LiteralPath $squatted).Sddl -ne $beforeSddl){throw 'Rejecting a squatted data directory must not mutate its ACL.'}
  $readOnly=Join-Path $root 'read-only-publish';New-Item -ItemType Directory -Path $readOnly | Out-Null
  $serviceSid=[Security.Principal.SecurityIdentifier]::new('S-1-5-80-1111111111-2222222222-3333333333-4444444444-5555555555')
+ $servicePrivateAcl=[Security.AccessControl.FileSecurity]::new()
+ $servicePrivateAcl.SetOwner($currentSid)
+ $servicePrivateAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($serviceSid,[Security.AccessControl.FileSystemRights]::Read,[Security.AccessControl.AccessControlType]::Allow))
+ if(-not (Test-TrustedInstallAcl $servicePrivateAcl (Get-TrustedInstallSids @($serviceSid)) -Private)){throw 'The Agent service SID must be allowed to read its private configuration.'}
+ if(Test-TrustedInstallAcl $servicePrivateAcl (Get-TrustedInstallSids) -Private){throw 'A private file must not allow an untrusted service SID to read it.'}
  Set-PrivateInstallAcl $readOnly $serviceSid -Directory -ReadOnly
  $readOnlyAcl=Get-Acl -LiteralPath $readOnly
  $serviceRules=@($readOnlyAcl.Access | Where-Object {$_.IdentityReference -eq $serviceSid})

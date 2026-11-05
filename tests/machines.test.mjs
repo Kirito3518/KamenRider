@@ -226,9 +226,19 @@ test("agent install command is admin-only and withheld until configuration valid
     .update(readFileSync(new URL("../public/agent/Bootstrap-Agent.ps1", import.meta.url)))
     .digest("hex")
     .toUpperCase();
+  const bootstrapDownload = await fetch(scriptUrl);
+  assert.equal(bootstrapDownload.status, 200);
+  const servedScriptHash = createHash("sha256")
+    .update(Buffer.from(await bootstrapDownload.arrayBuffer()))
+    .digest("hex")
+    .toUpperCase();
+  assert.equal(servedScriptHash, scriptHash);
   const quoted = (value) => `'${value.replaceAll("'", "''")}'`;
   assert.equal(result.scriptUrl, scriptUrl);
   assert.ok(result.command.includes(`-UseBasicParsing`));
+  assert.ok(result.command.includes(`[ScriptBlock]::Create`));
+  assert.ok(result.command.includes(`RawContentStream`));
+  assert.ok(!result.command.includes(`$env:TEMP`));
   assert.ok(result.command.includes(`-ControllerUrl ${quoted(controllerUrl.toString())}`));
   assert.ok(result.command.includes(`-PackageUrl ${quoted(packageUrl.toString())}`));
   assert.ok(result.command.includes(`-InstallReturnUrl ${quoted(returnUrl)}`));

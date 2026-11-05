@@ -33,15 +33,17 @@ VNC/noVNC เป็นความสามารถของระบบฉบ�
 - ต้องเริ่ม Next.js ใหม่หลังแก้ `.env.local`; Controller dev ต้องเปิดค้างระหว่างทดสอบ
 - สถานะล่าสุด: Controller ตอบ health ที่ `127.0.0.1:5081` และ HTTPS ที่ `localhost:7443` บนเครื่องนี้
 
-### 2. ติดตั้ง Agent จากหน้าแอดมิน — ยังไม่เสร็จ
+### 2. ติดตั้ง Agent จากหน้าแอดมิน — flow และ security checks เสร็จ; รอทดสอบเครื่องลูกจริง
 
-- หน้าแอดมินออกคำสั่ง PowerShell โดยใช้ URL และ package hash จาก environment
-- สคริปต์ตรวจสิทธิ์ Administrator, ดาวน์โหลด package ผ่าน HTTPS และตรวจ SHA-256
-- ติดตั้งไฟล์ใน Program Files; เก็บ identity/config ใน data directory ที่ ACL จำกัดสิทธิ์
-- ติดตั้งและเริ่ม Windows Service จากนั้นรอ Controller ยืนยัน enrollment
-- เมื่อสำเร็จ เครื่องขึ้น pending โดยไม่ต้องสร้างรายการเองบนเว็บ
-- แก้กรณีติดตั้งซ้ำ, network timeout, package เสีย, service เริ่มไม่สำเร็จ และ rollback
-- สถานะล่าสุด: มี UI/route/bootstrap scaffold แต่ยังปิดด้วย `AGENT_INSTALL_ENABLED=false`; package installer ยังหยุดก่อนสร้าง service
+- route แอดมินตรวจ session/admin และ environment; ถ้าค่า URL, hash หรือ trust thumbprint ไม่ผ่าน จะไม่ส่งคำสั่งออกไป
+- คำสั่งรองรับ Windows PowerShell 5.1, ตรวจ SHA-256 ของ Bootstrap ในหน่วยความจำและ package ก่อนติดตั้ง แล้วส่ง URL กลับ `/admin/machines`; ไม่เขียน Bootstrap ลง shared TEMP
+- HTTP อนุญาตเฉพาะ URL loopback สำหรับทดสอบเครื่องเดียว; Controller URL ต้องเป็น HTTPS
+- installer วาง Agent และ staging ใน Program Files, จำกัด ACL ของไฟล์/config/data ตั้งแต่สร้าง directory, ปฏิเสธ directory ที่ถูกสร้างดักหรือมี ACL ไม่ปลอดภัย, ตั้ง Windows Service เป็น auto-start และเริ่ม enrollment
+- หน้าแอดมินแสดงคำสั่งให้คัดลอก; หลังติดตั้งจะกลับมาหน้าเครื่อง และรายการ poll แสดงเครื่องที่ลงทะเบียนเป็น pending ให้ตั้งชื่อ ราคา พอร์ตและอนุมัติ
+- ถ้า Controller ติดต่อไม่ได้ภายใน 90 วินาที service จะอยู่ต่อและ retry; script แจ้ง pending แล้วเปิดหน้าเว็บ
+- service/ข้อมูลเดิมที่มีอยู่และ package ที่ hash ไม่ตรงถูกปฏิเสธ; service ที่สร้างโดยรอบติดตั้งนี้เท่านั้นที่ถูกลบเมื่อ rollback
+- ยังไม่ได้สั่งติดตั้ง service จริงบนเครื่องพัฒนา; tests, package build, route integration และ Plan ผ่านบน PowerShell 5.1/7; Agent ผ่าน 90 tests และ Controller ผ่าน 94 tests โดยข้ามเฉพาะ test ที่ rebuild Controller ขณะ dev process จับไฟล์อยู่
+- ก่อนทดสอบเครื่องลูก ต้องยืนยัน root certificate อยู่ใน `LocalMachine\Root`, ตั้งค่า env ใน `.env.local`, build package แล้วใส่ SHA-256 และตั้ง `AGENT_INSTALL_ENABLED=true`; ทดสอบการติดตั้ง, enrollment receipt/pending, approve, service recovery และ reboot บนเครื่องลูกจริง
 
 ### 3. Enrollment, identity และการอนุมัติเครื่อง — โค้ดหลักเสร็จ; ยังไม่ผ่านทดสอบติดตั้งจริง
 
@@ -129,4 +131,4 @@ VNC/noVNC เป็นความสามารถของระบบฉบ�
 
 ## สถานะสรุปวันนี้
 
-เว็บ/Controller/Agent มีโครงและ business logic หลายส่วนแล้ว; Controller dev เปิด localhost ได้ Agent runtime ส่ง heartbeat notReady ระหว่างรอหลักฐาน boot ได้แล้ว แต่ยังไม่ได้ติดตั้งเป็น Windows Service บนเครื่องนี้ การติดตั้งจากหน้าแอดมินยังถูกปิด VNC/noVNC ยังไม่เริ่ม และ production readiness ยังไม่ผ่านเพราะ stream fence จริง, restoration evidence, installer และ hardware acceptance ยังขาด
+เว็บ/Controller/Agent มีโครงและ business logic หลายส่วนแล้ว; Controller dev เปิด localhost ได้ Agent runtime ส่ง heartbeat notReady ระหว่างรอหลักฐาน boot ได้ และ flow ติดตั้งจากหน้าแอดมินผ่าน code/integration checks แล้ว แต่ยังไม่ได้ติดตั้งเป็น Windows Service บนเครื่องนี้ VNC/noVNC ยังไม่เริ่ม และ production readiness ยังไม่ผ่านเพราะ installation จริง, stream fence, restoration evidence, reboot reconciliation และ hardware acceptance ยังขาด
