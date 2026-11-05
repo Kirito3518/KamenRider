@@ -24,7 +24,7 @@
 
 ---
 
-## Task 1: Heartbeat while blocked — fix review pending
+## Task 1: Heartbeat while blocked — complete
 
 **Files:**
 - Modify: services/Agent/Startup/BootSyncBarrier.cs
@@ -64,3 +64,5 @@ The broader solution test attempt ran Agent.Tests successfully (94/94). Controll
 - Full Agent suite after the Ready-path follow-up: 97 passed, 0 failed.
 - Broader solution attempt before that Agent-only follow-up: Agent.Tests 96 passed; Controller.Tests 99 passed, one known HostTests.Build_DoesNotCreateProductionDatabase failure because --artifacts-path moves the relative project lookup under TEMP.
 - Full diff check passed.
+
+- [x] Step 8: Commit the review fix wave and complete scoped re-review. Fix commit e75ea6520b91c78acc2039fae44ac56745a6af24; all four findings addressed; no new Critical/Important breakage.
