@@ -47,23 +47,6 @@ public class SunshineTests {
   using var api=new SunshineClient(new Uri("https://127.0.0.1:47990"),new NetworkCredential("u","p"),new Transport(HttpStatusCode.Unauthorized,"{}"));
   Assert.False(await api.CheckReadyAsync(default));await Assert.ThrowsAsync<HttpRequestException>(()=>api.PendingIdsAsync(default));
  }
- [Fact] public async Task PendingSchemaAndExplicitPairPayloadMatchCurrentApi() {
-  var transport=new Transport(HttpStatusCode.OK,"{\"pairings\":[{\"id\":\"0123456789abcdef0123456789abcdef\",\"name\":\"untrusted\",\"address\":\"127.0.0.1\"}]}");
-  using var api=new SunshineClient(new Uri("https://localhost:47990"),new NetworkCredential("u","p"),transport);
-  Assert.Equal(new[]{"0123456789abcdef0123456789abcdef"},await api.PendingIdsAsync(default));
-  transport.Json="{\"status\":true}";Assert.True(await api.SubmitAsync("0123456789abcdef0123456789abcdef","1234",default));
-  Assert.Equal("https://localhost:47990/api/pin",transport.Url);Assert.Equal("Basic dTpw",transport.Auth);
-  using var body=System.Text.Json.JsonDocument.Parse(transport.Body!);Assert.Equal("0123456789abcdef0123456789abcdef",body.RootElement.GetProperty("pairing_id").GetString());Assert.Equal("1234",body.RootElement.GetProperty("pin").GetString());Assert.False(await api.CheckReadyAsync(default));
- }
- [Theory][InlineData("{}")] [InlineData("{\"pairings\":[{\"id\":\"invalid\"}]}")] [InlineData("{\"pairings\":[{\"id\":\"0123456789abcdef0123456789abcdef\"},{\"id\":\"0123456789abcdef0123456789abcdef\"}]}")]
- public async Task MalformedOrAmbiguousPendingListFails(string json){using var api=new SunshineClient(new Uri("https://localhost:47990"),new NetworkCredential("u","p"),new Transport(HttpStatusCode.OK,json));await Assert.ThrowsAsync<InvalidDataException>(()=>api.PendingIdsAsync(default));}
- [Fact] public async Task CleanupCancelsPendingBeforeUnpairAndClose(){var transport=new CleanupTransport();using var api=new SunshineClient(new Uri("https://localhost:47990"),new NetworkCredential("u","p"),transport);await api.ClearAsync(default);Assert.Equal(new[]{"GET /api/pin","DELETE /api/pin","POST /api/clients/unpair-all","POST /api/apps/close","GET /api/pin","GET /api/clients/list"},transport.Paths);}
- [Theory][InlineData("{\"status\":true,\"named_certs\":[{\"uuid\":\"still-paired\"}]}")][InlineData("{\"status\":true}")][InlineData("{\"status\":false,\"named_certs\":[]}")][InlineData("not-json")]
- public async Task CleanupFailsClosedWhenClientsRemainOrClientListIsUnverifiable(string clients){var transport=new CleanupTransport{Clients=clients};using var api=new SunshineClient(new Uri("https://localhost:47990"),new NetworkCredential("u","p"),transport);var error=await Record.ExceptionAsync(()=>api.ClearAsync(default));Assert.True(error is IOException or InvalidDataException);}
- private sealed class CleanupTransport:HttpMessageHandler {
-  public List<string> Paths=[];public string Clients="{\"status\":true,\"named_certs\":[]}";
-  protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,CancellationToken ct){Paths.Add(request.Method+" "+request.RequestUri!.AbsolutePath);return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK){Content=new StringContent(request.RequestUri!.AbsolutePath=="/api/clients/list"?Clients:Paths.Count==1?"{\"pairings\":[{\"id\":\"0123456789abcdef0123456789abcdef\"}]}":request.Method==HttpMethod.Get?"{\"pairings\":[]}":"{\"status\":true}")});}
- }
  private sealed class Transport(HttpStatusCode status,string json):HttpMessageHandler {
   public string Json=json;public string? Url,Auth,Body;
   protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,CancellationToken ct){Url=request.RequestUri!.ToString();Auth=request.Headers.Authorization?.ToString();Body=request.Content is null?null:await request.Content.ReadAsStringAsync(ct);return new(status){Content=new StringContent(Json)};}
@@ -84,10 +67,13 @@ public class SunshineTests {
   Assert.Empty(await session.ListAsync(default));scope=scope with{RentalId="next"};Assert.Empty(await session.ListAsync(default));
   Assert.True(await session.ClearAsync(default));Assert.Equal(new[]{"id"},await session.ListAsync(default));
  }
- [Theory][InlineData("{}")][InlineData("not json")][InlineData("{\"status\":\"true\"}")]
+ [Theory][InlineData("{}")][InlineData("not json")][InlineData("{\"status\":true}")]
  public async Task MalformedSubmissionResponseIsAmbiguousAndRequiresCleanup(string json){
-  const string id="0123456789abcdef0123456789abcdef";var transport=new Transport(HttpStatusCode.OK,"{\"pairings\":[{\"id\":\""+id+"\"}]}");using var api=new SunshineClient(new Uri("https://localhost:47990"),new NetworkCredential("u","p"),transport);var scope=new PairingScope("lease",1,"boot",DateTimeOffset.UtcNow.AddMinutes(1));var session=new PairingSession(api,new Fence(true),()=>scope,TimeProvider.System);await session.ListAsync(default);transport.Json=json;
-  await Assert.ThrowsAsync<InvalidDataException>(()=>session.PairAsync(id,"1234",default));Assert.Empty(await session.ListAsync(default));
+  var id=SunshineClient.PairingSlotId;var transport=new SubmissionTransport(json);using var api=new SunshineClient(new Uri("https://localhost:47990"),new NetworkCredential("u","p"),transport);var scope=new PairingScope("lease",1,"boot",DateTimeOffset.UtcNow.AddMinutes(1));var session=new PairingSession(api,new Fence(true),()=>scope,TimeProvider.System);await session.ListAsync(default);
+  await Assert.ThrowsAsync<InvalidDataException>(()=>session.PairAsync(id,"1234",default));Assert.Empty(await session.ListAsync(default));Assert.True(await session.ClearAsync(default));Assert.Equal(new[]{id},await session.ListAsync(default));
+ }
+ private sealed class SubmissionTransport(string submission):HttpMessageHandler {
+  protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,CancellationToken ct){var json=request.RequestUri!.AbsolutePath switch {"/api/clients/list"=>"{\"status\":\"true\",\"named_certs\":[]}","/api/pin"=>submission,_=>"{\"status\":\"true\"}"};return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK){Content=new StringContent(json)});}
  }
  private sealed class AmbiguousApi(string failure,CancellationTokenSource caller):ISunshinePairingApi {
   public Task<string[]> PendingIdsAsync(CancellationToken ct)=>Task.FromResult(new[]{"id"});

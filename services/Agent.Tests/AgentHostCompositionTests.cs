@@ -9,12 +9,15 @@ namespace Agent.Tests;
 public class AgentHostCompositionTests
 {
     [Fact]
-    public void AgentHostRegistersFailClosedBootEnvironmentByDefault()
+    public async Task AgentHostRegistersFailClosedBootEnvironmentByDefault()
     {
         using var host = KamenRaider.Agent.AgentHost.Build([], ConfigureTestAgentOptions);
 
         Assert.IsType<UnavailableBootEnvironment>(host.Services.GetRequiredService<IBootEnvironment>());
         Assert.False(host.Services.GetRequiredService<IBootBaselineEvidence>().HasValidatedBaseline);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => host.Services.GetRequiredService<KamenRaider.Agent.Leases.IStreamGate>().BlockAsync(default));
+        Assert.Null(host.Services.GetService<KamenRaider.Agent.Sunshine.SunshineClient>());
+        Assert.Null(host.Services.GetService<KamenRaider.Agent.Sunshine.PairingSession>());
         Assert.IsType<LeaseEnforcerReconciledLeaseImporter>(host.Services.GetRequiredService<IReconciledLeaseImporter>());
         Assert.Single(host.Services.GetServices<IHostedService>().OfType<KamenRaider.Agent.Sync.SyncWorker>());
     }

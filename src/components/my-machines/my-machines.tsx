@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import type { Lease, Offer } from "@/lib/machine-contracts";
 import { Navbar } from "@/components/ui/layout/Navbar";
 import { Footer } from "@/components/ui/layout/Footer";
+const foundationSunshineSlot = "foundation-sunshine-single-pending-slot";
 async function api(path: string, body?: unknown) {
   const r = await fetch(path, {
     method: body ? "POST" : "GET",
@@ -104,8 +105,12 @@ function LeaseCard({ lease }: { lease: Lease }) {
       {lease.state === "active" ? (
         <>
           <button className="rounded border p-2" onClick={pending}>
-            โหลด pending pairing จาก Agent
+            โหลดช่องจับคู่จาก Agent
           </button>
+          <p>
+            กดโหลดช่องจับคู่ แล้วเริ่ม Pair ใน Moonlight จากนั้นส่ง PIN 4
+            หลักที่ Moonlight แสดงภายใน 30 วินาที Sunshine รับคำขอจับคู่ได้ครั้งละหนึ่งรายการ
+          </p>
           <form
             className="space-y-3"
             onSubmit={async (e) => {
@@ -128,7 +133,7 @@ function LeaseCard({ lease }: { lease: Lease }) {
             }}
           >
             <label className="block">
-              Pending ID
+              อุปกรณ์ที่จะจับคู่
               <select
                 className="ml-2 max-w-full rounded border p-2"
                 name="pairingId"
@@ -136,10 +141,14 @@ function LeaseCard({ lease }: { lease: Lease }) {
                 defaultValue=""
               >
                 <option value="" disabled>
-                  เลือก ID ที่ตรงกับอุปกรณ์ของคุณ
+                  เลือกช่องจับคู่
                 </option>
                 {offer?.pairingIds.map((id) => (
-                  <option key={id}>{id}</option>
+                  <option key={id} value={id}>
+                    {id === foundationSunshineSlot
+                      ? "Sunshine ของเครื่องนี้"
+                      : id}
+                  </option>
                 ))}
               </select>
             </label>

@@ -81,22 +81,23 @@ VNC/noVNC เป็นความสามารถของระบบฉบ�
 - Agent บันทึก deadline ที่สั้นลงจาก Controller ก่อนรอ stream gate; regression tests ครอบคลุม restart ระหว่าง gate ค้าง, extension ที่ยังไม่ยืนยัน, confirmation ที่ storage ค้างข้าม recovery deadline และ shutdown timeout/retry ด้วย fake adapter; production shutdown adapter จำกัดเวลารอไว้ 15 วินาที ส่วนการจำลอง process crash ระหว่าง atomic file replacement และการทดสอบ shutdown/retry บนเครื่องจริงยังต้องยืนยัน
 - ระยะแรกใช้ trial lease ของแอดมิน ไม่หัก balance; payment/refund เป็นงานแยก
 
-### 6. Moonlight/Sunshine และ stream fence — pairing มี; ตัวกั้นสตรีมจริงยังขาด
+### 6. Moonlight/Sunshine และ stream fence — adapter ตรงกับ fork แล้ว; ตัวกั้นสตรีมจริงยังขาด
 
 - Agent เรียก Sunshine management API บน localhost เท่านั้น; credential ไม่ออกไป browser
+- Foundation Sunshine adapter ใช้ช่อง pairing เดียว ส่ง PIN/ชื่อ client และรอยืนยัน handshake จาก client list; token ที่เว็บเลือกเป็น pairing slot ของ Agent ไม่ใช่ client ID จาก Sunshine
 - จับคู่ PIN เฉพาะ lease/owner ที่ active; PIN ไม่ลง log และล้างเมื่อหมดอายุ
-- ล้าง pending pairing และ client เก่าก่อนคืนเครื่อง
+- ล้าง client เก่าก่อนคืนเครื่องได้หลังมี fence ที่พิสูจน์ว่าปิด pending handshake และ stream เดิมแล้ว; Sunshine fork ไม่มี API ยกเลิก pending PIN
 - สร้าง fence ที่ปิดตั้งแต่ boot, Agent/service crash และไม่มี active lease
 - Fence ต้องกันการเชื่อมต่อใหม่และตัด stream เดิม; firewall allow rules ที่ Sunshine ติดตั้งไว้ต้องถูกพิจารณาครบ
 - readiness ต้องตรวจ Sunshine, desktop/capture, encoder, audio และ input จริง
-- เครื่องนี้ติดตั้ง Sunshine รุ่น fork; ตรวจ schema/API กับ binary รุ่นนี้ก่อนเปิด adapter
+- ตรวจ source ของ Foundation Sunshine รุ่นที่เครื่องนี้ติดตั้งแล้ว และปรับ adapter/schema tests ให้ตรง; adapter กับ PairingSession ยังไม่ลงทะเบียน production จนกว่าจะมี stream fence
 - ทดสอบ Moonlight client ใหม่/เก่าและ stream ที่เปิดค้างเมื่อหมดเวลา
 
 ### 7. Reconcile หลังบูตและพร้อมเช่ารอบใหม่ — lease import ต่อ production แล้ว; boot evidence ยังขาด
 
 - Agent ปิด stream fence ก่อน sync/reconcile ทุกครั้ง
 - Agent ส่ง signed heartbeat สถานะ notReady ได้ระหว่างรอ reconciliation โดย Controller อัปเดต presence/config ACK แต่ไม่เปลี่ยน boot history, lease, command หรือผลคำสั่ง และไม่ส่ง command/lease confirmation; Agent เก็บผลคำสั่งค้างไว้จน Ready sync
-- สถานะปัจจุบัน: boot environment และหลักฐาน baseline ต่อผ่าน DI แล้ว โดยค่าเริ่มต้นเป็น UnavailableBootEnvironment/Unvalidated; BootReconciler ใช้ production lease importer ที่ต่อกับ LeaseEnforcer หลังได้รับ proof ครบและ Controller ยืนยัน ResumeLease แล้ว โดยนำ controller time กับเวลาเริ่ม request มาคำนวณ monotonic deadline; เมื่อ Controller ยืนยัน PrepareAvailable หลัง proof จะล้าง snapshot เก่าด้วย atomic tombstone เฉพาะข้าม boot และปฏิเสธการล้าง lease ที่ยังอยู่ใน boot เดียวกัน; หลัง reconciliation ผ่าน Agent ตรวจ runtime health ซ้ำทุกรอบ sync; เมื่อ health/boot/config ไม่ตรงจะปิด gate และรายงาน notReady; ถ้าปิด gate ล้มเหลวจะทิ้งหลักฐาน readiness และต้อง reconcile ใหม่ แต่ production ยังใช้ ClosedStreamGate และไม่มี restoration/stream/desktop evidence provider; ห้ามอ้างว่า Sunshine ถูกกั้นหรือเครื่องพร้อมเช่า
+- สถานะปัจจุบัน: boot environment และหลักฐาน baseline ต่อผ่าน DI แล้ว โดยค่าเริ่มต้นเป็น UnavailableBootEnvironment/Unvalidated; BootReconciler ใช้ production lease importer ที่ต่อกับ LeaseEnforcer หลังได้รับ proof ครบและ Controller ยืนยัน ResumeLease แล้ว โดยนำ controller time กับเวลาเริ่ม request มาคำนวณ monotonic deadline; เมื่อ Controller ยืนยัน PrepareAvailable หลัง proof จะล้าง snapshot เก่าด้วย atomic tombstone เฉพาะข้าม boot และปฏิเสธการล้าง lease ที่ยังอยู่ใน boot เดียวกัน; หลัง reconciliation ผ่าน Agent ตรวจ runtime health ซ้ำทุกรอบ sync; เมื่อ health/boot/config ไม่ตรงจะปิด gate และรายงาน notReady; ถ้าปิด gate ล้มเหลวจะทิ้งหลักฐาน readiness และต้อง reconcile ใหม่; production ใช้ ClosedStreamGate ที่ throw เมื่อถูกขอให้บล็อก เพราะยังพิสูจน์การกั้น Sunshine ไม่ได้ และไม่มี restoration/stream/desktop evidence provider; ห้ามอ้างว่า Sunshine ถูกกั้นหรือเครื่องพร้อมเช่า
 - ดึง config ล่าสุดและ reconcile lease/boot ก่อนรายงาน ready
 - lease ที่ยัง active และไม่หมดมีทาง import เข้า LeaseEnforcer ด้วย expiry เดิมหลัง proof ครบ; lease เก่าจะถูกล้างเมื่อ Controller ยืนยัน PrepareAvailable หลัง proof และ OS boot เปลี่ยนแล้ว; ห้ามเพิ่มเวลา; ยังต้องทดสอบกับ Agent/Controller และ boot จริง
 - lease ที่จบแล้วไม่สั่ง shutdown ซ้ำ; allocation ปล่อยได้หลัง cleanup/health ผ่าน

@@ -3,6 +3,7 @@ public record PairingScope(string RentalId,long Revision,string BootId,DateTimeO
 // Must prove ingress AND existing/in-flight handshakes are fenced; firewall rule creation alone is insufficient.
 public interface IPairingFence {Task<bool> BlockAndVerifyAsync(CancellationToken ct);}
 public interface ISunshinePairingApi {
+ // Targets may be concrete IDs or a server-supported pairing slot; Foundation Sunshine exposes only one slot.
  Task<string[]> PendingIdsAsync(CancellationToken ct);
  Task<bool> SubmitAsync(string id,string pin,CancellationToken ct);
  Task ClearAsync(CancellationToken ct);
