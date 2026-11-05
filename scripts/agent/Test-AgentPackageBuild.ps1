@@ -16,7 +16,8 @@ try {
  try {
   $entries=@($zip.Entries | ForEach-Object FullName)
   foreach($entry in $entries){if($entry.Contains('\') -or $entry.StartsWith('/') -or $entry.Split('/') -contains '..'){throw "Unsafe or non-portable ZIP path: $entry"}}
-  foreach($required in @('Agent/Agent.exe','Install-AgentPackage.ps1','Install-Service.ps1','PrivateInstallFiles.ps1','ServiceInstallTransaction.ps1')){if($required -notin $entries){throw "Package is missing $required."}}
+  foreach($required in @('Agent/Agent.exe','Install-AgentPackage.ps1','Install-Service.ps1','Install-TightVncServer.ps1','PrivateInstallFiles.ps1','ServiceInstallTransaction.ps1')){if($required -notin $entries){throw "Package is missing $required."}}
+  if(@($entries | Where-Object {$_ -match '(?i)(^|/)tightvnc[^/]*\.msi$'}).Count -ne 0){throw 'The separately licensed TightVNC MSI must not be bundled with the KamenRaider Agent package.'}
   if('Agent/appsettings.json' -in $entries){throw 'Package must not include the default appsettings.json; the installer publishes the protected configuration.'}
  } finally {$zip.Dispose()}
  if($PSVersionTable.PSEdition -eq 'Core'){
