@@ -286,6 +286,7 @@ test("agent install command is admin-only and withheld until configuration valid
     assert.ok(result.command.includes(`RawContentStream`));
     assert.ok(!result.command.includes(`$env:TEMP`));
     assert.ok(result.command.includes(`-ControllerUrl ${quoted(controllerUrl.toString())}`));
+    assert.ok(result.command.includes(`-VncAllowedSourceAddress ${quoted(process.env.TEST_AGENT_INSTALL_VNC_SOURCE_EXPECTED)}`));
     assert.ok(result.command.includes(`-PackageUrl ${quoted(packageUrl.toString())}`));
     assert.ok(result.command.includes(`-InstallReturnUrl ${quoted(returnUrl)}`));
     assert.ok(result.command.includes(`-PackageSha256 ${quoted(process.env.AGENT_PACKAGE_SHA256.toUpperCase())}`));

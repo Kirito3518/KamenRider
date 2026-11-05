@@ -11,6 +11,22 @@ function isLoopback(hostname: string) {
   return octets.length === 4 && octets[0] === 127 && octets.every((part) => Number.isInteger(part) && part >= 0 && part <= 255);
 }
 
+function isPrivateIpv4(value: string) {
+  const octets = value.split(".");
+  if (octets.length !== 4 || octets.some((part) => !/^\d{1,3}$/.test(part))) return false;
+  const [first, second, third, fourth] = octets.map(Number);
+  if ([first, second, third, fourth].some((part) => part < 0 || part > 255)) return false;
+  if (octets.some((part) => String(Number(part)) !== part)) return false;
+  return first === 10 || first === 127 || (first === 172 && second >= 16 && second <= 31) || (first === 192 && second === 168);
+}
+
+function resolveVncSourceAddress(controllerUrl: URL, configured: string | undefined) {
+  const source = configured?.trim();
+  if (source) return isPrivateIpv4(source) ? source : null;
+  if (isLoopback(controllerUrl.hostname)) return "127.0.0.1";
+  return isPrivateIpv4(controllerUrl.hostname) ? controllerUrl.hostname : null;
+}
+
 function allowedUrl(value: string | undefined, originOnly = false) {
   if (!value) return null;
   try {
@@ -32,10 +48,16 @@ export async function GET(request: Request) {
   const base = allowedUrl(process.env.AGENT_INSTALL_BASE_URL, true);
   const packageUrl = allowedUrl(process.env.AGENT_PACKAGE_URL);
   const controllerUrl = allowedUrl(process.env.AGENT_CONTROLLER_URL, true);
+  const vncAllowedSourceAddress = controllerUrl
+    ? resolveVncSourceAddress(controllerUrl, process.env.AGENT_VNC_ALLOWED_SOURCE_IP)
+    : null;
   const packageHash = process.env.AGENT_PACKAGE_SHA256?.toUpperCase();
   const root = process.env.AGENT_TRUST_ROOT_THUMBPRINT?.toUpperCase();
   if (process.env.AGENT_INSTALL_ENABLED !== "true" || !base || !packageUrl || !controllerUrl || controllerUrl.protocol !== "https:" || !/^[A-F0-9]{64}$/.test(packageHash || "") || !/^[A-F0-9]{40}$/.test(root || "")) {
     return Response.json({ available: false, reason: "ยังไม่ได้ตั้งค่าแพ็กเกจ Agent และ URL สำหรับเครื่องลูก" }, { headers: { "Cache-Control": "no-store" } });
+  }
+  if (!vncAllowedSourceAddress) {
+    return Response.json({ available: false, reason: "ตั้งค่า AGENT_VNC_ALLOWED_SOURCE_IP เป็น IPv4 ส่วนตัวของ Controller ก่อนสร้างคำสั่งติดตั้ง" }, { headers: { "Cache-Control": "no-store" } });
   }
   let script: Buffer;
   try {
@@ -56,6 +78,6 @@ export async function GET(request: Request) {
   } catch {
     return Response.json({ available: false, reason: "ออก ticket ลงทะเบียนจาก Controller ไม่สำเร็จ" }, { headers: { "Cache-Control": "no-store" } });
   }
-  const command = `$u=${quoted(scriptUrl)}; $r=Invoke-WebRequest -UseBasicParsing -Uri $u -ErrorAction Stop; $m=New-Object System.IO.MemoryStream; try { $r.RawContentStream.CopyTo($m); $b=$m.ToArray() } finally { $m.Dispose(); $r.RawContentStream.Dispose() }; $h=[BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($b)).Replace('-',''); if($h -ne ${quoted(hash)}) { throw 'Installer script hash mismatch' }; $s=[Text.Encoding]::UTF8.GetString($b); & ([ScriptBlock]::Create($s)) -ControllerUrl ${quoted(controllerUrl.toString())} -PackageUrl ${quoted(packageUrl.toString())} -PackageSha256 ${quoted(packageHash!)} -TrustedRootThumbprint ${quoted(root!)} -EnrollmentTicket ${quoted(ticket)} -InstallReturnUrl ${quoted(returnUrl)}`;
+  const command = `$u=${quoted(scriptUrl)}; $r=Invoke-WebRequest -UseBasicParsing -Uri $u -ErrorAction Stop; $m=New-Object System.IO.MemoryStream; try { $r.RawContentStream.CopyTo($m); $b=$m.ToArray() } finally { $m.Dispose(); $r.RawContentStream.Dispose() }; $h=[BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($b)).Replace('-',''); if($h -ne ${quoted(hash)}) { throw 'Installer script hash mismatch' }; $s=[Text.Encoding]::UTF8.GetString($b); & ([ScriptBlock]::Create($s)) -ControllerUrl ${quoted(controllerUrl.toString())} -PackageUrl ${quoted(packageUrl.toString())} -PackageSha256 ${quoted(packageHash!)} -TrustedRootThumbprint ${quoted(root!)} -EnrollmentTicket ${quoted(ticket)} -InstallReturnUrl ${quoted(returnUrl)} -VncAllowedSourceAddress ${quoted(vncAllowedSourceAddress)}`;
   return Response.json({ available: true, command, scriptUrl }, { headers: { "Cache-Control": "no-store" } });
 }

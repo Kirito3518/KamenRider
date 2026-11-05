@@ -6,11 +6,28 @@ param(
     [Parameter(Mandatory)][ValidatePattern('^[A-Fa-f0-9]{40}$')][string]$TrustedRootThumbprint,
     [Parameter(Mandatory)][ValidatePattern('^[A-Za-z0-9_-]{43}$')][string]$EnrollmentTicket,
     [Parameter(Mandatory)][string]$InstallReturnUrl,
+    [Parameter(Mandatory)][string]$VncAllowedSourceAddress,
     [string]$PackageArchivePath,
     [switch]$Plan
 )
 
 $ErrorActionPreference = 'Stop'
+
+function ConvertTo-AllowedVncSourceAddress {
+    param([Parameter(Mandatory)][string]$Address)
+    $parsed = $null
+    if (-not [Net.IPAddress]::TryParse($Address, [ref]$parsed) -or $parsed.AddressFamily -ne [Net.Sockets.AddressFamily]::InterNetwork) {
+        throw 'VncAllowedSourceAddress must be one private or loopback IPv4 address.'
+    }
+    $bytes = $parsed.GetAddressBytes()
+    $private = $bytes[0] -eq 10 -or $bytes[0] -eq 127 -or
+        ($bytes[0] -eq 172 -and $bytes[1] -ge 16 -and $bytes[1] -le 31) -or
+        ($bytes[0] -eq 192 -and $bytes[1] -eq 168)
+    if (-not $private -or $parsed.ToString() -cne $Address) {
+        throw 'VncAllowedSourceAddress must be one private or loopback IPv4 address.'
+    }
+    return $parsed.ToString()
+}
 
 function Get-BootstrapTrustedSids {
     @(
@@ -156,6 +173,7 @@ if ((($returnUri.Scheme -ne 'https') -and -not $loopbackReturnHttp) -or $returnU
 }
 
 $normalizedController = $controller.GetLeftPart([UriPartial]::Authority) + '/'
+$normalizedVncSourceAddress = ConvertTo-AllowedVncSourceAddress $VncAllowedSourceAddress
 if ($Plan) {
     Assert-BootstrapTrustedPath $env:ProgramFiles
     $plannedStageParent = Join-Path $env:ProgramFiles 'KamenRaider'
@@ -167,6 +185,7 @@ if ($Plan) {
     }
     [pscustomobject]@{
         ControllerUrl = $normalizedController
+        VncAllowedSourceAddress = $normalizedVncSourceAddress
         PackageUrl = $package.AbsoluteUri
         PackageSha256 = $PackageSha256.ToUpperInvariant()
         TrustedRootThumbprint = $TrustedRootThumbprint.ToUpperInvariant()
@@ -205,7 +224,8 @@ try {
     if (-not (Test-Path -LiteralPath $installer -PathType Leaf)) { throw 'Agent package has no qualified installer.' }
     $installerBlock = [ScriptBlock]::Create([IO.File]::ReadAllText($installer))
     & $installerBlock -PackageRoot $expanded -ControllerUrl $normalizedController `
-        -TrustedRootThumbprint $TrustedRootThumbprint -EnrollmentTicket $EnrollmentTicket -InstallReturnUrl $returnUri.AbsoluteUri
+        -TrustedRootThumbprint $TrustedRootThumbprint -EnrollmentTicket $EnrollmentTicket `
+        -InstallReturnUrl $returnUri.AbsoluteUri -VncAllowedSourceAddress $normalizedVncSourceAddress
 } finally {
     $resolved = [IO.Path]::GetFullPath($stage)
     if (-not [string]::Equals([IO.Path]::GetDirectoryName($resolved), [IO.Path]::GetFullPath($productDirectory), [StringComparison]::OrdinalIgnoreCase) -or [IO.Path]::GetFileName($resolved) -notlike '.agent-bootstrap-*') {
