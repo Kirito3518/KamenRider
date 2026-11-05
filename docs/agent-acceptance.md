@@ -19,6 +19,6 @@ No designated and available test client was supplied. Record machine, installed 
 
 - The isolated .NET solution test run passed 269 tests: Agent 134/134 and Controller 135/135.
 - Eight installer/package/readiness test scripts passed under both Windows PowerShell 5.1 and PowerShell 7. The package-build checks wrote only to temporary artifacts; no services changed.
-- Targeted ESLint passed for the renter pairing UI.
+- Targeted ESLint and `pnpm exec tsc --noEmit` passed after the renter pairing UI update.
 
 These checks validate software behavior and package plans only. They do not change any hardware result in the table above.
