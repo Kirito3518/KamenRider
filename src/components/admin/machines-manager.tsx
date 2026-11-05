@@ -14,6 +14,8 @@ async function request(path: string, body?: unknown, method = "POST") {
 }
 export function MachinesManager() {
   const [machines, setMachines] = useState<Machine[]>([]);
+  const [installCommand, setInstallCommand] = useState<string | null>(null);
+  const [installStatus, setInstallStatus] = useState("กำลังตรวจชุดติดตั้ง…");
   const [trialLease, setTrialLease] = useState<Lease | null>(null);
   const [loadStatus, setLoadStatus] = useState("กำลังโหลด…");
   const [message, setMessage] = useState("");
@@ -54,6 +56,21 @@ export function MachinesManager() {
       window.clearInterval(timer);
     };
   }, []);
+  useEffect(() => {
+    let active = true;
+    fetch("/api/admin/agent-install-command", { cache: "no-store" })
+      .then(async (response) => {
+        if (!response.ok) throw new Error("ตรวจชุดติดตั้งไม่ได้");
+        return response.json();
+      })
+      .then((result: { available: boolean; command?: string; reason?: string }) => {
+        if (!active) return;
+        setInstallCommand(result.available ? result.command || null : null);
+        setInstallStatus(result.available ? "เปิด PowerShell แบบ Administrator บนเครื่องลูก แล้ววางคำสั่งนี้" : result.reason || "ชุดติดตั้งยังไม่พร้อม");
+      })
+      .catch((error) => { if (active) setInstallStatus(String(error)); });
+    return () => { active = false; };
+  }, []);
   async function act(path: string, body: unknown, method = "POST") {
     try {
       setMessage("กำลังส่ง…");
@@ -68,6 +85,14 @@ export function MachinesManager() {
   return (
     <main className="mx-auto max-w-5xl space-y-5 p-5">
       <h1 className="text-3xl font-bold">เครื่องและ Agent</h1>
+      <section className="space-y-2 rounded-xl border p-4">
+        <h2 className="text-xl font-semibold">ติดตั้งเครื่องลูก</h2>
+        <p role="status">{installStatus}</p>
+        {installCommand ? <>
+          <textarea className="w-full rounded border p-2 font-mono text-xs" rows={5} readOnly value={installCommand} aria-label="คำสั่งติดตั้ง Agent" />
+          <button className="rounded border p-2" onClick={async () => { await navigator.clipboard.writeText(installCommand); setInstallStatus("คัดลอกคำสั่งแล้ว"); }}>คัดลอกคำสั่ง PowerShell</button>
+        </> : null}
+      </section>
       <p>
         ระบบทดลอง ไม่มีการหักยอดเงิน ความพร้อมจริงยังต้องผ่านการตรวจสอบ Agent
       </p>
