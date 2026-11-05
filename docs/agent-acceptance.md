@@ -14,3 +14,11 @@ Status: **NOT READY for rentals**. The software lifecycle test uses simulated Ag
 | Custom internet ports | NOT TESTED | Connect from a real external network using configured ports |
 
 No designated and available test client was supplied. Record machine, installed versions, date, operator, method and evidence for each future pass or failure. Fake tests must never be entered as hardware passes.
+
+## Software checks (2026-11-06)
+
+- The isolated .NET solution test run passed 269 tests: Agent 134/134 and Controller 135/135.
+- Eight installer/package/readiness test scripts passed under both Windows PowerShell 5.1 and PowerShell 7. The package-build checks wrote only to temporary artifacts; no services changed.
+- Targeted ESLint passed for the renter pairing UI.
+
+These checks validate software behavior and package plans only. They do not change any hardware result in the table above.
