@@ -16,6 +16,8 @@ public class AgentHostCompositionTests
 
         Assert.IsType<UnavailableBootEnvironment>(host.Services.GetRequiredService<IBootEnvironment>());
         Assert.False(host.Services.GetRequiredService<IBootBaselineEvidence>().HasValidatedBaseline);
+        Assert.IsType<KamenRaider.Agent.Sunshine.StreamGuardPipeClient>(host.Services.GetRequiredService<KamenRaider.Agent.Leases.IStreamGate>());
+        Assert.Empty(host.Services.GetServices<IHostedService>().OfType<KamenRaider.Agent.Sunshine.StreamGuardPipeServer>());
         await Assert.ThrowsAsync<InvalidOperationException>(() => host.Services.GetRequiredService<KamenRaider.Agent.Leases.IStreamGate>().BlockAsync(default));
         await Assert.ThrowsAsync<InvalidOperationException>(() => host.Services.GetRequiredService<KamenRaider.Agent.Leases.IStreamGate>().AllowAsync(new("rental", 1, "boot", DateTimeOffset.UtcNow.AddMinutes(1), 60000), default));
         Assert.Null(host.Services.GetService<KamenRaider.Agent.Sunshine.SunshineClient>());
@@ -23,6 +25,16 @@ public class AgentHostCompositionTests
         Assert.IsType<LeaseEnforcerReconciledLeaseImporter>(host.Services.GetRequiredService<IReconciledLeaseImporter>());
         Assert.IsType<UnavailableMachinePreparation>(host.Services.GetRequiredService<IMachinePreparation>());
         Assert.Single(host.Services.GetServices<IHostedService>().OfType<KamenRaider.Agent.Sync.SyncWorker>());
+    }
+
+    [Fact]
+    public async Task StreamGuardHostOwnsCoordinatorAndFailsClosedWithoutWindowsProviders()
+    {
+        using var host = KamenRaider.Agent.StreamGuardHost.Build([]);
+        var coordinator = host.Services.GetRequiredService<KamenRaider.Agent.Sunshine.StreamGateCoordinator>();
+
+        Assert.Same(coordinator, host.Services.GetRequiredService<KamenRaider.Agent.Leases.IStreamGate>());
+        await Assert.ThrowsAsync<AggregateException>(() => coordinator.BlockAsync(default));
     }
 
     [Fact]
@@ -49,6 +61,8 @@ public class AgentHostCompositionTests
             ["SunshinePort"] = "47984",
             ["NetworkAdapterId"] = "test-adapter"
         });
+        builder.Services.AddSingleton<KamenRaider.Agent.Leases.IStreamGate>(_ => new KamenRaider.Agent.Sunshine.StreamGuardPipeClient(
+            $"KamenRaider.Test.Missing.{Guid.NewGuid():N}", TimeSpan.FromMilliseconds(50), TimeSpan.FromMilliseconds(150)));
     }
 
     private sealed class ValidatedBaselineEvidence : IBootBaselineEvidence

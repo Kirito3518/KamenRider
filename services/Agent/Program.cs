@@ -23,7 +23,7 @@ public static class AgentHost
         builder.Services.AddHostedService<KamenRaider.Agent.Enrollment.EnrollmentWorker>();
         builder.Services.AddSingleton(TimeProvider.System);
         builder.Services.AddSingleton<KamenRaider.Agent.Leases.IBootClock,KamenRaider.Agent.Leases.WindowsBootClock>();
-        builder.Services.AddSingleton<KamenRaider.Agent.Leases.IStreamGate,KamenRaider.Agent.Leases.ClosedStreamGate>();
+        builder.Services.TryAddSingleton<KamenRaider.Agent.Leases.IStreamGate,KamenRaider.Agent.Sunshine.StreamGuardPipeClient>();
         builder.Services.TryAddSingleton<KamenRaider.Agent.Startup.IBootEnvironment,KamenRaider.Agent.Startup.UnavailableBootEnvironment>();
         builder.Services.TryAddSingleton<KamenRaider.Agent.Startup.IBootBaselineEvidence,KamenRaider.Agent.Startup.UnvalidatedBootBaselineEvidence>();
         builder.Services.AddSingleton<KamenRaider.Agent.Power.WindowsShutdown>();
@@ -38,4 +38,58 @@ public static class AgentHost
         return builder.Build();
     }
 }
-public class Program { public static void Main(string[] args) => AgentHost.Build(args).Run(); }
+
+public static class StreamGuardHost
+{
+    public static IHost Build(string[] args, Action<HostApplicationBuilder>? configure = null)
+    {
+        var builder = Host.CreateApplicationBuilder(args);
+        configure?.Invoke(builder);
+        builder.Services.AddWindowsService(options => options.ServiceName = "KamenRaider Stream Guard");
+        builder.Services.AddSingleton(TimeProvider.System);
+        builder.Services.AddSingleton<KamenRaider.Agent.Leases.IBootClock,KamenRaider.Agent.Leases.WindowsBootClock>();
+        builder.Services.TryAddSingleton<KamenRaider.Agent.Sunshine.IStreamIngressPolicy,UnavailableStreamIngressPolicy>();
+        builder.Services.TryAddSingleton<KamenRaider.Agent.Sunshine.ISunshineServiceControl,UnavailableSunshineServiceControl>();
+        builder.Services.AddSingleton<KamenRaider.Agent.Sunshine.StreamGateCoordinator>();
+        builder.Services.AddSingleton<KamenRaider.Agent.Leases.IStreamGate>(sp => sp.GetRequiredService<KamenRaider.Agent.Sunshine.StreamGateCoordinator>());
+        builder.Services.TryAddSingleton<KamenRaider.Agent.Sunshine.IStreamGuardPipeServerFactory>(_ =>
+        {
+            if (!OperatingSystem.IsWindows())
+                throw new PlatformNotSupportedException("The Stream Guard service can run only on Windows.");
+            return new KamenRaider.Agent.Sunshine.WindowsStreamGuardPipeServerFactory();
+        });
+        builder.Services.AddSingleton<KamenRaider.Agent.Sunshine.StreamGuardPipeRequestHandler>();
+        builder.Services.AddHostedService<KamenRaider.Agent.Sunshine.StreamGuardPipeServer>();
+        builder.Services.AddHostedService<KamenRaider.Agent.Sunshine.StreamGuardDeadlineWorker>();
+        return builder.Build();
+    }
+
+    private sealed class UnavailableStreamIngressPolicy : KamenRaider.Agent.Sunshine.IStreamIngressPolicy
+    {
+        private static Task Unavailable() => Task.FromException(new InvalidOperationException("Windows Sunshine firewall provider is not configured."));
+        public Task SetBlockedAsync(bool blocked, CancellationToken cancellationToken) => Unavailable();
+        public Task<bool> IsBlockedAsync(CancellationToken cancellationToken) => Task.FromException<bool>(new InvalidOperationException("Windows Sunshine firewall provider is not configured."));
+    }
+
+    private sealed class UnavailableSunshineServiceControl : KamenRaider.Agent.Sunshine.ISunshineServiceControl
+    {
+        private static Task Unavailable() => Task.FromException(new InvalidOperationException("Windows Sunshine service provider is not configured."));
+        public Task StartAndWaitAsync(CancellationToken cancellationToken) => Unavailable();
+        public Task StopAndWaitAsync(CancellationToken cancellationToken) => Unavailable();
+        public Task<bool> IsRunningAsync(CancellationToken cancellationToken) => Task.FromException<bool>(new InvalidOperationException("Windows Sunshine service provider is not configured."));
+    }
+}
+
+public class Program
+{
+    public static void Main(string[] args)
+    {
+        if (args.Any(argument => string.Equals(argument, "--stream-guard", StringComparison.OrdinalIgnoreCase)))
+        {
+            StreamGuardHost.Build(args.Where(argument => !string.Equals(argument, "--stream-guard", StringComparison.OrdinalIgnoreCase)).ToArray()).Run();
+            return;
+        }
+
+        AgentHost.Build(args).Run();
+    }
+}

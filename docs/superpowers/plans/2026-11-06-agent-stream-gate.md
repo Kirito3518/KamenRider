@@ -81,11 +81,11 @@
 - Consumes: versioned JSON-line Block and Allow requests, StreamLeaseGrant, and an injected gate coordinator.
 - Produces: a persistent Agent pipe client implementing IStreamGate and a guard server that permits only SYSTEM and the Agent service SID, rejects remote clients, and blocks immediately on connection loss.
 
-- [ ] Add tests for protocol version, payload size, bad JSON, stale grant rejection, authorization ACL, client disconnection, reconnect, and failed acknowledgments.
-- [ ] Run StreamGuardPipeTests and observe the missing server/client protocol fail to compile.
-- [ ] Implement the guarded named-pipe server and fail-closed client; run the guard host only when explicitly launched in Stream Guard service mode.
-- [ ] Run StreamGuardPipeTests and the full Agent.Tests project; verify default Agent composition still reports unavailable rather than ready if the guard is missing.
-- [ ] Commit as feat(agent): add local stream guard service protocol.
+- [x] Add tests for protocol version, payload size, bad JSON, stale grant rejection, authorization ACL, client disconnection, reconnect, and failed acknowledgments.
+- [x] Run StreamGuardPipeTests and observe the missing server/client protocol fail to compile.
+- [x] Implement the guarded named-pipe server and fail-closed client; run the guard host only when explicitly launched in Stream Guard service mode.
+- [x] Run StreamGuardPipeTests and the full Agent.Tests project; verify default Agent composition still reports unavailable rather than ready if the guard is missing.
+- [x] Commit as feat(agent): add local stream guard service protocol.
 
 ### Task 4: Implement Windows firewall and Sunshine service providers
 
