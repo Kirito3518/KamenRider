@@ -23,7 +23,8 @@ public static class AgentHost
         builder.Services.AddSingleton(TimeProvider.System);
         builder.Services.AddSingleton<KamenRaider.Agent.Leases.IBootClock,KamenRaider.Agent.Leases.WindowsBootClock>();
         builder.Services.AddSingleton<KamenRaider.Agent.Leases.IStreamGate,KamenRaider.Agent.Leases.ClosedStreamGate>();
-        builder.Services.AddSingleton<KamenRaider.Agent.Power.IShutdown,KamenRaider.Agent.Power.WindowsShutdown>();
+        builder.Services.AddSingleton<KamenRaider.Agent.Power.WindowsShutdown>();
+        builder.Services.AddSingleton<KamenRaider.Agent.Power.IShutdown>(sp=>new KamenRaider.Agent.Power.BoundedShutdown(sp.GetRequiredService<KamenRaider.Agent.Power.WindowsShutdown>(),TimeSpan.FromSeconds(15)));
         builder.Services.AddSingleton(sp=>new KamenRaider.Agent.Leases.LeaseStore(sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<AgentOptions>>().Value.DataDirectory));
         builder.Services.AddSingleton<KamenRaider.Agent.Leases.LeaseEnforcer>();
         builder.Services.AddSingleton<KamenRaider.Agent.Sync.LeaseCommandDispatcher>();
