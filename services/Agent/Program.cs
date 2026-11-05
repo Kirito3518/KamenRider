@@ -67,6 +67,7 @@ public static class StreamGuardHost
         builder.Services.TryAddSingleton<KamenRaider.Agent.Sunshine.ISunshineServiceControl,KamenRaider.Agent.Sunshine.WindowsSunshineServiceControl>();
         builder.Services.AddSingleton<KamenRaider.Agent.Sunshine.StreamGateCoordinator>();
         builder.Services.AddSingleton<KamenRaider.Agent.Leases.IStreamGate>(sp => sp.GetRequiredService<KamenRaider.Agent.Sunshine.StreamGateCoordinator>());
+        builder.Services.AddHostedService<KamenRaider.Agent.Sunshine.StreamGuardStartupFence>();
         builder.Services.TryAddSingleton<KamenRaider.Agent.Sunshine.IStreamGuardPipeServerFactory>(_ =>
         {
             if (!OperatingSystem.IsWindows())
@@ -85,6 +86,12 @@ public class Program
 {
     public static void Main(string[] args)
     {
+        if (args.Any(argument => string.Equals(argument, "--stream-guard-recover", StringComparison.OrdinalIgnoreCase)))
+        {
+            KamenRaider.Agent.Sunshine.StreamGuardRecovery.Close();
+            return;
+        }
+
         if (args.Any(argument => string.Equals(argument, "--stream-guard", StringComparison.OrdinalIgnoreCase)))
         {
             StreamGuardHost.Build(args.Where(argument => !string.Equals(argument, "--stream-guard", StringComparison.OrdinalIgnoreCase)).ToArray()).Run();

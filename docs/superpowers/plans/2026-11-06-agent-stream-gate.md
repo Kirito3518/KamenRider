@@ -146,6 +146,7 @@
 - Consumes: the named-pipe gate and the installed Foundation Sunshine API.
 - Produces: production composition that stays fail-closed until management TLS/credentials, fenced cleanup, and runtime health providers are available; cleanup can start Sunshine only behind a closed firewall, clear and verify clients, and stop it again; pairing API operations do not close the service before making their request.
 
+- [x] Close and verify the stream gate in a Guard startup fence before the pipe/deadline workers start; add a SYSTEM recovery entry point for the SCM failure command. Guard host composition test passes with injected providers.
 - [ ] Add tests for stop/clear/restart cleanup ordering, ambiguous PIN handshake cleanup, no old client after boot, unavailable TLS credentials, and exact active-lease-only pairing.
 - [ ] Run focused pairing/boot tests and observe the current unavailable production dependencies or incorrect fence ordering.
 - [ ] Implement only through the injected maintenance and health interfaces; do not add a fake ready signal or call Restore Rx.

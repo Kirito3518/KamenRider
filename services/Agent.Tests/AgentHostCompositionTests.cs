@@ -38,9 +38,15 @@ public class AgentHostCompositionTests
             builder.Services.AddSingleton<KamenRaider.Agent.Sunshine.ISunshineServiceControl>(sunshine);
         });
         var coordinator = host.Services.GetRequiredService<KamenRaider.Agent.Sunshine.StreamGateCoordinator>();
+        var hostedServices = host.Services.GetServices<IHostedService>().ToList();
+        var startupFence = Assert.Single(hostedServices.OfType<KamenRaider.Agent.Sunshine.StreamGuardStartupFence>());
+        var serverIndex = hostedServices.FindIndex(service => service is KamenRaider.Agent.Sunshine.StreamGuardPipeServer);
+        var deadlineIndex = hostedServices.FindIndex(service => service is KamenRaider.Agent.Sunshine.StreamGuardDeadlineWorker);
 
         Assert.Same(coordinator, host.Services.GetRequiredService<KamenRaider.Agent.Leases.IStreamGate>());
-        await coordinator.BlockAsync(default);
+        Assert.True(serverIndex > hostedServices.IndexOf(startupFence));
+        Assert.True(deadlineIndex > hostedServices.IndexOf(startupFence));
+        await startupFence.StartAsync(default);
         Assert.True(ingress.Blocked);
         Assert.False(sunshine.Running);
         Assert.Equal(1, ingress.BlockCalls);
