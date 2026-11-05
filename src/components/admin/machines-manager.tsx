@@ -15,31 +15,43 @@ async function request(path: string, body?: unknown, method = "POST") {
 export function MachinesManager() {
   const [machines, setMachines] = useState<Machine[]>([]);
   const [trialLease, setTrialLease] = useState<Lease | null>(null);
-  const [message, setMessage] = useState("กำลังโหลด…");
+  const [loadStatus, setLoadStatus] = useState("กำลังโหลด…");
+  const [message, setMessage] = useState("");
   async function load() {
     try {
       setMachines(await request("/api/admin/machines", undefined, "GET"));
-      setMessage("");
+      setLoadStatus("");
     } catch (e) {
-      setMessage(String(e));
+      setLoadStatus(String(e));
     }
   }
   useEffect(() => {
     let active = true;
-    fetch("/api/admin/machines", { cache: "no-store" })
-      .then(async (r) => {
+    let busy = false;
+    async function refresh() {
+      if (busy) return;
+      busy = true;
+      try {
+        const r = await fetch("/api/admin/machines", { cache: "no-store" });
         if (!r.ok) throw new Error("โหลดเครื่องไม่ได้");
-        const data = await r.json();
+        const data: Machine[] = await r.json();
         if (active) {
           setMachines(data);
-          setMessage("");
+          setLoadStatus("");
         }
-      })
-      .catch((e) => {
-        if (active) setMessage(String(e));
-      });
+      } catch (e) {
+        if (active) setLoadStatus(String(e));
+      } finally {
+        busy = false;
+      }
+    }
+    void refresh();
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible") void refresh();
+    }, 5000);
     return () => {
       active = false;
+      window.clearInterval(timer);
     };
   }, []);
   async function act(path: string, body: unknown, method = "POST") {
@@ -62,9 +74,12 @@ export function MachinesManager() {
       <button className="rounded border p-2" onClick={load}>
         รีเฟรช
       </button>
-      <p role="status">{message}</p>
-      {!machines.length && !message ? <p>ยังไม่มีเครื่องลงทะเบียน</p> : null}
-      {machines.map((m) => (
+      <p role="status">{message || loadStatus}</p>
+      {!machines.length && !loadStatus ? <p>ยังไม่มีเครื่องลงทะเบียน</p> : null}
+      {machines.some((m) => m.approvalStatus === "pending") ? (
+        <p>เครื่องรอตั้งค่าและอนุมัติ: {machines.filter((m) => m.approvalStatus === "pending").length}</p>
+      ) : null}
+      {[...machines].sort((a, b) => Number(b.approvalStatus === "pending") - Number(a.approvalStatus === "pending")).map((m) => (
         <section
           key={`${m.machineId}-${m.configRevision}`}
           className="space-y-3 rounded-xl border p-4"
