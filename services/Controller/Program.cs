@@ -42,6 +42,8 @@ public static class ControllerHost
         {
             var local = new Uri(settings.InternalUrl);
             var agent = new Uri(settings.AgentUrl);
+            builder.Services.AddSingleton(sp => new ControllerDatabaseActivityLock(settings.DatabasePath));
+            builder.Services.AddHostedService(sp => sp.GetRequiredService<ControllerDatabaseActivityLock>());
             builder.WebHost.ConfigureKestrel(server => {
                 server.Listen(IPAddress.Parse(local.Host), local.Port);
                 if (agent.Host.Equals("localhost", StringComparison.OrdinalIgnoreCase)
@@ -86,4 +88,53 @@ public static class ControllerHost
         return app;
     }
 }
-public class Program { public static void Main(string[] args) => ControllerHost.Build(args).Run(); }
+public class Program
+{
+    public static int Main(string[] args)
+    {
+        if (ControllerMaintenanceCommand.TryRun(args, out var exitCode)) return exitCode;
+        ControllerHost.Build(args).Run();
+        return 0;
+    }
+}
+
+public static class ControllerMaintenanceCommand
+{
+    public static bool TryRun(string[] args, out int exitCode)
+    {
+        exitCode = 0;
+        if (args.Length == 0 || args[0] is not ("--backup-database" or "--restore-database")) return false;
+
+        var invalidBackupArguments = args[0] == "--backup-database" && args.Length != 3;
+        var invalidRestoreArguments = args[0] == "--restore-database" && (args.Length != 4 || args[3] != "--controller-stopped");
+        if (invalidBackupArguments || invalidRestoreArguments)
+        {
+            Console.Error.WriteLine("Usage: Controller.exe --backup-database <database> <backup> | --restore-database <backup> <database> --controller-stopped");
+            exitCode = 2;
+            return true;
+        }
+
+        try
+        {
+            if (args[0] == "--backup-database")
+            {
+                var destination = ControllerDatabaseMaintenance.Backup(args[1], args[2]);
+                Console.WriteLine($"Verified database backup: {destination}");
+            }
+            else
+            {
+                var recovery = ControllerDatabaseMaintenance.Restore(args[1], args[2]);
+                Console.WriteLine(recovery is null
+                    ? "Database restore completed; there was no prior database to preserve."
+                    : $"Database restore completed. Prior database preserved at: {recovery}");
+            }
+        }
+        catch (Exception exception)
+        {
+            Console.Error.WriteLine($"Controller database maintenance failed: {exception.Message}");
+            exitCode = 1;
+        }
+
+        return true;
+    }
+}

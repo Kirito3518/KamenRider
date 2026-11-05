@@ -51,8 +51,22 @@ The reviewed installer hardening requires an empty data destination (including h
 Windows antivirus previously blocked access to the updated `scripts/agent/Install-Service.ps1`; the user subsequently allowed access and the script was read and tested in plan mode. Security review found unresolved directory-parent trust and reparse-point races, plus incomplete rollback after service creation. The live installation path is therefore explicitly disabled; do not use an earlier revision to work around this guard. File-only helper tests and plan checks do not qualify a live installation.
 ## Controller backup and recovery
 
-Controller SQLite contains machine identities, approvals, allocations, commands and configuration. Use SQLite's online backup API (or `sqlite3` `.backup`) against the live database to produce a consistent snapshot; do not copy only the database file while WAL writes are active. Alternatively stop the Controller cleanly before copying the database and associated state. Encrypt backups, restrict access and retain them according to the operator's policy. Test recovery in an isolated environment with network access and service startup disabled; validate database integrity and that the backup contains the expected machines and leases. Neither a backup nor a restore drill has been performed here.
+Controller SQLite contains machine identities, approvals, allocations, commands and configuration. The published Controller executable now has an online, verified backup command:
+
+```powershell
+.\Controller.exe --backup-database 'C:\ProgramData\KamenRaider\Controller\controller.db' 'D:\KamenRaiderBackups\controller-YYYYMMDDTHHMMSSZ.db'
+```
+
+`BackupDatabase` creates a consistent snapshot while the Controller is running and blocks database writes while the snapshot is copied. The command validates SQLite integrity, foreign keys and required Controller tables before atomically publishing the backup. Choose a destination directory with restricted ACLs, encrypt the backup at rest and retain it according to the operator's policy. [Microsoft's SQLite backup documentation](https://learn.microsoft.com/dotnet/standard/data/sqlite/backup) describes the online backup behavior.
+
+Restore only in an isolated recovery drill or a planned maintenance window. Stop the Controller first, then run:
+
+```powershell
+.\Controller.exe --restore-database 'D:\KamenRaiderBackups\controller-YYYYMMDDTHHMMSSZ.db' 'C:\ProgramData\KamenRaider\Controller\controller.db' --controller-stopped
+```
+
+The restore command requires the explicit `--controller-stopped` acknowledgment and refuses while a current Controller process holds the database activity lock. It validates a staged copy before replacing the destination atomically and preserves the previous database beside it as a `.pre-restore-*.db` recovery file (with raw `-wal`/`-shm` sidecars if the prior database is corrupt). Verify the reported result, start the Controller only in the isolated environment, and confirm expected machines, leases and configuration. Do not perform a restore on the development Controller currently running on this workstation.
 
 Back up Controller TLS private keys/certificates, trust roots and service credentials separately in an approved protected secret store, with recovery permissions and certificate expiry tracked. Agent private identities are per-machine; protect each separately and never clone one to another machine. If an identity is lost or compromised, isolate the machine and revoke its existing identity through the approved operator process, then provision a new key, re-enroll and explicitly approve it after verifying its fingerprint. This repository does not yet provide a complete operator revocation/re-enrollment recovery workflow; do not claim that this procedure has been validated. Reconcile held allocations conservatively and do not restore service until the missing gate and proof integrations are qualified.
 
-Web authentication data and its secrets have their own backup and restore process and consistency requirements; a Controller SQLite backup does not back up web authentication. Coordinate recovery points and review sessions and credentials after restoring either store. Avoid bringing an old snapshot online as production without assessing stale leases, identities and revoked credentials.
+Web authentication data and its secrets have their own backup and restore process and consistency requirements; a Controller SQLite backup does not back up web authentication. Coordinate recovery points and review sessions and credentials after restoring either store. Avoid bringing an old snapshot online as production without assessing stale leases, identities and revoked credentials. The code path is covered with temporary databases; no production backup or restore drill has been performed.
