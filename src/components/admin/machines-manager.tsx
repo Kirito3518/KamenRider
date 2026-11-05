@@ -136,6 +136,9 @@ export function MachinesManager() {
               ? "(ตรงกับ config)"
               : "(รอ Agent ACK)"}
           </p>
+          <p role="status">
+            เซสชันผู้ดูแลที่กำลังดู VNC: {m.activeAdminVncSessions ?? 0}
+          </p>
           <p className="break-all font-mono text-sm">
             Fingerprint: {m.publicKeyFingerprint || "ยังไม่มีข้อมูลยืนยัน"}
           </p>

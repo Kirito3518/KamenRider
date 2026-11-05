@@ -34,9 +34,16 @@ public class AdminVncSessionTests
             Assert.Equal("admin-1", target.AdminUserId);
             Assert.Equal("10.0.0.8", target.Address.ToString());
             Assert.Equal(5900, target.Port);
+            Assert.Equal(1, database.List().Single().ActiveAdminVncSessions);
             Assert.Throws<UnauthorizedAccessException>(() => database.ConsumeAdminVncTicket(issued.Ticket, "http://localhost:3000"));
 
             database.FinishAdminVncSession(target.SessionId);
+            Assert.Equal(0, database.List().Single().ActiveAdminVncSessions);
+            var stale = database.CreateAdminVncTicket("pc", "admin-1", "http://localhost:3000");
+            var staleTarget = database.ConsumeAdminVncTicket(stale.Ticket, "http://localhost:3000");
+            clock.Now = clock.Now.AddHours(1);
+            Assert.Equal(0, database.List().Single().ActiveAdminVncSessions);
+            database.FinishAdminVncSession(staleTarget.SessionId);
             clock.Now = clock.Now.AddSeconds(21);
             Assert.Throws<UnauthorizedAccessException>(() => database.CreateAdminVncTicket("pc", "admin-1", "http://localhost:3000"));
         }

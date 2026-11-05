@@ -13,6 +13,7 @@ export type Machine = {
   canRent: boolean;
   lastSeenAt: string | null;
   publicKeyFingerprint?: string;
+  activeAdminVncSessions: number;
 };
 export type Lease = {
   connection?: { address: string | null; stale: boolean };

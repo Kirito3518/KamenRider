@@ -111,10 +111,10 @@ VNC/noVNC เป็นความสามารถของระบบฉบ�
 - Controller ออก ticket ใช้ครั้งเดียว อายุ 1 นาที ผูกกับ origin; WSS ใช้ IP ที่แอดมินยืนยันกับ port 5900 ที่กำหนดฝั่ง server ไม่รับ host/port จาก browser
 - Controller จำกัด session ไว้ 1 ชั่วโมงและรับเฉพาะ RFB 3.7/3.8 ที่ใช้ VNC authentication; gateway ส่ง RFB handshake, Raw framebuffer, desktop-size และ control message ที่รู้ความยาวแน่นอน, ปฏิเสธ keyboard, mouse, clipboard จาก browser, XVP หรือข้อความที่ไม่รู้จัก, ตัด standard ServerCutText และปิด session เมื่อเจอ extended clipboard ที่ไม่ได้ต่อรอง
 - noVNC เปิด view-only และตัด clipboard negotiation; viewer ไม่ส่ง clipboard ไปยังเครื่องหรือใส่ clipboard ของเครื่องแอดมิน; VNC server ต้องเริ่มด้วย true-color 32 bpp และรองรับ Raw encoding
-- ฐานข้อมูลเก็บ admin, machine, เวลาเริ่ม/จบ; noVNC ตั้ง view-only เพิ่มอีกชั้นหนึ่ง
+- ฐานข้อมูลเก็บ admin, machine, เวลาเริ่ม/จบ; หน้าแอดมินแสดงจำนวน session ที่กำลังดูจาก session ที่ยังไม่จบและเริ่มภายใน 1 ชั่วโมงล่าสุด; noVNC ตั้ง view-only เพิ่มอีกชั้นหนึ่ง
 - ยังไม่มี VNC server ที่ติดตั้งและตั้งค่าบนเครื่องลูก; ต้องกำหนดวิธีแจกจ่าย/credential/firewall ให้ยอมรับ VNC authentication และเข้าถึงได้เฉพาะ gateway ใน LAN ก่อนใช้งาน
 - ห้ามเปิด VNC port ตรงสู่อินเทอร์เน็ต; ห้ามเปิด keyboard/mouse control จนกว่าจะเพิ่มสิทธิ์แยกและ audit
-- ยังไม่แสดงสถานะ admin ที่กำลังดูเครื่อง และยังไม่ผ่าน desktop จริง, Windows lock/UAC, การสลับ session, ระหว่าง Moonlight stream และกรณี Agent offline
+- ยังไม่ผ่าน desktop จริง, Windows lock/UAC, การสลับ session, ระหว่าง Moonlight stream และกรณี Agent offline
 - ทดสอบ desktop จริง, Windows lock/UAC, การสลับ session, ระหว่าง Moonlight stream และเมื่อ Agent offline
 
 ### 9. หน้าผู้เช่าและการเชื่อมต่อภายนอก — มีเส้นทางพื้นฐาน; ยังเป็นระบบทดลอง
