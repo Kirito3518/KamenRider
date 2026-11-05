@@ -46,6 +46,7 @@ VNC/noVNC เป็นความสามารถของระบบฉบ�
 - service/ข้อมูลเดิมที่มีอยู่และ package ที่ hash ไม่ตรงถูกปฏิเสธ; service ที่สร้างโดยรอบติดตั้งนี้เท่านั้นที่ถูกลบเมื่อ rollback
 - ยังไม่ได้สั่งติดตั้ง service จริงบนเครื่องพัฒนา; PowerShell 5.1/7 Plan และ ACL suites, Next.js production build, machine route integration 14 scenarios, Agent 112 tests และ Controller 129 tests ผ่าน; Controller build test ใช้ artifacts ชั่วคราวเพื่อไม่ชน Controller dev
 - ก่อนทดสอบเครื่องลูก ต้องยืนยัน root certificate อยู่ใน `LocalMachine\Root`, ตั้งค่า env ใน `.env.local`, build package แล้วใส่ SHA-256 และตั้ง `AGENT_INSTALL_ENABLED=true`; ทดสอบการติดตั้ง, enrollment receipt/pending, approve, service recovery และ reboot บนเครื่องลูกจริง
+- Inventory แบบอ่านอย่างเดียวล่าสุด (2026-11-06): ไม่มี Windows service ชื่อ `KamenRaider Controller` หรือ `KamenRaider Agent`; มี service แยกชื่อ `0jay-agent` กำลังทำงานเป็น LocalSystem/Automatic ซึ่งยังไม่ได้ตรวจว่าเข้ากันได้; `SunshineService` ทำงานแบบ Automatic, มีกฎ inbound TCP/UDP ที่ local port เป็น Any, ไม่มี private-certificate candidate และการตรวจไม่ elevated; `StreamFenceQualified=false` และ `ReadyForRental=false`
 
 ### 3. Enrollment, identity และการอนุมัติเครื่อง — โค้ดหลักเสร็จ; ยังไม่ผ่านทดสอบติดตั้งจริง
 
