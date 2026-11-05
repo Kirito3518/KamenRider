@@ -62,11 +62,11 @@
 - Consumes: StreamLeaseGrant, IBootClock, TimeProvider, IStreamIngressPolicy, and ISunshineServiceControl.
 - Produces: a testable coordinator whose BlockAsync and AllowAsync methods enforce the operation ordering in the spec; its expiry monitor closes at the supplied monotonic deadline.
 
-- [ ] Add tests for block-rule-before-service-stop, service-start-before-block-removal, expiry, cross-boot/stale grant rejection, repeated block idempotence, and close-on-open failure.
-- [ ] Run StreamGateCoordinatorTests and observe the absent coordinator API fail to compile.
-- [ ] Implement the coordinator with one serialized lifecycle and fail-closed cleanup after each partial failure.
-- [ ] Run the focused coordinator tests and the full Agent.Tests project.
-- [ ] Commit as feat(agent): coordinate Sunshine stream fencing.
+- [x] Add tests for block-rule-before-service-stop, service-start-before-block-removal, expiry, cross-boot/stale grant rejection, repeated block idempotence, and close-on-open failure; also cover UTC expiry and recovery from out-of-band gate changes.
+- [x] Run StreamGateCoordinatorTests and observe the absent coordinator API fail to compile.
+- [x] Implement the coordinator with one serialized lifecycle and fail-closed cleanup after each partial failure.
+- [x] Run the focused coordinator tests and the full Agent.Tests project.
+- [x] Commit as feat(agent): coordinate Sunshine stream fencing.
 
 ### Task 3: Add the restricted Agent-to-Guard named-pipe protocol
 
