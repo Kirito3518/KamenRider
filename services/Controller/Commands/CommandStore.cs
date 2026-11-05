@@ -16,9 +16,12 @@ public sealed partial class ControllerDatabase {
         while(r.Read()) commands.Add(new(r.GetString(0),r.GetString(1),r.GetString(2),r.GetInt64(3),r.GetString(4),DateTimeOffset.FromUnixTimeMilliseconds(r.GetInt64(5)),JsonSerializer.Deserialize<JsonElement>(r.GetString(6))));
                 return commands.Select(c=>c.Type=="PairPin"&&pairingPins.TryGetValue(c.CommandId,out var secret)?c with{Payload=JsonSerializer.SerializeToElement(new{pairingId=c.Payload.GetProperty("pairingId").GetString(),pin=secret.Pin})}:c).ToArray();
     }
-    private void RegisterBoot(SqliteTransaction tx,string machineId,string boot,bool preserveActive=false) {
+    private void RejectRetiredBoot(SqliteTransaction tx,string machineId,string boot) {
         using(var check=LeaseCommand(tx,"SELECT retired FROM machine_boots WHERE machine_id=$id AND boot_id=$boot",("$id",machineId),("$boot",boot)))
             if(check.ExecuteScalar() is long retired && retired==1) throw new ArgumentException("Retired boot");
+    }
+    private void RegisterBoot(SqliteTransaction tx,string machineId,string boot,bool preserveActive=false) {
+        RejectRetiredBoot(tx,machineId,boot);
         // Boot history is durable: a signed old heartbeat cannot resurrect a retired process after a restart.
         ExecuteLease(tx,"UPDATE machine_boots SET retired=1 WHERE machine_id=$id AND boot_id<>$boot; INSERT OR IGNORE INTO machine_boots(machine_id,boot_id) VALUES($id,$boot)",("$id",machineId),("$boot",boot));
         if(!preserveActive) ExecuteLease(tx,"UPDATE leases SET state=CASE WHEN state='active' THEN 'ending' ELSE 'failed' END,pending_revision=NULL,pending_expires_at=NULL WHERE machine_id=$id AND boot_id IS NOT NULL AND boot_id<>$boot AND state IN ('preparing','active')",("$id",machineId),("$boot",boot));

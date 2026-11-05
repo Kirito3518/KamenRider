@@ -74,16 +74,16 @@ public sealed partial class ControllerDatabase : IDisposable
     }
     private static void Ports(int moon,int sun) {if(moon is <1 or >65535 || sun is <1 or >65535)throw new ArgumentException("Invalid port");}
     public MachineDto[] List() {lock(gate) {
-        // Read heartbeat and allocation in one SQLite statement so they share a snapshot.
-        using var cmd=Command("SELECT m.machine_id,m.approval_status,m.display_name,m.hourly_price,m.local_ip,m.mac_address,m.moonlight_port,m.sunshine_port,m.revision,m.approved_by,m.approved_at,h.last_seen,h.boot_id,h.readiness,EXISTS(SELECT 1 FROM leases l WHERE l.machine_id=m.machine_id AND l.allocation_held=1) FROM machines m LEFT JOIN machine_heartbeats h ON h.machine_id=m.machine_id ORDER BY m.machine_id");
+        // Read heartbeat, configuration acknowledgment and allocation from the same SQLite snapshot.
+        using var cmd=Command("SELECT m.machine_id,m.approval_status,m.display_name,m.hourly_price,m.local_ip,m.mac_address,m.moonlight_port,m.sunshine_port,m.revision,m.approved_by,m.approved_at,h.last_seen,h.boot_id,h.readiness,EXISTS(SELECT 1 FROM leases l WHERE l.machine_id=m.machine_id AND l.allocation_held=1),a.applied_revision FROM machines m LEFT JOIN machine_heartbeats h ON h.machine_id=m.machine_id LEFT JOIN machine_config_acks a ON a.machine_id=m.machine_id ORDER BY m.machine_id");
         using var r=cmd.ExecuteReader(); var rows=new List<MachineDto>(); var now=clock.GetUtcNow();
         while(r.Read()) {
             DateTimeOffset? seen=r.IsDBNull(11)?null:DateTimeOffset.Parse(r.GetString(11));
             var readiness=seen is null?"unknown":now-seen.Value>TimeSpan.FromSeconds(20)?"unreachable":r.GetString(13);
-            rows.Add(new MachineDto(r.GetString(0),r.GetString(1),r.GetString(2),r.GetInt64(3),r.GetString(4),r.GetString(5),r.GetInt32(6),r.GetInt32(7),r.GetInt64(8),seen,r.IsDBNull(12)?null:r.GetString(12),readiness,null,r.IsDBNull(9)?null:r.GetString(9),r.IsDBNull(10)?null:DateTimeOffset.Parse(r.GetString(10))) {CanRent=r.GetString(1)=="approved" && readiness=="ready" && r.GetInt64(14)==0});
+            rows.Add(new MachineDto(r.GetString(0),r.GetString(1),r.GetString(2),r.GetInt64(3),r.GetString(4),r.GetString(5),r.GetInt32(6),r.GetInt32(7),r.GetInt64(8),seen,r.IsDBNull(12)?null:r.GetString(12),readiness,null,r.IsDBNull(9)?null:r.GetString(9),r.IsDBNull(10)?null:DateTimeOffset.Parse(r.GetString(10))) {AppliedConfigRevision=r.IsDBNull(15)?null:r.GetInt64(15),CanRent=r.GetString(1)=="approved" && readiness=="ready" && r.GetInt64(14)==0 && !r.IsDBNull(15) && r.GetInt64(15)==r.GetInt64(8)});
         }
         r.Close();
-        for(var i=0;i<rows.Count;i++){var row=rows[i];using var ack=Command("SELECT applied_revision FROM machine_config_acks WHERE machine_id=$id",("$id",row.MachineId));var applied=ack.ExecuteScalar();rows[i]=row with {AppliedConfigRevision=applied is long revision?revision:null,PublicKeyFingerprint=Convert.ToHexString(SHA256.HashData(Convert.FromBase64String(PublicKey(row.MachineId)!)))};}
+        for(var i=0;i<rows.Count;i++){var row=rows[i];rows[i]=row with {PublicKeyFingerprint=Convert.ToHexString(SHA256.HashData(Convert.FromBase64String(PublicKey(row.MachineId)!)))};}
         return rows.ToArray();
     }}
     public MachineDto Update(string id, MachineUpdate update,long expectedRevision) {lock(gate) {

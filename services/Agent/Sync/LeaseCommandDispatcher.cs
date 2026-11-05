@@ -5,15 +5,15 @@ public sealed class LeaseCommandDispatcher(LeaseEnforcer enforcer,KamenRaider.Ag
  public Task<PairingOffer?> GetPairingOfferAsync(CancellationToken ct)=>enforcer.CanStream&&pairing is not null?pairing.CreateOfferAsync(ct):Task.FromResult<PairingOffer?>(null);
  private CommandResult[] pending=[];
  public CommandResult[] PendingResults=>pending.ToArray();
- public async Task AcceptAsync(SyncResponse response,long requestStartedUptimeMilliseconds,CancellationToken ct){await enforcer.ObserveControllerTimeAsync(response.ServerTimeUtc,requestStartedUptimeMilliseconds,ct);await ProcessAsync(response,ct);}
- public async Task AcceptAsync(SyncResponse response,CancellationToken ct){await enforcer.ObserveControllerTimeAsync(response.ServerTimeUtc,ct);await ProcessAsync(response,ct);}
+ public async Task AcceptAsync(SyncResponse response,long requestStartedUptimeMilliseconds,CancellationToken ct){await ObserveResponseTimeAsync(response,requestStartedUptimeMilliseconds,ct);await AcceptObservedResponseAsync(response,ct);}
+ public async Task AcceptAsync(SyncResponse response,CancellationToken ct){await enforcer.ObserveControllerTimeAsync(response.ServerTimeUtc,ct);await AcceptObservedResponseAsync(response,ct);}
+ internal Task ObserveResponseTimeAsync(SyncResponse response,long requestStartedUptimeMilliseconds,CancellationToken ct)=>enforcer.ObserveControllerTimeAsync(response.ServerTimeUtc,requestStartedUptimeMilliseconds,ct);
  public async Task AcceptBlockedAsync(SyncResponse response,long requestStartedUptimeMilliseconds,CancellationToken ct){
-  // A successful response acknowledges the prior result batch, but its commands and lease proof are not trusted before reconciliation.
-  pending=[];
-  await enforcer.ObserveControllerTimeAsync(response.ServerTimeUtc,requestStartedUptimeMilliseconds,ct);
+  // Presence-only responses do not process command results; retain the batch until a ready sync acknowledges it.
+  await ObserveResponseTimeAsync(response,requestStartedUptimeMilliseconds,ct);
   await enforcer.ConfirmAsync(null,ct);
  }
- private async Task ProcessAsync(SyncResponse response,CancellationToken ct){
+ internal async Task AcceptObservedResponseAsync(SyncResponse response,CancellationToken ct){
   // A successful sync response acknowledges the results sent in that request.
   pending=[];
   foreach(var command in response.Commands.Where(c=>c.Type=="ApplyLease"))pending=[..pending,await enforcer.ApplyAsync(command,ct)];

@@ -12,13 +12,15 @@ An installed Agent should keep reporting that its machine is reachable while it 
 
 ## Design
 
-The Agent runs the sync request after each reconciliation attempt, including NotReady and Fault outcomes. It reports ready only when reconciliation is Ready; otherwise it reports notReady. It may apply the Controller's current port configuration, but it must ignore commands and active lease confirmations. It still observes the authenticated Controller time so a previously persisted lease cannot gain time when the local wall clock is behind. A successful response acknowledges command results sent with that heartbeat.
+The Agent runs the sync request after each reconciliation attempt, including NotReady and Fault outcomes. It reports ready only when reconciliation is Ready; otherwise it reports notReady. It may apply the Controller's current port configuration, but it must ignore commands and active lease confirmations. It still observes authenticated Controller time so a persisted lease cannot gain time when the local wall clock is behind. A presence-only response does not process or acknowledge command results; the Agent retains the batch until a Ready sync lets the Controller process it. The Agent processes blocked response time before attempting local config persistence.
 
 ## Constraints
 
 - Pending and approved-but-not-ready machines remain ineligible for rental.
 - An Agent without successful reconciliation must not apply lease or pairing commands or confirm a lease.
 - A Controller outage remains notReady; a heartbeat is not evidence of power, desktop health, restoration, or stream readiness.
+- A notReady/unknown heartbeat updates presence and configuration ACK metadata only; it cannot retire boot history, change lease or command state, process results, deliver commands, or confirm a lease.
+- Rental availability requires the applied configuration revision to equal the current Controller revision.
 - Reboot Restore Rx remains an externally configured system; this change does not call or modify it.
 
 ## Scope

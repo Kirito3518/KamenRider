@@ -2,6 +2,26 @@ using KamenRaider.Contracts;
 using KamenRaider.Controller.Data;
 namespace Controller.Tests;
 public class BootTests {
+ [Theory][InlineData("notReady")][InlineData("unknown")]
+ public async Task BlockedHeartbeatsPreserveActiveLeaseUntilVerifiedBootTransition(string readiness) {
+  using var f=new LeaseFixture();var lease=await f.Active();await f.Leases.ExtendLeaseAsync(lease.Id,30,1,"extension",default);
+  var challenge=BootChallengeTests.Issue(f);
+  for(var i=0;i<2;i++) {
+   var heartbeat=f.Db.Sync("pc",new("new","192.0.2.2","001122334455",3,readiness,[]));
+   Assert.Empty(heartbeat.Commands);Assert.Null(heartbeat.ActiveLease);
+   var retained=f.Db.GetLease(lease.Id)!;Assert.Equal("active",retained.State);Assert.Equal(2,retained.PendingRevision);Assert.Equal(lease.ExpiresAtUtc,retained.ExpiresAtUtc);
+   var machine=Assert.Single(f.Db.List());Assert.Equal("new",machine.BootId);Assert.Equal("192.0.2.2",machine.LocalIp);Assert.False(machine.CanRent);
+  }
+  var resumed=BootChallengeTests.Prove(f,challenge);
+  Assert.Equal("ResumeLease",resumed.Action);Assert.Equal(lease.ExpiresAtUtc,resumed.Lease!.ExpiresAtUtc);Assert.Equal(1,resumed.Lease.LeaseRevision);Assert.Equal("new",resumed.Lease.BootId);
+  f.Reopen();Assert.Throws<ArgumentException>(()=>f.Db.Sync("pc",new("boot","192.0.2.1","001122334455",3,readiness,[])));
+ }
+ [Theory][InlineData("notReady")][InlineData("unknown")]
+ public async Task BlockedHeartbeatCannotApplyFailureResultsOrReturnLeaseCommands(string readiness) {
+  using var f=new LeaseFixture();var lease=await f.Active();await f.Leases.ExtendLeaseAsync(lease.Id,30,1,"extension",default);var extension=Assert.Single(f.Sync().Commands);
+  var heartbeat=f.Db.Sync("pc",new("boot","192.0.2.1","001122334455",3,readiness,[new(extension.CommandId,"failed",2)]));
+  Assert.Empty(heartbeat.Commands);Assert.Null(heartbeat.ActiveLease);Assert.Equal("active",f.Db.GetLease(lease.Id)!.State);Assert.Equal(extension.CommandId,Assert.Single(f.Sync().Commands).CommandId);
+ }
  [Fact] public async Task VerifiedNewBootResumesOnlyCommittedExpiryAndInvalidatesOldCommands() {
   using var f=new LeaseFixture();var lease=await f.Active();await f.Leases.ExtendLeaseAsync(lease.Id,30,1,"extension",default);
   var result=BootChallengeTests.Prove(f,BootChallengeTests.Issue(f));

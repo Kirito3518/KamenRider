@@ -20,7 +20,7 @@ public sealed class LeaseFixture : IDisposable {
         Db.Update("pc",new("PC",500,1,2),1); Db.Approve("pc","admin");
         Sync();
     }
-    public SyncResponse Sync(string boot="boot", params CommandResult[] results) => Db.Sync("pc",new(boot,"192.0.2.1","001122334455",1,"ready",results));
+    public SyncResponse Sync(string boot="boot", params CommandResult[] results) => Db.Sync("pc",new(boot,"192.0.2.1","001122334455",Db.List().Single().ConfigRevision,"ready",results));
     public Task<LeaseDto> Create(string key="create",string user="alice") => Leases.CreateTrialLeaseAsync(user,"pc",60,key,default);
     public async Task<(LeaseDto,CommandEnvelope)> Prepare() {
         var lease = await Create();
@@ -39,6 +39,15 @@ public sealed class LeaseFixture : IDisposable {
     public void Dispose() { Db.Dispose(); File.Delete(Path); }
 }
 public class LeaseTests {
+    [Fact] public void AvailabilityWaitsForCurrentConfigurationAcknowledgmentAfterAdminEdit() {
+        using var f=new LeaseFixture();var before=Assert.Single(f.Db.List());Assert.True(before.CanRent);Assert.Equal(3,before.AppliedConfigRevision);
+        var updated=f.Db.Update("pc",new("PC",500,5000,6000),before.ConfigRevision);
+        Assert.Equal(4,updated.ConfigRevision);Assert.False(updated.CanRent);
+        f.Db.Sync("pc",new("boot","192.0.2.1","001122334455",3,"ready",[]));
+        var stale=Assert.Single(f.Db.List());Assert.Equal(3,stale.AppliedConfigRevision);Assert.False(stale.CanRent);
+        f.Db.Sync("pc",new("boot","192.0.2.1","001122334455",4,"ready",[]));
+        var current=Assert.Single(f.Db.List());Assert.Equal(4,current.AppliedConfigRevision);Assert.True(current.CanRent);
+    }
     [Fact] public async Task AvailabilityRequiresFreshReadyAndNoHeldAllocation() {
         using var f=new LeaseFixture();
         Assert.True(f.Db.List().Single().CanRent);

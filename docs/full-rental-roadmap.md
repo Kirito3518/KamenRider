@@ -58,6 +58,7 @@ VNC/noVNC เป็นความสามารถของระบบฉบ�
 - Agent ส่ง heartbeat และสถานะ config revision
 - Controller เป็นเจ้าของค่า config; Agent บันทึก config ใหม่แบบ atomic และรายงาน ACK
 - เครื่องที่เงียบเกินกำหนดเป็น unreachable ไม่ถือว่าปิดสำเร็จ
+- เครื่องที่มีสถานะ ready แต่ applied config revision ยังไม่ตรงกับ Controller revision ต้องยังเช่าไม่ได้
 - Controller ตรวจ Public IP ผ่าน API และคงค่าล่าสุดเมื่อ API ล้มเหลว
 - Controller ส่ง Wake-on-LAN ตาม interface/broadcast ที่ตั้งไว้
 - ทดสอบ WOL จาก shutdown จริง, subnet จริง และ adapter ที่เลือก
@@ -88,7 +89,7 @@ VNC/noVNC เป็นความสามารถของระบบฉบ�
 ### 7. Reconcile หลังบูตและพร้อมเช่ารอบใหม่ — runtime heartbeat ต่อแล้ว; boot evidence ยังขาด
 
 - Agent ปิด stream fence ก่อน sync/reconcile ทุกครั้ง
-- Agent ส่ง signed heartbeat สถานะ notReady ได้ระหว่างรอ reconciliation และไม่รับคำสั่ง/lease confirmation จนกว่าจะ Ready
+- Agent ส่ง signed heartbeat สถานะ notReady ได้ระหว่างรอ reconciliation โดย Controller อัปเดต presence/config ACK แต่ไม่เปลี่ยน boot history, lease, command หรือผลคำสั่ง และไม่ส่ง command/lease confirmation; Agent เก็บผลคำสั่งค้างไว้จน Ready sync
 - สถานะปัจจุบัน: runtime heartbeat ต่อแล้ว แต่ production ยังใช้ UnavailableBootEnvironment และ ClosedStreamGate; ห้ามอ้างว่า Sunshine ถูกกั้นหรือเครื่องพร้อมเช่า
 - ดึง config ล่าสุดและ reconcile lease/boot ก่อนรายงาน ready
 - lease ที่ยัง active และไม่หมดให้กลับเข้า lease เดิมด้วย expiry เดิม; ห้ามเพิ่มเวลา
