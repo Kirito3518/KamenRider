@@ -3,7 +3,8 @@ using KamenRaider.Contracts;
 using KamenRaider.Agent.Power;
 namespace KamenRaider.Agent.Leases;
 public interface IBootClock {string BootId {get;} long UptimeMilliseconds {get;}}
-public interface IStreamGate {Task BlockAsync(CancellationToken ct);Task AllowAsync(CancellationToken ct);}
+public sealed record StreamLeaseGrant(string RentalId,long Revision,string BootId,DateTimeOffset ExpiresAtUtc,long DeadlineUptimeMilliseconds);
+public interface IStreamGate {Task BlockAsync(CancellationToken ct);Task AllowAsync(StreamLeaseGrant grant,CancellationToken ct);}
 public sealed class LeaseEnforcer(LeaseStore store,TimeProvider time,IBootClock boot,IStreamGate gate,IShutdown shutdown) {
  private readonly SemaphoreSlim commands=new(1,1);
  private readonly object state=new();
@@ -103,7 +104,8 @@ private DateTimeOffset EffectiveNow(){var now=time.GetUtcNow();if(serverTime is 
    }catch(Exception ex) when(ex is IOException or UnauthorizedAccessException){lock(state){fault="LeaseStorageFailed";}return;}}
   lock(state){confirmed=false;candidate=CanTryOpenGate(confirmation)?current:null;}
   if(candidate is null){await gate.BlockAsync(ct);return;}
-  try{await gate.AllowAsync(ct);}catch(Exception openError){
+  var grant=new StreamLeaseGrant(candidate.RentalId,candidate.Revision,candidate.BootId,candidate.ExpiresAtUtc,EnforcementDeadline(candidate));
+  try{await gate.AllowAsync(grant,ct);}catch(Exception openError){
    lock(state){confirmed=false;if(fault is null or "StreamGateFailed")fault="StreamGateFailed";}
    try{await gate.BlockAsync(CancellationToken.None);}catch(Exception blockError){throw new AggregateException("The stream gate failed to open and could not be confirmed closed.",openError,blockError);}
    throw;
