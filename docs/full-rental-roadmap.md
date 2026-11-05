@@ -38,16 +38,19 @@ VNC/noVNC เป็นความสามารถของระบบฉบ�
 - route แอดมินตรวจ session/admin และ environment; ถ้าค่า URL, hash หรือ trust thumbprint ไม่ผ่าน จะไม่ส่งคำสั่งออกไป
 - คำสั่งรองรับ Windows PowerShell 5.1, ตรวจ SHA-256 ของ Bootstrap ในหน่วยความจำและ package ก่อนติดตั้ง แล้วส่ง URL กลับ `/admin/machines`; ไม่เขียน Bootstrap ลง shared TEMP
 - HTTP อนุญาตเฉพาะ URL loopback สำหรับทดสอบเครื่องเดียว; Controller URL ต้องเป็น HTTPS
+- API สร้าง enrollment ticket แบบสุ่มที่หมดอายุใน 24 ชั่วโมง เก็บเฉพาะ SHA-256 hash และใช้ได้ครั้งเดียวสำหรับ identity ใหม่; identity เดิมส่ง enrollment ซ้ำเพื่อกู้คืนได้
 - installer วาง Agent และ staging ใน Program Files, จำกัด ACL ของไฟล์/config/data ตั้งแต่สร้าง directory, ปฏิเสธ directory ที่ถูกสร้างดักหรือมี ACL ไม่ปลอดภัย, ตั้ง Windows Service เป็น auto-start และเริ่ม enrollment
 - หน้าแอดมินแสดงคำสั่งให้คัดลอก; หลังติดตั้งจะกลับมาหน้าเครื่อง และรายการ poll แสดงเครื่องที่ลงทะเบียนเป็น pending ให้ตั้งชื่อ ราคา พอร์ตและอนุมัติ
-- ถ้า Controller ติดต่อไม่ได้ภายใน 90 วินาที service จะอยู่ต่อและ retry; script แจ้ง pending แล้วเปิดหน้าเว็บ
+- ถ้า Controller ติดต่อไม่ได้ภายใน 90 วินาที service จะอยู่ต่อและ retry; script แจ้ง pending แล้วเปิดหน้าเว็บ; ticket ถูกลบหลังบันทึก receipt สำเร็จ
+- ถ้า service หยุดหรือ ticket หมดอายุก่อน enrollment คำสั่ง admin ใหม่จะตรวจ service, binary, config และ identity เดิม แล้วเปลี่ยนเฉพาะ ticket ส่วนตัวก่อนเริ่ม/ resume service; ปฏิเสธ installation ที่ไม่ครบหรือค่าไม่ตรงกัน
 - service/ข้อมูลเดิมที่มีอยู่และ package ที่ hash ไม่ตรงถูกปฏิเสธ; service ที่สร้างโดยรอบติดตั้งนี้เท่านั้นที่ถูกลบเมื่อ rollback
-- ยังไม่ได้สั่งติดตั้ง service จริงบนเครื่องพัฒนา; tests, package build, route integration และ Plan ผ่านบน PowerShell 5.1/7; Agent ผ่าน 98 tests และ Controller ผ่าน 94 tests โดยข้ามเฉพาะ test ที่ rebuild Controller ขณะ dev process จับไฟล์อยู่
+- ยังไม่ได้สั่งติดตั้ง service จริงบนเครื่องพัฒนา; PowerShell 5.1/7 Plan และ ACL suites, Next.js production build, machine route integration 14 scenarios, Agent 100 tests และ Controller 102 tests ผ่าน; Controller build test ใช้ artifacts ชั่วคราวเพื่อไม่ชน Controller dev
 - ก่อนทดสอบเครื่องลูก ต้องยืนยัน root certificate อยู่ใน `LocalMachine\Root`, ตั้งค่า env ใน `.env.local`, build package แล้วใส่ SHA-256 และตั้ง `AGENT_INSTALL_ENABLED=true`; ทดสอบการติดตั้ง, enrollment receipt/pending, approve, service recovery และ reboot บนเครื่องลูกจริง
 
 ### 3. Enrollment, identity และการอนุมัติเครื่อง — โค้ดหลักเสร็จ; ยังไม่ผ่านทดสอบติดตั้งจริง
 
 - Agent สร้าง key และ machine ID ประจำเครื่อง เก็บด้วย ACL เฉพาะ
+- Admin route ออก ticket ที่มีอายุ 24 ชั่วโมง; Controller เก็บ hash, บังคับ single-use ตอนสร้าง identity ใหม่ และอนุญาต same-identity retries โดยไม่สร้างเครื่องซ้ำ
 - คำขอ enrollment ลงลายเซ็นและมี replay protection
 - Controller สร้าง pending machine โดยไม่ให้เช่าได้
 - รายงาน local IP, MAC และพอร์ตเริ่มต้น; การส่งซ้ำใช้ identity เดิม

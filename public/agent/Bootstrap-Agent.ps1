@@ -4,6 +4,7 @@ param(
     [Parameter(Mandatory)][string]$PackageUrl,
     [Parameter(Mandatory)][ValidatePattern('^[A-Fa-f0-9]{64}$')][string]$PackageSha256,
     [Parameter(Mandatory)][ValidatePattern('^[A-Fa-f0-9]{40}$')][string]$TrustedRootThumbprint,
+    [Parameter(Mandatory)][ValidatePattern('^[A-Za-z0-9_-]{43}$')][string]$EnrollmentTicket,
     [Parameter(Mandatory)][string]$InstallReturnUrl,
     [string]$PackageArchivePath,
     [switch]$Plan
@@ -169,6 +170,7 @@ if ($Plan) {
         PackageUrl = $package.AbsoluteUri
         PackageSha256 = $PackageSha256.ToUpperInvariant()
         TrustedRootThumbprint = $TrustedRootThumbprint.ToUpperInvariant()
+        EnrollmentTicketProvided = $true
         InstallReturnUrl = $returnUri.AbsoluteUri
         StageParent = $plannedStageParent
         PackageArchivePath = $PackageArchivePath
@@ -203,7 +205,7 @@ try {
     if (-not (Test-Path -LiteralPath $installer -PathType Leaf)) { throw 'Agent package has no qualified installer.' }
     $installerBlock = [ScriptBlock]::Create([IO.File]::ReadAllText($installer))
     & $installerBlock -PackageRoot $expanded -ControllerUrl $normalizedController `
-        -TrustedRootThumbprint $TrustedRootThumbprint -InstallReturnUrl $returnUri.AbsoluteUri
+        -TrustedRootThumbprint $TrustedRootThumbprint -EnrollmentTicket $EnrollmentTicket -InstallReturnUrl $returnUri.AbsoluteUri
 } finally {
     $resolved = [IO.Path]::GetFullPath($stage)
     if (-not [string]::Equals([IO.Path]::GetDirectoryName($resolved), [IO.Path]::GetFullPath($productDirectory), [StringComparison]::OrdinalIgnoreCase) -or [IO.Path]::GetFileName($resolved) -notlike '.agent-bootstrap-*') {

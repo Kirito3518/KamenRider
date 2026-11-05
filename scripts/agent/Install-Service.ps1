@@ -6,6 +6,7 @@ param(
     [Parameter(Mandatory)][string]$ConfigurationFile,
     [Parameter(Mandatory)][ValidatePattern('^[A-Fa-f0-9]{40}$')][string]$TrustedRootThumbprint,
     [string]$InstallScriptRoot,
+    [string]$EnrollmentTicket,
     [switch]$StartAfterInstall,
     [switch]$Plan
 )
@@ -28,12 +29,14 @@ if ($Plan) {
         Startup = $startup
         StartAfterInstall = [bool]$StartAfterInstall
         TrustedRootThumbprint = $TrustedRootThumbprint
+        EnrollmentTicketStored = -not [string]::IsNullOrWhiteSpace($EnrollmentTicket)
         Recovery = 'restart after 5/15/60 seconds'
     }
     return
 }
 
 if ($Role -eq 'Controller') { throw 'Controller service installation is not enabled until separately reviewed.' }
+if ($Role -eq 'Agent' -and $EnrollmentTicket -notmatch '^[A-Za-z0-9_-]{43}$') { throw 'A valid enrollment ticket is required for Agent service installation.' }
 
 if ($env:OS -ne 'Windows_NT') { throw 'Windows is required.' }
 if (-not ([Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -64,13 +67,14 @@ Assert-ServiceIsAbsent $serviceName
 if (-not $PSCmdlet.ShouldProcess($serviceName, 'Create service, secure configuration and data, and configure startup')) { return }
 
 $binaryPath = Get-ServiceBinaryPath -Executable $executable -ContentRoot $PublishDirectory
-$dataDirectoryCreatedByThisRun = $false
+$dataDirectoryState = [pscustomobject]@{ Created = $false }
 Invoke-ServiceInstallTransaction -Create {
     New-DisabledWindowsService -ServiceName $serviceName -BinaryPath $binaryPath -Account $account
     return $true
 } -Configure {
     Assert-ServiceSidMatchesVirtualAccount -ServiceName $serviceName -ExpectedSid $serviceSid
-    $dataDirectoryCreatedByThisRun = Initialize-PrivateDataDirectory $DataDirectory $serviceSid
+    $dataDirectoryState.Created = Initialize-PrivateDataDirectory $DataDirectory $serviceSid
+    if ($Role -eq 'Agent') { Publish-PrivateEnrollmentTicket -Directory $DataDirectory -Ticket $EnrollmentTicket -ServiceSid $serviceSid | Out-Null }
     Publish-PrivateConfiguration $ConfigurationFile $PublishDirectory $serviceSid
     & sc.exe failure $serviceName reset= 86400 actions= restart/5000/restart/15000/restart/60000 | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'Recovery configuration failed.' }
@@ -102,8 +106,10 @@ Invoke-ServiceInstallTransaction -Create {
         & sc.exe delete $serviceName | Out-Null
         if ($LASTEXITCODE -ne 0) { throw 'Unable to remove the service created by this installation.' }
     }
-    if ($dataDirectoryCreatedByThisRun -and (Test-Path -LiteralPath $DataDirectory) -and @(Get-ChildItem -LiteralPath $DataDirectory -Force).Count -eq 0) {
-        [IO.Directory]::Delete([IO.Path]::GetFullPath($DataDirectory), $false)
+    if ($dataDirectoryState.Created -and (Test-Path -LiteralPath $DataDirectory)) {
+        $ticketPath = Join-Path $DataDirectory 'enrollment-ticket.txt'
+        if (Test-Path -LiteralPath $ticketPath -PathType Leaf) { Remove-Item -LiteralPath $ticketPath -Force }
+        if (@(Get-ChildItem -LiteralPath $DataDirectory -Force).Count -eq 0) { [IO.Directory]::Delete([IO.Path]::GetFullPath($DataDirectory), $false) }
     }
 }
 

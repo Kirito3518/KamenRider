@@ -2,6 +2,7 @@
 param(
     [Parameter(Mandatory)][string]$ControllerUrl,
     [Parameter(Mandatory)][ValidatePattern('^[A-Fa-f0-9]{40}$')][string]$TrustedRootThumbprint,
+    [Parameter(Mandatory)][ValidatePattern('^[A-Za-z0-9_-]{43}$')][string]$EnrollmentTicket,
     [ValidateRange(1, 65535)][int]$MoonlightPort = 47989,
     [ValidateRange(1, 65535)][int]$SunshinePort = 47990,
     [string]$NetworkAdapterId,
@@ -66,6 +67,7 @@ if ($Plan) {
         }
         ServiceStartup = 'auto'
         StartAfterInstall = $true
+        EnrollmentTicketStored = $true
         EnrollmentWaitSeconds = 90
         InstallReturnUrl = $returnUrlNormalized
     }
@@ -78,6 +80,33 @@ if (-not ([Security.Principal.WindowsPrincipal]::new([Security.Principal.Windows
     throw 'Run installation from an elevated PowerShell session.'
 }
 . ([ScriptBlock]::Create([IO.File]::ReadAllText((Join-Path $effectivePackageRoot 'PrivateInstallFiles.ps1'))))
+
+$serviceName = 'KamenRaider Agent'
+$serviceAccount = "NT SERVICE\$serviceName"
+$serviceSid = Get-ServiceSid -ServiceName $serviceName
+$existingService = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+$installMode = Get-AgentInstallMode `
+    -ServiceExists ([bool]$existingService) `
+    -InstallDirectoryExists (Test-Path -LiteralPath $installDirectory) `
+    -DataDirectoryExists (Test-Path -LiteralPath $dataDirectory)
+
+if (-not (Test-Path -LiteralPath "Cert:\LocalMachine\Root\$TrustedRootThumbprint")) {
+    throw 'Provision and verify the certificate trust chain before installation.'
+}
+
+if ($installMode -eq 'repair-enrollment') {
+    if (-not $PSCmdlet.ShouldProcess($installDirectory, 'Verify the existing Agent and renew its enrollment ticket')) { return }
+    try {
+        Invoke-AgentEnrollmentRepair -ServiceName $serviceName -InstallDirectory $installDirectory `
+            -DataDirectory $dataDirectory -ControllerUrl $controllerUrlNormalized `
+            -EnrollmentTicket $EnrollmentTicket -ServiceSid $serviceSid -InstallReturnUrl $returnUrlNormalized
+    } catch {
+        $service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+        if ($service) { Write-Warning (Get-AgentEnrollmentRecoveryInstruction -ServiceStatus $service.Status.ToString()) }
+        throw
+    }
+    return
+}
 
 $dotnetInterfaces = [Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces()
 $adapterCandidates = @(
@@ -98,19 +127,16 @@ $adapterCandidates = @(
         } | Sort-Object -Property Id -Unique
 )
 $normalizedAdapterId = Resolve-AgentNetworkAdapter -Candidates $adapterCandidates -RequestedId $normalizedAdapterId
-$serviceName = 'KamenRaider Agent'
-$serviceAccount = "NT SERVICE\$serviceName"
 $publishParent = Split-Path -Parent $installDirectory
 $dataParent = Split-Path -Parent $dataDirectory
 $dataParentExisted = Test-Path -LiteralPath $dataParent
 $configStage = $null
 $publishStage = $null
 $publishMoved = $false
+$serviceCreatedByThisRun = $false
 $dataParentCreatedByThisRun = $false
 $publishParentExisted = Test-Path -LiteralPath $publishParent
 $publishParentCreatedByThisRun = $false
-
-$serviceSid = Get-ServiceSid -ServiceName $serviceName
 
 Assert-TrustedInstallParent $publishParent
 Assert-TrustedInstallParent $dataDirectory -ServiceSid $serviceSid
@@ -118,10 +144,6 @@ Assert-EmptyInstallDirectory $dataDirectory
 if (Test-Path -LiteralPath $installDirectory) { throw 'Agent installation directory already exists; reviewed upgrade or repair is required.' }
 Assert-ServiceIsAbsent $serviceName
 Assert-TrustedPublishTree $sourceDirectory
-if (-not (Test-Path -LiteralPath "Cert:\LocalMachine\Root\$TrustedRootThumbprint")) {
-    throw 'Provision and verify the certificate trust chain before installation.'
-}
-
 $publishStage = Join-Path $publishParent ('.Agent-install-' + [Guid]::NewGuid().ToString('N'))
 $configStage = Join-Path $installDirectory ('.agent-config-' + [Guid]::NewGuid().ToString('N'))
 try {
@@ -166,7 +188,9 @@ try {
     $serviceInstallerBlock = [ScriptBlock]::Create([IO.File]::ReadAllText($serviceInstaller))
     & $serviceInstallerBlock -Role Agent -PublishDirectory $installDirectory -DataDirectory $dataDirectory `
         -InstallScriptRoot $effectivePackageRoot `
-        -ConfigurationFile $configSource -TrustedRootThumbprint $TrustedRootThumbprint -StartAfterInstall
+        -ConfigurationFile $configSource -TrustedRootThumbprint $TrustedRootThumbprint `
+        -EnrollmentTicket $EnrollmentTicket -StartAfterInstall
+    $serviceCreatedByThisRun = $true
 
     $receiptPath = Join-Path $dataDirectory 'enrollment-receipt.json'
     $timer = [Diagnostics.Stopwatch]::StartNew()
@@ -182,7 +206,7 @@ try {
         $service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
         if (-not $service) { throw 'Agent service disappeared while waiting for its enrollment receipt.' }
         $waitState = Get-AgentEnrollmentWaitState -ServiceStatus $service.Status.ToString() -ReceiptStatus $candidateStatus
-        if ($waitState -eq 'stopped') { throw 'Agent service stopped while waiting for its enrollment receipt; installation did not complete.' }
+        if ($waitState -eq 'unavailable') { throw "Agent service entered '$($service.Status)' while waiting for its enrollment receipt; installation did not complete." }
         if ($waitState -eq 'enrolled') { $receiptStatus = $candidateStatus; break }
         $remaining = 90 - $timer.Elapsed.TotalSeconds
         if ($remaining -gt 0) { Start-Sleep -Milliseconds ([int][Math]::Min(2000, [Math]::Ceiling($remaining * 1000))) }
@@ -201,6 +225,10 @@ try {
     Write-Output "Agent service installed and started with automatic startup. Data directory: $dataDirectory"
 } catch {
     $original = $_
+    if ($serviceCreatedByThisRun) {
+        $failedService = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+        if ($failedService) { Write-Warning (Get-AgentEnrollmentRecoveryInstruction -ServiceStatus $failedService.Status.ToString()) }
+    }
     if ($configStage -and (Test-Path -LiteralPath $configStage)) {
         $resolvedConfigStage = [IO.Path]::GetFullPath($configStage)
         if (-not [string]::Equals([IO.Path]::GetDirectoryName($resolvedConfigStage),[IO.Path]::GetFullPath($installDirectory),[StringComparison]::OrdinalIgnoreCase) -or [IO.Path]::GetFileName($resolvedConfigStage) -notlike '.agent-config-*') { throw 'Unsafe configuration staging cleanup path.' }

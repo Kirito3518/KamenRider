@@ -11,17 +11,22 @@ public class EnrollmentClientTests
         using(var identity=DeviceIdentity.LoadOrCreate(dir)) {
             using var handler=new VerifyHandler(identity);using var client=new HttpClient(handler);
             var enrollment=new EnrollmentClient(client,identity);
-            var result=await enrollment.EnrollAsync(new Uri("https://controller:5102"),"192.0.2.1","001122334455",47989,47990,CancellationToken.None);
+            var ticket=new string('A',43);
+            var result=await enrollment.EnrollAsync(new Uri("https://controller:5102"),"192.0.2.1","001122334455",47989,47990,ticket,CancellationToken.None);
             Assert.True(handler.Verified);
             Assert.Equal(identity.MachineId,result.MachineId);
             Assert.Equal("pending",result.ApprovalStatus);
-            await Assert.ThrowsAsync<ArgumentException>(()=>enrollment.EnrollAsync(new Uri("http://controller"),"192.0.2.1","001122334455",1,2,CancellationToken.None));
+            Assert.Equal(ticket,handler.EnrollmentTicket);
+            await Assert.ThrowsAsync<ArgumentException>(()=>enrollment.EnrollAsync(new Uri("https://controller:5102"),"192.0.2.1","001122334455",1,2,"not-a-ticket",CancellationToken.None));
+            await Assert.ThrowsAsync<ArgumentException>(()=>enrollment.EnrollAsync(new Uri("http://controller"),"192.0.2.1","001122334455",1,2,ticket,CancellationToken.None));
         }
         Directory.Delete(dir,true);
     }
     private sealed class VerifyHandler(DeviceIdentity identity):HttpMessageHandler {
         public bool Verified {get;private set;}
+        public string? EnrollmentTicket {get;private set;}
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,CancellationToken token) {
+            EnrollmentTicket=request.Headers.GetValues("X-Enrollment-Ticket").Single();
             var body=await request.Content!.ReadAsStringAsync(token);
             var timestamp=DateTimeOffset.FromUnixTimeSeconds(long.Parse(request.Headers.GetValues("X-Agent-Timestamp").Single()));
             Verified=new AgentAuthentication().Verify(identity.MachineId,identity.PublicKey,"POST","/agent/enroll",timestamp,request.Headers.GetValues("X-Agent-Nonce").Single(),body,request.Headers.GetValues("X-Agent-Signature").Single(),DateTimeOffset.UtcNow);

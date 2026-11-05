@@ -36,6 +36,11 @@ test("machine API session boundaries, validation, redaction and controller failu
       res.writeHead(401).end("{}");
       return;
     }
+    if (req.url === "/internal/agent-enrollment-tickets") {
+      assert.equal(req.method, "POST");
+      res.end(JSON.stringify({ ticket: "A".repeat(43), expiresAtUtc: new Date(Date.now() + 86_400_000).toISOString() }));
+      return;
+    }
     if (req.url === "/internal/machines") {
       res.end(
         JSON.stringify([
@@ -204,45 +209,64 @@ test("agent install command is admin-only and withheld until configuration valid
     .map((value) => value.split(";")[0])
     .join("; ");
 
-  const response = await call("/admin/agent-install-command", undefined, cookie);
-  assert.equal(response.status, 200);
-  assert.equal(response.headers.get("cache-control"), "no-store");
-  const result = await response.json();
-  const expected = process.env.TEST_AGENT_INSTALL_EXPECTED || "available";
-  if (expected === "unavailable") {
-    assert.equal(result.available, false);
-    assert.equal("command" in result, false);
-    assert.equal("scriptUrl" in result, false);
-    return;
-  }
+  const ticketRequests = [];
+  const ticketServer = createServer(async (req, res) => {
+    let bodyBytes = 0;
+    for await (const chunk of req) bodyBytes += chunk.length;
+    ticketRequests.push({ method: req.method, url: req.url, credential: req.headers["x-service-credential"], bodyBytes });
+    res.setHeader("content-type", "application/json");
+    if (req.method !== "POST" || req.url !== "/internal/agent-enrollment-tickets" || req.headers["x-service-credential"] !== "test-only") {
+      res.writeHead(401).end("{}");
+      return;
+    }
+    res.end(JSON.stringify({ ticket: "A".repeat(43), expiresAtUtc: new Date(Date.now() + 86_400_000).toISOString() }));
+  });
+  await new Promise((resolve) => ticketServer.listen(5089, "127.0.0.1", resolve));
+  try {
+    const response = await call("/admin/agent-install-command", undefined, cookie);
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("cache-control"), "no-store");
+    const result = await response.json();
+    const expected = process.env.TEST_AGENT_INSTALL_EXPECTED || "available";
+    if (expected === "unavailable") {
+      assert.equal(result.available, false);
+      assert.equal("command" in result, false);
+      assert.equal("scriptUrl" in result, false);
+      return;
+    }
 
-  assert.equal(result.available, true);
-  const baseUrl = process.env.AGENT_INSTALL_BASE_URL || process.env.BETTER_AUTH_URL;
-  const packageUrl = new URL(process.env.AGENT_PACKAGE_URL);
-  const controllerUrl = new URL(process.env.AGENT_CONTROLLER_URL);
-  const scriptUrl = new URL("/agent/Bootstrap-Agent.ps1", baseUrl).toString();
-  const returnUrl = new URL("/admin/machines", baseUrl).toString();
-  const scriptHash = createHash("sha256")
+    assert.equal(result.available, true);
+    assert.deepEqual(ticketRequests, [{ method: "POST", url: "/internal/agent-enrollment-tickets", credential: "test-only", bodyBytes: 0 }]);
+    const baseUrl = process.env.AGENT_INSTALL_BASE_URL || process.env.BETTER_AUTH_URL;
+    const packageUrl = new URL(process.env.AGENT_PACKAGE_URL);
+    const controllerUrl = new URL(process.env.AGENT_CONTROLLER_URL);
+    const scriptUrl = new URL("/agent/Bootstrap-Agent.ps1", baseUrl).toString();
+    const returnUrl = new URL("/admin/machines", baseUrl).toString();
+    const scriptHash = createHash("sha256")
     .update(readFileSync(new URL("../public/agent/Bootstrap-Agent.ps1", import.meta.url)))
     .digest("hex")
     .toUpperCase();
-  const bootstrapDownload = await fetch(scriptUrl);
-  assert.equal(bootstrapDownload.status, 200);
-  const servedScriptHash = createHash("sha256")
+    const bootstrapDownload = await fetch(scriptUrl);
+    assert.equal(bootstrapDownload.status, 200);
+    const servedScriptHash = createHash("sha256")
     .update(Buffer.from(await bootstrapDownload.arrayBuffer()))
     .digest("hex")
     .toUpperCase();
-  assert.equal(servedScriptHash, scriptHash);
-  const quoted = (value) => `'${value.replaceAll("'", "''")}'`;
-  assert.equal(result.scriptUrl, scriptUrl);
-  assert.ok(result.command.includes(`-UseBasicParsing`));
-  assert.ok(result.command.includes(`[ScriptBlock]::Create`));
-  assert.ok(result.command.includes(`RawContentStream`));
-  assert.ok(!result.command.includes(`$env:TEMP`));
-  assert.ok(result.command.includes(`-ControllerUrl ${quoted(controllerUrl.toString())}`));
-  assert.ok(result.command.includes(`-PackageUrl ${quoted(packageUrl.toString())}`));
-  assert.ok(result.command.includes(`-InstallReturnUrl ${quoted(returnUrl)}`));
-  assert.ok(result.command.includes(`-PackageSha256 ${quoted(process.env.AGENT_PACKAGE_SHA256.toUpperCase())}`));
-  assert.ok(result.command.includes(`-TrustedRootThumbprint ${quoted(process.env.AGENT_TRUST_ROOT_THUMBPRINT.toUpperCase())}`));
-  assert.ok(result.command.includes(quoted(scriptHash)));
+    assert.equal(servedScriptHash, scriptHash);
+    const quoted = (value) => `'${value.replaceAll("'", "''")}'`;
+    assert.equal(result.scriptUrl, scriptUrl);
+    assert.ok(result.command.includes(`-UseBasicParsing`));
+    assert.ok(result.command.includes(`[ScriptBlock]::Create`));
+    assert.ok(result.command.includes(`RawContentStream`));
+    assert.ok(!result.command.includes(`$env:TEMP`));
+    assert.ok(result.command.includes(`-ControllerUrl ${quoted(controllerUrl.toString())}`));
+    assert.ok(result.command.includes(`-PackageUrl ${quoted(packageUrl.toString())}`));
+    assert.ok(result.command.includes(`-InstallReturnUrl ${quoted(returnUrl)}`));
+    assert.ok(result.command.includes(`-PackageSha256 ${quoted(process.env.AGENT_PACKAGE_SHA256.toUpperCase())}`));
+    assert.ok(result.command.includes(`-TrustedRootThumbprint ${quoted(process.env.AGENT_TRUST_ROOT_THUMBPRINT.toUpperCase())}`));
+    assert.match(result.command, /-EnrollmentTicket '[A-Za-z0-9_-]{43}'/);
+    assert.ok(result.command.includes(quoted(scriptHash)));
+  } finally {
+    await new Promise((resolve) => ticketServer.close(resolve));
+  }
 });

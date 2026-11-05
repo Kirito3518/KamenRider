@@ -83,9 +83,27 @@ function New-DisabledWindowsService {
 }
 function Get-AgentEnrollmentWaitState {
  param([Parameter(Mandatory)][string]$ServiceStatus,[psobject]$ReceiptStatus)
- if($ServiceStatus -eq 'Stopped'){return 'stopped'}
- if($ReceiptStatus -and $ReceiptStatus.State -eq 'enrolled'){return 'enrolled'}
- return 'pending'
+ if($ServiceStatus -eq 'Running'){
+  if($ReceiptStatus -and $ReceiptStatus.State -eq 'enrolled'){return 'enrolled'}
+  return 'pending'
+ }
+ if($ServiceStatus -in @('StartPending','ContinuePending','PausePending')){return 'pending'}
+ if($ServiceStatus -in @('Stopped','StopPending','Paused')){return 'unavailable'}
+ return 'unavailable'
+}
+function Get-AgentEnrollmentRecoveryInstruction {
+ param([Parameter(Mandatory)][string]$ServiceStatus)
+ switch($ServiceStatus){
+  'Stopped' { return "Agent enrollment is incomplete. The protected installation and local identity were kept. Fix Controller connectivity or certificate trust, then run Start-Service -Name 'KamenRaider Agent' before the enrollment ticket expires. Do not rerun the installer." }
+  'Paused' { return "Agent enrollment is incomplete. The protected installation and local identity were kept. Fix Controller connectivity or certificate trust, then run Resume-Service -Name 'KamenRaider Agent' before the enrollment ticket expires. Do not rerun the installer." }
+  default { return "Agent enrollment is incomplete. The protected installation and local identity were kept. Check Get-Service -Name 'KamenRaider Agent', resolve the service state, then let enrollment retry before the enrollment ticket expires. Do not rerun the installer." }
+ }
+}
+function Get-AgentInstallMode {
+ param([Parameter(Mandatory)][bool]$ServiceExists,[Parameter(Mandatory)][bool]$InstallDirectoryExists,[Parameter(Mandatory)][bool]$DataDirectoryExists)
+ if(-not $ServiceExists -and -not $InstallDirectoryExists -and -not $DataDirectoryExists){return 'install'}
+ if($ServiceExists -and $InstallDirectoryExists -and $DataDirectoryExists){return 'repair-enrollment'}
+ throw 'Agent installation is incomplete or inconsistent; refusing to overwrite service, binaries or identity data.'
 }
 function Get-TrustedInstallSids {
  param([Security.Principal.SecurityIdentifier[]]$AdditionalSid=@())
@@ -351,6 +369,114 @@ function Set-PrivateInstallAcl {
  param([string]$Path,[Security.Principal.SecurityIdentifier]$ServiceSid,[switch]$Directory,[switch]$ReadOnly)
  $acl=New-PrivateInstallSecurity $ServiceSid -Directory:$Directory -ReadOnly:$ReadOnly
  Set-Acl -LiteralPath $Path -AclObject $acl
+}
+function Publish-PrivateEnrollmentTicket {
+ param([Parameter(Mandatory)][string]$Directory,[Parameter(Mandatory)][string]$Ticket,[Parameter(Mandatory)][Security.Principal.SecurityIdentifier]$ServiceSid,[switch]$Replace)
+ if($Ticket -notmatch '^[A-Za-z0-9_-]{43}$'){throw 'Enrollment ticket is invalid.'}
+ $directoryItem=Get-Item -LiteralPath $Directory -Force
+ if(-not $directoryItem.PSIsContainer -or ($directoryItem.Attributes -band [IO.FileAttributes]::ReparsePoint)){throw 'Enrollment ticket directory must be a real directory.'}
+ if(-not (Test-TrustedInstallAcl (Get-Acl -LiteralPath $Directory) (Get-TrustedInstallSids @($ServiceSid)) -RequireModifySid $ServiceSid)){throw 'Enrollment ticket directory does not have the required private Agent ACL.'}
+ $path=Join-Path $Directory 'enrollment-ticket.txt'
+ $existing=Test-Path -LiteralPath $path
+ if($existing -and -not $Replace){throw 'Enrollment ticket file already exists.'}
+ if($existing){
+  $old=Get-Item -LiteralPath $path -Force
+  if($old.PSIsContainer -or ($old.Attributes -band [IO.FileAttributes]::ReparsePoint) -or (Get-InstallFileLinkCount $path) -ne 1){throw 'Existing enrollment ticket is not a regular single-link file.'}
+ }
+ $temporary=Join-Path $Directory ('.enrollment-ticket-'+[Guid]::NewGuid().ToString('N')+'.tmp')
+ $backup=$temporary+'.backup'
+ $file=[IO.File]::Open($temporary,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+ $file.Dispose()
+ try {
+  Set-PrivateInstallAcl -Path $temporary -ServiceSid $ServiceSid
+  [IO.File]::WriteAllText($temporary,$Ticket,[Text.UTF8Encoding]::new($false))
+  $ticketFile=Get-Item -LiteralPath $temporary -Force
+  if($ticketFile.PSIsContainer -or ($ticketFile.Attributes -band [IO.FileAttributes]::ReparsePoint) -or (Get-InstallFileLinkCount $temporary) -ne 1){throw 'Enrollment ticket must be a regular single-link file.'}
+  if(-not (Test-TrustedInstallAcl (Get-Acl -LiteralPath $temporary) (Get-TrustedInstallSids @($ServiceSid)) -Private)){throw 'Enrollment ticket ACL is not private.'}
+  if($existing){[IO.File]::Replace($temporary,$path,$backup)}else{[IO.File]::Move($temporary,$path)}
+ } catch {
+  throw
+ } finally {
+  if(Test-Path -LiteralPath $temporary){Remove-Item -LiteralPath $temporary -Force}
+  if(Test-Path -LiteralPath $backup){Remove-Item -LiteralPath $backup -Force}
+ }
+ return $path
+}
+function Invoke-AgentEnrollmentRepair {
+ param(
+  [Parameter(Mandatory)][string]$ServiceName,
+  [Parameter(Mandatory)][string]$InstallDirectory,
+  [Parameter(Mandatory)][string]$DataDirectory,
+  [Parameter(Mandatory)][string]$ControllerUrl,
+  [Parameter(Mandatory)][string]$EnrollmentTicket,
+  [Security.Principal.SecurityIdentifier]$ServiceSid,
+  [string]$InstallReturnUrl
+ )
+ $serviceInfo=@(Get-CimInstance -ClassName Win32_Service -Filter ("Name='{0}'" -f $ServiceName) -ErrorAction Stop)
+ if($serviceInfo.Count -ne 1){throw 'Existing Agent service record is missing or ambiguous.'}
+ $expectedAccount="NT SERVICE\$ServiceName"
+ $expectedBinaryPath=Get-ServiceBinaryPath -Executable (Join-Path $InstallDirectory 'Agent.exe') -ContentRoot $InstallDirectory
+ if(-not [string]::Equals([string]$serviceInfo[0].PathName,$expectedBinaryPath,[StringComparison]::OrdinalIgnoreCase) -or
+    -not [string]::Equals([string]$serviceInfo[0].StartName,$expectedAccount,[StringComparison]::OrdinalIgnoreCase) -or
+    -not [string]::Equals([string]$serviceInfo[0].StartMode,'Auto',[StringComparison]::OrdinalIgnoreCase)){
+  throw 'Existing service identity, binary path or automatic startup does not match the Agent installation.'
+ }
+ Assert-TrustedInstallParent $InstallDirectory -ServiceSid $ServiceSid
+ Assert-TrustedPublishTree $InstallDirectory
+ $configurationFile=Join-Path $InstallDirectory 'appsettings.json'
+ Assert-TrustedInstallFile $configurationFile -ServiceSid $ServiceSid -Private
+ try{$configuration=[IO.File]::ReadAllText($configurationFile)|ConvertFrom-Json -ErrorAction Stop}catch{throw 'Existing Agent configuration is invalid.'}
+ if(-not [string]::Equals([string]$configuration.ControllerUrl,$ControllerUrl,[StringComparison]::OrdinalIgnoreCase) -or
+    -not [string]::Equals([IO.Path]::GetFullPath([string]$configuration.DataDirectory),[IO.Path]::GetFullPath($DataDirectory),[StringComparison]::OrdinalIgnoreCase)){
+  throw 'Existing Agent configuration points to a different Controller or data directory; refusing to overwrite it.'
+ }
+ $dataItem=Get-Item -LiteralPath $DataDirectory -Force -ErrorAction Stop
+ if(-not $dataItem.PSIsContainer -or ($dataItem.Attributes -band [IO.FileAttributes]::ReparsePoint)){throw 'Existing Agent data directory is not a real directory.'}
+ if(-not (Test-TrustedInstallAcl (Get-Acl -LiteralPath $DataDirectory) (Get-TrustedInstallSids @($ServiceSid)) -IncludeInheritedChildRules -Private -RequireModifySid $ServiceSid)){throw 'Existing Agent data directory ACL is not safe for enrollment repair.'}
+ Assert-TrustedPublishTree $DataDirectory
+
+ $receiptPath=Join-Path $DataDirectory 'enrollment-receipt.json'
+ $receiptStatus=$null
+ $ticketRenewed=$false
+ if(Test-Path -LiteralPath $receiptPath -PathType Leaf){
+  try{$receiptStatus=Get-AgentEnrollmentStatus -Receipt ([IO.File]::ReadAllText($receiptPath)|ConvertFrom-Json -ErrorAction Stop)}catch{throw 'Existing enrollment receipt is invalid; refusing to replace the installation.'}
+ }else{
+  Publish-PrivateEnrollmentTicket -Directory $DataDirectory -Ticket $EnrollmentTicket -ServiceSid $ServiceSid -Replace | Out-Null
+  $ticketRenewed=$true
+ }
+
+ $service=Get-Service -Name $ServiceName -ErrorAction Stop
+ if($service.Status -eq [ServiceProcess.ServiceControllerStatus]::Stopped){Start-Service -Name $ServiceName -ErrorAction Stop}
+ elseif($service.Status -eq [ServiceProcess.ServiceControllerStatus]::Paused){Resume-Service -Name $ServiceName -ErrorAction Stop}
+ $startup= [Diagnostics.Stopwatch]::StartNew();$startAttempted=$service.Status -in @([ServiceProcess.ServiceControllerStatus]::Stopped,[ServiceProcess.ServiceControllerStatus]::Paused)
+ do{
+  $service=Get-Service -Name $ServiceName -ErrorAction Stop
+  if($service.Status -eq [ServiceProcess.ServiceControllerStatus]::Running){break}
+  if($service.Status -eq [ServiceProcess.ServiceControllerStatus]::Stopped -and -not $startAttempted){Start-Service -Name $ServiceName -ErrorAction Stop;$startAttempted=$true}
+  elseif($service.Status -eq [ServiceProcess.ServiceControllerStatus]::Paused){Resume-Service -Name $ServiceName -ErrorAction Stop}
+  Start-Sleep -Milliseconds 250
+ }while($startup.Elapsed.TotalSeconds -lt 30)
+ if($service.Status -ne [ServiceProcess.ServiceControllerStatus]::Running){throw "Existing Agent service did not reach Running state (state=$($service.Status))."}
+
+ $timer=[Diagnostics.Stopwatch]::StartNew()
+ while($timer.Elapsed.TotalSeconds -lt 90 -and -not $receiptStatus){
+  $candidateStatus=$null
+  if(Test-Path -LiteralPath $receiptPath -PathType Leaf){try{$candidateStatus=Get-AgentEnrollmentStatus -Receipt ([IO.File]::ReadAllText($receiptPath)|ConvertFrom-Json -ErrorAction Stop)}catch{}}
+  $service=Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+  if(-not $service){throw 'Existing Agent service disappeared during enrollment repair.'}
+  $waitState=Get-AgentEnrollmentWaitState -ServiceStatus $service.Status.ToString() -ReceiptStatus $candidateStatus
+  if($waitState -eq 'unavailable'){
+   Write-Warning (Get-AgentEnrollmentRecoveryInstruction -ServiceStatus $service.Status.ToString())
+   throw "Existing Agent service entered '$($service.Status)' during enrollment repair."
+  }
+  if($waitState -eq 'enrolled'){$receiptStatus=$candidateStatus;break}
+  $remaining=90-$timer.Elapsed.TotalSeconds;if($remaining -gt 0){Start-Sleep -Milliseconds ([int][Math]::Min(2000,[Math]::Ceiling($remaining*1000)))}
+ }
+ if($receiptStatus){Write-Output $receiptStatus.Message;Write-Output 'The machine still requires administrator configuration and approval before it can be rented.'}
+ else{Write-Warning (Get-AgentEnrollmentStatus).Message}
+ if($InstallReturnUrl){try{Start-Process -FilePath $InstallReturnUrl}catch{Write-Warning 'Enrollment repair completed, but the admin page could not be opened automatically.'}}
+ if($ticketRenewed){Write-Output 'Existing Agent installation verified; enrollment ticket renewed and service retrying. Agent binaries and configuration were not changed.'}
+ else{Write-Output 'Existing Agent installation verified; enrollment receipt is already present. Agent binaries and configuration were not changed.'}
 }
 function Initialize-PrivateDirectoryNativeType {
  if(-not ('KamenRaider.Install.NativeDirectories' -as [type])){

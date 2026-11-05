@@ -16,7 +16,7 @@ public sealed class LeaseFixture : IDisposable {
     public LeaseFixture() {
         Db = new(Path, clock: Time);
         using var key = ECDsa.Create();
-        Db.Enroll(new("pc",Convert.ToBase64String(key.ExportSubjectPublicKeyInfo()),"192.0.2.1","001122334455",1,2));
+        Db.EnrollWithTicket(new("pc",Convert.ToBase64String(key.ExportSubjectPublicKeyInfo()),"192.0.2.1","001122334455",1,2));
         Db.Update("pc",new("PC",500,1,2),1); Db.Approve("pc","admin");
         Sync();
     }

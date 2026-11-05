@@ -7,6 +7,7 @@ public static class MachineEndpoints
 {
     public static void MapMachines(this WebApplication app) {
         app.MapGet("/internal/machines",(ControllerDatabase db)=>db.List());
+        app.MapPost("/internal/agent-enrollment-tickets",(ControllerDatabase db)=>Results.Ok(db.CreateEnrollmentTicket()));
         app.MapPatch("/internal/machines/{id}",(string id,MachineUpdate update,long expectedRevision,ControllerDatabase db)=>Execute(()=>db.Update(id,update,expectedRevision)));
         app.MapPost("/internal/machines/{id}/approve",(string id,MachineIdentityConfirmation confirmation,HttpContext context,ControllerDatabase db)=>Execute(()=>db.ApproveVerified(id,context.Request.Headers["X-Authenticated-Actor-Id"].ToString(),confirmation.Fingerprint)));
         app.MapPost("/internal/machines/{id}/reject",(string id,MachineIdentityConfirmation confirmation,ControllerDatabase db)=>Execute(()=>db.RejectPending(id,confirmation.Fingerprint)));
@@ -19,7 +20,7 @@ public static class MachineEndpoints
             DateTimeOffset timestamp;try {timestamp=DateTimeOffset.FromUnixTimeSeconds(seconds);}catch(ArgumentOutOfRangeException){return Results.Unauthorized();}
             // Enrollment proves possession even for a previously approved ID. Its submitted key never authenticates another route.
             if(!auth.Verify(request.MachineId,request.PublicKey,"POST","/agent/enroll",timestamp,context.Request.Headers["X-Agent-Nonce"].ToString(),body,context.Request.Headers["X-Agent-Signature"].ToString(),DateTimeOffset.UtcNow))return Results.Unauthorized();
-            return Execute(()=>db.Enroll(request));
+            return Execute(()=>db.Enroll(request,context.Request.Headers["X-Enrollment-Ticket"].ToString()));
         });
     }
     private static IResult Execute<T>(Func<T> action) {

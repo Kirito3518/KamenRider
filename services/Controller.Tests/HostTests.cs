@@ -56,11 +56,42 @@ public class HostTests
         var path = Path.Combine(Path.GetTempPath(), Guid.NewGuid()+".db");
         using var app = ControllerHost.Build([], b => b.Configuration["DatabasePath"] = path);
         Assert.False(File.Exists(path));
-        var project = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../Controller/Controller.csproj"));
-        using var build = ContainedProcess.Start(new System.Diagnostics.ProcessStartInfo("dotnet") { ArgumentList = { "build", project, "--no-restore", "--no-dependencies", "-p:DatabasePath=" + path }, RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false });
-        var result = await ChildProcess.RunAsync(build, TimeSpan.FromSeconds(60));
-        Assert.True(result.ExitCode == 0, result.Output + result.Error);
-        Assert.False(File.Exists(path));
+        var project = FindControllerProject();
+        var artifactsPath = Path.Combine(Path.GetTempPath(), "kr-controller-build-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var startInfo = new System.Diagnostics.ProcessStartInfo("dotnet")
+            {
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false
+            };
+            foreach (var argument in new[] { "build", project, "--artifacts-path", artifactsPath, "--verbosity", "quiet", "-p:DatabasePath=" + path })
+                startInfo.ArgumentList.Add(argument);
+            using var build = ContainedProcess.Start(startInfo);
+            var result = await ChildProcess.RunAsync(build, TimeSpan.FromSeconds(60));
+            Assert.True(result.ExitCode == 0, result.Output + result.Error);
+            Assert.False(File.Exists(path));
+        }
+        finally
+        {
+            var fullArtifactsPath = Path.GetFullPath(artifactsPath);
+            var tempRoot = Path.GetFullPath(Path.GetTempPath()).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+            if (!fullArtifactsPath.StartsWith(tempRoot, StringComparison.OrdinalIgnoreCase) || !Path.GetFileName(fullArtifactsPath).StartsWith("kr-controller-build-", StringComparison.Ordinal))
+                throw new InvalidOperationException("Refusing unsafe temporary build cleanup.");
+            if (Directory.Exists(fullArtifactsPath)) Directory.Delete(fullArtifactsPath, recursive: true);
+        }
+    }
+
+    private static string FindControllerProject()
+    {
+        var value = typeof(HostTests).Assembly
+            .GetCustomAttributes(inherit: false)
+            .OfType<System.Reflection.AssemblyMetadataAttribute>()
+            .SingleOrDefault(attribute => attribute.Key == "ControllerProjectPath")?.Value;
+        if (string.IsNullOrWhiteSpace(value) || !File.Exists(value))
+            throw new FileNotFoundException("Unable to locate the Controller project using the build-time test metadata.");
+        return Path.GetFullPath(value);
     }
 }
 public sealed class LoopbackTestFilter : Microsoft.AspNetCore.Hosting.IStartupFilter

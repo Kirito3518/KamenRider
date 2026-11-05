@@ -16,7 +16,7 @@ public sealed partial class ControllerDatabase : IDisposable
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
         connection=new SqliteConnection(new SqliteConnectionStringBuilder {DataSource=path, ForeignKeys=true, Pooling=false}.ToString()); connection.Open();
         using var transaction=connection.BeginTransaction();
-        foreach (var name in new[] { "001-machines.sql", "002-leases-commands.sql", "003-pairing.sql", "004-boot-challenges.sql", "005-config-acks.sql" }) {
+        foreach (var name in new[] { "001-machines.sql", "002-leases-commands.sql", "003-pairing.sql", "004-boot-challenges.sql", "005-config-acks.sql", "006-enrollment-tickets.sql" }) {
             if(name=="003-pairing.sql"){using var version=connection.CreateCommand();version.Transaction=transaction;version.CommandText="PRAGMA user_version";if((long)version.ExecuteScalar()!>=3)continue;}
             using var resource=typeof(ControllerDatabase).Assembly.GetManifestResourceStream("KamenRaider.Controller.Data.Migrations."+name)!;
             using var reader=new StreamReader(resource);
@@ -28,7 +28,17 @@ public sealed partial class ControllerDatabase : IDisposable
     public void Dispose(){lock(gate){if(disposed)return;disposed=true;foreach(var timer in pairingPinTimers.Values)timer.Dispose();pairingPinTimers.Clear();pairingPins.Clear();connection.Dispose();}}
     private SqliteCommand Command(string sql, params (string,object?)[] values) { var cmd=connection.CreateCommand();cmd.CommandText=sql; foreach(var (name,value) in values) cmd.Parameters.AddWithValue(name,value??DBNull.Value); return cmd; }
     public string? PublicKey(string id) { lock(gate) {using var cmd=Command("SELECT public_key FROM machines WHERE machine_id=$id",("$id",id)); return cmd.ExecuteScalar() as string;} }
-    public EnrollmentResult Enroll(EnrollmentRequest request) { lock(gate) {
+    public EnrollmentTicketResponse CreateEnrollmentTicket() { lock(gate) {
+        var now=clock.GetUtcNow();var expires=now.AddHours(24);var nowMilliseconds=now.ToUnixTimeMilliseconds();
+        var token=Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)).TrimEnd('=').Replace('+','-').Replace('/','_');
+        var tokenHash=Convert.ToHexString(SHA256.HashData(System.Text.Encoding.ASCII.GetBytes(token)));
+        using var transaction=connection.BeginTransaction();
+        using(var cleanup=Command("DELETE FROM agent_enrollment_tickets WHERE expires_at_unix_ms <= $now",("$now",nowMilliseconds))){cleanup.Transaction=transaction;cleanup.ExecuteNonQuery();}
+        using(var insert=Command("INSERT INTO agent_enrollment_tickets(token_hash,expires_at_unix_ms) VALUES($hash,$expires)",("$hash",tokenHash),("$expires",expires.ToUnixTimeMilliseconds()))){insert.Transaction=transaction;insert.ExecuteNonQuery();}
+        transaction.Commit();
+        return new(token,expires);
+    }}
+    public EnrollmentResult Enroll(EnrollmentRequest request,string? enrollmentTicket=null) { lock(gate) {
         if(string.IsNullOrWhiteSpace(request.MachineId)||request.MachineId.Length>128) throw new ArgumentException("Invalid machine ID");
         using var key=ECDsa.Create(); key.ImportSubjectPublicKeyInfo(Convert.FromBase64String(request.PublicKey),out var bytes);
         if(bytes!=Convert.FromBase64String(request.PublicKey).Length) throw new ArgumentException("Invalid key");
@@ -45,8 +55,12 @@ public sealed partial class ControllerDatabase : IDisposable
                 return new(request.MachineId, row.GetString(1));
             }
         }
+        var ticketHash=GetEnrollmentTicketHash(enrollmentTicket);
+        if(ticketHash is null)throw new UnauthorizedAccessException("A valid enrollment ticket is required");
+        var nowMilliseconds=clock.GetUtcNow().ToUnixTimeMilliseconds();
+        using(var consume=Command("DELETE FROM agent_enrollment_tickets WHERE token_hash=$hash AND expires_at_unix_ms > $now",("$hash",ticketHash),("$now",nowMilliseconds))){consume.Transaction=transaction;if(consume.ExecuteNonQuery()!=1)throw new UnauthorizedAccessException("Enrollment ticket is invalid, expired or already used");}
         // The immediate transaction serializes capacity checks and admission across connections.
-        var cutoff = clock.GetUtcNow().AddMinutes(-1).ToUnixTimeMilliseconds();
+        var cutoff = nowMilliseconds - (long)TimeSpan.FromMinutes(1).TotalMilliseconds;
         using (var cleanup = Command("DELETE FROM enrollment_admissions WHERE admitted_at <= $cutoff", ("$cutoff", cutoff))) {
             cleanup.Transaction = transaction; cleanup.ExecuteNonQuery();
         }
@@ -63,6 +77,10 @@ public sealed partial class ControllerDatabase : IDisposable
         transaction.Commit();
         return new(request.MachineId, "pending");
     } }
+    private static string? GetEnrollmentTicketHash(string? ticket) {
+        if(ticket is null||!System.Text.RegularExpressions.Regex.IsMatch(ticket,@"\A[A-Za-z0-9_-]{43}\z",System.Text.RegularExpressions.RegexOptions.CultureInvariant))return null;
+        return Convert.ToHexString(SHA256.HashData(System.Text.Encoding.ASCII.GetBytes(ticket)));
+    }
     private static void ValidateNetworkMetadata(string? ip, string? mac) {
         if (string.IsNullOrWhiteSpace(ip) || ip.Length > 45 || !System.Net.IPAddress.TryParse(ip, out var address)
             || address.ToString().Contains('%') || ip != address.ToString())

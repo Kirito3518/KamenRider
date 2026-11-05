@@ -7,6 +7,7 @@ import { join } from "node:path";
 const port = 3002;
 const scenarios = [
   { name: "configured", expected: "available", full: true, overrides: {} },
+  { name: "controller-ticket-unavailable", expected: "unavailable", overrides: { CONTROLLER_INTERNAL_URL: "http://127.0.0.1:5090" } },
   { name: "disabled", expected: "unavailable", overrides: { AGENT_INSTALL_ENABLED: "false" } },
   { name: "missing-install-base-url", expected: "unavailable", overrides: { AGENT_INSTALL_BASE_URL: "" } },
   { name: "localhost-subdomain-base", expected: "unavailable", overrides: { AGENT_INSTALL_BASE_URL: "http://shop.localhost:3002" } },

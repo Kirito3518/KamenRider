@@ -11,7 +11,11 @@ try {
     [IO.File]::WriteAllText((Join-Path $agentDirectory 'Agent.exe'), 'test fixture')
 
     $installerSource = [IO.File]::ReadAllText((Join-Path $package 'Install-AgentPackage.ps1'))
+    if (-not $installerSource.Contains('[string]$EnrollmentTicket') -or -not $installerSource.Contains('-EnrollmentTicket $EnrollmentTicket')) { throw 'Agent installer must pass the issued ticket to the service installer without putting it in appsettings.' }
+    if (-not $installerSource.Contains('Get-AgentInstallMode') -or -not $installerSource.Contains('Invoke-AgentEnrollmentRepair')) { throw 'An existing protected Agent installation must have a ticket-renewal recovery path.' }
+    if ($installerSource.IndexOf('Invoke-AgentEnrollmentRepair', [StringComparison]::Ordinal) -gt $installerSource.IndexOf('$dotnetInterfaces', [StringComparison]::Ordinal)) { throw 'Enrollment repair must be selected before new-install network adapter discovery.' }
     if (-not $installerSource.Contains('Get-AgentEnrollmentWaitState -ServiceStatus $service.Status.ToString()')) { throw 'Installer must inspect Windows service state throughout the enrollment receipt wait.' }
+    if (-not $installerSource.Contains('$serviceCreatedByThisRun = $true') -or -not $installerSource.Contains('Get-AgentEnrollmentRecoveryInstruction')) { throw 'Installer must provide a supported recovery path when its service stops during enrollment.' }
     $shouldProcessPosition = $installerSource.IndexOf('$PSCmdlet.ShouldProcess', [StringComparison]::Ordinal)
     $firstMutationPosition = $installerSource.IndexOf('New-Item -ItemType Directory', [StringComparison]::Ordinal)
     if ($shouldProcessPosition -lt 0 -or $firstMutationPosition -lt 0 -or $shouldProcessPosition -gt $firstMutationPosition) {
@@ -36,12 +40,13 @@ try {
 
     $installer = Join-Path $package 'Install-AgentPackage.ps1'
     $adapterId = $candidateOne.Id
+    $enrollmentTicket = 'A' * 43
     $plan = & $installer -ControllerUrl 'https://localhost:7443' -TrustedRootThumbprint ('A' * 40) `
-        -NetworkAdapterId $adapterId -InstallReturnUrl 'http://localhost:3000/admin/machines' -Plan
+        -NetworkAdapterId $adapterId -EnrollmentTicket $enrollmentTicket -InstallReturnUrl 'http://localhost:3000/admin/machines' -Plan
 
     $memoryInstaller = [ScriptBlock]::Create($installerSource)
     $memoryPlan = & $memoryInstaller -PackageRoot $package -ControllerUrl 'https://localhost:7443' `
-        -TrustedRootThumbprint ('A' * 40) -NetworkAdapterId $adapterId `
+        -TrustedRootThumbprint ('A' * 40) -NetworkAdapterId $adapterId -EnrollmentTicket $enrollmentTicket `
         -InstallReturnUrl 'http://localhost:3000/admin/machines' -Plan
     if ($memoryPlan.InstallDirectory -ne $plan.InstallDirectory) { throw 'In-memory installer did not honor its explicit PackageRoot.' }
 
@@ -54,15 +59,26 @@ try {
     }
     if ($plan.ServiceStartup -ne 'auto' -or -not $plan.StartAfterInstall) { throw 'Agent service must start automatically after installation.' }
     if ($plan.EnrollmentWaitSeconds -ne 90) { throw 'Enrollment wait must be bounded at 90 seconds.' }
-    if ((Get-AgentEnrollmentWaitState -ServiceStatus 'Stopped') -ne 'stopped') { throw 'Enrollment wait must fail if the service stops.' }
+    if (-not $plan.EnrollmentTicketStored -or $plan.PSObject.Properties.Name -contains 'EnrollmentTicket' -or $plan.Configuration.PSObject.Properties.Name -contains 'EnrollmentTicket') { throw 'Plan must show a ticket will be stored privately without returning the ticket in configuration or output.' }
+    if ((Get-AgentEnrollmentWaitState -ServiceStatus 'Stopped') -ne 'unavailable') { throw 'Enrollment wait must fail if the service stops.' }
     if ((Get-AgentEnrollmentWaitState -ServiceStatus 'Running' -ReceiptStatus ([pscustomobject]@{ State = 'enrolled' })) -ne 'enrolled') { throw 'Enrollment wait must recognize an enrolled receipt while the service is running.' }
     if ((Get-AgentEnrollmentWaitState -ServiceStatus 'Running') -ne 'pending') { throw 'Enrollment wait must remain pending while the service is running without a receipt.' }
+    if ((Get-AgentEnrollmentWaitState -ServiceStatus 'StopPending' -ReceiptStatus ([pscustomobject]@{ State = 'enrolled' })) -ne 'unavailable') { throw 'A stopping service must not be reported as enrolled.' }
+    if ((Get-AgentEnrollmentWaitState -ServiceStatus 'Paused' -ReceiptStatus ([pscustomobject]@{ State = 'enrolled' })) -ne 'unavailable') { throw 'A paused service must not be reported as enrolled.' }
+    if ((Get-AgentEnrollmentWaitState -ServiceStatus 'StartPending' -ReceiptStatus ([pscustomobject]@{ State = 'enrolled' })) -ne 'pending') { throw 'A starting service must wait until it is running before accepting an enrollment receipt.' }
+    if ((Get-AgentEnrollmentWaitState -ServiceStatus 'Unknown' -ReceiptStatus ([pscustomobject]@{ State = 'enrolled' })) -ne 'unavailable') { throw 'Unknown service states must not be reported as enrolled.' }
+    if ((Get-AgentEnrollmentRecoveryInstruction 'Stopped') -notmatch 'Start-Service.*Do not rerun the installer') { throw 'A stopped Agent service must show its supported recovery command.' }
+    if ((Get-AgentEnrollmentRecoveryInstruction 'Paused') -notmatch 'Resume-Service.*Do not rerun the installer') { throw 'A paused Agent service must show its supported recovery command.' }
+    if ((Get-AgentInstallMode -ServiceExists $false -InstallDirectoryExists $false -DataDirectoryExists $false) -ne 'install') { throw 'A clean machine must use a new installation.' }
+    if ((Get-AgentInstallMode -ServiceExists $true -InstallDirectoryExists $true -DataDirectoryExists $true) -ne 'repair-enrollment') { throw 'An existing service must use the enrollment-ticket repair path.' }
+    $partialInstallRejected=$false;try{Get-AgentInstallMode -ServiceExists $true -InstallDirectoryExists $false -DataDirectoryExists $true | Out-Null}catch{$partialInstallRejected=$true}
+    if(-not $partialInstallRejected){throw 'A partial installation must not be overwritten by the ticket-repair path.'}
     if ($plan.InstallReturnUrl -ne 'http://localhost:3000/admin/machines') { throw 'Validated return URL was not preserved.' }
     if ($plan.ConfigurationStagingParent -ne $plan.InstallDirectory) { throw 'Configuration staging must stay inside the protected Agent installation directory.' }
     if (Test-Path -LiteralPath $plan.DataDirectory) { throw 'Plan mode created the data directory.' }
     if (Test-Path -LiteralPath (Join-Path $plan.InstallDirectory 'appsettings.json')) { throw 'Plan mode published configuration.' }
 
-    $adapterPlan = & $installer -ControllerUrl 'https://localhost:7443' -TrustedRootThumbprint ('A' * 40) -Plan
+    $adapterPlan = & $installer -ControllerUrl 'https://localhost:7443' -TrustedRootThumbprint ('A' * 40) -EnrollmentTicket $enrollmentTicket -Plan
     if ($adapterPlan.NetworkAdapterSelection -ne 'required-at-install') { throw 'Missing adapter must be selected at install time, not guessed.' }
 
     $invalidCases = @(
@@ -81,7 +97,7 @@ try {
     foreach ($case in $invalidCases) {
         $rejected = $false
         try {
-            & $installer -ControllerUrl $case.ControllerUrl -TrustedRootThumbprint ('A' * 40) `
+            & $installer -ControllerUrl $case.ControllerUrl -TrustedRootThumbprint ('A' * 40) -EnrollmentTicket $enrollmentTicket `
                 -InstallReturnUrl $case.ReturnUrl -NetworkAdapterId $case.AdapterId -Plan | Out-Null
         } catch { $rejected = $true }
         if (-not $rejected) { throw "Invalid install plan input was accepted: $($case | ConvertTo-Json -Compress)" }

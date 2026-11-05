@@ -50,6 +50,15 @@ try {
  if($serviceRules.Count -ne 1 -or ($serviceRules[0].FileSystemRights -band [Security.AccessControl.FileSystemRights]::ReadAndExecute) -ne [Security.AccessControl.FileSystemRights]::ReadAndExecute){throw 'Service account must read and execute published binaries.'}
  $writeRights=[Security.AccessControl.FileSystemRights]::WriteData -bor [Security.AccessControl.FileSystemRights]::AppendData -bor [Security.AccessControl.FileSystemRights]::Delete -bor [Security.AccessControl.FileSystemRights]::ChangePermissions
  if($serviceRules[0].FileSystemRights -band $writeRights){throw 'Service account must not modify published binaries.'}
+ $ticketData=Join-Path $root 'ticket-data';New-PrivateInstallDirectory $ticketData $serviceSid | Out-Null
+ $ticket='A'*43;$ticketPath=Publish-PrivateEnrollmentTicket -Directory $ticketData -Ticket $ticket -ServiceSid $serviceSid
+ if([IO.File]::ReadAllText($ticketPath) -ne $ticket){throw 'Enrollment ticket was not written to the private data directory.'}
+ $ticketAcl=Get-Acl -LiteralPath $ticketPath;$ticketRules=@($ticketAcl.Access | Where-Object {$_.IdentityReference -eq $serviceSid})
+ if(-not $ticketAcl.AreAccessRulesProtected -or $ticketRules.Count -ne 1 -or ($ticketRules[0].FileSystemRights -band $writeRights)){throw 'Enrollment ticket must be private and read-only to the Agent service.'}
+ $replacementTicket='B'*43;Publish-PrivateEnrollmentTicket -Directory $ticketData -Ticket $replacementTicket -ServiceSid $serviceSid -Replace | Out-Null
+ if([IO.File]::ReadAllText($ticketPath) -ne $replacementTicket -or @(Get-ChildItem -LiteralPath $ticketData -Force).Count -ne 1){throw 'Ticket renewal must replace the old private ticket atomically without leaking staging files.'}
+ $invalidTicketRejected=$false;try{Publish-PrivateEnrollmentTicket -Directory $ticketData -Ticket 'bad' -ServiceSid $serviceSid | Out-Null}catch{$invalidTicketRejected=$true}
+ if(-not $invalidTicketRejected){throw 'Malformed enrollment tickets must not be published.'}
  $publish=Join-Path $root 'publish';New-Item -ItemType Directory -Path $publish | Out-Null
  $source=Join-Path $root 'secret.json';[IO.File]::WriteAllText($source,'{"credential":"test-only-secret"}')
  $destination=Join-Path $publish 'appsettings.json';[IO.File]::WriteAllText($destination,'old')

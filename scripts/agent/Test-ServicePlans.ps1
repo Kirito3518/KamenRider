@@ -1,5 +1,7 @@
 $ErrorActionPreference = 'Stop'
 $install = Join-Path $PSScriptRoot 'Install-Service.ps1'
+$installSource = [IO.File]::ReadAllText($install)
+if (-not $installSource.Contains('$dataDirectoryState.Created = Initialize-PrivateDataDirectory') -or -not $installSource.Contains('$dataDirectoryState.Created -and')) { throw 'Service rollback must observe the data-directory creation result and remove its staged enrollment ticket.' }
 $privateFiles = Join-Path $PSScriptRoot 'PrivateInstallFiles.ps1'
 $privateSource = [IO.File]::ReadAllText($privateFiles)
 . ([ScriptBlock]::Create($privateSource))
@@ -19,6 +21,9 @@ if ($agent.StartAfterInstall) { throw 'Service Plan must not start a service unl
 $startPlan = & $install -Role Agent -PublishDirectory $root -DataDirectory (Join-Path $root 'data') `
     -ConfigurationFile (Join-Path $root 'config.json') -TrustedRootThumbprint ('A' * 40) -StartAfterInstall -Plan
 if (-not $startPlan.StartAfterInstall) { throw 'Plan must report the requested post-install start.' }
+$ticketPlan = & $install -Role Agent -PublishDirectory $root -DataDirectory (Join-Path $root 'data') `
+    -ConfigurationFile (Join-Path $root 'config.json') -TrustedRootThumbprint ('A' * 40) -EnrollmentTicket ('A' * 43) -Plan
+if (-not $ticketPlan.EnrollmentTicketStored -or $ticketPlan.PSObject.Properties.Name -contains 'EnrollmentTicket') { throw 'Service plan must store the ticket without exposing its value.' }
 $controller = & $install -Role Controller -PublishDirectory $root -DataDirectory (Join-Path $root 'data') `
     -ConfigurationFile (Join-Path $root 'config.json') -TrustedRootThumbprint ('A' * 40) -Plan
 if ($controller.Startup -ne 'auto') { throw 'Controller automatic startup plan missing.' }
