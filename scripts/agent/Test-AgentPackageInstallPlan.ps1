@@ -72,17 +72,17 @@ try {
     $enrollmentTicket = 'A' * 43
     $plan = & $installer -ControllerUrl 'https://localhost:7443' -TrustedRootThumbprint ('A' * 40) `
         -NetworkAdapterId $adapterId -EnrollmentTicket $enrollmentTicket -InstallReturnUrl 'http://localhost:3000/admin/machines' `
-        -VncAllowedSourceAddress '127.0.0.1' -Plan
+        -VncAllowedSourceAddress '192.168.1.10' -Plan
 
     $memoryInstaller = [ScriptBlock]::Create($installerSource)
     $memoryPlan = & $memoryInstaller -PackageRoot $package -ControllerUrl 'https://localhost:7443' `
         -TrustedRootThumbprint ('A' * 40) -NetworkAdapterId $adapterId -EnrollmentTicket $enrollmentTicket `
-        -InstallReturnUrl 'http://localhost:3000/admin/machines' -VncAllowedSourceAddress '127.0.0.1' -Plan
+        -InstallReturnUrl 'http://localhost:3000/admin/machines' -VncAllowedSourceAddress '192.168.1.10' -Plan
     if ($memoryPlan.InstallDirectory -ne $plan.InstallDirectory) { throw 'In-memory installer did not honor its explicit PackageRoot.' }
 
     if ($plan.ControllerUrl -ne 'https://localhost:7443/') { throw 'Controller URL must be normalized as an HTTPS origin.' }
     if ($plan.NetworkAdapterId -ne $adapterId) { throw 'Explicit network adapter selection was not preserved.' }
-    if ($plan.VncSetup.Version -ne '2.8.90' -or $plan.VncSetup.Port -ne 5900 -or $plan.VncSetup.AllowedSourceAddress -ne '127.0.0.1' -or
+    if ($plan.VncSetup.Version -ne '2.8.90' -or $plan.VncSetup.Port -ne 5900 -or $plan.VncSetup.AllowedSourceAddress -ne '192.168.1.10' -or
         -not $plan.VncSetup.RemoteInputBlocked -or $plan.VncSetup.FirewallProfile -ne 'Private') { throw 'Agent install plan must include read-only VNC and exact Controller firewall intent.' }
     if ($plan.PSObject.Properties.Name -contains 'VncPassword' -or $plan.VncSetup.PSObject.Properties.Name -contains 'Password') { throw 'Agent install plan must not expose a VNC credential.' }
     if ($plan.MoonlightPort -ne 47989 -or $plan.SunshinePort -ne 47990) { throw 'Initial stream ports are incorrect.' }
@@ -124,9 +124,12 @@ try {
     if (Test-Path -LiteralPath $plan.DataDirectory) { throw 'Plan mode created the data directory.' }
     if (Test-Path -LiteralPath (Join-Path $plan.InstallDirectory 'appsettings.json')) { throw 'Plan mode published configuration.' }
 
-    $adapterPlan = & $installer -ControllerUrl 'https://localhost:7443' -TrustedRootThumbprint ('A' * 40) -EnrollmentTicket $enrollmentTicket -Plan
+    $adapterPlan = & $installer -ControllerUrl 'https://localhost:7443' -TrustedRootThumbprint ('A' * 40) -EnrollmentTicket $enrollmentTicket `
+        -VncAllowedSourceAddress '192.168.1.10' -Plan
     if ($adapterPlan.NetworkAdapterSelection -ne 'required-at-install') { throw 'Missing adapter must be selected at install time, not guessed.' }
-    if ($adapterPlan.VncSetup.AllowedSourceAddress -ne '127.0.0.1') { throw 'Same-machine development must default the VNC source to loopback.' }
+    $loopbackSourceRejected = $false
+    try { & $installer -ControllerUrl 'https://localhost:7443' -TrustedRootThumbprint ('A' * 40) -EnrollmentTicket $enrollmentTicket -Plan | Out-Null } catch { $loopbackSourceRejected = $true }
+    if (-not $loopbackSourceRejected) { throw 'Loopback Controller setup must require its actual LAN source address for VNC.' }
 
     $invalidCases = @(
         @{ ControllerUrl = 'http://localhost:7443'; ReturnUrl = 'https://localhost:3000/admin/machines'; AdapterId = $adapterId },
@@ -140,6 +143,7 @@ try {
         @{ ControllerUrl = 'https://localhost:7443'; ReturnUrl = 'http://192.168.1.10:3000/admin/machines'; AdapterId = $adapterId },
         @{ ControllerUrl = 'https://localhost:7443'; ReturnUrl = 'http://shop.localhost:3000/admin/machines'; AdapterId = $adapterId },
         @{ ControllerUrl = 'https://controller.example:7443'; ReturnUrl = 'https://localhost:3000/admin/machines'; AdapterId = $adapterId },
+        @{ ControllerUrl = 'https://localhost:7443'; ReturnUrl = 'https://localhost:3000/admin/machines'; AdapterId = $adapterId; VncSource = '127.0.0.1' },
         @{ ControllerUrl = 'https://localhost:7443'; ReturnUrl = 'https://localhost:3000/admin/machines'; AdapterId = $adapterId; VncSource = '203.0.113.10' },
         @{ ControllerUrl = 'https://localhost:7443'; ReturnUrl = 'https://localhost:3000/admin/machines'; AdapterId = $adapterId; VncSource = '192.168.1.0/24' },
         @{ ControllerUrl = 'https://localhost:7443'; ReturnUrl = 'https://localhost:3000/admin/machines'; AdapterId = $adapterId; VncSource = '::1' },

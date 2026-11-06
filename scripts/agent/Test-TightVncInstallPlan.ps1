@@ -4,7 +4,7 @@ $root = Join-Path ([IO.Path]::GetTempPath()) ('kr-tightvnc-plan-' + [Guid]::NewG
 $dataDirectory = Join-Path $root 'AgentData'
 New-Item -ItemType Directory -Path $root | Out-Null
 try {
-    $tightVncPlan = . $installer -AllowedSourceAddress '127.0.0.1' -DataDirectory $dataDirectory -Plan
+    $tightVncPlan = . $installer -AllowedSourceAddress '192.168.1.10' -DataDirectory $dataDirectory -Plan
     foreach ($functionName in @('Merge-TightVncHiddenPropertyList', 'Test-WindowsInstallerCommandLineLoggingEnabled', 'Get-TightVncServiceFailureDisposition', 'Test-TightVncFailureStopRequired')) {
         if (-not (Get-Command $functionName -ErrorAction SilentlyContinue)) { throw "TightVNC security helper is missing: $functionName" }
     }
@@ -77,7 +77,7 @@ try {
     }
     if ($tightVncPlan.MsiProperties.Contains('VALUE_OF_VIEWONLYPASSWORD') -or $tightVncPlan.MsiProperties.Contains('VALUE_OF_PASSWORD')) { throw 'Plan must never expose a generated VNC credential.' }
     if ($tightVncPlan.Firewall.Direction -ne 'Inbound' -or $tightVncPlan.Firewall.Action -ne 'Allow' -or $tightVncPlan.Firewall.Protocol -ne 'TCP' -or
-        $tightVncPlan.Firewall.LocalPort -ne 5900 -or $tightVncPlan.Firewall.RemoteAddress -ne '127.0.0.1' -or $tightVncPlan.Firewall.Profile -ne 'Private') {
+        $tightVncPlan.Firewall.LocalPort -ne 5900 -or $tightVncPlan.Firewall.RemoteAddress -ne '192.168.1.10' -or $tightVncPlan.Firewall.Profile -ne 'Private') {
         throw 'VNC firewall plan must be limited to Controller IPv4, TCP 5900 and the Private profile.'
     }
     if ($tightVncPlan.SecretPath -ne (Join-Path $dataDirectory 'RemoteDesktop\vnc-password.txt') -or
@@ -120,7 +120,7 @@ try {
 
     $privatePlan = . $installer -AllowedSourceAddress '192.168.50.4' -DataDirectory $dataDirectory -Plan
     if ($privatePlan.Firewall.RemoteAddress -ne '192.168.50.4') { throw 'VNC firewall plan must preserve the exact Controller source IPv4.' }
-    foreach ($invalid in @('203.0.113.4', '192.168.1.0/24', '::1', '0.0.0.0', '169.254.1.3')) {
+    foreach ($invalid in @('203.0.113.4', '192.168.1.0/24', '::1', '127.0.0.1', '0.0.0.0', '169.254.1.3')) {
         $rejected = $false
         try { . $installer -AllowedSourceAddress $invalid -DataDirectory $dataDirectory -Plan | Out-Null } catch { $rejected = $true }
         if (-not $rejected) { throw "Unsafe Controller source address was accepted: $invalid" }

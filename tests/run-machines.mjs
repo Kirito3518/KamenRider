@@ -6,8 +6,10 @@ import { join } from "node:path";
 
 const port = 3002;
 const scenarios = [
-  { name: "configured", expected: "available", vncSource: "127.0.0.1", full: true, overrides: {} },
+  { name: "configured", expected: "available", vncSource: "192.168.1.10", full: true, overrides: { AGENT_VNC_ALLOWED_SOURCE_IP: "192.168.1.10" } },
   { name: "configured-vnc-source", expected: "available", vncSource: "192.168.1.10", overrides: { AGENT_VNC_ALLOWED_SOURCE_IP: "192.168.1.10" } },
+  { name: "loopback-controller-without-vnc-source", expected: "unavailable", overrides: { AGENT_VNC_ALLOWED_SOURCE_IP: "" } },
+  { name: "loopback-vnc-source-rejected", expected: "unavailable", overrides: { AGENT_VNC_ALLOWED_SOURCE_IP: "127.0.0.1" } },
   { name: "private-controller-ip-fallback", expected: "available", vncSource: "192.168.50.4", overrides: { AGENT_CONTROLLER_URL: "https://192.168.50.4:7443" } },
   { name: "public-controller-without-vnc-source", expected: "unavailable", overrides: { AGENT_CONTROLLER_URL: "https://controller.example:7443", AGENT_VNC_ALLOWED_SOURCE_IP: "" } },
   { name: "public-vnc-source-rejected", expected: "unavailable", overrides: { AGENT_VNC_ALLOWED_SOURCE_IP: "203.0.113.10" } },

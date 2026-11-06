@@ -18,14 +18,14 @@ function ConvertTo-AllowedVncSourceAddress {
     param([Parameter(Mandatory)][string]$Address)
     $parsed = $null
     if (-not [Net.IPAddress]::TryParse($Address, [ref]$parsed) -or $parsed.AddressFamily -ne [Net.Sockets.AddressFamily]::InterNetwork) {
-        throw 'AllowedSourceAddress must be one private or loopback IPv4 address.'
+        throw 'AllowedSourceAddress must be one RFC1918 private IPv4 address.'
     }
     $bytes = $parsed.GetAddressBytes()
-    $private = $bytes[0] -eq 10 -or $bytes[0] -eq 127 -or
+    $private = $bytes[0] -eq 10 -or
         ($bytes[0] -eq 172 -and $bytes[1] -ge 16 -and $bytes[1] -le 31) -or
         ($bytes[0] -eq 192 -and $bytes[1] -eq 168)
     if (-not $private -or $parsed.ToString() -cne $Address) {
-        throw 'AllowedSourceAddress must be one private or loopback IPv4 address.'
+        throw 'AllowedSourceAddress must be one RFC1918 private IPv4 address.'
     }
     return $parsed.ToString()
 }

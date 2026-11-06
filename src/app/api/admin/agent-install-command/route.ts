@@ -3,36 +3,14 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { getAuth } from "@/lib/auth";
 import { controllerRequest } from "@/lib/controller-client";
-
-function isLoopback(hostname: string) {
-  const host = hostname.replace(/^\[(.*)\]$/, "$1").toLowerCase();
-  if (host === "localhost" || host === "::1") return true;
-  const octets = host.split(".").map(Number);
-  return octets.length === 4 && octets[0] === 127 && octets.every((part) => Number.isInteger(part) && part >= 0 && part <= 255);
-}
-
-function isPrivateIpv4(value: string) {
-  const octets = value.split(".");
-  if (octets.length !== 4 || octets.some((part) => !/^\d{1,3}$/.test(part))) return false;
-  const [first, second, third, fourth] = octets.map(Number);
-  if ([first, second, third, fourth].some((part) => part < 0 || part > 255)) return false;
-  if (octets.some((part) => String(Number(part)) !== part)) return false;
-  return first === 10 || first === 127 || (first === 172 && second >= 16 && second <= 31) || (first === 192 && second === 168);
-}
-
-function resolveVncSourceAddress(controllerUrl: URL, configured: string | undefined) {
-  const source = configured?.trim();
-  if (source) return isPrivateIpv4(source) ? source : null;
-  if (isLoopback(controllerUrl.hostname)) return "127.0.0.1";
-  return isPrivateIpv4(controllerUrl.hostname) ? controllerUrl.hostname : null;
-}
+import { isLoopbackHostname, resolveVncSourceAddress } from "@/lib/agent-install-vnc-source.mjs";
 
 function allowedUrl(value: string | undefined, originOnly = false) {
   if (!value) return null;
   try {
     const url = new URL(value);
     if (url.username || url.password || url.search || url.hash) return null;
-    if (url.protocol !== "https:" && !(url.protocol === "http:" && isLoopback(url.hostname))) return null;
+    if (url.protocol !== "https:" && !(url.protocol === "http:" && isLoopbackHostname(url.hostname))) return null;
     if (originOnly && url.pathname !== "/") return null;
     return url;
   } catch { return null; }
@@ -49,7 +27,7 @@ export async function GET(request: Request) {
   const packageUrl = allowedUrl(process.env.AGENT_PACKAGE_URL);
   const controllerUrl = allowedUrl(process.env.AGENT_CONTROLLER_URL, true);
   const vncAllowedSourceAddress = controllerUrl
-    ? resolveVncSourceAddress(controllerUrl, process.env.AGENT_VNC_ALLOWED_SOURCE_IP)
+    ? resolveVncSourceAddress(controllerUrl.hostname, process.env.AGENT_VNC_ALLOWED_SOURCE_IP)
     : null;
   const packageHash = process.env.AGENT_PACKAGE_SHA256?.toUpperCase();
   const root = process.env.AGENT_TRUST_ROOT_THUMBPRINT?.toUpperCase();
@@ -57,7 +35,7 @@ export async function GET(request: Request) {
     return Response.json({ available: false, reason: "ยังไม่ได้ตั้งค่าแพ็กเกจ Agent และ URL สำหรับเครื่องลูก" }, { headers: { "Cache-Control": "no-store" } });
   }
   if (!vncAllowedSourceAddress) {
-    return Response.json({ available: false, reason: "ตั้งค่า AGENT_VNC_ALLOWED_SOURCE_IP เป็น IPv4 ส่วนตัวของ Controller ก่อนสร้างคำสั่งติดตั้ง" }, { headers: { "Cache-Control": "no-store" } });
+    return Response.json({ available: false, reason: "ตั้งค่า AGENT_VNC_ALLOWED_SOURCE_IP เป็น IPv4 ของ Controller ที่เครื่องลูกเข้าถึงได้ รวมถึงกรณีทดสอบ localhost" }, { headers: { "Cache-Control": "no-store" } });
   }
   let script: Buffer;
   try {

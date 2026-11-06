@@ -19,10 +19,10 @@ try {
     $thumbprint = 'A' * 40
     $plan = & $bootstrap -ControllerUrl $controllerUrl -PackageUrl $packageUrl -PackageSha256 ('B' * 64) `
         -TrustedRootThumbprint $thumbprint -EnrollmentTicket $ticket -InstallReturnUrl $returnUrl `
-        -VncAllowedSourceAddress '127.0.0.1' -Plan
+        -VncAllowedSourceAddress '192.168.1.10' -Plan
     if ($plan.ControllerUrl -ne 'https://localhost:7443/') { throw 'Controller URL must normalize to an HTTPS origin.' }
     if ($plan.PackageUrl -ne $packageUrl -or $plan.InstallReturnUrl -ne $returnUrl) { throw 'Loopback package or admin return URL was not preserved.' }
-    if ($plan.VncAllowedSourceAddress -ne '127.0.0.1') { throw 'Bootstrap plan must carry the exact loopback VNC source address.' }
+    if ($plan.VncAllowedSourceAddress -ne '192.168.1.10') { throw 'Bootstrap plan must carry the exact LAN VNC source address.' }
     $expectedStageParent = Join-Path $env:ProgramFiles 'KamenRaider'
     if ($plan.StageParent -ne $expectedStageParent) { throw 'Bootstrap staging must stay under the protected Program Files product directory.' }
 
@@ -35,26 +35,27 @@ try {
     try {
         & $bootstrap -ControllerUrl $controllerUrl -PackageUrl $packageUrl -PackageSha256 ('C' * 64) `
             -TrustedRootThumbprint $thumbprint -EnrollmentTicket $ticket -InstallReturnUrl $returnUrl `
-            -VncAllowedSourceAddress '127.0.0.1' -PackageArchivePath $archive -Plan | Out-Null
+            -VncAllowedSourceAddress '192.168.1.10' -PackageArchivePath $archive -Plan | Out-Null
     } catch { $mismatchRejected = $_.Exception.Message -eq 'Agent package hash mismatch.' }
     if (-not $mismatchRejected) { throw 'A package with a mismatched SHA-256 must be rejected before extraction or service setup.' }
 
     $invalidCases = @(
-        @{ Controller = 'http://localhost:7443'; Package = $packageUrl; Return = $returnUrl; VncSource = '127.0.0.1' },
-        @{ Controller = 'https://user@localhost:7443'; Package = $packageUrl; Return = $returnUrl; VncSource = '127.0.0.1' },
-        @{ Controller = 'https://localhost:7443/controller'; Package = $packageUrl; Return = $returnUrl; VncSource = '127.0.0.1' },
-        @{ Controller = 'https://localhost:7443?token=x'; Package = $packageUrl; Return = $returnUrl; VncSource = '127.0.0.1' },
-        @{ Controller = 'https://localhost:7443'; Package = 'http://192.168.1.20:3000/AgentPackage.zip'; Return = $returnUrl; VncSource = '127.0.0.1' },
-        @{ Controller = 'https://localhost:7443'; Package = 'https://user@packages.example/AgentPackage.zip'; Return = $returnUrl; VncSource = '127.0.0.1' },
-        @{ Controller = 'https://localhost:7443'; Package = 'https://packages.example/AgentPackage.zip?token=x'; Return = $returnUrl; VncSource = '127.0.0.1' },
-        @{ Controller = 'https://localhost:7443'; Package = 'http://shop.localhost:3000/AgentPackage.zip'; Return = $returnUrl; VncSource = '127.0.0.1' },
-        @{ Controller = 'https://localhost:7443'; Package = $packageUrl; Return = 'http://192.168.1.20:3000/admin/machines'; VncSource = '127.0.0.1' },
-        @{ Controller = 'https://localhost:7443'; Package = $packageUrl; Return = 'http://shop.localhost:3000/admin/machines'; VncSource = '127.0.0.1' },
-        @{ Controller = 'https://localhost:7443'; Package = $packageUrl; Return = 'http://localhost:3000/admin/machines?token=x'; VncSource = '127.0.0.1' },
-        @{ Controller = 'https://localhost:7443'; Package = $packageUrl; Return = 'https://localhost:3000/admin/machines#setup'; VncSource = '127.0.0.1' },
+        @{ Controller = 'http://localhost:7443'; Package = $packageUrl; Return = $returnUrl; VncSource = '192.168.1.10' },
+        @{ Controller = 'https://user@localhost:7443'; Package = $packageUrl; Return = $returnUrl; VncSource = '192.168.1.10' },
+        @{ Controller = 'https://localhost:7443/controller'; Package = $packageUrl; Return = $returnUrl; VncSource = '192.168.1.10' },
+        @{ Controller = 'https://localhost:7443?token=x'; Package = $packageUrl; Return = $returnUrl; VncSource = '192.168.1.10' },
+        @{ Controller = 'https://localhost:7443'; Package = 'http://192.168.1.20:3000/AgentPackage.zip'; Return = $returnUrl; VncSource = '192.168.1.10' },
+        @{ Controller = 'https://localhost:7443'; Package = 'https://user@packages.example/AgentPackage.zip'; Return = $returnUrl; VncSource = '192.168.1.10' },
+        @{ Controller = 'https://localhost:7443'; Package = 'https://packages.example/AgentPackage.zip?token=x'; Return = $returnUrl; VncSource = '192.168.1.10' },
+        @{ Controller = 'https://localhost:7443'; Package = 'http://shop.localhost:3000/AgentPackage.zip'; Return = $returnUrl; VncSource = '192.168.1.10' },
+        @{ Controller = 'https://localhost:7443'; Package = $packageUrl; Return = 'http://192.168.1.20:3000/admin/machines'; VncSource = '192.168.1.10' },
+        @{ Controller = 'https://localhost:7443'; Package = $packageUrl; Return = 'http://shop.localhost:3000/admin/machines'; VncSource = '192.168.1.10' },
+        @{ Controller = 'https://localhost:7443'; Package = $packageUrl; Return = 'http://localhost:3000/admin/machines?token=x'; VncSource = '192.168.1.10' },
+        @{ Controller = 'https://localhost:7443'; Package = $packageUrl; Return = 'https://localhost:3000/admin/machines#setup'; VncSource = '192.168.1.10' },
         @{ Controller = 'https://localhost:7443'; Package = $packageUrl; Return = $returnUrl; VncSource = '203.0.113.10' },
         @{ Controller = 'https://localhost:7443'; Package = $packageUrl; Return = $returnUrl; VncSource = '192.168.1.0/24' },
-        @{ Controller = 'https://localhost:7443'; Package = $packageUrl; Return = $returnUrl; VncSource = '::1' }
+        @{ Controller = 'https://localhost:7443'; Package = $packageUrl; Return = $returnUrl; VncSource = '::1' },
+        @{ Controller = 'https://localhost:7443'; Package = $packageUrl; Return = $returnUrl; VncSource = '127.0.0.1' }
     )
     foreach ($case in $invalidCases) {
         $rejected = $false

@@ -18,18 +18,18 @@ function ConvertTo-AgentVncSourceAddress {
     param([Parameter(Mandatory)][Uri]$Controller,[string]$Address)
     $candidate = $Address
     if ([string]::IsNullOrWhiteSpace($candidate)) {
-        if ($Controller.IsLoopback) { $candidate = '127.0.0.1' }
-        else { $candidate = $Controller.DnsSafeHost }
+        if ($Controller.IsLoopback) { throw 'When ControllerUrl uses localhost, VncAllowedSourceAddress must be the Controller LAN IPv4 seen by the VNC target; the gateway connects to the confirmed LAN IP, not loopback.' }
+        $candidate = $Controller.DnsSafeHost
     }
     $parsed = $null
     if (-not [Net.IPAddress]::TryParse($candidate, [ref]$parsed) -or $parsed.AddressFamily -ne [Net.Sockets.AddressFamily]::InterNetwork) {
-        throw 'VncAllowedSourceAddress must be one private or loopback IPv4 address; configure it when ControllerUrl uses a hostname.'
+        throw 'VncAllowedSourceAddress must be one RFC1918 private IPv4 address; configure it when ControllerUrl uses loopback or a hostname.'
     }
     $bytes = $parsed.GetAddressBytes()
-    $private = $bytes[0] -eq 10 -or $bytes[0] -eq 127 -or
+    $private = $bytes[0] -eq 10 -or
         ($bytes[0] -eq 172 -and $bytes[1] -ge 16 -and $bytes[1] -le 31) -or
         ($bytes[0] -eq 192 -and $bytes[1] -eq 168)
-    if (-not $private -or $parsed.ToString() -cne $candidate) { throw 'VncAllowedSourceAddress must be one private or loopback IPv4 address.' }
+    if (-not $private -or $parsed.ToString() -cne $candidate) { throw 'VncAllowedSourceAddress must be one RFC1918 private IPv4 address.' }
     return $parsed.ToString()
 }
 
@@ -37,7 +37,7 @@ function Invoke-AgentVncSetup {
     param([Parameter(Mandatory)][string]$InstallerPath,[Parameter(Mandatory)][string]$AllowedSourceAddress,[Parameter(Mandatory)][string]$DataDirectory)
     if (-not (Test-Path -LiteralPath $InstallerPath -PathType Leaf)) { throw 'TightVNC installer is missing from the Agent package.' }
     $installerBlock = [ScriptBlock]::Create([IO.File]::ReadAllText($InstallerPath))
-    & $installerBlock -AllowedSourceAddress $AllowedSourceAddress -DataDirectory $DataDirectory
+    & $installerBlock -AllowedSourceAddress $AllowedSourceAddress -DataDirectory $DataDirectory -Confirm:$false
 }
 
 function Open-AgentInstallReturnPage {
