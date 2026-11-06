@@ -38,9 +38,7 @@
     ".next-local/types/**/*.ts",
     ".next-local/dev/types/**/*.ts",
     ".next-vnc-validation/types/**/*.ts",
-    ".next-vnc-validation/dev/types/**/*.ts",
-    ".next-task15-validation/types/**/*.ts",
-    ".next-task15-validation/dev/types/**/*.ts"
+    ".next-vnc-validation/dev/types/**/*.ts"
   ],
   "exclude": [
     "node_modules"
