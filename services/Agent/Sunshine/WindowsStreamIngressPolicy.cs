@@ -1,5 +1,7 @@
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
+using System.Text.Json;
 
 namespace KamenRaider.Agent.Sunshine;
 
@@ -8,7 +10,8 @@ public sealed record FirewallPolicySnapshot(
     bool DomainEnabled,
     bool PrivateEnabled,
     bool PublicEnabled,
-    int LocalPolicyModifyState);
+    int LocalPolicyModifyState,
+    IReadOnlyDictionary<string, bool> AllowLocalFirewallRulesByProfile);
 
 public sealed record FirewallRuleSnapshot(
     string Name,
@@ -129,11 +132,18 @@ public sealed class WindowsStreamIngressPolicy : IStreamIngressPolicy
             !state.DomainEnabled ||
             !state.PrivateEnabled ||
             !state.PublicEnabled ||
-            state.LocalPolicyModifyState != 0)
+            state.LocalPolicyModifyState != 0 ||
+            !HasLocalRuleMergePermissionForEveryProfile(state.AllowLocalFirewallRulesByProfile))
         {
             throw new InvalidOperationException("Windows Firewall profiles or local policy do not permit a verified Sunshine fence.");
         }
     }
+
+    private static bool HasLocalRuleMergePermissionForEveryProfile(IReadOnlyDictionary<string, bool>? profiles) =>
+        profiles is { Count: 3 } &&
+        profiles.TryGetValue("Domain", out var domain) && domain &&
+        profiles.TryGetValue("Private", out var privateProfile) && privateProfile &&
+        profiles.TryGetValue("Public", out var publicProfile) && publicProfile;
 
     private FirewallRuleDefinition ExpectedRule(bool enabled) => new(
         BlockRuleName,
@@ -203,6 +213,8 @@ public sealed class WindowsFirewallComApi : IWindowsFirewallApi
     private const int ProfilePrivate = 2;
     private const int ProfilePublic = 4;
     private const int RuleNotFoundHResult = unchecked((int)0x80070002);
+    private const int ProfilePolicyQueryTimeoutMilliseconds = 10_000;
+    private const string ProfilePolicyQuery = "$ErrorActionPreference = 'Stop'; Get-NetFirewallProfile -PolicyStore ActiveStore -All | Select-Object Name, AllowLocalFirewallRules | ConvertTo-Json -Compress";
 
     public FirewallPolicySnapshot ReadPolicyState()
     {
@@ -214,12 +226,85 @@ public sealed class WindowsFirewallComApi : IWindowsFirewallApi
                 (bool)policy.FirewallEnabled(ProfileDomain),
                 (bool)policy.FirewallEnabled(ProfilePrivate),
                 (bool)policy.FirewallEnabled(ProfilePublic),
-                (int)policy.LocalPolicyModifyState);
+                (int)policy.LocalPolicyModifyState,
+                ReadEffectiveLocalFirewallRulesByProfile());
         }
         finally
         {
             ReleaseComObject(policy);
         }
+    }
+
+    private static IReadOnlyDictionary<string, bool> ReadEffectiveLocalFirewallRulesByProfile()
+    {
+        var systemDirectory = Environment.GetFolderPath(Environment.SpecialFolder.System);
+        if (string.IsNullOrWhiteSpace(systemDirectory))
+            throw new InvalidOperationException("Windows system directory is unavailable for firewall policy verification.");
+
+        var powershellPath = Path.Combine(systemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe");
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = powershellPath,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true
+        };
+        startInfo.ArgumentList.Add("-NoLogo");
+        startInfo.ArgumentList.Add("-NoProfile");
+        startInfo.ArgumentList.Add("-NonInteractive");
+        startInfo.ArgumentList.Add("-Command");
+        startInfo.ArgumentList.Add(ProfilePolicyQuery);
+
+        using var process = Process.Start(startInfo)
+            ?? throw new InvalidOperationException("Unable to start Windows PowerShell for effective firewall policy verification.");
+        var standardOutput = process.StandardOutput.ReadToEndAsync();
+        var standardError = process.StandardError.ReadToEndAsync();
+        if (!process.WaitForExit(ProfilePolicyQueryTimeoutMilliseconds))
+        {
+            try { process.Kill(entireProcessTree: true); }
+            catch (InvalidOperationException) { }
+            process.WaitForExit();
+            throw new TimeoutException("Effective Windows Firewall profile policy query timed out.");
+        }
+
+        var output = standardOutput.GetAwaiter().GetResult();
+        _ = standardError.GetAwaiter().GetResult();
+        if (process.ExitCode != 0)
+            throw new InvalidOperationException("Windows PowerShell could not read the effective firewall profile policy.");
+
+        using var document = JsonDocument.Parse(output);
+        if (document.RootElement.ValueKind != JsonValueKind.Array)
+            throw new InvalidDataException("Effective firewall profile policy query did not return a profile array.");
+
+        var profiles = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+        foreach (var item in document.RootElement.EnumerateArray())
+        {
+            var name = item.GetProperty("Name").GetString();
+            if (string.IsNullOrWhiteSpace(name))
+                throw new InvalidDataException("Effective firewall profile policy contains an unnamed profile.");
+
+            var allowsLocalRules = item.GetProperty("AllowLocalFirewallRules");
+            var allowed = allowsLocalRules.ValueKind switch
+            {
+                JsonValueKind.True => true,
+                JsonValueKind.False => false,
+                JsonValueKind.Number when allowsLocalRules.TryGetInt32(out var value) && value == 1 => true,
+                JsonValueKind.Number when allowsLocalRules.TryGetInt32(out var value) && value == 0 => false,
+                _ => throw new InvalidDataException("Effective firewall profile policy contains an unknown local-rule setting.")
+            };
+            profiles.Add(name, allowed);
+        }
+
+        if (profiles.Count != 3 ||
+            !profiles.ContainsKey("Domain") ||
+            !profiles.ContainsKey("Private") ||
+            !profiles.ContainsKey("Public"))
+        {
+            throw new InvalidDataException("Effective firewall profile policy must include Domain, Private, and Public.");
+        }
+
+        return profiles;
     }
 
     public FirewallRuleSnapshot? FindRule(string name)

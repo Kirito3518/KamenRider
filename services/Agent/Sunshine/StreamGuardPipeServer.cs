@@ -172,8 +172,22 @@ internal static class ServiceSidResolver
     }
 }
 
-public sealed class StreamGuardPipeRequestHandler(IStreamGuardControl gate)
+public sealed class StreamGuardPipeRequestHandler
 {
+    public const int DefaultMaxRequestIdsPerSession = 4096;
+
+    private readonly IStreamGuardControl gate;
+    private readonly int maxRequestIdsPerSession;
+
+    public StreamGuardPipeRequestHandler(IStreamGuardControl gate, int maxRequestIdsPerSession = DefaultMaxRequestIdsPerSession)
+    {
+        ArgumentNullException.ThrowIfNull(gate);
+        if (maxRequestIdsPerSession <= 0)
+            throw new ArgumentOutOfRangeException(nameof(maxRequestIdsPerSession));
+        this.gate = gate;
+        this.maxRequestIdsPerSession = maxRequestIdsPerSession;
+    }
+
     public async Task HandleSessionAsync(Stream pipe, CancellationToken cancellationToken)
     {
         var seenRequestIds = new HashSet<string>(StringComparer.Ordinal);
@@ -208,11 +222,18 @@ public sealed class StreamGuardPipeRequestHandler(IStreamGuardControl gate)
                 return;
             }
 
-            if (!Guid.TryParseExact(request.RequestId, "N", out _) || !seenRequestIds.Add(request.RequestId))
+            if (!Guid.TryParseExact(request.RequestId, "N", out _) || seenRequestIds.Contains(request.RequestId))
             {
                 await RejectAndCloseAsync(pipe, request.RequestId, "invalid_request_id", cancellationToken);
                 return;
             }
+
+            if (seenRequestIds.Count >= maxRequestIdsPerSession)
+            {
+                await RejectAndCloseAsync(pipe, request.RequestId, "session_request_limit", cancellationToken);
+                return;
+            }
+            seenRequestIds.Add(request.RequestId);
 
             if (request.Version != StreamGuardPipeProtocol.Version)
             {

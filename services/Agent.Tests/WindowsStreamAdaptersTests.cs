@@ -1,3 +1,4 @@
+using System.Runtime.Versioning;
 using KamenRaider.Agent.Sunshine;
 
 namespace Agent.Tests;
@@ -9,7 +10,7 @@ public class WindowsStreamAdaptersTests
 
     private sealed class FirewallApi : IWindowsFirewallApi
     {
-        public FirewallPolicySnapshot Policy = new(2, true, true, true, 0);
+        public FirewallPolicySnapshot Policy = new(2, true, true, true, 0, LocalRuleMergePermissions());
         public FirewallRuleSnapshot? Rule;
         public readonly List<FirewallRuleDefinition> Added = [];
         public readonly List<bool> EnabledChanges = [];
@@ -149,8 +150,12 @@ public class WindowsStreamAdaptersTests
     {
         foreach (var state in new[]
         {
-            new FirewallPolicySnapshot(2, false, true, true, 0),
-            new FirewallPolicySnapshot(2, true, true, true, 1)
+            new FirewallPolicySnapshot(2, false, true, true, 0, LocalRuleMergePermissions()),
+            new FirewallPolicySnapshot(2, true, true, true, 1, LocalRuleMergePermissions()),
+            new FirewallPolicySnapshot(2, true, true, true, 0, LocalRuleMergePermissions(domain: false)),
+            new FirewallPolicySnapshot(2, true, true, true, 0, LocalRuleMergePermissions(privateProfile: false)),
+            new FirewallPolicySnapshot(2, true, true, true, 0, LocalRuleMergePermissions(publicProfile: false)),
+            new FirewallPolicySnapshot(2, true, true, true, 0, new Dictionary<string, bool> { ["Domain"] = true, ["Private"] = true })
         })
         {
             var firewall = new FirewallApi { Policy = state };
@@ -161,6 +166,22 @@ public class WindowsStreamAdaptersTests
             Assert.Empty(firewall.Added);
             Assert.Empty(firewall.EnabledChanges);
         }
+    }
+
+    [Fact]
+    public async Task DeniedInactiveProfilePreventsOpeningAndLeavesManagedFenceEnabled()
+    {
+        var firewall = new FirewallApi
+        {
+            Rule = ExpectedRule(),
+            Policy = new FirewallPolicySnapshot(2, true, true, true, 0, LocalRuleMergePermissions(privateProfile: false))
+        };
+        var policy = new WindowsStreamIngressPolicy(firewall, Installation());
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => policy.SetBlockedAsync(false, default));
+
+        Assert.Empty(firewall.EnabledChanges);
+        Assert.True(firewall.Rule!.Enabled);
     }
 
     [Fact]
@@ -213,6 +234,20 @@ public class WindowsStreamAdaptersTests
     }
 
     [Fact]
+    [SupportedOSPlatform("windows")]
+    public void WindowsFirewallComApiSnapshotIncludesEffectiveLocalRuleMergeForEveryProfile()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+
+        var state = new WindowsFirewallComApi().ReadPolicyState();
+
+        Assert.Equal(3, state.AllowLocalFirewallRulesByProfile.Count);
+        Assert.Contains("Domain", state.AllowLocalFirewallRulesByProfile.Keys, StringComparer.OrdinalIgnoreCase);
+        Assert.Contains("Private", state.AllowLocalFirewallRulesByProfile.Keys, StringComparer.OrdinalIgnoreCase);
+        Assert.Contains("Public", state.AllowLocalFirewallRulesByProfile.Keys, StringComparer.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task SunshineServiceControlStartsAndStopsOnlyTheValidatedService()
     {
         var api = new ServiceApi();
@@ -253,6 +288,16 @@ public class WindowsStreamAdaptersTests
     }
 
     private static SunshineServiceInstallation Installation() => new("SunshineService", ServiceImage, SunshineImage);
+
+    private static IReadOnlyDictionary<string, bool> LocalRuleMergePermissions(
+        bool domain = true,
+        bool privateProfile = true,
+        bool publicProfile = true) => new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase)
+    {
+        ["Domain"] = domain,
+        ["Private"] = privateProfile,
+        ["Public"] = publicProfile
+    };
 
     private static FirewallRuleSnapshot ExpectedRule() => FromDefinition(new(
         WindowsStreamIngressPolicy.BlockRuleName,

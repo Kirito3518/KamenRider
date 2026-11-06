@@ -170,6 +170,27 @@ public class StreamGuardPipeTests
     }
 
     [Fact]
+    public async Task RequestIdMemoryBoundClosesSessionAfterTheConfiguredLimit()
+    {
+        var gate = new RecordingGate();
+        var requests = Enumerable.Range(0, 3)
+            .Select(_ => new StreamGuardPipeRequest(StreamGuardPipeProtocol.Version, Guid.NewGuid().ToString("N"), "block", null))
+            .ToArray();
+        using var pipe = await CreateSessionStreamAsync(requests);
+
+        await new StreamGuardPipeSession(new StreamGuardPipeRequestHandler(gate, maxRequestIdsPerSession: 2), gate)
+            .RunAsync(pipe, default);
+
+        var responses = await ReadResponsesAsync(pipe.Written);
+        Assert.Equal(3, responses.Length);
+        Assert.True(responses[0].Success);
+        Assert.True(responses[1].Success);
+        Assert.False(responses[2].Success);
+        Assert.Equal("session_request_limit", responses[2].Error);
+        Assert.Equal(4, gate.Calls.Count(call => call == "block"));
+    }
+
+    [Fact]
     public async Task VerifyOpenRequestReturnsTheExactLeaseResultWithoutBlocking()
     {
         var gate = new RecordingGate();
@@ -394,6 +415,44 @@ public class StreamGuardPipeTests
 
     [Fact]
     [SupportedOSPlatform("windows")]
+    public async Task ClientReconnectsSafelyAfterRequestIdSessionLimit()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var pipeName = $"KamenRaider.Test.{Guid.NewGuid():N}";
+        var gate = new RecordingGate();
+        var handler = new StreamGuardPipeRequestHandler(gate, maxRequestIdsPerSession: 1);
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await using var client = new StreamGuardPipeClient(pipeName, TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(3));
+
+        var firstServer = CreateCurrentUserPipeServer(pipeName);
+        var firstSession = Task.Run(async () =>
+        {
+            await firstServer.WaitForConnectionAsync(cancellation.Token);
+            await new StreamGuardPipeSession(handler, gate).RunAsync(firstServer, cancellation.Token);
+            await firstServer.DisposeAsync();
+        }, cancellation.Token);
+
+        await client.BlockAsync(default);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => client.BlockAsync(default));
+        await firstSession;
+        Assert.Contains("block", gate.Calls);
+
+        var secondServer = CreateCurrentUserPipeServer(pipeName);
+        var secondSession = Task.Run(async () =>
+        {
+            await secondServer.WaitForConnectionAsync(cancellation.Token);
+            await new StreamGuardPipeSession(handler, gate).RunAsync(secondServer, cancellation.Token);
+            await secondServer.DisposeAsync();
+        }, cancellation.Token);
+        await client.BlockAsync(default);
+        await client.DisposeAsync();
+        await secondSession;
+
+        Assert.True(gate.Calls.Count(call => call == "block") >= 5);
+    }
+
+    [Fact]
+    [SupportedOSPlatform("windows")]
     public async Task ClientReconnectsAfterGuardRestartsItsPipeSession()
     {
         if (!OperatingSystem.IsWindows()) return;
@@ -450,6 +509,15 @@ public class StreamGuardPipeTests
         var frame = await StreamGuardPipeProtocol.ReadFrameAsync(stream, default);
         Assert.NotNull(frame);
         return StreamGuardPipeProtocol.DecodeResponse(frame);
+    }
+
+    private static async Task<StreamGuardPipeResponse[]> ReadResponsesAsync(MemoryStream stream)
+    {
+        stream.Position = 0;
+        var responses = new List<StreamGuardPipeResponse>();
+        while (await StreamGuardPipeProtocol.ReadFrameAsync(stream, default) is { } frame)
+            responses.Add(StreamGuardPipeProtocol.DecodeResponse(frame));
+        return responses.ToArray();
     }
 
     [SupportedOSPlatform("windows")]
