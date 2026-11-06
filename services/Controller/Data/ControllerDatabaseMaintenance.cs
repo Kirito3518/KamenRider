@@ -58,6 +58,37 @@ internal static class ControllerDatabaseFileLocks
 public static class ControllerDatabaseMaintenance
 {
     private static readonly string[] requiredTables = ["machines", "machine_heartbeats", "leases", "command_outbox"];
+    private sealed record RequiredColumn(string Name, string Type, bool NotNull = false);
+    private static readonly IReadOnlyDictionary<string, RequiredColumn[]> requiredColumns = new Dictionary<string, RequiredColumn[]>(StringComparer.OrdinalIgnoreCase)
+    {
+        ["machines"] = [
+            new("machine_id", "TEXT"), new("public_key", "TEXT", true), new("approval_status", "TEXT", true),
+            new("display_name", "TEXT", true), new("hourly_price", "INTEGER", true), new("local_ip", "TEXT", true),
+            new("mac_address", "TEXT", true), new("moonlight_port", "INTEGER", true), new("sunshine_port", "INTEGER", true),
+            new("revision", "INTEGER", true), new("approved_by", "TEXT"), new("approved_at", "TEXT")
+        ],
+        ["machine_heartbeats"] = [
+            new("machine_id", "TEXT"), new("last_seen", "TEXT", true), new("boot_id", "TEXT", true), new("readiness", "TEXT", true)
+        ],
+        ["leases"] = [
+            new("id", "TEXT"), new("user_id", "TEXT", true), new("machine_id", "TEXT", true), new("state", "TEXT", true),
+            new("revision", "INTEGER", true), new("pending_revision", "INTEGER"), new("duration_seconds", "INTEGER", true),
+            new("preparation_deadline", "INTEGER", true), new("starts_at", "INTEGER"), new("expires_at", "INTEGER"),
+            new("pending_expires_at", "INTEGER"), new("boot_id", "TEXT"), new("allocation_held", "INTEGER", true)
+        ],
+        ["command_outbox"] = [
+            new("command_id", "TEXT"), new("type", "TEXT", true), new("rental_id", "TEXT", true), new("machine_id", "TEXT", true),
+            new("lease_revision", "INTEGER", true), new("boot_id", "TEXT", true), new("valid_until", "INTEGER", true),
+            new("payload", "TEXT", true), new("status", "TEXT", true), new("error_code", "TEXT")
+        ]
+    };
+    private static readonly IReadOnlyDictionary<string, string[]> requiredPrimaryKeys = new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase)
+    {
+        ["machines"] = ["machine_id"],
+        ["machine_heartbeats"] = ["machine_id"],
+        ["leases"] = ["id"],
+        ["command_outbox"] = ["command_id"]
+    };
 
     public static string Backup(string databasePath, string backupPath)
     {
@@ -192,12 +223,150 @@ public static class ControllerDatabaseMaintenance
             }
             if (requiredTables.Any(table => !tables.Contains(table)))
                 throw new InvalidDataException("The database is missing required Controller tables.");
+
+            foreach (var table in requiredTables)
+                ValidateColumns(connection, table, requiredColumns[table], requiredPrimaryKeys[table]);
+
+            // These uniqueness constraints enforce allocation and command-revision invariants.
+            ValidateIndex(connection, "leases", "leases_machine_allocation", ["machine_id"], "allocation_held=1", required: true);
+            using var userVersionCommand = connection.CreateCommand();
+            userVersionCommand.CommandText = "PRAGMA user_version";
+            var userVersion = Convert.ToInt64(userVersionCommand.ExecuteScalar(), CultureInfo.InvariantCulture);
+            var commandTableDefinition = ReadTableDefinition(connection, "command_outbox");
+            var hasPairingMigration = userVersion >= 3 || commandTableDefinition.Contains("'PairPin'", StringComparison.OrdinalIgnoreCase);
+            if (hasPairingMigration)
+                ValidateIndex(connection, "command_outbox", "lease_command_revision", ["rental_id", "type", "lease_revision"], "type!='PairPin'", required: true);
+            else
+                // Before pairing, this same uniqueness rule is a table-level UNIQUE constraint.
+                ValidateLegacyCommandRevisionUniqueness(connection);
         }
         catch (SqliteException exception)
         {
             throw new InvalidDataException("The file is not a valid Controller database.", exception);
         }
     }
+
+    private static void ValidateColumns(SqliteConnection connection, string table, RequiredColumn[] expectedColumns, string[] expectedPrimaryKey)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = $"PRAGMA table_info(\"{table}\")";
+        using var rows = command.ExecuteReader();
+        var columns = new Dictionary<string, (string Type, bool NotNull)>(StringComparer.OrdinalIgnoreCase);
+        var primaryKey = new SortedDictionary<int, string>();
+        while (rows.Read())
+        {
+            var name = rows.GetString(1);
+            columns[name] = (rows.GetString(2), rows.GetInt32(3) != 0);
+            var primaryKeyOrder = rows.GetInt32(5);
+            if (primaryKeyOrder > 0) primaryKey.Add(primaryKeyOrder, name);
+        }
+
+        if (expectedColumns.Any(column => !columns.ContainsKey(column.Name)))
+            throw new InvalidDataException($"Controller database table '{table}' is missing required columns.");
+        foreach (var expected in expectedColumns)
+        {
+            var actual = columns[expected.Name];
+            if (!string.Equals(actual.Type.Trim(), expected.Type, StringComparison.OrdinalIgnoreCase) || (expected.NotNull && !actual.NotNull))
+                throw new InvalidDataException($"Controller database table '{table}' has an invalid required column definition.");
+        }
+        if (!primaryKey.Values.SequenceEqual(expectedPrimaryKey, StringComparer.OrdinalIgnoreCase))
+            throw new InvalidDataException($"Controller database table '{table}' has an invalid primary key.");
+    }
+
+    private static string ReadTableDefinition(SqliteConnection connection, string table)
+    {
+        using var definition = connection.CreateCommand();
+        definition.CommandText = "SELECT sql FROM sqlite_schema WHERE type='table' AND name=$name";
+        definition.Parameters.AddWithValue("$name", table);
+        return definition.ExecuteScalar()?.ToString() ?? string.Empty;
+    }
+
+    private static void ValidateLegacyCommandRevisionUniqueness(SqliteConnection connection)
+    {
+        var candidateIndexes = new List<string>();
+        using var indexes = connection.CreateCommand();
+        indexes.CommandText = "PRAGMA index_list('command_outbox')";
+        using (var rows = indexes.ExecuteReader())
+        {
+            while (rows.Read())
+                if (rows.GetInt32(2) != 0 && rows.GetInt32(4) == 0)
+                    candidateIndexes.Add(rows.GetString(1));
+        }
+
+        foreach (var candidate in candidateIndexes)
+        {
+            var indexName = candidate.Replace("'", "''", StringComparison.Ordinal);
+            using var info = connection.CreateCommand();
+            info.CommandText = $"PRAGMA index_info('{indexName}')";
+            using var columns = info.ExecuteReader();
+            var actualColumns = new List<string>();
+            while (columns.Read())
+            {
+                if (columns.IsDBNull(2)) break;
+                actualColumns.Add(columns.GetString(2));
+            }
+            if (actualColumns.SequenceEqual(["rental_id", "type", "lease_revision"], StringComparer.OrdinalIgnoreCase)) return;
+        }
+        throw new InvalidDataException("Controller database is missing command-revision uniqueness.");
+    }
+
+    private static void ValidateIndex(SqliteConnection connection, string table, string name, string[] expectedColumns, string predicate, bool required)
+    {
+        var found = false;
+        var isUnique = false;
+        var isPartial = false;
+        using (var indexes = connection.CreateCommand())
+        {
+            indexes.CommandText = $"PRAGMA index_list('{table}')";
+            using var rows = indexes.ExecuteReader();
+            while (rows.Read())
+            {
+                if (!string.Equals(rows.GetString(1), name, StringComparison.OrdinalIgnoreCase)) continue;
+                found = true;
+                isUnique = rows.GetInt32(2) != 0;
+                isPartial = rows.GetInt32(4) != 0;
+                break;
+            }
+        }
+
+        if (!found)
+        {
+            if (required) throw new InvalidDataException($"Controller database is missing required index '{name}'.");
+            return;
+        }
+        if (!isUnique || !isPartial)
+            throw new InvalidDataException($"Controller database index '{name}' must be unique and partial.");
+
+        var columns = new List<string>();
+        using (var info = connection.CreateCommand())
+        {
+            info.CommandText = $"PRAGMA index_info('{name}')";
+            using var rows = info.ExecuteReader();
+            while (rows.Read())
+            {
+                if (rows.IsDBNull(2)) throw new InvalidDataException($"Controller database index '{name}' cannot contain expression columns.");
+                columns.Add(rows.GetString(2));
+            }
+        }
+        if (!columns.SequenceEqual(expectedColumns, StringComparer.OrdinalIgnoreCase))
+            throw new InvalidDataException($"Controller database index '{name}' has invalid columns.");
+
+        using var definition = connection.CreateCommand();
+        definition.CommandText = "SELECT sql FROM sqlite_schema WHERE type='index' AND name=$name";
+        definition.Parameters.AddWithValue("$name", name);
+        var sql = definition.ExecuteScalar()?.ToString();
+        if (sql is null)
+            throw new InvalidDataException($"Controller database index '{name}' has an invalid filter.");
+
+        var normalizedDefinition = NormalizeSql(sql);
+        var expectedClause = NormalizeSql($"ON {table}({string.Join(',', expectedColumns)}) WHERE {predicate}");
+        var clauseStart = normalizedDefinition.LastIndexOf(NormalizeSql($"ON {table}("), StringComparison.Ordinal);
+        if (clauseStart < 0 || !string.Equals(normalizedDefinition[clauseStart..], expectedClause, StringComparison.Ordinal))
+            throw new InvalidDataException($"Controller database index '{name}' has an invalid filter.");
+    }
+
+    private static string NormalizeSql(string sql) => string.Concat(sql.Where(character =>
+        !char.IsWhiteSpace(character) && character != '"' && character != '`' && character != '[' && character != ']')).ToLowerInvariant();
 
     private static void CheckpointWal(string path)
     {

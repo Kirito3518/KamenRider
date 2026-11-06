@@ -142,7 +142,7 @@ VNC/noVNC เป็นความสามารถของระบบฉบ�
 - ทดสอบ collision สองผู้เช่า, command replay, Controller restart, Agent crash, network offline และ expiry boundary
 - Hardware matrix: WOL, stream isolation, active session cutoff, old-client reconnect, cold boot, audio/input/capture, external ports
 - บันทึก pass/fail/not-tested แยก fake tests กับ hardware tests
-- Controller มี online verified SQLite backup/restore CLI พร้อม activity lock และ pre-restore snapshot; ทดสอบกับฐานชั่วคราวเท่านั้น ยังต้องทำ production restore drill, รับรอง ACL/การเก็บ backup และทำ certificate/secret recovery กับ identity revoke/re-enroll runbook
+- Controller มี online verified SQLite backup/restore CLI พร้อม activity lock และ pre-restore snapshot; validator ตรวจ required columns/types/nullability/primary keys และ allocation/command-revision uniqueness ก่อนทำ snapshot หรือแทนที่ฐาน; ทดสอบด้วยฐานชั่วคราวเท่านั้น ยังต้องทำ production restore drill, รับรอง ACL/การเก็บ backup และทำ certificate/secret recovery กับ identity revoke/re-enroll runbook
 - ห้ามประกาศ rental-ready จน gate, expiry, installation และ hardware acceptance ผ่านครบ
 
 ## สถานะสรุปวันนี้

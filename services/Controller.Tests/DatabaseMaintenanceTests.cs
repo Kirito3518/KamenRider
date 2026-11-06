@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using Microsoft.Data.Sqlite;
 using KamenRaider.Contracts;
 using KamenRaider.Controller.Data;
 
@@ -28,6 +29,23 @@ public class DatabaseMaintenanceTests
     }
 
     [Fact]
+    public void BackupRejectsDatabaseWithMissingRequiredColumnWithoutPublishingFile()
+    {
+        var root = NewRoot();
+        var databasePath = Path.Combine(root, "controller.db");
+        var backupPath = Path.Combine(root, "backup.db");
+        try
+        {
+            using (var database = new ControllerDatabase(databasePath)) AddMachine(database, "source-machine");
+            ReplaceHeartbeatTable(databasePath, "CREATE TABLE machine_heartbeats(machine_id TEXT PRIMARY KEY,last_seen TEXT NOT NULL,boot_id TEXT NOT NULL);");
+
+            Assert.Throws<InvalidDataException>(() => ControllerDatabaseMaintenance.Backup(databasePath, backupPath));
+            Assert.False(File.Exists(backupPath));
+        }
+        finally { DeleteRoot(root); }
+    }
+
+    [Fact]
     public void RestoreReplacesDatabaseWithValidatedBackup()
     {
         var root = NewRoot();
@@ -47,6 +65,33 @@ public class DatabaseMaintenanceTests
             Assert.NotNull(recoveryPath);
             using var recovery = new ControllerDatabase(recoveryPath!);
             Assert.Equal("old-machine", Assert.Single(recovery.List()).MachineId);
+        }
+        finally { DeleteRoot(root); }
+    }
+
+    [Fact]
+    public void RestoreAcceptsLegacyCommandTableWithUnfilteredRevisionUniqueness()
+    {
+        var root = NewRoot();
+        var backupPath = Path.Combine(root, "legacy-v2.db");
+        var destinationPath = Path.Combine(root, "destination.db");
+        try
+        {
+            CreateLegacyVersionTwoDatabase(backupPath);
+            using (var destination = new ControllerDatabase(destinationPath)) AddMachine(destination, "preserved-machine");
+
+            var recoveryPath = ControllerDatabaseMaintenance.Restore(backupPath, destinationPath);
+
+            Assert.NotNull(recoveryPath);
+            using (var restored = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = destinationPath, Mode = SqliteOpenMode.ReadOnly, Pooling = false }.ToString()))
+            {
+                restored.Open();
+                using var version = restored.CreateCommand();
+                version.CommandText = "PRAGMA user_version";
+                Assert.Equal(2L, version.ExecuteScalar());
+            }
+            using var recovery = new ControllerDatabase(recoveryPath!);
+            Assert.Equal("preserved-machine", Assert.Single(recovery.List()).MachineId);
         }
         finally { DeleteRoot(root); }
     }
@@ -83,6 +128,252 @@ public class DatabaseMaintenanceTests
             using (var destination = new ControllerDatabase(destinationPath)) AddMachine(destination, "preserved-machine");
 
             Assert.Throws<InvalidDataException>(() => ControllerDatabaseMaintenance.Restore(backupPath, destinationPath));
+            using var preserved = new ControllerDatabase(destinationPath);
+            Assert.Equal("preserved-machine", Assert.Single(preserved.List()).MachineId);
+        }
+        finally { DeleteRoot(root); }
+    }
+
+    [Fact]
+    public void RestoreRejectsSqliteWithRequiredTableNamesButMalformedColumns()
+    {
+        var root = NewRoot();
+        var backupPath = Path.Combine(root, "malformed-schema.db");
+        var destinationPath = Path.Combine(root, "destination.db");
+        try
+        {
+            using (var malformed = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = backupPath, Pooling = false }.ToString()))
+            {
+                malformed.Open();
+                using var command = malformed.CreateCommand();
+                command.CommandText = "CREATE TABLE machines (wrong TEXT); CREATE TABLE machine_heartbeats (wrong TEXT); CREATE TABLE leases (wrong TEXT); CREATE TABLE command_outbox (wrong TEXT);";
+                command.ExecuteNonQuery();
+            }
+
+            using (var malformed = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = backupPath, Mode = SqliteOpenMode.ReadOnly, Pooling = false }.ToString()))
+            {
+                malformed.Open();
+                using var integrity = malformed.CreateCommand();
+                integrity.CommandText = "PRAGMA integrity_check";
+                Assert.Equal("ok", integrity.ExecuteScalar()?.ToString());
+                using var tables = malformed.CreateCommand();
+                tables.CommandText = "SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name IN ('machines','machine_heartbeats','leases','command_outbox')";
+                Assert.Equal(4L, (long)tables.ExecuteScalar()!);
+            }
+
+            using (var destination = new ControllerDatabase(destinationPath)) AddMachine(destination, "preserved-machine");
+
+            Assert.Throws<InvalidDataException>(() => ControllerDatabaseMaintenance.Restore(backupPath, destinationPath));
+
+            using var preserved = new ControllerDatabase(destinationPath);
+            Assert.Equal("preserved-machine", Assert.Single(preserved.List()).MachineId);
+        }
+        finally { DeleteRoot(root); }
+    }
+
+    [Fact]
+    public void RestoreRejectsDatabaseMissingARequiredColumn()
+    {
+        var root = NewRoot();
+        var backupPath = Path.Combine(root, "missing-column.db");
+        var destinationPath = Path.Combine(root, "destination.db");
+        try
+        {
+            using (var backup = new ControllerDatabase(backupPath)) AddMachine(backup, "backup-machine");
+            ReplaceHeartbeatTable(backupPath, "CREATE TABLE machine_heartbeats(machine_id TEXT PRIMARY KEY,last_seen TEXT NOT NULL,boot_id TEXT NOT NULL);");
+            using (var destination = new ControllerDatabase(destinationPath)) AddMachine(destination, "preserved-machine");
+
+            Assert.Throws<InvalidDataException>(() => ControllerDatabaseMaintenance.Restore(backupPath, destinationPath));
+
+            using var preserved = new ControllerDatabase(destinationPath);
+            Assert.Equal("preserved-machine", Assert.Single(preserved.List()).MachineId);
+        }
+        finally { DeleteRoot(root); }
+    }
+
+    [Fact]
+    public void RestoreCommandDoesNotPrintDatabaseRowValuesOnValidationFailure()
+    {
+        var root = NewRoot();
+        var backupPath = Path.Combine(root, "row-content.db");
+        var destinationPath = Path.Combine(root, "destination.db");
+        const string rowValue = "task14-private-row-marker";
+        try
+        {
+            using (var backup = new ControllerDatabase(backupPath)) AddMachine(backup, "backup-machine");
+            ReplaceHeartbeatTable(backupPath, "CREATE TABLE machine_heartbeats(machine_id TEXT PRIMARY KEY,last_seen TEXT NOT NULL,boot_id TEXT NOT NULL);");
+            using (var malformed = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = backupPath, Pooling = false }.ToString()))
+            {
+                malformed.Open();
+                using var command = malformed.CreateCommand();
+                command.CommandText = "INSERT INTO machine_heartbeats(machine_id,last_seen,boot_id) VALUES ('machine-marker',$rowValue,'boot-marker')";
+                command.Parameters.AddWithValue("$rowValue", rowValue);
+                command.ExecuteNonQuery();
+            }
+            using (var destination = new ControllerDatabase(destinationPath)) AddMachine(destination, "preserved-machine");
+
+            var originalError = Console.Error;
+            using var error = new StringWriter();
+            int exitCode;
+            bool handled;
+            try
+            {
+                Console.SetError(error);
+                handled = KamenRaider.Controller.ControllerMaintenanceCommand.TryRun(["--restore-database", backupPath, destinationPath, "--controller-stopped"], out exitCode);
+            }
+            finally { Console.SetError(originalError); }
+
+            Assert.True(handled);
+            Assert.Equal(1, exitCode);
+            Assert.DoesNotContain(rowValue, error.ToString());
+            using var preserved = new ControllerDatabase(destinationPath);
+            Assert.Equal("preserved-machine", Assert.Single(preserved.List()).MachineId);
+        }
+        finally { DeleteRoot(root); }
+    }
+
+    [Fact]
+    public void RestoreRejectsDatabaseMissingARequiredPrimaryKey()
+    {
+        var root = NewRoot();
+        var backupPath = Path.Combine(root, "missing-primary-key.db");
+        var destinationPath = Path.Combine(root, "destination.db");
+        try
+        {
+            using (var backup = new ControllerDatabase(backupPath)) AddMachine(backup, "backup-machine");
+            ReplaceHeartbeatTable(backupPath, "CREATE TABLE machine_heartbeats(machine_id TEXT NOT NULL,last_seen TEXT NOT NULL,boot_id TEXT NOT NULL,readiness TEXT NOT NULL);");
+            using (var destination = new ControllerDatabase(destinationPath)) AddMachine(destination, "preserved-machine");
+
+            Assert.Throws<InvalidDataException>(() => ControllerDatabaseMaintenance.Restore(backupPath, destinationPath));
+
+            using var preserved = new ControllerDatabase(destinationPath);
+            Assert.Equal("preserved-machine", Assert.Single(preserved.List()).MachineId);
+        }
+        finally { DeleteRoot(root); }
+    }
+
+    [Fact]
+    public void RestoreRejectsDatabaseWithNarrowedRequiredColumnType()
+    {
+        var root = NewRoot();
+        var backupPath = Path.Combine(root, "narrowed-column-type.db");
+        var destinationPath = Path.Combine(root, "destination.db");
+        try
+        {
+            using (var backup = new ControllerDatabase(backupPath)) AddMachine(backup, "backup-machine");
+            ReplaceHeartbeatTable(backupPath, "CREATE TABLE machine_heartbeats(machine_id TEXT PRIMARY KEY,last_seen INTEGER NOT NULL,boot_id TEXT NOT NULL,readiness TEXT NOT NULL);");
+            using (var destination = new ControllerDatabase(destinationPath)) AddMachine(destination, "preserved-machine");
+
+            Assert.Throws<InvalidDataException>(() => ControllerDatabaseMaintenance.Restore(backupPath, destinationPath));
+
+            using var preserved = new ControllerDatabase(destinationPath);
+            Assert.Equal("preserved-machine", Assert.Single(preserved.List()).MachineId);
+        }
+        finally { DeleteRoot(root); }
+    }
+
+    [Fact]
+    public void RestoreRejectsDatabaseWithMalformedLeaseAllocationIndex()
+    {
+        var root = NewRoot();
+        var backupPath = Path.Combine(root, "malformed-index.db");
+        var destinationPath = Path.Combine(root, "destination.db");
+        try
+        {
+            using (var backup = new ControllerDatabase(backupPath)) AddMachine(backup, "backup-machine");
+            using (var malformed = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = backupPath, Pooling = false }.ToString()))
+            {
+                malformed.Open();
+                using var command = malformed.CreateCommand();
+                command.CommandText = "DROP INDEX leases_machine_allocation; CREATE INDEX leases_machine_allocation ON leases(machine_id);";
+                command.ExecuteNonQuery();
+            }
+
+            using (var destination = new ControllerDatabase(destinationPath)) AddMachine(destination, "preserved-machine");
+
+            Assert.Throws<InvalidDataException>(() => ControllerDatabaseMaintenance.Restore(backupPath, destinationPath));
+
+            using var preserved = new ControllerDatabase(destinationPath);
+            Assert.Equal("preserved-machine", Assert.Single(preserved.List()).MachineId);
+        }
+        finally { DeleteRoot(root); }
+    }
+
+    [Fact]
+    public void RestoreRejectsNarrowedLeaseAllocationIndexPredicate()
+    {
+        var root = NewRoot();
+        var backupPath = Path.Combine(root, "narrowed-allocation-index.db");
+        var destinationPath = Path.Combine(root, "destination.db");
+        try
+        {
+            using (var backup = new ControllerDatabase(backupPath)) AddMachine(backup, "backup-machine");
+            using (var malformed = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = backupPath, Pooling = false }.ToString()))
+            {
+                malformed.Open();
+                using var command = malformed.CreateCommand();
+                command.CommandText = "DROP INDEX leases_machine_allocation; CREATE UNIQUE INDEX leases_machine_allocation ON leases(machine_id) WHERE allocation_held=1 AND state='active';";
+                command.ExecuteNonQuery();
+            }
+
+            using (var destination = new ControllerDatabase(destinationPath)) AddMachine(destination, "preserved-machine");
+
+            Assert.Throws<InvalidDataException>(() => ControllerDatabaseMaintenance.Restore(backupPath, destinationPath));
+
+            using var preserved = new ControllerDatabase(destinationPath);
+            Assert.Equal("preserved-machine", Assert.Single(preserved.List()).MachineId);
+        }
+        finally { DeleteRoot(root); }
+    }
+
+    [Fact]
+    public void RestoreRejectsDatabaseWithNarrowedCommandRevisionIndex()
+    {
+        var root = NewRoot();
+        var backupPath = Path.Combine(root, "narrowed-command-index.db");
+        var destinationPath = Path.Combine(root, "destination.db");
+        try
+        {
+            using (var backup = new ControllerDatabase(backupPath)) AddMachine(backup, "backup-machine");
+            using (var malformed = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = backupPath, Pooling = false }.ToString()))
+            {
+                malformed.Open();
+                using var command = malformed.CreateCommand();
+                command.CommandText = "DROP INDEX lease_command_revision; CREATE UNIQUE INDEX lease_command_revision ON command_outbox(rental_id,type,lease_revision) WHERE type!='PairPin' AND status='pending';";
+                command.ExecuteNonQuery();
+            }
+
+            using (var destination = new ControllerDatabase(destinationPath)) AddMachine(destination, "preserved-machine");
+
+            Assert.Throws<InvalidDataException>(() => ControllerDatabaseMaintenance.Restore(backupPath, destinationPath));
+
+            using var preserved = new ControllerDatabase(destinationPath);
+            Assert.Equal("preserved-machine", Assert.Single(preserved.List()).MachineId);
+        }
+        finally { DeleteRoot(root); }
+    }
+
+    [Fact]
+    public void RestoreRejectsMissingCommandRevisionIndexEvenWhenUserVersionWasLowered()
+    {
+        var root = NewRoot();
+        var backupPath = Path.Combine(root, "missing-command-index.db");
+        var destinationPath = Path.Combine(root, "destination.db");
+        try
+        {
+            using (var backup = new ControllerDatabase(backupPath)) AddMachine(backup, "backup-machine");
+            using (var malformed = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = backupPath, Pooling = false }.ToString()))
+            {
+                malformed.Open();
+                using var command = malformed.CreateCommand();
+                command.CommandText = "DROP INDEX lease_command_revision; PRAGMA user_version=2;";
+                command.ExecuteNonQuery();
+            }
+
+            using (var destination = new ControllerDatabase(destinationPath)) AddMachine(destination, "preserved-machine");
+
+            Assert.Throws<InvalidDataException>(() => ControllerDatabaseMaintenance.Restore(backupPath, destinationPath));
+
             using var preserved = new ControllerDatabase(destinationPath);
             Assert.Equal("preserved-machine", Assert.Single(preserved.List()).MachineId);
         }
@@ -136,6 +427,48 @@ public class DatabaseMaintenanceTests
     {
         using var key = ECDsa.Create();
         database.EnrollWithTicket(new EnrollmentRequest(machineId, Convert.ToBase64String(key.ExportSubjectPublicKeyInfo()), "192.0.2.1", "001122334455", 5000, 47989));
+    }
+
+    private static void ReplaceHeartbeatTable(string databasePath, string createStatement)
+    {
+        using var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = databasePath, Pooling = false }.ToString());
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "DROP TABLE machine_heartbeats; " + createStatement;
+        command.ExecuteNonQuery();
+    }
+
+    private static void CreateLegacyVersionTwoDatabase(string databasePath)
+    {
+        using var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = databasePath, Pooling = false }.ToString());
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            CREATE TABLE machines (
+                machine_id TEXT PRIMARY KEY, public_key TEXT NOT NULL, approval_status TEXT NOT NULL DEFAULT 'pending',
+                display_name TEXT NOT NULL DEFAULT '', hourly_price INTEGER NOT NULL DEFAULT 0,
+                local_ip TEXT NOT NULL, mac_address TEXT NOT NULL, moonlight_port INTEGER NOT NULL,
+                sunshine_port INTEGER NOT NULL, revision INTEGER NOT NULL DEFAULT 1, approved_by TEXT, approved_at TEXT
+            );
+            CREATE TABLE machine_heartbeats(machine_id TEXT PRIMARY KEY,last_seen TEXT NOT NULL,boot_id TEXT NOT NULL,readiness TEXT NOT NULL);
+            CREATE TABLE leases (
+                id TEXT PRIMARY KEY, user_id TEXT NOT NULL, machine_id TEXT NOT NULL,
+                state TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 0, pending_revision INTEGER,
+                duration_seconds INTEGER NOT NULL, preparation_deadline INTEGER NOT NULL,
+                starts_at INTEGER, expires_at INTEGER, pending_expires_at INTEGER, boot_id TEXT,
+                allocation_held INTEGER NOT NULL DEFAULT 1
+            );
+            CREATE UNIQUE INDEX leases_machine_allocation ON leases(machine_id) WHERE allocation_held=1;
+            CREATE TABLE command_outbox (
+                command_id TEXT PRIMARY KEY, type TEXT NOT NULL CHECK(type IN ('PrepareMachine','ApplyLease')),
+                rental_id TEXT NOT NULL, machine_id TEXT NOT NULL, lease_revision INTEGER NOT NULL,
+                boot_id TEXT NOT NULL, valid_until INTEGER NOT NULL, payload TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending', error_code TEXT,
+                UNIQUE(rental_id,type,lease_revision)
+            );
+            PRAGMA user_version=2;
+            """;
+        command.ExecuteNonQuery();
     }
 
     private static string NewRoot()
