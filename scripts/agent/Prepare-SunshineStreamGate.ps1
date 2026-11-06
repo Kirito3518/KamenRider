@@ -77,7 +77,8 @@ function Invoke-SunshineStreamGateRollback {
         [Parameter(Mandatory)][psobject]$Transaction,
         [Parameter(Mandatory)][scriptblock]$EnsureClosed,
         [Parameter(Mandatory)][scriptblock]$RestoreSunshineConfiguration,
-        [Parameter(Mandatory)][scriptblock]$StopAndRemoveGuard,
+        [Parameter(Mandatory)][scriptblock]$StopGuard,
+        [Parameter(Mandatory)][scriptblock]$RemoveGuard,
         [Parameter(Mandatory)][scriptblock]$RestoreFirewall,
         [Parameter(Mandatory)][scriptblock]$RestoreSunshineRunning
     )
@@ -85,19 +86,30 @@ function Invoke-SunshineStreamGateRollback {
     if ($Transaction.FencePrepared) {
         try { & $EnsureClosed } catch { $failures.Add($_.Exception) }
     }
-    if ($Transaction.SunshineConfigurationChanged) {
+    if ($Transaction.GuardServiceCreated -and $failures.Count -eq 0) {
+        try { & $StopGuard } catch { $failures.Add($_.Exception) }
+    }
+    if ($Transaction.SunshineConfigurationChanged -and $failures.Count -eq 0) {
         try { & $RestoreSunshineConfiguration } catch { $failures.Add($_.Exception) }
     }
-    if ($Transaction.GuardServiceCreated -and $failures.Count -eq 0) {
-        try { & $StopAndRemoveGuard } catch { $failures.Add($_.Exception) }
+    # Keep the verified fence and Guard service definition until Sunshine has
+    # been restored and its running state verified. Stop Guard first because
+    # its shutdown handler can stop Sunshine.
+    if ($Transaction.SunshineStopped -and $Transaction.SunshineWasRunning -and $failures.Count -eq 0) {
+        try { & $RestoreSunshineRunning } catch { $failures.Add($_.Exception) }
     }
     if ($Transaction.FirewallChanged -and $failures.Count -eq 0) {
         try { & $RestoreFirewall $Transaction } catch { $failures.Add($_.Exception) }
     }
-    if ($Transaction.SunshineStopped -and $Transaction.SunshineWasRunning -and $failures.Count -eq 0) {
-        try { & $RestoreSunshineRunning } catch { $failures.Add($_.Exception) }
+    if ($Transaction.GuardServiceCreated -and $failures.Count -eq 0) {
+        try { & $RemoveGuard } catch { $failures.Add($_.Exception) }
     }
     if ($failures.Count -gt 0) {
+        if ($Transaction.FencePrepared -or $Transaction.FirewallChanged) {
+            # A failing firewall restore can already have removed/disabled the
+            # rule, and a failing start can already have started Sunshine.
+            try { & $EnsureClosed } catch { $failures.Add($_.Exception) }
+        }
         throw [AggregateException]::new('Stream Guard installation failed and one or more rollback steps also failed.', $failures)
     }
 }
@@ -169,6 +181,22 @@ function Invoke-StreamGateServiceControl {
     & (Join-Path $env:SystemRoot 'System32\sc.exe') @Arguments | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "Service control failed: $($Arguments[0])" }
 }
+function Assert-SunshineStreamGateFirewallPolicy {
+    $profiles = @(Get-NetFirewallProfile -PolicyStore ActiveStore -ErrorAction Stop)
+    foreach ($name in @('Domain', 'Private', 'Public')) {
+        $profile = @($profiles | Where-Object { $_.Name -eq $name })
+        # LocalPolicyModifyState only describes current profiles. Require an
+        # explicit effective local-rule merge permission for inactive ones too.
+        if ($profile.Count -ne 1 -or [string]$profile[0].Enabled -ne 'True' -or
+            [string]$profile[0].AllowLocalFirewallRules -ne 'True') {
+            throw "Windows Firewall profile '$name' must be enabled and verifiably permit local firewall rules."
+        }
+    }
+    $policy = New-Object -ComObject HNetCfg.FwPolicy2
+    if ([int]$policy.CurrentProfileTypes -eq 0 -or [int]$policy.LocalPolicyModifyState -ne 0) {
+        throw 'Windows Firewall policy does not permit the Stream Guard to verify and update a local rule.'
+    }
+}
 function Test-InstalledSunshineStreamGate {
     param([string]$GuardExecutablePath, [string]$ContentRoot)
     $guard = Get-StreamGateServiceConfiguration -Name $script:GuardServiceName
@@ -185,39 +213,66 @@ function Test-InstalledSunshineStreamGate {
         throw 'SunshineService must point to Sunshine\tools\sunshinesvc.exe.'
     }
     $sunshineExecutable = Join-Path ([IO.Path]::GetDirectoryName([IO.Path]::GetDirectoryName($serviceImage))) 'sunshine.exe'
-    $profiles = @(Get-NetFirewallProfile -PolicyStore ActiveStore -ErrorAction Stop)
-    $policy = New-Object -ComObject HNetCfg.FwPolicy2
-    if (@($profiles | Where-Object { $_.Name -in @('Domain', 'Private', 'Public') -and $_.Enabled -eq 'True' }).Count -ne 3 -or
-        [int]$policy.CurrentProfileTypes -eq 0 -or [int]$policy.LocalPolicyModifyState -ne 0) {
-        throw 'Effective Windows Firewall policy is not available for Stream Guard enrollment repair.'
-    }
+    Assert-SunshineStreamGateFirewallPolicy
     $rule = @(Get-NetFirewallRule -PolicyStore ActiveStore -Name $script:StreamRuleName -ErrorAction Stop)
     if ($rule.Count -ne 1 -or [string]$rule[0].PolicyStoreSourceType -ne 'Local' -or
         -not (Test-SunshineStreamGateFirewallRule -Rule $rule[0] -SunshineExecutable $sunshineExecutable)) {
         throw 'An exact enabled local Sunshine block rule is required before enrollment repair.'
     }
 }
+function New-SunshineStreamGateFirewallRule {
+    param([string]$SunshineExecutable)
+    New-NetFirewallRule -PolicyStore PersistentStore -Name $script:StreamRuleName `
+        -DisplayName 'KamenRaider Stream Guard - Sunshine' -Description 'Managed by KamenRaider Stream Guard.' `
+        -Direction Inbound -Action Block -Program $SunshineExecutable -Profile Any -Protocol Any `
+        -LocalPort Any -RemotePort Any -LocalAddress Any -RemoteAddress Any -InterfaceType Any `
+        -Enabled True -EdgeTraversalPolicy Block -OverrideBlockRules $false -ErrorAction Stop | Out-Null
+}
+function Close-SunshineStreamGateTransaction {
+    param([psobject]$Transaction)
+    $failures = [Collections.Generic.List[Exception]]::new()
+    try {
+        $rule = @(Get-NetFirewallRule -PolicyStore ActiveStore -Name $script:StreamRuleName -ErrorAction SilentlyContinue)
+        if ($rule.Count -eq 0 -and $Transaction.FirewallRuleCreated) {
+            New-SunshineStreamGateFirewallRule -SunshineExecutable $Transaction.SunshineExecutablePath
+        } elseif ($rule.Count -eq 1 -and [string]$rule[0].PolicyStoreSourceType -eq 'Local' -and
+            (Test-SunshineStreamGateFirewallRule -Rule $rule[0] -SunshineExecutable $Transaction.SunshineExecutablePath -AllowDisabled)) {
+            Set-NetFirewallRule -PolicyStore PersistentStore -Name $script:StreamRuleName -Enabled True -ErrorAction Stop | Out-Null
+        } else { throw 'Cannot safely recover the transaction-owned Sunshine fence.' }
+        Assert-SunshineStreamGateFirewallPolicy
+        $verified = @(Get-NetFirewallRule -PolicyStore ActiveStore -Name $script:StreamRuleName -ErrorAction Stop)
+        if ($verified.Count -ne 1 -or -not (Test-SunshineStreamGateFirewallRule -Rule $verified[0] -SunshineExecutable $Transaction.SunshineExecutablePath)) {
+            throw 'The recovered Sunshine fence could not be verified.'
+        }
+    } catch { $failures.Add($_.Exception) }
+    # Attempt service containment even when firewall recovery/verification fails.
+    try {
+        $sunshine = Get-Service -Name $script:SunshineServiceName -ErrorAction Stop
+        if ($sunshine.Status.ToString() -ne 'Stopped') {
+            Stop-Service -Name $script:SunshineServiceName -ErrorAction Stop
+        }
+        Wait-SunshineServiceState -Name $script:SunshineServiceName -State 'Stopped'
+    } catch { $failures.Add($_.Exception) }
+    if ($failures.Count -gt 0) { throw [AggregateException]::new('Could not fully re-close and stop Sunshine during rollback.', $failures) }
+}
 function Restore-SunshineStreamGate {
     param([psobject]$Transaction)
     Invoke-SunshineStreamGateRollback -Transaction $Transaction `
         -EnsureClosed {
-            Set-NetFirewallRule -PolicyStore PersistentStore -Name $script:StreamRuleName -Enabled True -ErrorAction Stop | Out-Null
-            $sunshine = Get-Service -Name $script:SunshineServiceName -ErrorAction Stop
-            if ($sunshine.Status.ToString() -ne 'Stopped') {
-                Stop-Service -Name $script:SunshineServiceName -ErrorAction Stop
-                Wait-SunshineServiceState -Name $script:SunshineServiceName -State 'Stopped'
-            }
+            Close-SunshineStreamGateTransaction -Transaction $Transaction
         } `
         -RestoreSunshineConfiguration {
             Set-StreamGateServiceConfiguration -Name $script:SunshineServiceName -StartType $Transaction.PriorSunshineStartType -Dependencies $Transaction.PriorSunshineDependencies
         } `
-        -StopAndRemoveGuard {
+        -StopGuard {
             $guard = Get-Service -Name $script:GuardServiceName -ErrorAction SilentlyContinue
             if ($guard -and $guard.Status.ToString() -ne 'Stopped') {
                 Stop-Service -Name $script:GuardServiceName -ErrorAction Stop
                 Wait-SunshineServiceState -Name $script:GuardServiceName -State 'Stopped'
             }
-            if ($guard) {
+        } `
+        -RemoveGuard {
+            if (Get-Service -Name $script:GuardServiceName -ErrorAction SilentlyContinue) {
                 Invoke-StreamGateServiceControl -Arguments @('delete', $script:GuardServiceName)
             }
         } `
@@ -233,8 +288,8 @@ function Restore-SunshineStreamGate {
             $sunshine = Get-Service -Name $script:SunshineServiceName -ErrorAction Stop
             if ($sunshine.Status.ToString() -eq 'Stopped') {
                 Start-Service -Name $script:SunshineServiceName -ErrorAction Stop
-                Wait-SunshineServiceState -Name $script:SunshineServiceName -State 'Running'
             }
+            Wait-SunshineServiceState -Name $script:SunshineServiceName -State 'Running'
         }
 
 }
@@ -256,14 +311,7 @@ if (-not (Test-Path -LiteralPath $sunshineServiceImage -PathType Leaf) -or -not 
     throw 'Sunshine service wrapper and sunshine.exe must both exist.'
 }
 
-$profiles = @(Get-NetFirewallProfile -PolicyStore ActiveStore -ErrorAction Stop)
-if (@($profiles | Where-Object { $_.Name -in @('Domain', 'Private', 'Public') -and $_.Enabled -eq 'True' }).Count -ne 3) {
-    throw 'Enable Windows Firewall for Domain, Private and Public profiles before installing the Stream Guard.'
-}
-$firewallPolicy = New-Object -ComObject HNetCfg.FwPolicy2
-if ([int]$firewallPolicy.CurrentProfileTypes -eq 0 -or [int]$firewallPolicy.LocalPolicyModifyState -ne 0) {
-    throw 'Windows Firewall policy does not permit the Stream Guard to verify and update a local rule.'
-}
+Assert-SunshineStreamGateFirewallPolicy
 
 $priorSunshine = (Get-StreamGateServiceConfiguration -Name $script:SunshineServiceName)
 $currentSunshine = Get-Service -Name $script:SunshineServiceName -ErrorAction Stop
@@ -296,11 +344,7 @@ try {
             Set-NetFirewallRule -PolicyStore PersistentStore -Name $script:StreamRuleName -Enabled True -ErrorAction Stop | Out-Null
         }
     } else {
-        New-NetFirewallRule -PolicyStore PersistentStore -Name $script:StreamRuleName `
-            -DisplayName 'KamenRaider Stream Guard - Sunshine' -Description 'Managed by KamenRaider Stream Guard.' `
-            -Direction Inbound -Action Block -Program $sunshineExecutable -Profile Any -Protocol Any `
-            -LocalPort Any -RemotePort Any -LocalAddress Any -RemoteAddress Any -InterfaceType Any `
-            -Enabled True -EdgeTraversalPolicy Block -OverrideBlockRules $false -ErrorAction Stop | Out-Null
+        New-SunshineStreamGateFirewallRule -SunshineExecutable $sunshineExecutable
         $transaction.FirewallRuleCreated = $true
         $transaction.FirewallChanged = $true
     }

@@ -54,10 +54,11 @@ $transaction = [pscustomobject]@{
 Invoke-SunshineStreamGateRollback -Transaction $transaction `
     -EnsureClosed { $events.Add('close') } `
     -RestoreSunshineConfiguration { $events.Add('restore-sunshine-config') } `
-    -StopAndRemoveGuard { $events.Add('remove-guard') } `
+    -StopGuard { $events.Add('stop-guard') } `
+    -RemoveGuard { $events.Add('remove-guard') } `
     -RestoreFirewall { param($state) $events.Add("restore-firewall:$($state.PriorFirewallEnabled)") } `
     -RestoreSunshineRunning { $events.Add('restore-sunshine-running') }
-if (($events -join ',') -ne 'close,restore-sunshine-config,remove-guard,restore-firewall:False,restore-sunshine-running') {
+if (($events -join ',') -ne 'close,stop-guard,restore-sunshine-config,restore-sunshine-running,restore-firewall:False,remove-guard') {
     throw "Rollback order or prior firewall state was not preserved: $($events -join ',')"
 }
 $dependencies = @(Get-SunshineStreamDependencies -Existing @('BaseService', 'KamenRaider Stream Guard', 'baseService') -Required 'KamenRaider Stream Guard')
@@ -84,9 +85,11 @@ function Reset-Fixture {
         Events = [Collections.Generic.List[string]]::new(); Fail = ''; Failed = $false
         Agent = $false; Guard = $false; Sunshine = $true; Running = $true
         DisabledProfile = ''; PolicyState = 0; Rule = $null; Reads = 0
+        LocalRules = @{ Domain = 'True'; Private = 'True'; Public = 'True' }
         StartType = 2; Dependencies = @('BaseService'); ConfigReads = 0
         VendorRules = 'TCP:Any:Allow,UDP:Any:Allow'; Unrelated = 'description,account,recovery,display-name'
         BadGuardAccount = $false; MissingAgentDependency = $false
+        CheckRestartFence = $false
     }
 }
 function Step([string]$Name) {
@@ -106,7 +109,7 @@ function Get-CimInstance {
 function Test-Path { param($LiteralPath, $PathType) return $true }
 function Get-NetFirewallProfile {
     param($PolicyStore, $ErrorAction)
-    foreach ($name in @('Domain', 'Private', 'Public')) { [pscustomobject]@{ Name = $name; Enabled = ($name -ne $fixture.DisabledProfile).ToString() } }
+    foreach ($name in @('Domain', 'Private', 'Public')) { [pscustomobject]@{ Name = $name; Enabled = ($name -ne $fixture.DisabledProfile).ToString(); AllowLocalFirewallRules = $fixture.LocalRules[$name] } }
 }
 function New-Object {
     param($ComObject)
@@ -158,10 +161,24 @@ function Set-NetFirewallRule {
     Step 'set-firewall'
     if (-not $fixture.Rule) { throw 'Attempted to modify a firewall rule not owned by this transaction.' }
     $fixture.Rule.Enabled = [string]$Enabled
+    if ([string]$Enabled -eq 'False') { Step 'disable-firewall-after' }
 }
-function Remove-NetFirewallRule { param($PolicyStore, $Name, $ErrorAction) Step 'remove-firewall'; $fixture.Rule = $null }
+function Remove-NetFirewallRule { param($PolicyStore, $Name, $ErrorAction) Step 'remove-firewall'; $fixture.Rule = $null; Step 'remove-firewall-after' }
 function Stop-Service { param($Name, $ErrorAction) Step 'stop-sunshine'; $fixture.Running = $false }
-function Start-Service { param($Name, $ErrorAction) Step 'start-sunshine'; $fixture.Running = $true }
+function Start-Service {
+    param($Name, $ErrorAction)
+    if ($fixture.CheckRestartFence -and (-not $fixture.Rule -or $fixture.Rule.Enabled -ne 'True' -or -not $fixture.Guard)) { throw 'Sunshine restart requires the closed fence and retained Guard.' }
+    $fixture.Running = $true # A failing start can already have started Sunshine.
+    Step 'start-sunshine'
+}
+function Wait-SunshineServiceState {
+    param($Name, $State)
+    if ($State -eq 'Running') {
+        if ($fixture.CheckRestartFence -and (-not $fixture.Rule -or $fixture.Rule.Enabled -ne 'True' -or -not $fixture.Guard)) { throw 'Sunshine state verification requires the closed fence and retained Guard.' }
+        Step 'verify-running'
+    }
+    if ((Get-Service -Name $Name).Status -ne $State) { throw "Mock service did not reach $State." }
+}
 function New-DisabledWindowsService { param($ServiceName, $BinaryPath, $Account, $Dependencies) Step 'create-guard'; $fixture.Guard = $true }
 function Invoke-StreamGateServiceControl {
     param($Arguments)
@@ -206,6 +223,7 @@ foreach ($priorRule in @('absent', 'True', 'False')) {
         ($fixture.Dependencies -join ',') -ne 'BaseService,KamenRaider Stream Guard') { throw 'Installation did not establish the closed policy.' }
     if ($fixture.Events.IndexOf('verify-firewall') -gt $fixture.Events.IndexOf('stop-sunshine') -or
         $fixture.Events.IndexOf('stop-sunshine') -gt $fixture.Events.IndexOf('create-guard')) { throw 'Installation order must close, stop, then create Guard.' }
+    $fixture.CheckRestartFence = $true
     Restore-SunshineStreamGate -Transaction $installed
     if ($fixture.Guard -or -not $fixture.Running -or $fixture.StartType -ne 2 -or ($fixture.Dependencies -join ',') -ne 'BaseService') { throw 'Successful installation rollback did not restore Sunshine.' }
     if (($priorRule -eq 'absent' -and $fixture.Rule) -or ($priorRule -ne 'absent' -and $fixture.Rule.Enabled -ne $priorRule)) { throw 'Rollback must preserve the existing firewall rule and its prior enable state.' }
@@ -232,6 +250,37 @@ foreach ($case in @('valid', 'guard-account', 'agent-dependency', 'sunshine-star
     $rejected = $false
     try { Test-InstalledSunshineStreamGate -GuardExecutablePath $guardPath -ContentRoot ([IO.Path]::GetDirectoryName($guardPath)) } catch { $rejected = $true }
     if ($rejected -ne ($case -ne 'valid') -or $fixture.Events.Count -ne 0) { throw "Enrollment repair validation failed: $case" }
+    $caseCount++
+}
+foreach ($profile in @('Domain', 'Private', 'Public')) {
+    foreach ($permission in @('False', 'NotConfigured', $null)) {
+        foreach ($action in @('Apply', 'Validate')) {
+            Reset-Fixture
+            $fixture.LocalRules[$profile] = $permission
+            # COM still reports current Private profile policy as modifiable.
+            if ($action -eq 'Validate') {
+                $fixture.StartType = 3; $fixture.Dependencies = @('BaseService', 'KamenRaider Stream Guard'); $fixture.Rule = New-FixtureRule
+            }
+            $rejected = $false
+            try {
+                if ($action -eq 'Apply') { Install-SunshineStreamGate -GuardExecutablePath $guardPath -ContentRoot ([IO.Path]::GetDirectoryName($guardPath)) | Out-Null }
+                else { Test-InstalledSunshineStreamGate -GuardExecutablePath $guardPath -ContentRoot ([IO.Path]::GetDirectoryName($guardPath)) }
+            } catch { $rejected = $true }
+            if (-not $rejected -or $fixture.Events.Count -ne 0) { throw "$action must reject denied/unverifiable local rules for $profile without mutations." }
+            $caseCount++
+        }
+    }
+}
+foreach ($stage in @('start-sunshine', 'verify-running', 'remove-firewall', 'remove-firewall-after', 'disable-firewall-after', 'delete')) {
+    Reset-Fixture
+    if ($stage -eq 'disable-firewall-after') { $fixture.Rule = New-FixtureRule; $fixture.Rule.Enabled = 'False' }
+    $installed = Install-SunshineStreamGate -GuardExecutablePath $guardPath -ContentRoot ([IO.Path]::GetDirectoryName($guardPath))
+    $fixture.Fail = $stage; $fixture.CheckRestartFence = $true
+    $rejected = $false
+    try { Restore-SunshineStreamGate -Transaction $installed } catch { $rejected = $_.Exception -is [AggregateException] }
+    if (-not $rejected -or -not $fixture.Failed -or -not $fixture.Guard -or $fixture.Running -or -not $fixture.Rule -or $fixture.Rule.Enabled -ne 'True') {
+        throw "Late rollback failure at $stage must retain recovery resources, re-close the fence and stop Sunshine."
+    }
     $caseCount++
 }
 Write-Output "Sunshine Stream Guard plan and $caseCount mocked setup/rollback cases passed; no services or firewall rules changed."
