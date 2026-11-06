@@ -30,6 +30,7 @@ VNC/noVNC เป็นความสามารถของระบบฉบ�
 - Controller มี internal HTTP listener และ HTTPS listener แยกพอร์ต
 - มีสคริปต์ dev สำหรับเปิด Controller ด้วยค่าจาก `.env.local`
 - `/admin/machines` อ่านรายการเครื่อง แสดง pending ตั้งชื่อ/ราคา/พอร์ต อนุมัติหรือปฏิเสธ และสั่ง WOL
+- `/admin/machines` ใช้ `instant = false` สำหรับ session ตรวจสิทธิ์ช่วง request-time; production build ไม่รายงาน uncached prerender error
 - ต้องเริ่ม Next.js ใหม่หลังแก้ `.env.local`; Controller dev ต้องเปิดค้างระหว่างทดสอบ
 - สถานะล่าสุด: Controller ตอบ health ที่ `127.0.0.1:5081` และ HTTPS ที่ `localhost:7443` บนเครื่องนี้
 

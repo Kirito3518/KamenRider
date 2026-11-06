@@ -55,7 +55,7 @@ test("real credential/session lifecycle and account boundaries", async () => {
   const changeHeaders = { "Content-Type": "application/json", Origin: base };
   assert.equal((await fetch(memberEndpoint, { method: "POST", headers: changeHeaders, body: JSON.stringify(changeBody) })).status, 401);
   assert.equal((await fetch(memberEndpoint, { method: "POST", headers: { ...changeHeaders, Cookie: cookie }, body: JSON.stringify(changeBody) })).status, 403);
-  for (const path of ["/admin", "/admin/users", "/admin/balances"]) {
+  for (const path of ["/admin", "/admin/users", "/admin/balances", "/admin/machines"]) {
     const guest = await fetch(`${base}${path}`, { redirect: "manual" });
     const guestHtml = await guest.text();
     assert.ok([307, 308].includes(guest.status) || guestHtml.includes("NEXT_REDIRECT"), `${path} must redirect guests`);
@@ -132,7 +132,7 @@ test("real credential/session lifecycle and account boundaries", async () => {
     assert.equal((await sendChange({ ...requestBody, requestId: crypto.randomUUID(), action: "debit", amount: "3.00" })).status, 400);
     assert.equal((await sendChange({ requestId: crypto.randomUUID(), action: "role", role: "admin", reason: "ทดสอบเพิ่มสิทธิ์" })).status, 200);
     assert.equal((await sendChange({ requestId: crypto.randomUUID(), action: "role", role: "user", reason: "คืนสิทธิ์สมาชิก" })).status, 200);
-    for (const path of ["/admin", "/admin/users", "/admin/balances"]) {
+    for (const path of ["/admin", "/admin/users", "/admin/balances", "/admin/machines"]) {
       const response = await fetch(`${base}${path}`, { headers: { Cookie: cookie }, redirect: "manual" });
       const html = await response.text();
       assert.equal(response.status, 200, `${path} must open for admin`);
