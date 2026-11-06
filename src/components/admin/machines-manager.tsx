@@ -1,7 +1,13 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ChangeEventHandler } from "react";
 import { AdminVncViewerButton } from "@/components/admin/admin-vnc-viewer";
 import type { Lease, Machine } from "@/lib/machine-contracts";
+import {
+  getSavedVncTargetForMetadataUpdate,
+  getVncTargetForExplicitSave,
+  mergeVncTargetDrafts,
+  updateVncTargetDraft,
+} from "@/lib/admin-vnc-target-drafts.mjs";
 async function request(path: string, body?: unknown, method = "POST") {
   const r = await fetch(path, {
     method,
@@ -13,8 +19,10 @@ async function request(path: string, body?: unknown, method = "POST") {
   if (!r.ok) throw new Error(`${r.status}: ${data.error}`);
   return data;
 }
+
 export function MachinesManager() {
   const [machines, setMachines] = useState<Machine[]>([]);
+  const [vncTargetDrafts, setVncTargetDrafts] = useState<Record<string, string>>({});
   const [installCommand, setInstallCommand] = useState<string | null>(null);
   const [installStatus, setInstallStatus] = useState("กำลังตรวจชุดติดตั้ง…");
   const [copyStatus, setCopyStatus] = useState("");
@@ -23,7 +31,15 @@ export function MachinesManager() {
   const [message, setMessage] = useState("");
   async function load() {
     try {
-      setMachines(await request("/api/admin/machines", undefined, "GET"));
+      const nextMachines: Machine[] = await request(
+        "/api/admin/machines",
+        undefined,
+        "GET",
+      );
+      setMachines(nextMachines);
+      setVncTargetDrafts((current) =>
+        mergeVncTargetDrafts(current, nextMachines),
+      );
       setLoadStatus("");
     } catch (e) {
       setLoadStatus(String(e));
@@ -41,6 +57,7 @@ export function MachinesManager() {
         const data: Machine[] = await r.json();
         if (active) {
           setMachines(data);
+          setVncTargetDrafts((current) => mergeVncTargetDrafts(current, data));
           setLoadStatus("");
         }
       } catch (e) {
@@ -89,8 +106,10 @@ export function MachinesManager() {
       if (path === "/api/admin/trial-leases" || path.includes("/extend")) setTrialLease(result);
       await load();
       setMessage("บันทึกคำขอแล้ว ตรวจสถานะ Agent ก่อนใช้งาน");
+      return true;
     } catch (e) {
       setMessage(String(e));
+      return false;
     }
   }
   return (
@@ -150,6 +169,7 @@ export function MachinesManager() {
             onSubmit={(e) => {
               e.preventDefault();
               const d = new FormData(e.currentTarget);
+              const savedVncTarget = getSavedVncTargetForMetadataUpdate(m);
               void act(
                 `/api/admin/machines/${encodeURIComponent(m.machineId)}`,
                 {
@@ -157,7 +177,7 @@ export function MachinesManager() {
                   hourlyPriceMinorUnits: Number(d.get("price")),
                   moonlightPort: Number(d.get("moon")),
                   sunshinePort: Number(d.get("sun")),
-                  vncLocalIp: d.get("vncIp"),
+                  vncLocalIp: savedVncTarget,
                   expectedRevision: m.configRevision,
                 },
                 "PATCH",
@@ -186,9 +206,53 @@ export function MachinesManager() {
             </label>
             <label>
               IP เป้าหมาย VNC (ตรวจสอบกับเครื่องจริงก่อนบันทึก)
-              <Input name="vncIp" value={m.vncLocalIp || m.localIp} />
+              <Input
+                name="vncIp"
+                value={vncTargetDrafts[m.machineId] ?? ""}
+                required={false}
+                onChange={(event) =>
+                  setVncTargetDrafts((current) =>
+                    updateVncTargetDraft(
+                      current,
+                      m.machineId,
+                      event.currentTarget.value,
+                    ),
+                  )
+                }
+              />
             </label>
             <button className="rounded border p-2">บันทึก metadata</button>
+            <button
+              type="button"
+              className="rounded border p-2"
+              onClick={async () => {
+                const target = getVncTargetForExplicitSave(
+                  vncTargetDrafts[m.machineId],
+                );
+                if (!target) {
+                  setMessage("กรอก IPv4 LAN ส่วนตัวหรือ IPv6 ULA ที่ยืนยันกับเครื่องจริงก่อนบันทึก");
+                  return;
+                }
+                const saved = await act(
+                  `/api/admin/machines/${encodeURIComponent(m.machineId)}`,
+                  {
+                    displayName: m.displayName,
+                    hourlyPriceMinorUnits: m.hourlyPriceMinorUnits,
+                    moonlightPort: m.moonlightPort,
+                    sunshinePort: m.sunshinePort,
+                    vncLocalIp: target,
+                    expectedRevision: m.configRevision,
+                  },
+                  "PATCH",
+                );
+                if (!saved) return;
+                setVncTargetDrafts((current) =>
+                  updateVncTargetDraft(current, m.machineId, target),
+                );
+              }}
+            >
+              บันทึก IP เป้าหมาย VNC ที่ยืนยันแล้ว
+            </button>
           </form>
           {m.approvalStatus === "pending" ? (
             <form
@@ -311,18 +375,22 @@ function Input({
   name,
   value,
   type = "text",
+  onChange,
+  required = true,
 }: {
   name: string;
   value: string | number;
   type?: string;
+  onChange?: ChangeEventHandler<HTMLInputElement>;
+  required?: boolean;
 }) {
   return (
     <input
       className="mt-1 block w-full rounded border p-2"
       name={name}
-      defaultValue={value}
+      {...(onChange ? { value, onChange } : { defaultValue: value })}
       type={type}
-      required
+      required={required}
     />
   );
 }

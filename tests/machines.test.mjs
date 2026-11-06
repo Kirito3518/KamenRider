@@ -175,6 +175,9 @@ test("machine API session boundaries, validation, redaction and controller failu
       vncLocalIp: "192.168.1.4",
       expectedRevision: 999,
     };
+    const withoutVncTarget = { ...patch, vncLocalIp: null, expectedRevision: 1 };
+    assert.equal((await call("/admin/machines/pc", withoutVncTarget, cookie, "PATCH")).status, 200);
+    assert.equal(seen.at(-1).body.vncLocalIp, null);
     for (const invalid of [
       { ...patch, hourlyPriceMinorUnits: -1 },
       { ...patch, moonlightPort: 65536 },

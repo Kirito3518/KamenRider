@@ -12,7 +12,7 @@ export async function PATCH(
       hourlyPriceMinorUnits: integer(b.hourlyPriceMinorUnits, 1),
       moonlightPort: integer(b.moonlightPort, 1, 65535),
       sunshinePort: integer(b.sunshinePort, 1, 65535),
-      vncLocalIp: text(b.vncLocalIp),
+      vncLocalIp: b.vncLocalIp == null ? null : text(b.vncLocalIp),
     };
     return call(
       `/internal/machines/${segment(machineId)}?expectedRevision=${revision}`,
