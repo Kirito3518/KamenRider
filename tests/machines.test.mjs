@@ -20,10 +20,12 @@ const call = (path, body, cookie, method) =>
   });
 test("machine API session boundaries, validation, redaction and controller failures", async () => {
   assert.equal((await call("/my-leases")).status, 401);
+  assert.equal((await call("/my-leases/rental-1/extend", { additionalSeconds: 60, expectedRevision: 1, idempotencyKey: "unauthenticated" })).status, 401);
   assert.equal((await call("/admin/machines/pc/approve", {})).status, 401);
   assert.equal((await call("/admin/vnc-ticket", { machineId: "pc" })).status, 401);
   assert.equal((await call("/machines")).status, 503);
   const seen = [];
+  let leaseOwnerId = "";
   const server = createServer(async (req, res) => {
     let raw = "";
     for await (const c of req) raw += c;
@@ -68,6 +70,15 @@ test("machine API session boundaries, validation, redaction and controller failu
       );
       return;
     }
+    const extendMatch = req.url.match(/^\/internal\/leases\/([^/]+)\/extend$/);
+    if (extendMatch) {
+      if (extendMatch[1] !== "rental-1" || req.headers["x-authenticated-actor-id"] !== leaseOwnerId) {
+        res.writeHead(403).end("{}");
+        return;
+      }
+      res.end(JSON.stringify({ id: "rental-1", machineId: "pc", state: "active", revision: 1, pendingRevision: 2, expiresAtUtc: "2026-11-06T12:00:00Z" }));
+      return;
+    }
     if (req.url.includes("/pair")) {
       res.writeHead(403).end("{}");
       return;
@@ -89,6 +100,7 @@ test("machine API session boundaries, validation, redaction and controller failu
     });
     assert.equal(signup.status, 200);
     const created = await signup.json();
+    leaseOwnerId = created.user.id;
     let cookie = signup.headers
       .getSetCookie()
       .map((c) => c.split(";")[0])
@@ -128,6 +140,17 @@ test("machine API session boundaries, validation, redaction and controller failu
     );
     assert.equal(ownerRequest.headers["x-authenticated-actor-role"], "user");
     assert.equal(ownerRequest.body.userId, created.user.id);
+    const extension = { additionalSeconds: 3600, expectedRevision: 1, idempotencyKey: "extend-once" };
+    assert.equal((await call("/my-leases/rental-1/extend", { ...extension, additionalSeconds: 0 }, cookie)).status, 400);
+    assert.equal((await call("/my-leases/not-owner/extend", extension, cookie)).status, 403);
+    const extendedResponse = await call("/my-leases/rental-1/extend", extension, cookie);
+    assert.equal(extendedResponse.status, 200);
+    assert.equal((await extendedResponse.json()).pendingRevision, 2);
+    const extensionRequest = seen.at(-1);
+    assert.equal(extensionRequest.url, "/internal/leases/rental-1/extend");
+    assert.equal(extensionRequest.headers["x-authenticated-actor-id"], created.user.id);
+    assert.equal(extensionRequest.headers["x-authenticated-actor-role"], "user");
+    assert.deepEqual(extensionRequest.body, extension);
     const db = new Database(process.env.TEST_AUTH_DB);
     try {
       db.prepare("UPDATE user SET role='admin' WHERE id=?").run(

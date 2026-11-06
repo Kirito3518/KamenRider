@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Lease, Offer } from "@/lib/machine-contracts";
 import { Navbar } from "@/components/ui/layout/Navbar";
 import { Footer } from "@/components/ui/layout/Footer";
@@ -58,14 +58,28 @@ export function MyMachines() {
           <p>คุณยังไม่มีสิทธิ์ทดลอง ติดต่อผู้ดูแล</p>
         ) : null}
         {leases.map((lease) => (
-          <LeaseCard key={lease.id} lease={lease} />
+          <LeaseCard
+            key={lease.id}
+            lease={lease}
+            onLeaseUpdate={(updated) =>
+              setLeases((current) =>
+                current.map((item) => (item.id === updated.id ? updated : item)),
+              )
+            }
+          />
         ))}
       </main>
       <Footer />
     </div>
   );
 }
-function LeaseCard({ lease }: { lease: Lease }) {
+function LeaseCard({
+  lease,
+  onLeaseUpdate,
+}: {
+  lease: Lease;
+  onLeaseUpdate: (lease: Lease) => void;
+}) {
   const [offer, setOffer] = useState<Offer>(null);
   useEffect(() => {
     if (!offer) return;
@@ -77,6 +91,9 @@ function LeaseCard({ lease }: { lease: Lease }) {
   }, [offer]);
   const [message, setMessage] = useState("");
   const [command, setCommand] = useState("");
+  const [extensionMinutes, setExtensionMinutes] = useState(60);
+  const [extensionBusy, setExtensionBusy] = useState(false);
+  const extensionRequestKey = useRef<string | null>(null);
   const path = `/api/my-leases/${encodeURIComponent(lease.id)}/pair`;
   async function pending() {
     try {
@@ -183,6 +200,59 @@ function LeaseCard({ lease }: { lease: Lease }) {
               ตรวจสถานะการจับคู่
             </button>
           ) : null}
+          <form
+            className="space-y-3 rounded-lg border p-3"
+            onSubmit={async (event) => {
+              event.preventDefault();
+              setExtensionBusy(true);
+              try {
+                const updated = (await api(
+                  `/api/my-leases/${encodeURIComponent(lease.id)}/extend`,
+                  {
+                    additionalSeconds: extensionMinutes * 60,
+                    expectedRevision: lease.revision,
+                    idempotencyKey:
+                      extensionRequestKey.current ??
+                      (extensionRequestKey.current = crypto.randomUUID()),
+                  },
+                )) as Lease;
+                onLeaseUpdate(updated);
+                extensionRequestKey.current = null;
+                setMessage("ส่งคำขอต่อเวลาทดลองแล้ว รอเครื่องยืนยัน");
+              } catch (error) {
+                setMessage(String(error));
+              } finally {
+                setExtensionBusy(false);
+              }
+            }}
+          >
+            <label className="block">
+              เพิ่มเวลา (นาที)
+              <input
+                className="ml-2 w-24 rounded border p-2"
+                type="number"
+                name="extensionMinutes"
+                min={1}
+                max={1440}
+                step={1}
+                value={extensionMinutes}
+                onChange={(event) => {
+                  extensionRequestKey.current = null;
+                  setExtensionMinutes(Number(event.target.value));
+                }}
+                required
+              />
+            </label>
+            <button
+              disabled={extensionBusy || lease.pendingRevision !== null}
+              className="rounded border p-2 disabled:opacity-50"
+            >
+              ต่อเวลาทดลอง
+            </button>
+            <p className="text-sm text-muted-foreground">
+              ช่วงทดลองยังไม่มีการหักเงิน การต่อเวลาจะมีผลเมื่อเครื่องยืนยันคำสั่งแล้ว
+            </p>
+          </form>
         </>
       ) : (
         <p>รอเครื่องและสิทธิ์พร้อมก่อนจับคู่</p>
