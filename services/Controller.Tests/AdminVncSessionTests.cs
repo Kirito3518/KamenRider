@@ -54,6 +54,59 @@ public class AdminVncSessionTests
     }
 
     [Fact]
+    public void AbandonedVncSessionsArePrunedButFinishedSessionsRemainForAudit()
+    {
+        var path = Path.Combine(Path.GetTempPath(), Guid.NewGuid() + ".db");
+        var clock = new TestClock();
+        try
+        {
+            using var database = new ControllerDatabase(path, clock: clock);
+            using var key = ECDsa.Create();
+            database.EnrollWithTicket(new EnrollmentRequest("pc", Convert.ToBase64String(key.ExportSubjectPublicKeyInfo()), "10.0.0.4", "001122334455", 47989, 47990));
+            database.Sync("pc", new SyncRequest("boot", "10.0.0.4", "001122334455", 1, "notReady", []));
+            database.Update("pc", new MachineUpdate("PC", 100, 47989, 47990) { VncLocalIp = "10.0.0.8" }, 1);
+            database.ApproveVerified("pc", "admin-1", database.List().Single().PublicKeyFingerprint!);
+
+            var finished = OpenSession();
+            database.FinishAdminVncSession(finished.SessionId);
+            var abandoned = OpenSession();
+
+            clock.Now = clock.Now.AddHours(1).AddMinutes(5);
+            RefreshPresence();
+            database.CreateAdminVncTicket("pc", "admin-1", "http://localhost:3000");
+            Assert.Equal(1, CountSession(finished.SessionId));
+            Assert.Equal(0, CountSession(abandoned.SessionId));
+
+            clock.Now = clock.Now.AddDays(30).AddSeconds(1);
+            RefreshPresence();
+            database.CreateAdminVncTicket("pc", "admin-1", "http://localhost:3000");
+            Assert.Equal(0, CountSession(finished.SessionId));
+
+            AdminVncTarget OpenSession()
+            {
+                var ticket = database.CreateAdminVncTicket("pc", "admin-1", "http://localhost:3000");
+                return database.ConsumeAdminVncTicket(ticket.Ticket, "http://localhost:3000");
+            }
+
+            void RefreshPresence() => database.Sync("pc", new SyncRequest("boot", "10.0.0.4", "001122334455", 1, "notReady", []));
+
+            long CountSession(string sessionId)
+            {
+                using var connection = new Microsoft.Data.Sqlite.SqliteConnection("Data Source=" + path + ";Pooling=False");
+                connection.Open();
+                using var command = connection.CreateCommand();
+                command.CommandText = "SELECT COUNT(*) FROM admin_vnc_sessions WHERE session_id=$session";
+                command.Parameters.AddWithValue("$session", sessionId);
+                return Convert.ToInt64(command.ExecuteScalar());
+            }
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
     public void MigrationCanOpenTheSameDatabaseMoreThanOnce()
     {
         var path = Path.Combine(Path.GetTempPath(), Guid.NewGuid() + ".db");

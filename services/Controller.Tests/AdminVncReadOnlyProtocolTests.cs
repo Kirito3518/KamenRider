@@ -205,7 +205,44 @@ public class AdminVncReadOnlyProtocolTests
         Assert.Throws<InvalidDataException>(() => oldProtocol.ObserveServerBytes(Encoding.ASCII.GetBytes("RFB 003.003\n")));
     }
 
+    [Theory]
+    [InlineData(8)]
+    [InlineData(16)]
+    public void RejectsServerPixelFormatsThatAreNot32Bpp(byte bitsPerPixel)
+    {
+        var protocol = CreateProtocolAwaitingServerInit();
+        var serverInit = NewServerInit();
+        serverInit[4] = bitsPerPixel;
+
+        Assert.Throws<InvalidDataException>(() => protocol.ObserveServerBytes(serverInit));
+    }
+
+    [Theory]
+    [InlineData(5, 0)] // Zero depth
+    [InlineData(5, 23)] // Does not account for all 24 color bits
+    [InlineData(5, 33)] // Depth cannot exceed bits per pixel
+    [InlineData(6, 2)] // Invalid endian flag
+    [InlineData(9, 0)] // Zero red range
+    [InlineData(9, 240)] // Red maximum is not 2^N - 1
+    [InlineData(14, 8)] // Red overlaps green
+    [InlineData(14, 31)] // Red extends beyond 32-bit pixel
+    public void RejectsServerPixelFormatsWithInvalidRangesOrOverlappingColorChannels(int fieldOffset, int value)
+    {
+        var protocol = CreateProtocolAwaitingServerInit();
+        var serverInit = NewServerInit();
+        serverInit[fieldOffset] = checked((byte)value);
+
+        Assert.Throws<InvalidDataException>(() => protocol.ObserveServerBytes(serverInit));
+    }
+
     private static ReadOnlyVncProtocol CreateReadyProtocol()
+    {
+        var protocol = CreateProtocolAwaitingServerInit();
+        protocol.ObserveServerBytes(NewServerInit());
+        return protocol;
+    }
+
+    private static ReadOnlyVncProtocol CreateProtocolAwaitingServerInit()
     {
         var protocol = new ReadOnlyVncProtocol();
         var banner = Encoding.ASCII.GetBytes("RFB 003.008\n");
@@ -217,7 +254,6 @@ public class AdminVncReadOnlyProtocolTests
         Assert.Equal(new byte[16], protocol.FilterClientMessage(new byte[16]));
         protocol.ObserveServerBytes([0, 0, 0, 0]);
         Assert.Equal(new byte[] { 1 }, protocol.FilterClientMessage([1]));
-        protocol.ObserveServerBytes(NewServerInit());
         return protocol;
     }
 
@@ -232,6 +268,9 @@ public class AdminVncReadOnlyProtocolTests
         BinaryPrimitives.WriteUInt16BigEndian(serverInit.AsSpan(8, 2), 255);
         BinaryPrimitives.WriteUInt16BigEndian(serverInit.AsSpan(10, 2), 255);
         BinaryPrimitives.WriteUInt16BigEndian(serverInit.AsSpan(12, 2), 255);
+        serverInit[14] = 16;
+        serverInit[15] = 8;
+        serverInit[16] = 0;
         return serverInit;
     }
 }

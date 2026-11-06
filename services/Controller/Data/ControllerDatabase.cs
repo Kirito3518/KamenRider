@@ -97,7 +97,7 @@ public sealed partial class ControllerDatabase : IDisposable
         Identifier(machineId);Identifier(adminUserId);var origin=AdminVncOrigin(allowedOrigin);lock(gate) {
             var now=clock.GetUtcNow();var nowMs=now.ToUnixTimeMilliseconds();
             using var transaction=connection.BeginTransaction();
-            using(var cleanup=Command("DELETE FROM admin_vnc_sessions WHERE (expires_at_unix_ms <= $now AND (used_at_unix_ms IS NULL OR ended_at_unix_ms IS NOT NULL)) OR ended_at_unix_ms <= $old",("$now",nowMs),("$old",now.AddDays(-30).ToUnixTimeMilliseconds()))) {cleanup.Transaction=transaction;cleanup.ExecuteNonQuery();}
+            using(var cleanup=Command("DELETE FROM admin_vnc_sessions WHERE (used_at_unix_ms IS NULL AND expires_at_unix_ms <= $now) OR (used_at_unix_ms IS NOT NULL AND ended_at_unix_ms IS NULL AND used_at_unix_ms <= $abandoned) OR ended_at_unix_ms <= $old",("$now",nowMs),("$abandoned",now.AddHours(-1).AddMinutes(-5).ToUnixTimeMilliseconds()),("$old",now.AddDays(-30).ToUnixTimeMilliseconds()))) {cleanup.Transaction=transaction;cleanup.ExecuteNonQuery();}
             string address;DateTimeOffset lastSeen;
             using(var machine=Command("SELECT m.vnc_local_ip,h.last_seen,m.approval_status FROM machines m JOIN machine_heartbeats h ON h.machine_id=m.machine_id WHERE m.machine_id=$id",("$id",machineId))) {
                 machine.Transaction=transaction;using var row=machine.ExecuteReader();

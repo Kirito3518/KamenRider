@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using System.IO;
+using System.Numerics;
 using System.Runtime.InteropServices;
 using System.Text;
 
@@ -385,9 +386,39 @@ internal sealed class ReadOnlyVncProtocol
 
     private static int ValidatePixelFormat(ReadOnlySpan<byte> format)
     {
+        if (format.Length != 16)
+            throw new InvalidDataException("Invalid VNC pixel format length");
+
         var bitsPerPixel = format[0];
-        if (format.Length != 16 || bitsPerPixel is not (8 or 16 or 32) || format[3] != 1)
-            throw new InvalidDataException("VNC must use a supported true-color pixel format");
+        var depth = format[1];
+        if (bitsPerPixel != 32 || depth == 0 || depth > bitsPerPixel || format[2] > 1 || format[3] != 1)
+            throw new InvalidDataException("VNC must use a 32-bpp true-color pixel format");
+
+        uint usedChannelBits = 0;
+        var channelDepth = 0;
+        for (var channel = 0; channel < 3; channel++)
+        {
+            var maximum = BinaryPrimitives.ReadUInt16BigEndian(format.Slice(4 + channel * 2, 2));
+            var shift = format[10 + channel];
+            var maximumValue = (uint)maximum;
+            if (maximum == 0 || (maximumValue & (maximumValue + 1)) != 0)
+                throw new InvalidDataException("VNC color channel maximum must be a non-zero sequence of low bits");
+
+            var channelBits = BitOperations.PopCount(maximumValue);
+            if (shift >= bitsPerPixel || channelBits > bitsPerPixel - shift)
+                throw new InvalidDataException("VNC color channel extends beyond the pixel size");
+
+            var channelMask = maximumValue << shift;
+            if ((usedChannelBits & channelMask) != 0)
+                throw new InvalidDataException("VNC color channels overlap");
+
+            usedChannelBits |= channelMask;
+            channelDepth += channelBits;
+        }
+
+        if (channelDepth != depth)
+            throw new InvalidDataException("VNC pixel depth does not match its color channels");
+
         return bitsPerPixel / 8;
     }
 

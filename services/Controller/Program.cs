@@ -36,6 +36,7 @@ public static class ControllerHost
         builder.Services.AddWindowsService(options => options.ServiceName = "KamenRaider Controller");
         builder.Services.AddOptions<ControllerOptions>().Bind(builder.Configuration)
             .Validate(o => o.IsValid(), "InternalUrl (loopback HTTP), AgentUrl (separate HTTPS port), absolute DatabasePath and ServiceCredential are required.").ValidateOnStart();
+        builder.Services.TryAddSingleton(TimeProvider.System);
         var settings = builder.Configuration.Get<ControllerOptions>() ?? new();
         // Invalid configuration is rejected by startup validation before any listener starts.
         if (settings.IsValid())
@@ -53,7 +54,9 @@ public static class ControllerHost
                     server.Listen(IPAddress.Any, agent.Port, endpoint => endpoint.UseHttps());
             });
         }
-        builder.Services.AddSingleton<ControllerDatabase>(sp => new ControllerDatabase(sp.GetRequiredService<IOptions<ControllerOptions>>().Value.DatabasePath));
+        builder.Services.AddSingleton<ControllerDatabase>(sp => new ControllerDatabase(
+            sp.GetRequiredService<IOptions<ControllerOptions>>().Value.DatabasePath,
+            clock: sp.GetRequiredService<TimeProvider>()));
         builder.Services.AddSingleton<AgentAuthentication>();
         builder.Services.AddSingleton<LeaseService>();
         builder.Services.TryAddSingleton<KamenRaider.Controller.Network.IWakeSender>(_ => new KamenRaider.Controller.Network.WakeService(settings.WakeInterfaceAddress));
