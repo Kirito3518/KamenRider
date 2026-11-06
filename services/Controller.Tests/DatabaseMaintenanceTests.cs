@@ -97,6 +97,46 @@ public class DatabaseMaintenanceTests
     }
 
     [Fact]
+    public void RestoreRejectsLegacyCommandRevisionIndexWithExpressionTerm()
+    {
+        var root = NewRoot();
+        var backupPath = Path.Combine(root, "legacy-expression-index.db");
+        var destinationPath = Path.Combine(root, "destination.db");
+        try
+        {
+            CreateLegacyVersionTwoDatabase(backupPath);
+            ReplaceLegacyCommandRevisionConstraintWithIndex(backupPath, "rental_id,type,lease_revision,lower(payload)");
+            using (var destination = new ControllerDatabase(destinationPath)) AddMachine(destination, "preserved-machine");
+
+            Assert.Throws<InvalidDataException>(() => ControllerDatabaseMaintenance.Restore(backupPath, destinationPath));
+
+            using var preserved = new ControllerDatabase(destinationPath);
+            Assert.Equal("preserved-machine", Assert.Single(preserved.List()).MachineId);
+        }
+        finally { DeleteRoot(root); }
+    }
+
+    [Fact]
+    public void RestoreRejectsLegacyCommandRevisionIndexWithExtraTerm()
+    {
+        var root = NewRoot();
+        var backupPath = Path.Combine(root, "legacy-extra-index-term.db");
+        var destinationPath = Path.Combine(root, "destination.db");
+        try
+        {
+            CreateLegacyVersionTwoDatabase(backupPath);
+            ReplaceLegacyCommandRevisionConstraintWithIndex(backupPath, "rental_id,type,lease_revision,payload");
+            using (var destination = new ControllerDatabase(destinationPath)) AddMachine(destination, "preserved-machine");
+
+            Assert.Throws<InvalidDataException>(() => ControllerDatabaseMaintenance.Restore(backupPath, destinationPath));
+
+            using var preserved = new ControllerDatabase(destinationPath);
+            Assert.Equal("preserved-machine", Assert.Single(preserved.List()).MachineId);
+        }
+        finally { DeleteRoot(root); }
+    }
+
+    [Fact]
     public async Task RestoreRefusesWhileControllerActivityLockIsHeld()
     {
         var root = NewRoot();
@@ -442,30 +482,40 @@ public class DatabaseMaintenanceTests
     {
         using var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = databasePath, Pooling = false }.ToString());
         connection.Open();
+        using var transaction = connection.BeginTransaction();
+        foreach (var migration in new[] { "001-machines.sql", "002-leases-commands.sql" })
+        {
+            using var resource = typeof(ControllerDatabase).Assembly.GetManifestResourceStream($"KamenRaider.Controller.Data.Migrations.{migration}")!;
+            using var reader = new StreamReader(resource);
+            using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = reader.ReadToEnd();
+            command.ExecuteNonQuery();
+        }
+        using (var version = connection.CreateCommand())
+        {
+            version.Transaction = transaction;
+            version.CommandText = "PRAGMA user_version=2";
+            version.ExecuteNonQuery();
+        }
+        transaction.Commit();
+    }
+
+    private static void ReplaceLegacyCommandRevisionConstraintWithIndex(string databasePath, string indexTerms)
+    {
+        using var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = databasePath, Pooling = false }.ToString());
+        connection.Open();
         using var command = connection.CreateCommand();
-        command.CommandText = """
-            CREATE TABLE machines (
-                machine_id TEXT PRIMARY KEY, public_key TEXT NOT NULL, approval_status TEXT NOT NULL DEFAULT 'pending',
-                display_name TEXT NOT NULL DEFAULT '', hourly_price INTEGER NOT NULL DEFAULT 0,
-                local_ip TEXT NOT NULL, mac_address TEXT NOT NULL, moonlight_port INTEGER NOT NULL,
-                sunshine_port INTEGER NOT NULL, revision INTEGER NOT NULL DEFAULT 1, approved_by TEXT, approved_at TEXT
-            );
-            CREATE TABLE machine_heartbeats(machine_id TEXT PRIMARY KEY,last_seen TEXT NOT NULL,boot_id TEXT NOT NULL,readiness TEXT NOT NULL);
-            CREATE TABLE leases (
-                id TEXT PRIMARY KEY, user_id TEXT NOT NULL, machine_id TEXT NOT NULL,
-                state TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 0, pending_revision INTEGER,
-                duration_seconds INTEGER NOT NULL, preparation_deadline INTEGER NOT NULL,
-                starts_at INTEGER, expires_at INTEGER, pending_expires_at INTEGER, boot_id TEXT,
-                allocation_held INTEGER NOT NULL DEFAULT 1
-            );
-            CREATE UNIQUE INDEX leases_machine_allocation ON leases(machine_id) WHERE allocation_held=1;
+        command.CommandText = $"""
+            DROP TABLE command_outbox;
             CREATE TABLE command_outbox (
-                command_id TEXT PRIMARY KEY, type TEXT NOT NULL CHECK(type IN ('PrepareMachine','ApplyLease')),
-                rental_id TEXT NOT NULL, machine_id TEXT NOT NULL, lease_revision INTEGER NOT NULL,
-                boot_id TEXT NOT NULL, valid_until INTEGER NOT NULL, payload TEXT NOT NULL,
-                status TEXT NOT NULL DEFAULT 'pending', error_code TEXT,
-                UNIQUE(rental_id,type,lease_revision)
+                command_id TEXT PRIMARY KEY, type TEXT NOT NULL CHECK(type IN ('PrepareMachine','ApplyLease','PairPin')),
+                rental_id TEXT NOT NULL REFERENCES leases(id), machine_id TEXT NOT NULL REFERENCES machines(machine_id),
+                lease_revision INTEGER NOT NULL, boot_id TEXT NOT NULL, valid_until INTEGER NOT NULL, payload TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','applied','failed','expired','invalidated')),
+                error_code TEXT
             );
+            CREATE UNIQUE INDEX altered_command_revision ON command_outbox({indexTerms});
             PRAGMA user_version=2;
             """;
         command.ExecuteNonQuery();

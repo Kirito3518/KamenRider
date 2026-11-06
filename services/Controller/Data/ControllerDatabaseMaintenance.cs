@@ -232,9 +232,8 @@ public static class ControllerDatabaseMaintenance
             using var userVersionCommand = connection.CreateCommand();
             userVersionCommand.CommandText = "PRAGMA user_version";
             var userVersion = Convert.ToInt64(userVersionCommand.ExecuteScalar(), CultureInfo.InvariantCulture);
-            var commandTableDefinition = ReadTableDefinition(connection, "command_outbox");
-            var hasPairingMigration = userVersion >= 3 || commandTableDefinition.Contains("'PairPin'", StringComparison.OrdinalIgnoreCase);
-            if (hasPairingMigration)
+            var hasCommandRevisionIndex = HasIndex(connection, "command_outbox", "lease_command_revision");
+            if (userVersion >= 3 || hasCommandRevisionIndex)
                 ValidateIndex(connection, "command_outbox", "lease_command_revision", ["rental_id", "type", "lease_revision"], "type!='PairPin'", required: true);
             else
                 // Before pairing, this same uniqueness rule is a table-level UNIQUE constraint.
@@ -273,12 +272,15 @@ public static class ControllerDatabaseMaintenance
             throw new InvalidDataException($"Controller database table '{table}' has an invalid primary key.");
     }
 
-    private static string ReadTableDefinition(SqliteConnection connection, string table)
+    private static bool HasIndex(SqliteConnection connection, string table, string name)
     {
-        using var definition = connection.CreateCommand();
-        definition.CommandText = "SELECT sql FROM sqlite_schema WHERE type='table' AND name=$name";
-        definition.Parameters.AddWithValue("$name", table);
-        return definition.ExecuteScalar()?.ToString() ?? string.Empty;
+        using var indexes = connection.CreateCommand();
+        indexes.CommandText = $"PRAGMA index_list('{table}')";
+        using var rows = indexes.ExecuteReader();
+        while (rows.Read())
+            if (string.Equals(rows.GetString(1), name, StringComparison.OrdinalIgnoreCase))
+                return true;
+        return false;
     }
 
     private static void ValidateLegacyCommandRevisionUniqueness(SqliteConnection connection)
@@ -289,7 +291,7 @@ public static class ControllerDatabaseMaintenance
         using (var rows = indexes.ExecuteReader())
         {
             while (rows.Read())
-                if (rows.GetInt32(2) != 0 && rows.GetInt32(4) == 0)
+                if (rows.GetInt32(2) != 0 && rows.GetInt32(4) == 0 && string.Equals(rows.GetString(3), "u", StringComparison.OrdinalIgnoreCase))
                     candidateIndexes.Add(rows.GetString(1));
         }
 
@@ -300,12 +302,17 @@ public static class ControllerDatabaseMaintenance
             info.CommandText = $"PRAGMA index_info('{indexName}')";
             using var columns = info.ExecuteReader();
             var actualColumns = new List<string>();
+            var hasExpressionTerm = false;
             while (columns.Read())
             {
-                if (columns.IsDBNull(2)) break;
+                if (columns.IsDBNull(2))
+                {
+                    hasExpressionTerm = true;
+                    break;
+                }
                 actualColumns.Add(columns.GetString(2));
             }
-            if (actualColumns.SequenceEqual(["rental_id", "type", "lease_revision"], StringComparer.OrdinalIgnoreCase)) return;
+            if (!hasExpressionTerm && actualColumns.SequenceEqual(["rental_id", "type", "lease_revision"], StringComparer.OrdinalIgnoreCase)) return;
         }
         throw new InvalidDataException("Controller database is missing command-revision uniqueness.");
     }
