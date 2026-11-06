@@ -94,7 +94,7 @@ Fresh Windows PowerShell 5.1 and PowerShell 7 checks passed: Stream Guard plan p
 
 ## Final software and host qualification (2026-11-07)
 
-Final full-suite evidence is Agent 218/218 after the Task 6 fix, Controller 151/151, and 43/43 for the focused Guard pipe/coordinator set after the fix. Task 5 passed on Windows PowerShell 5.1.22621.6133 and PowerShell 7.6.9, including 53 mocked setup/rollback cases, package plan/install checks, and package build. The earlier antivirus block did not recur after the user allowed/restored the file. Task 5 and Task 6 code reviews, including the final fix review, were clean.
+Latest full-suite evidence is Agent 222/222 after the Task 8 fail-closed fixes and Controller 161/161 after Task 14, with zero skipped; the focused Guard pipe/coordinator set passed 43/43 after the final fix. The earlier Task 6 snapshot was Agent 218/218 and Controller 151/151. Task 5 passed on Windows PowerShell 5.1.22621.6133 and PowerShell 7.6.9, including 53 mocked setup/rollback cases, package plan/install checks, and package build. The earlier antivirus block did not recur after the user allowed/restored the file. Task 5 and Task 6 code reviews, including the final fix review, were clean.
 
 A read-only host check found all three Windows firewall profiles enabled with local rules allowed, but no KamenRaider Agent, Controller, or Stream Guard service; public/agent/AgentPackage.zip is absent; and AGENT_INSTALL_ENABLED=false. Profile inventory is not evidence that the managed block rule exists or effectively stops new or established connections. No credentials, installation, live firewall/service Apply, Sunshine stream test, or Reboot Restore Rx interaction occurred.
 

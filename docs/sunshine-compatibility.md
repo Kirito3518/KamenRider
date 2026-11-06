@@ -51,7 +51,7 @@ This is software verification only. Real Windows SCM recovery, reboot/start orde
 
 ## Final software and host qualification (2026-11-07)
 
-Task 5 package and setup verification passed under Windows PowerShell 5.1.22621.6133 and PowerShell 7.6.9: 53 mocked setup/rollback cases, package plan/install checks, and package build. The user Allow/restore succeeded and no antivirus block recurred. Task 6's final Agent suite passed 218/218, the focused Guard pipe/coordinator set passed 43/43 after the final fix, and Controller passed 151/151. Task 5 and Task 6, including the fix, were reviewed clean.
+Task 5 package and setup verification passed under Windows PowerShell 5.1.22621.6133 and PowerShell 7.6.9: 53 mocked setup/rollback cases, package plan/install checks, and package build. The user Allow/restore succeeded and no antivirus block recurred. Latest suites are Agent 222/222 after Task 8, Controller 161/161 after Task 14 with zero skipped, and the focused Guard pipe/coordinator set 43/43 after the final fix. The earlier Task 6 snapshot was Agent 218/218 and Controller 151/151. Task 5 and Task 6, including the final fix, were reviewed clean.
 
 The 2026-11-07 read-only host check found Domain, Private, and Public profiles enabled and permitting local rules. No KamenRaider Agent, Controller, or Stream Guard service exists; public/agent/AgentPackage.zip is absent; AGENT_INSTALL_ENABLED=false. This profile inventory does not prove the managed fence is installed or effective against new or existing Sunshine connections.
 
