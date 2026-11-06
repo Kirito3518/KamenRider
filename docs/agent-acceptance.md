@@ -1,6 +1,6 @@
 # Agent acceptance record
 
-Status: **NOT READY for rentals**. The software lifecycle test uses simulated Agent messages, command results and boot proof. It does not exercise a production Agent, Sunshine, Restore Rx, a real stream fence, or a physical machine. Production reconciliation now wires lease import into `LeaseEnforcer`; `PrepareMachine` is dispatched and fails closed when its preparation provider is unavailable, which remains the production default. Restoration evidence, an enforcing gate and desktop health checks also remain unavailable; see [agent operations](agent-operations.md) and [Sunshine compatibility](sunshine-compatibility.md).
+Status: **NOT READY for rentals**. Task 5 installer/package checks passed after the earlier antivirus block was cleared, and Task 6 software suites pass. The installer has not been applied, no Agent or Stream Guard service is installed, the package is absent, production boot/restoration/desktop-health providers remain unavailable, Sunshine credentials/TLS are not provisioned on this host, and no rental-machine hardware acceptance has been performed.
 
 | Hardware scenario | Result | Evidence required before acceptance |
 | --- | --- | --- |
@@ -30,3 +30,13 @@ No designated and available test client was supplied. Record machine, installed 
 - Targeted ESLint and `pnpm exec tsc --noEmit` passed after the renter pairing UI update.
 
 These checks validate software behavior and package plans only. They do not change any hardware result in the table above.
+
+## Final software and qualification update (2026-11-07)
+
+This update supersedes the earlier antivirus status and 217/217 Agent count above.
+
+- Final full Agent suite passed 218/218 at D:\kamenraiderplay-acceptance-20261107\agent-final. The full suite before the final Task 6 fix passed 217/217; the final focused pipe/coordinator set after that fix passed 43/43. The full Controller suite passed 151/151. These are software contract results and do not establish Windows firewall or boot enforcement.
+- Task 5 PowerShell checks passed under Windows PowerShell 5.1.22621.6133 and PowerShell 7.6.9, including 53 mocked setup/rollback cases, package plan/install checks, and package build. The user Allow/restore succeeded and no antivirus block recurred. Task 5 and Task 6, including the final fix, were reviewed clean.
+- Existing web verification passed TypeScript, lint (zero errors and one existing img warning), and the Webpack production build. The default Turbopack build failed when its Babel loader subprocess crashed in three existing UI imports; these build and check results are software evidence only.
+- Read-only host check on 2026-11-07 found Domain, Private, and Public firewall profiles enabled with local rules allowed; no KamenRaider Agent, Controller, or Stream Guard service exists; public/agent/AgentPackage.zip is absent; and .env.local has AGENT_INSTALL_ENABLED=false. Profile settings do not prove that the managed fence is installed or effective.
+- No Sunshine credentials were provisioned, no service/firewall Apply or installation was performed, no actual stream test ran, and Reboot Restore Rx was not queried or changed. Default boot, restoration, and desktop-health providers remain unavailable. Rental readiness remains NOT READY. Hardware acceptance remains NOT TESTED for effective IPv4/IPv6 blocking, existing-connection termination, Agent/Guard crash and recovery, actual Moonlight pairing, lease expiry, and cold boot/Restore Rx rollback.

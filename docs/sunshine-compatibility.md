@@ -48,3 +48,11 @@ Task 5 package integration and setup/rollback checks now pass under Windows Powe
 The setup installs `KamenRaider Stream Guard` as automatic LocalSystem, keeps `KamenRaider Agent` on its virtual service account, closes the exact program-wide inbound rule before Sunshine is stopped or enrollment can start, and preserves unrelated Sunshine configuration. Rollback restores captured startup/dependency/rule state and only removes transaction-owned resources. A failed rollback retains the fence and protected binaries instead of reopening Sunshine.
 
 This is software verification only. Real Windows SCM recovery, reboot/start ordering, effective block precedence against broad vendor allows, existing-stream termination, management-loopback access, TLS credentials and dedicated rental-host qualification remain required. No services or firewall rules were installed, applied or rolled back on this development host.
+
+## Final software and host qualification (2026-11-07)
+
+Task 5 package and setup verification passed under Windows PowerShell 5.1.22621.6133 and PowerShell 7.6.9: 53 mocked setup/rollback cases, package plan/install checks, and package build. The user Allow/restore succeeded and no antivirus block recurred. Task 6's final Agent suite passed 218/218, the focused Guard pipe/coordinator set passed 43/43 after the final fix, and Controller passed 151/151. Task 5 and Task 6, including the fix, were reviewed clean.
+
+The 2026-11-07 read-only host check found Domain, Private, and Public profiles enabled and permitting local rules. No KamenRaider Agent, Controller, or Stream Guard service exists; public/agent/AgentPackage.zip is absent; AGENT_INSTALL_ENABLED=false. This profile inventory does not prove the managed fence is installed or effective against new or existing Sunshine connections.
+
+No Sunshine credential provisioning, service installation, live firewall/service Apply, actual Moonlight stream test, or Reboot Restore Rx interaction occurred. Default boot/restoration/desktop-health providers remain unavailable. Do not mark this host ready. Effective IPv4/IPv6 block, established-connection termination, Agent/Guard crash recovery, real Moonlight pairing, expiry shutdown, and cold-boot/Restore Rx qualification remain NOT TESTED.

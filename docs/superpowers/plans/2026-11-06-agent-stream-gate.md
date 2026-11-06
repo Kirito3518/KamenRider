@@ -122,11 +122,11 @@
 - Consumes: the Agent package, the local Sunshine service/executable, and existing service/data installation transaction helpers.
 - Produces: a LocalSystem KamenRaider Stream Guard automatic service, the restricted KamenRaider Agent service, an initially enabled closed firewall rule, and a plan mode with no mutations. Failed setup restores the prior Sunshine service startup/dependency values and removes only transaction-owned resources.
 
-- [ ] Add plan and rollback tests for existing Agent/Guard services, missing Sunshine, broad vendor allow rules, firewall disabled by profile or policy, failures at each setup stage, and preservation of unrelated Sunshine settings.
-- [ ] Run the new PowerShell plan suite under Windows PowerShell 5.1 and observe the missing setup path fail.
-- [ ] Integrate the initial closed policy and Guard service before the Agent starts enrollment; keep existing files/config ACL-protected and maintain the Agent's virtual service account.
-- [ ] Run all Agent PowerShell plan/install checks under Windows PowerShell 5.1 and PowerShell 7; verify Plan reports changes without applying them.
-- [ ] Commit as feat(agent): install default-closed Sunshine stream guard.
+- [x] Add plan and rollback tests for existing Agent/Guard services, missing Sunshine, broad vendor allow rules, firewall disabled by profile or policy, failures at each setup stage, and preservation of unrelated Sunshine settings.
+- [x] Run the new plan suite under Windows PowerShell 5.1; the initial missing setup interface was caught and fixed, and the final suite passed under Windows PowerShell 5.1 and PowerShell 7 with 53 mocked setup/rollback cases.
+- [x] Integrate the initial closed policy and Guard service before the Agent starts enrollment; keep existing files/config ACL-protected and maintain the Agent's virtual service account.
+- [x] Run Agent PowerShell plan/install/package checks under Windows PowerShell 5.1 and PowerShell 7; Plan reports changes without applying them. The setup suite passed 53 mocked cases, and package plan/install/build checks passed.
+- [x] Commit as feat(agent): install default-closed Sunshine stream guard (`97f5c52`); follow-up fix committed as `242d2d3`.
 
 ### Task 6: Wire lease, boot, pairing cleanup, and host shutdown to the Guard
 
@@ -147,11 +147,12 @@
 - Produces: production composition that stays fail-closed until management TLS/credentials, fenced cleanup, and runtime health providers are available; cleanup can start Sunshine only behind a closed firewall, clear and verify clients, and stop it again; pairing API operations do not close the service before making their request.
 
 - [x] Close and verify the stream gate in a Guard startup fence before the pipe/deadline workers start; add a SYSTEM recovery entry point for the SCM failure command. Guard host composition test passes with injected providers.
-- [ ] Add tests for stop/clear/restart cleanup ordering, ambiguous PIN handshake cleanup, no old client after boot, unavailable TLS credentials, and exact active-lease-only pairing.
-- [ ] Run focused pairing/boot tests and observe the current unavailable production dependencies or incorrect fence ordering.
-- [ ] Implement only through the injected maintenance and health interfaces; do not add a fake ready signal or call Restore Rx.
-- [ ] Run the full Agent and Controller test suites with isolated artifacts paths, plus all PowerShell plan checks; keep machine readiness false until each provider returns independently verified evidence.
-- [ ] Commit as feat(agent): fence Sunshine lifecycle around rentals.
+- [x] Add tests for stop/clear/restart cleanup ordering, ambiguous PIN handshake cleanup, no old client after boot, unavailable TLS credentials, and exact active-lease-only pairing. Existing ambiguity/scope/provider tests plus new pipe-to-coordinator cleanup and boot cleanup-order tests cover these contracts.
+- [x] Run focused pairing/boot tests and observe the current unavailable production dependencies; default host composition still leaves pairing and health providers unavailable.
+- [x] Keep implementation behind the injected maintenance and health interfaces; do not add a fake ready signal or call Restore Rx.
+- [x] Run the full Agent and Controller test suites with isolated artifacts paths. The Agent suite passed 217/217 before the final fix and 218/218 afterward (`D:\kamenraiderplay-acceptance-20261107\agent-final`); the focused Guard pipe/coordinator set passed 43/43 after the fix. Controller passed 151/151. These include signed enrollment-to-reboot rental lifecycle integration with fake host evidence adapters, restore rejection of malformed or narrowed integrity indexes, and VNC session audit retention/orphan cleanup. Default readiness remains false until providers return independently verified evidence.
+- [x] Run the PowerShell plan, setup/rollback, install, and package checks under Windows PowerShell 5.1 and PowerShell 7. Both engines passed the 53-case Stream Guard setup suite and the package plan/install/build checks after the user allowed/restored the file; no antivirus block recurred.
+- [x] Commit as feat(agent): fence Sunshine lifecycle around rentals (`28b5d6c`); the final Guard verification fix is `5290056`.
 
 ### Task 7: Record qualification limits and final software review
 
@@ -161,7 +162,7 @@
 - Modify: docs/full-rental-roadmap.md
 - Modify: docs/sunshine-compatibility.md
 
-- [ ] Record software results and preserve not-tested hardware rows for effective IPv4/IPv6 block, existing connections, Agent/Guard crash, actual Moonlight pairing, expiry, and cold boot.
-- [ ] Run the complete solution, Next.js build/lint/type checks, Agent PowerShell checks, `git diff --check`, and a read-only host inventory; report any environmental failure with the exact command.
-- [ ] Review the plan changes as a whole and resolve Critical/Important findings before committing the final documentation state.
-- [ ] Commit as docs(agent): record stream gate acceptance status.
+- [x] Record software results and preserve not-tested hardware rows for effective IPv4/IPv6 block, existing connections, Agent/Guard crash, actual Moonlight pairing, expiry, and cold boot in `docs/agent-acceptance.md`.
+- [x] Run full Agent/Controller suites, Next.js build/lint/type checks, `git diff --check` on the staged documentation/plan hunks, and read-only host inventory. The final Agent suite passed 218/218, focused pipe/coordinator checks passed 43/43, and Controller passed 151/151; Task 5 PowerShell checks passed on both engines. Webpack production build passed, lint had zero errors and one existing img warning, and the default Turbopack build failed on the existing Babel loader subprocess crash. Host and hardware limits are recorded in the acceptance record.
+- [x] Review the plan changes as a whole and reconcile Task 5/6 completion, test counts, and PowerShell status with the final reports. No unresolved Critical or Important documentation/plan finding remains.
+- [x] Commit as docs(agent): record stream gate acceptance status.

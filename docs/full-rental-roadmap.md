@@ -81,7 +81,7 @@ VNC/noVNC เป็นความสามารถของระบบฉบ�
 - Agent บันทึก deadline ที่สั้นลงจาก Controller ก่อนรอ stream gate; regression tests ครอบคลุม restart ระหว่าง gate ค้าง, extension ที่ยังไม่ยืนยัน, confirmation ที่ storage ค้างข้าม recovery deadline และ shutdown timeout/retry ด้วย fake adapter; production shutdown adapter จำกัดเวลารอไว้ 15 วินาที ส่วนการจำลอง process crash ระหว่าง atomic file replacement และการทดสอบ shutdown/retry บนเครื่องจริงยังต้องยืนยัน
 - ระยะแรกใช้ trial lease ของแอดมิน ไม่หัก balance; payment/refund เป็นงานแยก
 
-### 6. Moonlight/Sunshine และ stream fence — adapter ตรงกับ fork แล้ว; ตัวกั้นสตรีมจริงยังขาด
+### 6. Moonlight/Sunshine และ stream fence — Guard/adapter และ installer Plan/mock ผ่าน; live installation และ hardware qualification ยังขาด
 
 - Agent เรียก Sunshine management API บน localhost เท่านั้น; credential ไม่ออกไป browser
 - Foundation Sunshine adapter ใช้ช่อง pairing เดียว ส่ง PIN/ชื่อ client และรอยืนยัน handshake จาก client list; token ที่เว็บเลือกเป็น pairing slot ของ Agent ไม่ใช่ client ID จาก Sunshine
@@ -151,3 +151,13 @@ VNC/noVNC เป็นความสามารถของระบบฉบ�
 ### Stream Guard installer — Task 5 verification, 2026-11-06
 
 The default-closed Sunshine installer transaction is implemented and verified in Plan/mock mode. The package prepares the exact closed firewall rule and automatic LocalSystem `KamenRaider Stream Guard` before starting virtual-account `KamenRaider Agent` enrollment; Sunshine becomes manual-start with prior dependencies preserved plus Guard. Ownership-aware rollback and existing-install validation are covered by 29 mocked cases. All Agent PowerShell plan/install/package checks passed on Windows PowerShell 5.1 and PowerShell 7, including ZIP/SHA-256 and repeated package builds. The antivirus read block did not recur. No live install, rollback, firewall/service mutation, Restore Rx action or `AGENT_INSTALL_ENABLED` change occurred. Real-host stream isolation and boot/recovery qualification are still outstanding; the generated test packages were disposable and were not published to `public/agent`.
+
+### Task 7: ผลซอฟต์แวร์และข้อจำกัดการ qualification (2026-11-07)
+
+- สถานะนี้อัปเดต summary ด้านบน: Task 5 software Plan/mock/package verification ผ่านแล้ว แต่ package ยังไม่ถูก publish และ live install/Apply ยังไม่เกิด
+- หลักฐานล่าสุดหลัง Task 6 fix: Agent full suite ผ่าน 218/218, ชุด focused pipe/coordinator ผ่าน 43/43 และ Controller ผ่าน 151/151. ก่อน final fix, Agent full suite ผ่าน 217/217; ใช้ผลหลัง fix เป็นสถานะล่าสุด
+- Windows PowerShell 5.1.22621.6133 และ PowerShell 7.6.9 ผ่าน Stream Guard setup/rollback mock 53 cases, package plan/install checks และ package build. Allow/restore ของผู้ใช้สำเร็จและไม่พบ antivirus block ซ้ำ; Task 5, Task 6 และ review ของ fix ผ่าน
+- Web checks ที่บันทึกไว้: TypeScript ผ่าน, lint ไม่มี error (มี img warning เดิมหนึ่งจุด), Webpack production build ผ่าน; Turbopack build ล้มจาก Babel loader subprocess crash ใน UI imports เดิม
+- Read-only host check วันที่ 2026-11-07 พบ firewall Domain/Private/Public enabled และอนุญาต local rules; ไม่มี KamenRaider Agent/Controller/Stream Guard service, ไม่มี public/agent/AgentPackage.zip และ AGENT_INSTALL_ENABLED=false. การตั้งค่า profile ไม่พิสูจน์ว่ามี managed fence หรือว่าปิดการเชื่อมต่อได้จริง
+- ยังไม่มีการ provision Sunshine credentials, ติดตั้ง service, live firewall/service Apply, actual stream test หรือ Restore Rx interaction. Boot/restoration/desktop-health providers ยัง unavailable จึงคง NOT READY.
+- Hardware rows ยังคง NOT TESTED: effective IPv4/IPv6 block, termination ของ existing connection, Agent/Guard crash/recovery, Moonlight pairing จริง, expiry และ cold boot/Restore Rx rollback.
