@@ -4,7 +4,7 @@ $package = Join-Path $root 'package'
 $agentDirectory = Join-Path $package 'Agent'
 New-Item -ItemType Directory -Path $agentDirectory -Force | Out-Null
 try {
-    foreach ($name in @('Install-AgentPackage.ps1', 'Install-Service.ps1', 'Install-TightVncServer.ps1', 'PrivateInstallFiles.ps1', 'ServiceInstallTransaction.ps1')) {
+    foreach ($name in @('Install-AgentPackage.ps1', 'Install-Service.ps1', 'Install-TightVncServer.ps1', 'Prepare-SunshineStreamGate.ps1', 'PrivateInstallFiles.ps1', 'ServiceInstallTransaction.ps1')) {
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination (Join-Path $package $name)
     }
     . (Join-Path $package 'PrivateInstallFiles.ps1')
@@ -13,6 +13,15 @@ try {
     $installerSource = [IO.File]::ReadAllText((Join-Path $package 'Install-AgentPackage.ps1'))
     if (-not $installerSource.Contains('[string]$EnrollmentTicket') -or -not $installerSource.Contains('-EnrollmentTicket $EnrollmentTicket')) { throw 'Agent installer must pass the issued ticket to the service installer without putting it in appsettings.' }
     if (-not $installerSource.Contains('Get-AgentInstallMode') -or -not $installerSource.Contains('Invoke-AgentEnrollmentRepair')) { throw 'An existing protected Agent installation must have a ticket-renewal recovery path.' }
+    if (-not $installerSource.Contains('Prepare-SunshineStreamGate.ps1') -or -not $installerSource.Contains('StreamGateSetup')) { throw 'The Agent install plan must include Stream Guard setup and its transaction.' }
+    if (-not $installerSource.Contains('-Action Validate') -or -not $installerSource.Contains('-Action Apply') -or
+        -not $installerSource.Contains('-Action Rollback') -or -not $installerSource.Contains('-Dependencies @($guardServiceName)')) {
+        throw 'Agent repair must validate the Guard; fresh setup must prepare it transactionally and make Agent depend on it.'
+    }
+    $guardSetupPosition = $installerSource.IndexOf('$streamGateTransaction = & $streamGateInstallerBlock -Action Apply', [StringComparison]::Ordinal)
+    $agentStartPosition = $installerSource.IndexOf('& $serviceInstallerBlock -Role Agent', [StringComparison]::Ordinal)
+    if ($guardSetupPosition -lt 0 -or $agentStartPosition -lt $guardSetupPosition) { throw 'The closed policy and Guard must be installed before Agent enrollment can start.' }
+    if (-not $installerSource.Contains('-not $guardExists -and -not $streamGateRollbackError')) { throw 'Installer rollback must retain protected binaries while a Guard service or failed rollback still needs them.' }
     if ($installerSource.IndexOf('Invoke-AgentEnrollmentRepair', [StringComparison]::Ordinal) -gt $installerSource.IndexOf('$dotnetInterfaces', [StringComparison]::Ordinal)) { throw 'Enrollment repair must be selected before new-install network adapter discovery.' }
     if (-not $installerSource.Contains('Get-AgentEnrollmentWaitState -ServiceStatus $service.Status.ToString()')) { throw 'Installer must inspect Windows service state throughout the enrollment receipt wait.' }
     $repairBranch = $installerSource.IndexOf("if (`$installMode -eq 'repair-enrollment')", [StringComparison]::Ordinal)
@@ -82,6 +91,11 @@ try {
         throw 'Agent appsettings plan omitted or changed a required configuration value.'
     }
     if ($plan.ServiceStartup -ne 'auto' -or -not $plan.StartAfterInstall) { throw 'Agent service must start automatically after installation.' }
+    if ($plan.StreamGateSetup.GuardService.Name -ne 'KamenRaider Stream Guard' -or $plan.StreamGateSetup.GuardService.Startup -ne 'Automatic' -or
+        $plan.StreamGateSetup.Sunshine.Startup -ne 'Manual' -or $plan.StreamGateSetup.Agent.Dependency -ne 'KamenRaider Stream Guard' -or
+        $plan.StreamGateSetup.Firewall.Action -ne 'Block' -or -not $plan.StreamGateSetup.Firewall.Enabled) {
+        throw 'Install plan must include the LocalSystem Guard, Sunshine startup/dependency, Agent dependency and enabled firewall block.'
+    }
     if ($plan.EnrollmentWaitSeconds -ne 90) { throw 'Enrollment wait must be bounded at 90 seconds.' }
     if (-not $plan.EnrollmentTicketStored -or $plan.PSObject.Properties.Name -contains 'EnrollmentTicket' -or $plan.Configuration.PSObject.Properties.Name -contains 'EnrollmentTicket') { throw 'Plan must show a ticket will be stored privately without returning the ticket in configuration or output.' }
     if ((Get-AgentEnrollmentWaitState -ServiceStatus 'Stopped') -ne 'unavailable') { throw 'Enrollment wait must fail if the service stops.' }
@@ -102,8 +116,8 @@ try {
     if ((Get-AgentEnrollmentRecoveryInstruction 'Stopped') -notmatch 'Start-Service.*Do not rerun the installer') { throw 'A stopped Agent service must show its supported recovery command.' }
     if ((Get-AgentEnrollmentRecoveryInstruction 'Paused') -notmatch 'Resume-Service.*Do not rerun the installer') { throw 'A paused Agent service must show its supported recovery command.' }
     if ((Get-AgentInstallMode -ServiceExists $false -InstallDirectoryExists $false -DataDirectoryExists $false) -ne 'install') { throw 'A clean machine must use a new installation.' }
-    if ((Get-AgentInstallMode -ServiceExists $true -InstallDirectoryExists $true -DataDirectoryExists $true) -ne 'repair-enrollment') { throw 'An existing service must use the enrollment-ticket repair path.' }
-    $partialInstallRejected=$false;try{Get-AgentInstallMode -ServiceExists $true -InstallDirectoryExists $false -DataDirectoryExists $true | Out-Null}catch{$partialInstallRejected=$true}
+    if ((Get-AgentInstallMode -ServiceExists $true -InstallDirectoryExists $true -DataDirectoryExists $true -GuardServiceExists $true) -ne 'repair-enrollment') { throw 'An existing Agent and Guard installation must use the enrollment-ticket repair path.' }
+    $partialInstallRejected=$false;try{Get-AgentInstallMode -ServiceExists $true -InstallDirectoryExists $false -DataDirectoryExists $true -GuardServiceExists $false | Out-Null}catch{$partialInstallRejected=$true}
     if(-not $partialInstallRejected){throw 'A partial installation must not be overwritten by the ticket-repair path.'}
     if ($plan.InstallReturnUrl -ne 'http://localhost:3000/admin/machines') { throw 'Validated return URL was not preserved.' }
     if ($plan.ConfigurationStagingParent -ne $plan.InstallDirectory) { throw 'Configuration staging must stay inside the protected Agent installation directory.' }

@@ -21,7 +21,7 @@ $OutputDirectory=[IO.Path]::GetFullPath($OutputDirectory)
 $project=Join-Path $repo 'services/Agent/Agent.csproj'
 $archive=Join-Path $OutputDirectory 'AgentPackage.zip'
 $hashFile=Join-Path $OutputDirectory 'AgentPackage.sha256'
-$scriptNames=@('Install-AgentPackage.ps1','Install-Service.ps1','Install-TightVncServer.ps1','PrivateInstallFiles.ps1','ServiceInstallTransaction.ps1')
+$scriptNames=@('Install-AgentPackage.ps1','Install-Service.ps1','Install-TightVncServer.ps1','Prepare-SunshineStreamGate.ps1','PrivateInstallFiles.ps1','ServiceInstallTransaction.ps1')
 $entries=@('Agent')+$scriptNames
 if($Plan){
  [pscustomobject]@{ProjectPath=$project;OutputDirectory=$OutputDirectory;Runtime=$Runtime;SelfContained=$true;ArchivePath=$archive;HashFilePath=$hashFile;PackageEntries=$entries;AgentVersion=$agentVersion}

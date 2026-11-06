@@ -59,16 +59,89 @@ namespace KamenRaider.Install {
   [DllImport("advapi32.dll", EntryPoint="OpenSCManagerW", CharSet=CharSet.Unicode, SetLastError=true)]
   private static extern IntPtr OpenSCManager(string machineName,string databaseName,uint desiredAccess);
   [DllImport("advapi32.dll", EntryPoint="CreateServiceW", CharSet=CharSet.Unicode, SetLastError=true)]
-  private static extern IntPtr CreateService(IntPtr manager,string serviceName,string displayName,uint desiredAccess,uint serviceType,uint startType,uint errorControl,string binaryPathName,string loadOrderGroup,IntPtr tagId,string dependencies,string serviceStartName,string password);
+  private static extern IntPtr CreateService(IntPtr manager,string serviceName,string displayName,uint desiredAccess,uint serviceType,uint startType,uint errorControl,string binaryPathName,string loadOrderGroup,IntPtr tagId,IntPtr dependencies,string serviceStartName,string password);
+  [DllImport("advapi32.dll", EntryPoint="OpenServiceW", CharSet=CharSet.Unicode, SetLastError=true)]
+  private static extern IntPtr OpenService(IntPtr manager,string serviceName,uint desiredAccess);
+  [DllImport("advapi32.dll", EntryPoint="QueryServiceConfigW", CharSet=CharSet.Unicode, SetLastError=true)] [return: MarshalAs(UnmanagedType.Bool)]
+  private static extern bool QueryServiceConfig(IntPtr service,IntPtr config,int bufferSize,out int bytesNeeded);
+  [DllImport("advapi32.dll", EntryPoint="ChangeServiceConfigW", CharSet=CharSet.Unicode, SetLastError=true)] [return: MarshalAs(UnmanagedType.Bool)]
+  private static extern bool ChangeServiceConfig(IntPtr service,uint serviceType,uint startType,uint errorControl,string binaryPath,string loadOrderGroup,IntPtr tagId,IntPtr dependencies,string account,string password,string displayName);
   [DllImport("advapi32.dll", SetLastError=true)] [return: MarshalAs(UnmanagedType.Bool)]
   private static extern bool CloseServiceHandle(IntPtr handle);
-  public static void CreateDisabledService(string serviceName,string displayName,string binaryPath,string account) {
+  [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)]
+  private struct ServiceConfig {
+   public uint ServiceType; public uint StartType; public uint ErrorControl; public IntPtr BinaryPathName;
+   public IntPtr LoadOrderGroup; public uint TagId; public IntPtr Dependencies; public IntPtr ServiceStartName; public IntPtr DisplayName;
+  }
+  public sealed class ServiceConfiguration {
+   public string BinaryPath { get; set; } public uint StartType { get; set; }
+   public string Account { get; set; } public string[] Dependencies { get; set; }
+  }
+  private static string[] ReadMultiString(IntPtr value) {
+   if(value==IntPtr.Zero) return new string[0];
+   var result=new System.Collections.Generic.List<string>(); int offset=0;
+   while(offset<65536) {
+    var current=Marshal.PtrToStringUni(IntPtr.Add(value,offset*2));
+    if(String.IsNullOrEmpty(current)) return result.ToArray();
+    result.Add(current); offset+=current.Length+1;
+   }
+   throw new InvalidOperationException("Windows service dependency list is not terminated.");
+  }
+  private static IntPtr MakeMultiString(string[] values) {
+   if(values==null) values=new string[0];
+   var clean=new System.Collections.Generic.List<string>();
+   var seen=new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
+   foreach(var value in values) {
+    if(String.IsNullOrWhiteSpace(value) || value.IndexOf('\0')>=0) throw new ArgumentException("Windows service dependency is invalid.");
+    if(seen.Add(value)) clean.Add(value);
+   }
+   return Marshal.StringToHGlobalUni(String.Join("\0",clean.ToArray())+"\0\0");
+  }
+  public static ServiceConfiguration QueryConfiguration(string serviceName) {
+   IntPtr manager=OpenSCManager(null,null,0x0001);
+   if(manager==IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
+   try {
+    IntPtr service=OpenService(manager,serviceName,0x0001);
+    if(service==IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
+    try {
+     int size=0; QueryServiceConfig(service,IntPtr.Zero,0,out size); int error=Marshal.GetLastWin32Error();
+     if(error!=122 || size<=0) throw new Win32Exception(error);
+     IntPtr buffer=Marshal.AllocHGlobal(size);
+     try {
+      if(!QueryServiceConfig(service,buffer,size,out size)) throw new Win32Exception(Marshal.GetLastWin32Error());
+      var config=(ServiceConfig)Marshal.PtrToStructure(buffer,typeof(ServiceConfig));
+      return new ServiceConfiguration {
+       BinaryPath=Marshal.PtrToStringUni(config.BinaryPathName), StartType=config.StartType,
+       Account=Marshal.PtrToStringUni(config.ServiceStartName), Dependencies=ReadMultiString(config.Dependencies)
+      };
+     } finally {Marshal.FreeHGlobal(buffer);}
+    } finally {CloseServiceHandle(service);}
+   } finally {CloseServiceHandle(manager);}
+  }
+  public static void SetStartAndDependencies(string serviceName,uint startType,string[] dependencies) {
+   if(startType<2 || startType>4) throw new ArgumentOutOfRangeException("startType");
+   IntPtr manager=OpenSCManager(null,null,0x0001);
+   if(manager==IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
+   try {
+    IntPtr service=OpenService(manager,serviceName,0x0002);
+    if(service==IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
+    try {
+     IntPtr dependencyValue=MakeMultiString(dependencies);
+     try {if(!ChangeServiceConfig(service,0xFFFFFFFF,startType,0xFFFFFFFF,null,null,IntPtr.Zero,dependencyValue,null,null,null)) throw new Win32Exception(Marshal.GetLastWin32Error());}
+     finally {Marshal.FreeHGlobal(dependencyValue);}
+    } finally {CloseServiceHandle(service);}
+   } finally {CloseServiceHandle(manager);}
+  }
+  public static void CreateDisabledService(string serviceName,string displayName,string binaryPath,string account,string[] serviceDependencies) {
    IntPtr manager=OpenSCManager(null,null,0x0002);
    if(manager==IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
    try {
-    IntPtr service=CreateService(manager,serviceName,displayName,0x000F01FF,0x00000010,0x00000004,0x00000001,binaryPath,null,IntPtr.Zero,null,account,null);
-    if(service==IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
-    try {} finally {CloseServiceHandle(service);}
+    IntPtr dependencies=MakeMultiString(serviceDependencies);
+    try {
+     IntPtr service=CreateService(manager,serviceName,displayName,0x000F01FF,0x00000010,0x00000004,0x00000001,binaryPath,null,IntPtr.Zero,dependencies,account,null);
+     if(service==IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
+     try {} finally {CloseServiceHandle(service);}
+    } finally {Marshal.FreeHGlobal(dependencies);}
    } finally {CloseServiceHandle(manager);}
   }
  }
@@ -77,9 +150,9 @@ namespace KamenRaider.Install {
  }
 }
 function New-DisabledWindowsService {
- param([Parameter(Mandatory)][string]$ServiceName,[Parameter(Mandatory)][string]$BinaryPath,[Parameter(Mandatory)][string]$Account)
+ param([Parameter(Mandatory)][string]$ServiceName,[Parameter(Mandatory)][string]$BinaryPath,[Parameter(Mandatory)][string]$Account,[string[]]$Dependencies=@())
  Initialize-ServiceManagerNativeType
- [KamenRaider.Install.NativeServiceManager]::CreateDisabledService($ServiceName,$ServiceName,$BinaryPath,$Account)
+ [KamenRaider.Install.NativeServiceManager]::CreateDisabledService($ServiceName,$ServiceName,$BinaryPath,$Account,$Dependencies)
 }
 function Get-AgentEnrollmentWaitState {
  param([Parameter(Mandatory)][string]$ServiceStatus,[psobject]$ReceiptStatus)
@@ -100,9 +173,9 @@ function Get-AgentEnrollmentRecoveryInstruction {
  }
 }
 function Get-AgentInstallMode {
- param([Parameter(Mandatory)][bool]$ServiceExists,[Parameter(Mandatory)][bool]$InstallDirectoryExists,[Parameter(Mandatory)][bool]$DataDirectoryExists)
- if(-not $ServiceExists -and -not $InstallDirectoryExists -and -not $DataDirectoryExists){return 'install'}
- if($ServiceExists -and $InstallDirectoryExists -and $DataDirectoryExists){return 'repair-enrollment'}
+ param([Parameter(Mandatory)][bool]$ServiceExists,[Parameter(Mandatory)][bool]$InstallDirectoryExists,[Parameter(Mandatory)][bool]$DataDirectoryExists,[bool]$GuardServiceExists=$false)
+ if(-not $ServiceExists -and -not $InstallDirectoryExists -and -not $DataDirectoryExists -and -not $GuardServiceExists){return 'install'}
+ if($ServiceExists -and $InstallDirectoryExists -and $DataDirectoryExists -and $GuardServiceExists){return 'repair-enrollment'}
  throw 'Agent installation is incomplete or inconsistent; refusing to overwrite service, binaries or identity data.'
 }
 function Get-TrustedInstallSids {

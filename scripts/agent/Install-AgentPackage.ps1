@@ -80,12 +80,17 @@ if (-not [string]::IsNullOrWhiteSpace($NetworkAdapterId)) {
 $sourceDirectory = Join-Path $effectivePackageRoot 'Agent'
 $serviceInstaller = Join-Path $effectivePackageRoot 'Install-Service.ps1'
 $tightVncInstaller = Join-Path $effectivePackageRoot 'Install-TightVncServer.ps1'
+$streamGateInstaller = Join-Path $effectivePackageRoot 'Prepare-SunshineStreamGate.ps1'
 if (-not (Test-Path -LiteralPath (Join-Path $sourceDirectory 'Agent.exe') -PathType Leaf)) { throw 'Agent.exe is missing from the package.' }
 if (-not (Test-Path -LiteralPath $serviceInstaller -PathType Leaf)) { throw 'Install-Service.ps1 is missing from the package.' }
 if (-not (Test-Path -LiteralPath $tightVncInstaller -PathType Leaf)) { throw 'Install-TightVncServer.ps1 is missing from the package.' }
+if (-not (Test-Path -LiteralPath $streamGateInstaller -PathType Leaf)) { throw 'Prepare-SunshineStreamGate.ps1 is missing from the package.' }
 
 $installDirectory = Join-Path (Join-Path $env:ProgramFiles 'KamenRaider') 'Agent'
 $dataDirectory = Join-Path (Join-Path $env:ProgramData 'KamenRaider') 'Agent'
+$streamGateInstallerBlock = [ScriptBlock]::Create([IO.File]::ReadAllText($streamGateInstaller))
+$streamGatePlan = & $streamGateInstallerBlock -GuardExecutablePath (Join-Path $installDirectory 'Agent.exe') `
+    -ContentRoot $installDirectory -InstallScriptRoot $effectivePackageRoot -Plan
 if ($Plan) {
     [pscustomobject]@{
         ControllerUrl = $controllerUrlNormalized
@@ -112,6 +117,7 @@ if ($Plan) {
             NetworkAdapterId = $normalizedAdapterId
         }
         ServiceStartup = 'auto'
+        StreamGateSetup = $streamGatePlan
         StartAfterInstall = $true
         EnrollmentTicketStored = $true
         EnrollmentWaitSeconds = 90
@@ -128,13 +134,16 @@ if (-not ([Security.Principal.WindowsPrincipal]::new([Security.Principal.Windows
 . ([ScriptBlock]::Create([IO.File]::ReadAllText((Join-Path $effectivePackageRoot 'PrivateInstallFiles.ps1'))))
 
 $serviceName = 'KamenRaider Agent'
+$guardServiceName = 'KamenRaider Stream Guard'
 $serviceAccount = "NT SERVICE\$serviceName"
 $serviceSid = Get-ServiceSid -ServiceName $serviceName
 $existingService = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+$existingGuardService = Get-Service -Name $guardServiceName -ErrorAction SilentlyContinue
 $installMode = Get-AgentInstallMode `
     -ServiceExists ([bool]$existingService) `
     -InstallDirectoryExists (Test-Path -LiteralPath $installDirectory) `
-    -DataDirectoryExists (Test-Path -LiteralPath $dataDirectory)
+    -DataDirectoryExists (Test-Path -LiteralPath $dataDirectory) `
+    -GuardServiceExists ([bool]$existingGuardService)
 
 if (-not (Test-Path -LiteralPath "Cert:\LocalMachine\Root\$TrustedRootThumbprint")) {
     throw 'Provision and verify the certificate trust chain before installation.'
@@ -143,6 +152,8 @@ if (-not (Test-Path -LiteralPath "Cert:\LocalMachine\Root\$TrustedRootThumbprint
 if ($installMode -eq 'repair-enrollment') {
     if (-not $PSCmdlet.ShouldProcess($installDirectory, 'Verify the existing Agent and renew its enrollment ticket')) { return }
     try {
+        & $streamGateInstallerBlock -Action Validate -GuardExecutablePath (Join-Path $installDirectory 'Agent.exe') `
+            -ContentRoot $installDirectory -InstallScriptRoot $effectivePackageRoot | Out-Null
         Invoke-AgentEnrollmentRepair -ServiceName $serviceName -InstallDirectory $installDirectory `
             -DataDirectory $dataDirectory -ControllerUrl $controllerUrlNormalized `
             -EnrollmentTicket $EnrollmentTicket -ServiceSid $serviceSid
@@ -192,6 +203,8 @@ $configStage = $null
 $publishStage = $null
 $publishMoved = $false
 $serviceCreatedByThisRun = $false
+$streamGateTransaction = $null
+$streamGateCommitted = $false
 $vncSetupAttempted = $false
 $dataParentCreatedByThisRun = $false
 $publishParentExisted = Test-Path -LiteralPath $publishParent
@@ -244,12 +257,17 @@ try {
         -MoonlightPort $MoonlightPort -SunshinePort $SunshinePort -NetworkAdapterId $normalizedAdapterId
     [IO.File]::WriteAllText($configSource, $configuration, [Text.UTF8Encoding]::new($false))
 
+    $streamGateTransaction = & $streamGateInstallerBlock -Action Apply `
+        -GuardExecutablePath (Join-Path $installDirectory 'Agent.exe') -ContentRoot $installDirectory `
+        -InstallScriptRoot $effectivePackageRoot -Confirm:$false
+
     $serviceInstallerBlock = [ScriptBlock]::Create([IO.File]::ReadAllText($serviceInstaller))
     & $serviceInstallerBlock -Role Agent -PublishDirectory $installDirectory -DataDirectory $dataDirectory `
         -InstallScriptRoot $effectivePackageRoot `
         -ConfigurationFile $configSource -TrustedRootThumbprint $TrustedRootThumbprint `
-        -EnrollmentTicket $EnrollmentTicket -StartAfterInstall
+        -EnrollmentTicket $EnrollmentTicket -Dependencies @($guardServiceName) -StartAfterInstall -Confirm:$false
     $serviceCreatedByThisRun = $true
+    $streamGateCommitted = $true
 
     $receiptPath = Join-Path $dataDirectory 'enrollment-receipt.json'
     $timer = [Diagnostics.Stopwatch]::StartNew()
@@ -287,6 +305,14 @@ try {
     Write-Output "Agent service installed and started with automatic startup. Data directory: $dataDirectory"
 } catch {
     $original = $_
+    $streamGateRollbackError = $null
+    if ($streamGateTransaction -and -not $streamGateCommitted) {
+        try {
+            & $streamGateInstallerBlock -Action Rollback -GuardExecutablePath (Join-Path $installDirectory 'Agent.exe') `
+                -ContentRoot $installDirectory -InstallScriptRoot $effectivePackageRoot `
+                -Transaction $streamGateTransaction | Out-Null
+        } catch { $streamGateRollbackError = $_.Exception }
+    }
     if ($serviceCreatedByThisRun) {
         $failedService = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
         if ($failedService -and $vncSetupAttempted) {
@@ -301,10 +327,14 @@ try {
         Remove-Item -LiteralPath $resolvedConfigStage -Recurse -Force
     }
     $serviceExists = [bool](Get-Service -Name $serviceName -ErrorAction SilentlyContinue)
-    if (-not $serviceExists -and $publishMoved -and (Test-Path -LiteralPath $installDirectory)) {
+    $guardExists = [bool](Get-Service -Name $guardServiceName -ErrorAction SilentlyContinue)
+    if (-not $serviceExists -and -not $guardExists -and -not $streamGateRollbackError -and $publishMoved -and (Test-Path -LiteralPath $installDirectory)) {
         $safeInstall = [IO.Path]::GetFullPath($installDirectory)
         $expectedInstall = [IO.Path]::GetFullPath((Join-Path $env:ProgramFiles 'KamenRaider\Agent'))
         if ($safeInstall -eq $expectedInstall) { Remove-Item -LiteralPath $safeInstall -Recurse -Force }
+    }
+    if ($streamGateRollbackError) {
+        throw [AggregateException]::new('Agent installation failed and Stream Guard rollback did not fully restore prior service/firewall state.', @($original.Exception, $streamGateRollbackError))
     }
     throw $original
 } finally {
