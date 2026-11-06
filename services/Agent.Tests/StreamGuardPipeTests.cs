@@ -300,6 +300,43 @@ public class StreamGuardPipeTests
 
     [Fact]
     [SupportedOSPlatform("windows")]
+    public async Task MismatchedPairingScopeClosesAnOpenGateBeforeThePipeReportsFailure()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+
+        var pipeName = $"KamenRaider.Test.{Guid.NewGuid():N}";
+        var events = new List<string>();
+        var ingress = new LifecycleIngress(events);
+        var sunshine = new LifecycleSunshine(events);
+        var coordinator = new StreamGateCoordinator(ingress, sunshine, TimeProvider.System, new LifecycleClock(), new GrantHistoryStore());
+        var server = CreateCurrentUserPipeServer(pipeName);
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var serve = Task.Run(async () =>
+        {
+            await server.WaitForConnectionAsync(cancellation.Token);
+            await new StreamGuardPipeSession(new StreamGuardPipeRequestHandler(coordinator), coordinator).RunAsync(server, cancellation.Token);
+        }, cancellation.Token);
+        await using var client = new StreamGuardPipeClient(pipeName, TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(3));
+
+        var grant = new StreamLeaseGrant("rental", 3, "boot", DateTimeOffset.UtcNow.AddMinutes(2), 120000);
+        await client.AllowAsync(grant, default);
+        Assert.False(ingress.Blocked);
+        Assert.True(sunshine.Running);
+
+        var mismatched = new PairingScope("another-rental", grant.Revision, grant.BootId, grant.ExpiresAtUtc, grant.DeadlineUptimeMilliseconds);
+        Assert.False(await client.VerifyOpenForLeaseAsync(mismatched, default));
+
+        Assert.True(ingress.Blocked);
+        Assert.False(sunshine.Running);
+        Assert.Null(coordinator.CurrentGrant);
+
+        await client.DisposeAsync();
+        await serve;
+        await server.DisposeAsync();
+    }
+
+    [Fact]
+    [SupportedOSPlatform("windows")]
     public void PipeSecurityAllowsOnlySystemAndAgentServiceAndDeniesNetwork()
     {
         if (!OperatingSystem.IsWindows()) return;

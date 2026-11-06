@@ -265,6 +265,9 @@ public sealed class StreamGuardPipeRequestHandler(IStreamGuardControl gate)
                 try
                 {
                     var verified = await gate.VerifyOpenForLeaseAsync(scope, cancellationToken);
+                    if (!verified)
+                        await gate.BlockAsync(CancellationToken.None);
+
                     await WriteResponseAsync(pipe, request.RequestId, true, verified ? null : "lease_not_open", cancellationToken, verified);
                 }
                 catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
