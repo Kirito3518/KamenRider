@@ -5,9 +5,9 @@ using KamenRaider.Agent.Configuration;
 using KamenRaider.Agent.Startup;
 using Microsoft.Extensions.Options;
 namespace KamenRaider.Agent.Sync;
-public sealed class SyncWorker(IOptions<AgentOptions> options,ILogger<SyncWorker> logger,KamenRaider.Agent.Leases.IBootClock clock,KamenRaider.Agent.Leases.IStreamGate gate,LeaseCommandDispatcher commands,IBootEnvironment bootEnvironment,IBootBaselineEvidence baselineEvidence,IReconciledLeaseImporter leaseImporter):BackgroundService {
+public sealed class SyncWorker(IOptions<AgentOptions> options,ILogger<SyncWorker> logger,KamenRaider.Agent.Leases.IBootClock clock,AppliedConfiguration configuration,KamenRaider.Agent.Leases.IStreamGate gate,LeaseCommandDispatcher commands,IBootEnvironment bootEnvironment,IBootBaselineEvidence baselineEvidence,IReconciledLeaseImporter leaseImporter):BackgroundService {
  protected override async Task ExecuteAsync(CancellationToken stoppingToken) {
- var settings=options.Value;using var identity=DeviceIdentity.LoadOrCreate(settings.DataDirectory);var configuration=new AppliedConfiguration(settings.DataDirectory);
+ var settings=options.Value;using var identity=DeviceIdentity.LoadOrCreate(settings.DataDirectory);
  using var http=new HttpClient{Timeout=TimeSpan.FromSeconds(15)};var client=new SyncClient(http,identity);var bootId=clock.BootId;var failures=0;var reconciled=false;
  var cycle=new AgentSyncCycle(client,new(settings.ControllerUrl),clock,configuration,commands);
  var reconciler=new BootReconciler(clock,gate,configuration,new ReconciliationClient(http,identity,new Uri(settings.ControllerUrl)),bootEnvironment,leaseImporter,baselineEvidence.HasValidatedBaseline);

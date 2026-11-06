@@ -12,12 +12,15 @@ namespace Agent.Tests;
 
 public class StreamGuardPipeTests
 {
-    private sealed class RecordingGate : IStreamGate
+    private sealed class RecordingGate : IStreamGuardControl
     {
         public readonly List<string> Calls = [];
         public StreamLeaseGrant? LastGrant;
+        public PairingScope? LastScope;
         public Exception? AllowFailure;
         public Exception? BlockFailure;
+        public bool VerifyResult = true;
+        public bool MaintenanceActive;
 
         public Task BlockAsync(CancellationToken cancellationToken)
         {
@@ -36,6 +39,36 @@ public class StreamGuardPipeTests
             LastGrant = grant;
             return AllowFailure is { } error ? Task.FromException(error) : Task.CompletedTask;
         }
+
+        public Task<bool> VerifyOpenForLeaseAsync(PairingScope scope, CancellationToken cancellationToken)
+        {
+            Calls.Add("verify-open");
+            LastScope = scope;
+            return Task.FromResult(VerifyResult);
+        }
+
+        public Task BeginFencedMaintenanceAsync(CancellationToken cancellationToken)
+        {
+            Calls.Add("maintenance-begin");
+            MaintenanceActive = true;
+            return Task.CompletedTask;
+        }
+
+        public Task<bool> EndFencedMaintenanceAsync(CancellationToken cancellationToken)
+        {
+            Calls.Add("maintenance-end");
+            MaintenanceActive = false;
+            return Task.FromResult(true);
+        }
+    }
+
+    private sealed class GrantHistoryStore : IStreamGrantHistoryStore
+    {
+        private StreamGrantHistorySnapshot snapshot = new([], null);
+
+        public StreamGrantHistorySnapshot Load() => new(snapshot.Grants.ToArray(), snapshot.CurrentLease);
+
+        public void Save(StreamGrantHistorySnapshot history) => snapshot = new(history.Grants.ToArray(), history.CurrentLease);
     }
 
     private sealed class DuplexMemoryStream(byte[] input) : Stream
@@ -71,7 +104,7 @@ public class StreamGuardPipeTests
     public async Task UnsupportedProtocolVersionIsRejectedAndClosesGate()
     {
         var gate = new RecordingGate();
-        var request = new StreamGuardPipeRequest(2, Guid.NewGuid().ToString("N"), "block", null);
+        var request = new StreamGuardPipeRequest(1, Guid.NewGuid().ToString("N"), "block", null);
         using var pipe = await CreateSessionStreamAsync(request);
 
         await new StreamGuardPipeSession(new StreamGuardPipeRequestHandler(gate), gate).RunAsync(pipe, default);
@@ -134,6 +167,135 @@ public class StreamGuardPipeTests
         Assert.False(response.Success);
         Assert.Equal("gate_rejected", response.Error);
         Assert.Equal(3, gate.Calls.Count(call => call == "block"));
+    }
+
+    [Fact]
+    public async Task VerifyOpenRequestReturnsTheExactLeaseResultWithoutBlocking()
+    {
+        var gate = new RecordingGate();
+        var scope = new PairingScope("rental", 3, "boot", DateTimeOffset.UtcNow.AddMinutes(2), 121000);
+        var request = new StreamGuardPipeRequest(StreamGuardPipeProtocol.Version, Guid.NewGuid().ToString("N"), "verify-open", null, scope);
+        using var pipe = await CreateSessionStreamAsync(request);
+
+        await new StreamGuardPipeSession(new StreamGuardPipeRequestHandler(gate), gate).RunAsync(pipe, default);
+
+        var response = await ReadResponseAsync(pipe.Written);
+        Assert.True(response.Success);
+        Assert.True(response.Verified);
+        Assert.Equal(scope, gate.LastScope);
+        Assert.Equal(new[] { "verify-open", "block" }, gate.Calls);
+    }
+
+    [Fact]
+    public async Task BlockRequestWithUnexpectedPairingScopeIsRejected()
+    {
+        var gate = new RecordingGate();
+        var scope = new PairingScope("rental", 3, "boot", DateTimeOffset.UtcNow.AddMinutes(2), 121000);
+        var request = new StreamGuardPipeRequest(StreamGuardPipeProtocol.Version, Guid.NewGuid().ToString("N"), "block", null, scope);
+        using var pipe = await CreateSessionStreamAsync(request);
+
+        await new StreamGuardPipeSession(new StreamGuardPipeRequestHandler(gate), gate).RunAsync(pipe, default);
+
+        var response = await ReadResponseAsync(pipe.Written);
+        Assert.False(response.Success);
+        Assert.Equal("invalid_request", response.Error);
+        Assert.Contains("block", gate.Calls);
+    }
+
+    [Fact]
+    public async Task PairingCleanupRunsOnlyInsideGuardMaintenanceAndAlwaysEndsIt()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var pipeName = $"KamenRaider.Test.{Guid.NewGuid():N}";
+        var gate = new RecordingGate();
+        var server = CreateCurrentUserPipeServer(pipeName);
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var serve = Task.Run(async () =>
+        {
+            await server.WaitForConnectionAsync(cancellation.Token);
+            await new StreamGuardPipeSession(new StreamGuardPipeRequestHandler(gate), gate).RunAsync(server, cancellation.Token);
+        }, cancellation.Token);
+        await using var client = new StreamGuardPipeClient(pipeName, TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(3));
+        var scope = new PairingScope("rental", 3, "boot", DateTimeOffset.UtcNow.AddMinutes(2), 121000);
+
+        Assert.True(await client.VerifyOpenForLeaseAsync(scope, default));
+        var cleanupEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseCleanup = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var clearedUnderMaintenance = false;
+        var cleanup = client.RunFencedCleanupAsync(async _ =>
+        {
+            clearedUnderMaintenance = gate.MaintenanceActive;
+            gate.Calls.Add("clear-api");
+            cleanupEntered.SetResult();
+            await releaseCleanup.Task;
+        }, default);
+        await cleanupEntered.Task;
+        var allow = client.AllowAsync(new("rental", 3, "boot", scope.ExpiresAtUtc, scope.DeadlineUptimeMilliseconds), default);
+        await Task.Delay(50);
+        Assert.False(allow.IsCompleted);
+        releaseCleanup.SetResult();
+        Assert.True(await cleanup);
+        await allow;
+        await client.DisposeAsync();
+        await serve;
+
+        Assert.True(clearedUnderMaintenance);
+        Assert.False(gate.MaintenanceActive);
+        Assert.Equal(new[] { "verify-open", "maintenance-begin", "clear-api", "maintenance-end", "allow", "block" }, gate.Calls);
+        await server.DisposeAsync();
+    }
+
+    [Fact]
+    [SupportedOSPlatform("windows")]
+    public async Task PairingCleanupBlocksStopsStartsOnlyForClearAndStopsBeforeAcknowledging()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+
+        var pipeName = $"KamenRaider.Test.{Guid.NewGuid():N}";
+        var events = new List<string>();
+        var ingress = new LifecycleIngress(events);
+        var sunshine = new LifecycleSunshine(events);
+        var coordinator = new StreamGateCoordinator(ingress, sunshine, TimeProvider.System, new LifecycleClock(), new GrantHistoryStore());
+        var server = CreateCurrentUserPipeServer(pipeName);
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var serve = Task.Run(async () =>
+        {
+            await server.WaitForConnectionAsync(cancellation.Token);
+            await new StreamGuardPipeSession(new StreamGuardPipeRequestHandler(coordinator), coordinator).RunAsync(server, cancellation.Token);
+        }, cancellation.Token);
+        await using var client = new StreamGuardPipeClient(pipeName, TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(3));
+
+        var grant = new StreamLeaseGrant("rental", 3, "boot", DateTimeOffset.UtcNow.AddMinutes(2), 120000);
+        await client.AllowAsync(grant, default);
+        Assert.False(ingress.Blocked);
+        Assert.True(sunshine.Running);
+        events.Clear();
+
+        var pairing = new PairingSession(new LifecyclePairingApi(events, () => ingress.Blocked && sunshine.Running), client, () => null, TimeProvider.System);
+        Assert.True(await pairing.ClearAsync(default));
+
+        Assert.Equal(new[]
+        {
+            "firewall:block",
+            "sunshine:stop",
+            "firewall:verify-blocked",
+            "sunshine:verify-stopped",
+            "sunshine:start",
+            "firewall:verify-blocked",
+            "sunshine:verify-running",
+            "api:clear",
+            "firewall:block",
+            "sunshine:stop",
+            "firewall:verify-blocked",
+            "sunshine:verify-stopped"
+        }, events);
+        Assert.Null(coordinator.CurrentGrant);
+        Assert.True(ingress.Blocked);
+        Assert.False(sunshine.Running);
+
+        await client.DisposeAsync();
+        await serve;
+        await server.DisposeAsync();
     }
 
     [Fact]
@@ -237,10 +399,11 @@ public class StreamGuardPipeTests
         await server.DisposeAsync();
     }
 
-    private static async Task<DuplexMemoryStream> CreateSessionStreamAsync(StreamGuardPipeRequest request)
+    private static async Task<DuplexMemoryStream> CreateSessionStreamAsync(params StreamGuardPipeRequest[] requests)
     {
         using var input = new MemoryStream();
-        await StreamGuardPipeProtocol.WriteFrameAsync(input, request, default);
+        foreach (var request in requests)
+            await StreamGuardPipeProtocol.WriteFrameAsync(input, request, default);
         return new(input.ToArray());
     }
 
@@ -273,6 +436,70 @@ public class StreamGuardPipeTests
         var request = StreamGuardPipeProtocol.DecodeRequest(requestBytes!);
         await StreamGuardPipeProtocol.WriteFrameAsync(server,
             new StreamGuardPipeResponse(StreamGuardPipeProtocol.Version, request.RequestId, true, null), cancellation.Token);
+    }
+
+    private sealed class LifecycleClock : IBootClock
+    {
+        public string BootId => "boot";
+        public long UptimeMilliseconds => 1000;
+    }
+
+    private sealed class LifecycleIngress(List<string> events) : IStreamIngressPolicy
+    {
+        public bool Blocked { get; private set; }
+
+        public Task SetBlockedAsync(bool blocked, CancellationToken cancellationToken)
+        {
+            Blocked = blocked;
+            events.Add(blocked ? "firewall:block" : "firewall:unblock");
+            return Task.CompletedTask;
+        }
+
+        public Task<bool> IsBlockedAsync(CancellationToken cancellationToken)
+        {
+            events.Add(Blocked ? "firewall:verify-blocked" : "firewall:verify-open");
+            return Task.FromResult(Blocked);
+        }
+    }
+
+    private sealed class LifecycleSunshine(List<string> events) : ISunshineServiceControl
+    {
+        public bool Running { get; private set; }
+
+        public Task StartAndWaitAsync(CancellationToken cancellationToken)
+        {
+            Running = true;
+            events.Add("sunshine:start");
+            return Task.CompletedTask;
+        }
+
+        public Task StopAndWaitAsync(CancellationToken cancellationToken)
+        {
+            Running = false;
+            events.Add("sunshine:stop");
+            return Task.CompletedTask;
+        }
+
+        public Task<bool> IsRunningAsync(CancellationToken cancellationToken)
+        {
+            events.Add(Running ? "sunshine:verify-running" : "sunshine:verify-stopped");
+            return Task.FromResult(Running);
+        }
+    }
+
+    private sealed class LifecyclePairingApi(List<string> events, Func<bool> clearIsFenced) : ISunshinePairingApi
+    {
+        public Task<string[]> PendingIdsAsync(CancellationToken cancellationToken) => Task.FromResult(Array.Empty<string>());
+
+        public Task<bool> SubmitAsync(string id, string pin, CancellationToken cancellationToken) => Task.FromResult(false);
+
+        public Task ClearAsync(CancellationToken cancellationToken)
+        {
+            if (!clearIsFenced())
+                throw new InvalidOperationException("Pairing API cleanup ran outside blocked Sunshine maintenance.");
+            events.Add("api:clear");
+            return Task.CompletedTask;
+        }
     }
 
     [DllImport("kernel32.dll", SetLastError = true)]

@@ -1,8 +1,10 @@
+using System.Runtime.Versioning;
 using KamenRaider.Agent.Startup;
 using KamenRaider.Agent.Preparation;
 using KamenRaider.Contracts;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
 
 namespace Agent.Tests;
@@ -17,19 +19,23 @@ public class AgentHostCompositionTests
         Assert.IsType<UnavailableBootEnvironment>(host.Services.GetRequiredService<IBootEnvironment>());
         Assert.False(host.Services.GetRequiredService<IBootBaselineEvidence>().HasValidatedBaseline);
         Assert.IsType<KamenRaider.Agent.Sunshine.StreamGuardPipeClient>(host.Services.GetRequiredService<KamenRaider.Agent.Leases.IStreamGate>());
+        Assert.Same(host.Services.GetRequiredService<KamenRaider.Agent.Leases.IStreamGate>(), host.Services.GetRequiredService<KamenRaider.Agent.Sunshine.IPairingFence>());
         Assert.Empty(host.Services.GetServices<IHostedService>().OfType<KamenRaider.Agent.Sunshine.StreamGuardPipeServer>());
         await Assert.ThrowsAsync<InvalidOperationException>(() => host.Services.GetRequiredService<KamenRaider.Agent.Leases.IStreamGate>().BlockAsync(default));
         await Assert.ThrowsAsync<InvalidOperationException>(() => host.Services.GetRequiredService<KamenRaider.Agent.Leases.IStreamGate>().AllowAsync(new("rental", 1, "boot", DateTimeOffset.UtcNow.AddMinutes(1), 60000), default));
         Assert.Null(host.Services.GetService<KamenRaider.Agent.Sunshine.SunshineClient>());
         Assert.Null(host.Services.GetService<KamenRaider.Agent.Sunshine.PairingSession>());
         Assert.IsType<LeaseEnforcerReconciledLeaseImporter>(host.Services.GetRequiredService<IReconciledLeaseImporter>());
-        Assert.IsType<UnavailableMachinePreparation>(host.Services.GetRequiredService<IMachinePreparation>());
+        Assert.Equal("FencedMachinePreparation", host.Services.GetRequiredService<IMachinePreparation>().GetType().Name);
         Assert.Single(host.Services.GetServices<IHostedService>().OfType<KamenRaider.Agent.Sync.SyncWorker>());
     }
 
     [Fact]
+    [SupportedOSPlatform("windows")]
     public async Task StreamGuardHostOwnsCoordinatorAndHonorsInjectedProviders()
     {
+        if (!OperatingSystem.IsWindows()) return;
+
         var ingress = new TestIngressPolicy();
         var sunshine = new TestSunshineServiceControl();
         using var host = KamenRaider.Agent.StreamGuardHost.Build([], builder =>
@@ -44,6 +50,7 @@ public class AgentHostCompositionTests
         var deadlineIndex = hostedServices.FindIndex(service => service is KamenRaider.Agent.Sunshine.StreamGuardDeadlineWorker);
 
         Assert.Same(coordinator, host.Services.GetRequiredService<KamenRaider.Agent.Leases.IStreamGate>());
+        Assert.IsType<KamenRaider.Agent.Sunshine.WindowsStreamGrantHistoryStore>(host.Services.GetRequiredService<KamenRaider.Agent.Sunshine.IStreamGrantHistoryStore>());
         Assert.True(serverIndex > hostedServices.IndexOf(startupFence));
         Assert.True(deadlineIndex > hostedServices.IndexOf(startupFence));
         await startupFence.StartAsync(default);
@@ -67,6 +74,66 @@ public class AgentHostCompositionTests
         Assert.True(host.Services.GetRequiredService<IBootBaselineEvidence>().HasValidatedBaseline);
     }
 
+    [Fact]
+    [SupportedOSPlatform("windows")]
+    public void AgentHostRegistersLazySunshinePairingWithoutLoadingLocalCredentials()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        using var host = KamenRaider.Agent.AgentHost.Build([], ConfigureTestAgentOptions);
+
+        Assert.IsType<KamenRaider.Agent.Sunshine.LazySunshinePairingSession>(
+            host.Services.GetRequiredService<KamenRaider.Agent.Sunshine.ISunshinePairingSession>());
+        Assert.Null(host.Services.GetService<KamenRaider.Agent.Sunshine.PairingSession>());
+        Assert.NotNull(host.Services.GetRequiredService<KamenRaider.Agent.Configuration.AppliedConfiguration>());
+    }
+
+    [Fact]
+    [SupportedOSPlatform("windows")]
+    public async Task DefaultPreparationAcknowledgesOnlyAfterTheCurrentUnleasedMachineIsFenced()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+
+        var dataDirectory = Path.Combine(Path.GetTempPath(), "agent-preparation-" + Guid.NewGuid().ToString("N"));
+        var gate = new RecordingStreamGate();
+        try
+        {
+            using var host = KamenRaider.Agent.AgentHost.Build([], builder =>
+            {
+                ConfigureTestAgentOptions(builder);
+                builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    ["DataDirectory"] = dataDirectory
+                });
+                builder.Services.Replace(ServiceDescriptor.Singleton<KamenRaider.Agent.Leases.IStreamGate>(gate));
+            });
+
+            var clock = host.Services.GetRequiredService<KamenRaider.Agent.Leases.IBootClock>();
+            var dispatcher = host.Services.GetRequiredService<KamenRaider.Agent.Sync.LeaseCommandDispatcher>();
+            var command = new CommandEnvelope(
+                "prepare",
+                "PrepareMachine",
+                "rental",
+                1,
+                clock.BootId,
+                DateTimeOffset.UtcNow.AddMinutes(3),
+                System.Text.Json.JsonSerializer.SerializeToElement(new { }));
+
+            await dispatcher.AcceptAsync(
+                new(DateTimeOffset.UtcNow, new(1, 5000, 6000), [command]),
+                clock.UptimeMilliseconds,
+                default);
+
+            Assert.Equal(new CommandResult("prepare", "applied", 1), Assert.Single(dispatcher.PendingResults));
+            Assert.True(gate.Blocked);
+            Assert.True(gate.BlockCalls >= 2);
+            Assert.False(host.Services.GetRequiredService<KamenRaider.Agent.Leases.LeaseEnforcer>().CanStream);
+        }
+        finally
+        {
+            if (Directory.Exists(dataDirectory)) Directory.Delete(dataDirectory, recursive: true);
+        }
+    }
+
     private static void ConfigureTestAgentOptions(HostApplicationBuilder builder)
     {
         builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
@@ -77,8 +144,10 @@ public class AgentHostCompositionTests
             ["SunshinePort"] = "47984",
             ["NetworkAdapterId"] = "test-adapter"
         });
-        builder.Services.AddSingleton<KamenRaider.Agent.Leases.IStreamGate>(_ => new KamenRaider.Agent.Sunshine.StreamGuardPipeClient(
-            $"KamenRaider.Test.Missing.{Guid.NewGuid():N}", TimeSpan.FromMilliseconds(50), TimeSpan.FromMilliseconds(150)));
+        var pipe = new KamenRaider.Agent.Sunshine.StreamGuardPipeClient(
+            $"KamenRaider.Test.Missing.{Guid.NewGuid():N}", TimeSpan.FromMilliseconds(50), TimeSpan.FromMilliseconds(150));
+        builder.Services.AddSingleton(pipe);
+        builder.Services.AddSingleton<KamenRaider.Agent.Leases.IStreamGate>(pipe);
     }
 
     private sealed class ValidatedBaselineEvidence : IBootBaselineEvidence
@@ -128,5 +197,26 @@ public class AgentHostCompositionTests
         }
 
         public Task<bool> IsRunningAsync(CancellationToken cancellationToken) => Task.FromResult(Running);
+    }
+
+    private sealed class RecordingStreamGate : KamenRaider.Agent.Leases.IStreamGate
+    {
+        public bool Blocked { get; private set; }
+        public int BlockCalls { get; private set; }
+
+        public Task BlockAsync(CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+            BlockCalls++;
+            Blocked = true;
+            return Task.CompletedTask;
+        }
+
+        public Task AllowAsync(KamenRaider.Agent.Leases.StreamLeaseGrant grant, CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+            Blocked = false;
+            return Task.CompletedTask;
+        }
     }
 }

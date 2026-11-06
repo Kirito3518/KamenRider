@@ -4,15 +4,16 @@ using KamenRaider.Agent.Leases;
 
 namespace KamenRaider.Agent.Sunshine;
 
-public sealed class StreamGuardPipeClient : IStreamGate, IAsyncDisposable
+public sealed class StreamGuardPipeClient : IStreamGate, IPairingFence, IAsyncDisposable
 {
-    public const string DefaultPipeName = "KamenRaider.StreamGuard.v1";
+    public const string DefaultPipeName = "KamenRaider.StreamGuard.v2";
     private static readonly TimeSpan DefaultConnectTimeout = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan DefaultRequestTimeout = TimeSpan.FromSeconds(5);
     private readonly string pipeName;
     private readonly TimeSpan connectTimeout;
     private readonly TimeSpan requestTimeout;
     private readonly SemaphoreSlim serial = new(1, 1);
+    private readonly SemaphoreSlim operationSerial = new(1, 1);
     private NamedPipeClientStream? pipe;
     private bool disposed;
 
@@ -31,16 +32,75 @@ public sealed class StreamGuardPipeClient : IStreamGate, IAsyncDisposable
     {
         // Closing is containment; a caller cancellation must not prevent notifying the guard.
         _ = cancellationToken;
-        return SendAsync("block", null, CancellationToken.None);
+        return SendSerializedAsync("block", null, CancellationToken.None);
     }
 
-    public Task AllowAsync(StreamLeaseGrant grant, CancellationToken cancellationToken)
+    public async Task AllowAsync(StreamLeaseGrant grant, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(grant);
-        return SendAsync("allow", grant, cancellationToken);
+        await operationSerial.WaitAsync(cancellationToken);
+        try { await SendAsync("allow", grant, cancellationToken); }
+        finally { operationSerial.Release(); }
+    }
+
+    public async Task<bool> VerifyOpenForLeaseAsync(PairingScope scope, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(scope);
+        await operationSerial.WaitAsync(cancellationToken);
+        try
+        {
+            var response = await SendRequestAsync("verify-open", null, scope, cancellationToken);
+            return response.Success && response.Verified == true;
+        }
+        finally { operationSerial.Release(); }
+    }
+
+    public async Task<bool> RunFencedCleanupAsync(Func<CancellationToken, Task> clear, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(clear);
+        await operationSerial.WaitAsync(cancellationToken);
+        try
+        {
+            await SendAsync("maintenance-begin", null, cancellationToken);
+            try
+            {
+                await clear(cancellationToken);
+            }
+            finally
+            {
+                var end = await SendRequestAsync("maintenance-end", null, null, CancellationToken.None);
+                if (!end.Success)
+                {
+                    await ResetPipeAsync();
+                    throw new InvalidOperationException($"Stream Guard could not finish fenced cleanup ({end.Error ?? "unspecified"}).");
+                }
+            }
+
+            return true;
+        }
+        finally
+        {
+            operationSerial.Release();
+        }
+    }
+
+    private async Task SendSerializedAsync(string command, StreamLeaseGrant? grant, CancellationToken cancellationToken)
+    {
+        await operationSerial.WaitAsync(CancellationToken.None);
+        try { await SendAsync(command, grant, cancellationToken); }
+        finally { operationSerial.Release(); }
     }
 
     private async Task SendAsync(string command, StreamLeaseGrant? grant, CancellationToken cancellationToken)
+    {
+        var response = await SendRequestAsync(command, grant, null, cancellationToken);
+        if (response.Success) return;
+
+        await ResetPipeAsync();
+        throw new InvalidOperationException($"Stream Guard rejected the request ({response.Error ?? "unspecified"}).");
+    }
+
+    private async Task<StreamGuardPipeResponse> SendRequestAsync(string command, StreamLeaseGrant? grant, PairingScope? scope, CancellationToken cancellationToken)
     {
         await serial.WaitAsync(cancellationToken);
         try
@@ -50,7 +110,8 @@ public sealed class StreamGuardPipeClient : IStreamGate, IAsyncDisposable
                 StreamGuardPipeProtocol.Version,
                 Guid.NewGuid().ToString("N"),
                 command,
-                grant);
+                grant,
+                scope);
 
             for (var attempt = 0; attempt < 2; attempt++)
             {
@@ -92,14 +153,9 @@ public sealed class StreamGuardPipeClient : IStreamGate, IAsyncDisposable
                     throw new InvalidOperationException("Stream Guard returned an acknowledgment for another protocol version or request.");
                 }
 
-                if (!response.Success)
-                {
-                    await ResetPipeAsync();
-                    throw new InvalidOperationException($"Stream Guard rejected the request ({response.Error ?? "unspecified"}).");
-                }
-
-                return;
+                return response;
             }
+            throw new InvalidOperationException("Stream Guard did not acknowledge the request.");
         }
         finally
         {
@@ -152,16 +208,18 @@ public sealed class StreamGuardPipeClient : IStreamGate, IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
-        await serial.WaitAsync(CancellationToken.None);
+        await operationSerial.WaitAsync(CancellationToken.None);
         try
         {
-            if (disposed) return;
-            disposed = true;
-            await ResetPipeAsync();
+            await serial.WaitAsync(CancellationToken.None);
+            try
+            {
+                if (disposed) return;
+                disposed = true;
+                await ResetPipeAsync();
+            }
+            finally { serial.Release(); }
         }
-        finally
-        {
-            serial.Release();
-        }
+        finally { operationSerial.Release(); }
     }
 }

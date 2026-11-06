@@ -1,4 +1,5 @@
 using KamenRaider.Contracts;
+using KamenRaider.Agent.Leases;
 
 namespace KamenRaider.Agent.Preparation;
 
@@ -9,11 +10,19 @@ public interface IMachinePreparation
     Task<bool> PrepareAsync(CommandEnvelope command, CancellationToken cancellationToken);
 }
 
-public sealed class UnavailableMachinePreparation : IMachinePreparation
+// Called only for commands in a sync cycle whose boot reconciliation and current
+// runtime-health proof succeeded. Preparation confirms the machine remains unleased
+// and the stream gate is closed before the Controller can proceed to lease activation.
+public sealed class FencedMachinePreparation(LeaseEnforcer enforcer, IStreamGate gate) : IMachinePreparation
 {
-    public Task<bool> PrepareAsync(CommandEnvelope command, CancellationToken cancellationToken)
+    public async Task<bool> PrepareAsync(CommandEnvelope command, CancellationToken cancellationToken)
     {
-        cancellationToken.ThrowIfCancellationRequested();
-        return Task.FromResult(false);
+        if (!await enforcer.CanPrepareMachineAsync(command, cancellationToken)) return false;
+
+        await gate.BlockAsync(cancellationToken);
+
+        // Gate IPC can take time; revalidate command expiry and lease state before
+        // acknowledging so an expired/stale command cannot reserve a machine.
+        return await enforcer.CanPrepareMachineAsync(command, cancellationToken);
     }
 }

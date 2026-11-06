@@ -23,15 +23,37 @@ public static class AgentHost
         builder.Services.AddHostedService<KamenRaider.Agent.Enrollment.EnrollmentWorker>();
         builder.Services.AddSingleton(TimeProvider.System);
         builder.Services.AddSingleton<KamenRaider.Agent.Leases.IBootClock,KamenRaider.Agent.Leases.WindowsBootClock>();
-        builder.Services.TryAddSingleton<KamenRaider.Agent.Leases.IStreamGate,KamenRaider.Agent.Sunshine.StreamGuardPipeClient>();
+        builder.Services.TryAddSingleton<KamenRaider.Agent.Sunshine.StreamGuardPipeClient>();
+        builder.Services.TryAddSingleton<KamenRaider.Agent.Leases.IStreamGate>(sp => sp.GetRequiredService<KamenRaider.Agent.Sunshine.StreamGuardPipeClient>());
+        builder.Services.TryAddSingleton<KamenRaider.Agent.Sunshine.IPairingFence>(sp => sp.GetRequiredService<KamenRaider.Agent.Sunshine.StreamGuardPipeClient>());
         builder.Services.TryAddSingleton<KamenRaider.Agent.Startup.IBootEnvironment,KamenRaider.Agent.Startup.UnavailableBootEnvironment>();
         builder.Services.TryAddSingleton<KamenRaider.Agent.Startup.IBootBaselineEvidence,KamenRaider.Agent.Startup.UnvalidatedBootBaselineEvidence>();
         builder.Services.AddSingleton<KamenRaider.Agent.Power.WindowsShutdown>();
         builder.Services.AddSingleton<KamenRaider.Agent.Power.IShutdown>(sp=>new KamenRaider.Agent.Power.BoundedShutdown(sp.GetRequiredService<KamenRaider.Agent.Power.WindowsShutdown>(),TimeSpan.FromSeconds(15)));
+        builder.Services.AddSingleton(sp => new KamenRaider.Agent.Configuration.AppliedConfiguration(
+            sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<AgentOptions>>().Value.DataDirectory));
         builder.Services.AddSingleton(sp=>new KamenRaider.Agent.Leases.LeaseStore(sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<AgentOptions>>().Value.DataDirectory));
         builder.Services.AddSingleton<KamenRaider.Agent.Leases.LeaseEnforcer>();
-        builder.Services.TryAddSingleton<KamenRaider.Agent.Preparation.IMachinePreparation,KamenRaider.Agent.Preparation.UnavailableMachinePreparation>();
+        builder.Services.TryAddSingleton<KamenRaider.Agent.Preparation.IMachinePreparation,KamenRaider.Agent.Preparation.FencedMachinePreparation>();
         builder.Services.TryAddSingleton<KamenRaider.Agent.Startup.IReconciledLeaseImporter,KamenRaider.Agent.Startup.LeaseEnforcerReconciledLeaseImporter>();
+        builder.Services.TryAddSingleton<KamenRaider.Agent.Sunshine.ISunshinePairingSession>(sp =>
+        {
+            if (!OperatingSystem.IsWindows())
+                throw new PlatformNotSupportedException("Sunshine pairing credential storage requires Windows.");
+            var options = sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<AgentOptions>>().Value;
+            var configuration = sp.GetRequiredService<KamenRaider.Agent.Configuration.AppliedConfiguration>();
+            var credentialStore = new KamenRaider.Agent.Sunshine.WindowsSunshineCredentialStore(
+                options.DataDirectory,
+                KamenRaider.Agent.Sunshine.WindowsSunshineCredentialStore.ResolveAgentServiceSid(),
+                new KamenRaider.Agent.Sunshine.WindowsDpapiMachineSecretProtector());
+            return new KamenRaider.Agent.Sunshine.LazySunshinePairingSession(
+                credentialStore,
+                () => configuration.Current?.SunshinePort ?? options.SunshinePort,
+                sp.GetRequiredService<KamenRaider.Agent.Sunshine.IPairingFence>(),
+                () => sp.GetRequiredService<KamenRaider.Agent.Leases.LeaseEnforcer>().CurrentPairingScope,
+                sp.GetRequiredService<TimeProvider>(),
+                sp.GetRequiredService<ILogger<KamenRaider.Agent.Sunshine.LazySunshinePairingSession>>());
+        });
         builder.Services.AddSingleton<KamenRaider.Agent.Sync.LeaseCommandDispatcher>();
         builder.Services.AddHostedService<KamenRaider.Agent.Leases.LeaseEnforcementWorker>();
         builder.Services.AddHostedService<KamenRaider.Agent.Sync.SyncWorker>();
@@ -63,9 +85,16 @@ public static class StreamGuardHost
                 throw new PlatformNotSupportedException("The Stream Guard firewall provider requires Windows.");
             return new KamenRaider.Agent.Sunshine.WindowsFirewallComApi();
         });
+        builder.Services.TryAddSingleton<KamenRaider.Agent.Sunshine.IStreamGrantHistoryStore>(_ =>
+        {
+            if (!OperatingSystem.IsWindows())
+                throw new PlatformNotSupportedException("The Stream Guard grant history store requires Windows.");
+            return new KamenRaider.Agent.Sunshine.WindowsStreamGrantHistoryStore();
+        });
         builder.Services.TryAddSingleton<KamenRaider.Agent.Sunshine.IStreamIngressPolicy,KamenRaider.Agent.Sunshine.WindowsStreamIngressPolicy>();
         builder.Services.TryAddSingleton<KamenRaider.Agent.Sunshine.ISunshineServiceControl,KamenRaider.Agent.Sunshine.WindowsSunshineServiceControl>();
         builder.Services.AddSingleton<KamenRaider.Agent.Sunshine.StreamGateCoordinator>();
+        builder.Services.AddSingleton<KamenRaider.Agent.Sunshine.IStreamGuardControl>(sp => sp.GetRequiredService<KamenRaider.Agent.Sunshine.StreamGateCoordinator>());
         builder.Services.AddSingleton<KamenRaider.Agent.Leases.IStreamGate>(sp => sp.GetRequiredService<KamenRaider.Agent.Sunshine.StreamGateCoordinator>());
         builder.Services.AddHostedService<KamenRaider.Agent.Sunshine.StreamGuardStartupFence>();
         builder.Services.TryAddSingleton<KamenRaider.Agent.Sunshine.IStreamGuardPipeServerFactory>(_ =>
@@ -84,20 +113,24 @@ public static class StreamGuardHost
 
 public class Program
 {
-    public static void Main(string[] args)
+    public static int Main(string[] args)
     {
+        if (args.Length > 0 && string.Equals(args[0], "--provision-sunshine-credentials", StringComparison.OrdinalIgnoreCase))
+            return KamenRaider.Agent.Sunshine.SunshineCredentialProvisionCommand.Run(args);
+
         if (args.Any(argument => string.Equals(argument, "--stream-guard-recover", StringComparison.OrdinalIgnoreCase)))
         {
             KamenRaider.Agent.Sunshine.StreamGuardRecovery.Close();
-            return;
+            return 0;
         }
 
         if (args.Any(argument => string.Equals(argument, "--stream-guard", StringComparison.OrdinalIgnoreCase)))
         {
             StreamGuardHost.Build(args.Where(argument => !string.Equals(argument, "--stream-guard", StringComparison.OrdinalIgnoreCase)).ToArray()).Run();
-            return;
+            return 0;
         }
 
         AgentHost.Build(args).Run();
+        return 0;
     }
 }

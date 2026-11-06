@@ -57,7 +57,7 @@ public sealed class WindowsStreamGuardPipeServerFactory : IStreamGuardPipeServer
     {
     }
 
-    public WindowsStreamGuardPipeServerFactory(SecurityIdentifier agentServiceSid, string pipeName = "KamenRaider.StreamGuard.v1")
+    public WindowsStreamGuardPipeServerFactory(SecurityIdentifier agentServiceSid, string pipeName = StreamGuardPipeClient.DefaultPipeName)
     {
         ArgumentNullException.ThrowIfNull(agentServiceSid);
         ArgumentException.ThrowIfNullOrWhiteSpace(pipeName);
@@ -172,7 +172,7 @@ internal static class ServiceSidResolver
     }
 }
 
-public sealed class StreamGuardPipeRequestHandler(IStreamGate gate)
+public sealed class StreamGuardPipeRequestHandler(IStreamGuardControl gate)
 {
     public async Task HandleSessionAsync(Stream pipe, CancellationToken cancellationToken)
     {
@@ -220,7 +220,7 @@ public sealed class StreamGuardPipeRequestHandler(IStreamGate gate)
                 return;
             }
 
-            if (request.Command == "block" && request.Grant is null)
+            if (request.Command == "block" && request.Grant is null && request.Scope is null)
             {
                 try
                 {
@@ -244,7 +244,7 @@ public sealed class StreamGuardPipeRequestHandler(IStreamGate gate)
                 continue;
             }
 
-            if (request.Command == "allow" && request.Grant is { } grant)
+            if (request.Command == "allow" && request.Grant is { } grant && request.Scope is null)
             {
                 try
                 {
@@ -255,6 +255,57 @@ public sealed class StreamGuardPipeRequestHandler(IStreamGate gate)
                 {
                     await gate.BlockAsync(CancellationToken.None);
                     await WriteResponseAsync(pipe, request.RequestId, false, "gate_rejected", cancellationToken);
+                    return;
+                }
+                continue;
+            }
+
+            if (request.Command == "verify-open" && request.Grant is null && request.Scope is { } scope)
+            {
+                try
+                {
+                    var verified = await gate.VerifyOpenForLeaseAsync(scope, cancellationToken);
+                    await WriteResponseAsync(pipe, request.RequestId, true, verified ? null : "lease_not_open", cancellationToken, verified);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch
+                {
+                    await gate.BlockAsync(CancellationToken.None);
+                    await WriteResponseAsync(pipe, request.RequestId, true, "gate_unverified", cancellationToken, false);
+                }
+                continue;
+            }
+
+            if (request.Command == "maintenance-begin" && request.Grant is null && request.Scope is null)
+            {
+                try
+                {
+                    await gate.BeginFencedMaintenanceAsync(cancellationToken);
+                    await WriteResponseAsync(pipe, request.RequestId, true, null, cancellationToken);
+                }
+                catch
+                {
+                    await gate.BlockAsync(CancellationToken.None);
+                    await WriteResponseAsync(pipe, request.RequestId, false, "maintenance_rejected", cancellationToken);
+                    return;
+                }
+                continue;
+            }
+
+            if (request.Command == "maintenance-end" && request.Grant is null && request.Scope is null)
+            {
+                try
+                {
+                    var ended = await gate.EndFencedMaintenanceAsync(cancellationToken);
+                    await WriteResponseAsync(pipe, request.RequestId, ended, ended ? null : "maintenance_expired", cancellationToken);
+                }
+                catch
+                {
+                    await gate.BlockAsync(CancellationToken.None);
+                    await WriteResponseAsync(pipe, request.RequestId, false, "maintenance_end_failed", cancellationToken);
                     return;
                 }
                 continue;
@@ -271,10 +322,10 @@ public sealed class StreamGuardPipeRequestHandler(IStreamGate gate)
         await WriteResponseAsync(pipe, requestId, false, error, cancellationToken);
     }
 
-    private static Task WriteResponseAsync(Stream pipe, string requestId, bool success, string? error, CancellationToken cancellationToken) =>
+    private static Task WriteResponseAsync(Stream pipe, string requestId, bool success, string? error, CancellationToken cancellationToken, bool? verified = null) =>
         StreamGuardPipeProtocol.WriteFrameAsync(
             pipe,
-            new StreamGuardPipeResponse(StreamGuardPipeProtocol.Version, requestId, success, error),
+            new StreamGuardPipeResponse(StreamGuardPipeProtocol.Version, requestId, success, error, verified),
             cancellationToken);
 }
 

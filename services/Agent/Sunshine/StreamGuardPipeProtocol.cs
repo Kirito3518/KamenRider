@@ -5,12 +5,12 @@ using KamenRaider.Agent.Leases;
 
 namespace KamenRaider.Agent.Sunshine;
 
-public sealed record StreamGuardPipeRequest(int Version, string RequestId, string Command, StreamLeaseGrant? Grant);
-public sealed record StreamGuardPipeResponse(int Version, string RequestId, bool Success, string? Error);
+public sealed record StreamGuardPipeRequest(int Version, string RequestId, string Command, StreamLeaseGrant? Grant, PairingScope? Scope = null);
+public sealed record StreamGuardPipeResponse(int Version, string RequestId, bool Success, string? Error, bool? Verified = null);
 
 public static class StreamGuardPipeProtocol
 {
-    public const int Version = 1;
+    public const int Version = 2;
     public const int MaxFrameBytes = 4096;
     private static readonly JsonSerializerOptions JsonOptions = new()
     {

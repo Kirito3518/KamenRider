@@ -1,7 +1,7 @@
 using KamenRaider.Agent.Leases;
 using KamenRaider.Contracts;
 namespace KamenRaider.Agent.Sync;
-public sealed class LeaseCommandDispatcher(LeaseEnforcer enforcer,KamenRaider.Agent.Sunshine.PairingSession? pairing=null,KamenRaider.Agent.Preparation.IMachinePreparation? machinePreparation=null) {
+public sealed class LeaseCommandDispatcher(LeaseEnforcer enforcer,KamenRaider.Agent.Sunshine.ISunshinePairingSession? pairing=null,KamenRaider.Agent.Preparation.IMachinePreparation? machinePreparation=null) {
  public Task<PairingOffer?> GetPairingOfferAsync(CancellationToken ct)=>enforcer.CanStream&&pairing is not null?pairing.CreateOfferAsync(ct):Task.FromResult<PairingOffer?>(null);
  private CommandResult[] pending=[];
  public CommandResult[] PendingResults=>pending.ToArray();

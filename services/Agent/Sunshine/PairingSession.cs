@@ -1,17 +1,29 @@
 namespace KamenRaider.Agent.Sunshine;
-public record PairingScope(string RentalId,long Revision,string BootId,DateTimeOffset ExpiresAtUtc);
-// Must prove ingress AND existing/in-flight handshakes are fenced; firewall rule creation alone is insufficient.
-public interface IPairingFence {Task<bool> BlockAndVerifyAsync(CancellationToken ct);}
+public record PairingScope(string RentalId,long Revision,string BootId,DateTimeOffset ExpiresAtUtc,long DeadlineUptimeMilliseconds=0);
+// Pair/list verify the currently open, exact lease without interrupting Sunshine. Cleanup runs only
+// through a provider that blocks ingress, starts Sunshine behind that block, clears/verifies clients,
+// and stops Sunshine again before returning.
+public interface IPairingFence {
+ Task<bool> VerifyOpenForLeaseAsync(PairingScope scope,CancellationToken ct);
+ Task<bool> RunFencedCleanupAsync(Func<CancellationToken,Task> clear,CancellationToken ct);
+}
 public interface ISunshinePairingApi {
  // Targets may be concrete IDs or a server-supported pairing slot; Foundation Sunshine exposes only one slot.
  Task<string[]> PendingIdsAsync(CancellationToken ct);
  Task<bool> SubmitAsync(string id,string pin,CancellationToken ct);
  Task ClearAsync(CancellationToken ct);
 }
-public sealed class PairingSession(ISunshinePairingApi api,IPairingFence fence,Func<PairingScope?> scope,TimeProvider time) {
+public interface ISunshinePairingSession {
+ Task<KamenRaider.Contracts.PairingOffer?> CreateOfferAsync(CancellationToken ct);
+ Task<string[]> ListAsync(CancellationToken ct);
+ Task<KamenRaider.Contracts.CommandResult> ExecuteAsync(KamenRaider.Contracts.CommandEnvelope command,CancellationToken ct);
+ Task<bool> ClearAsync(CancellationToken ct);
+}
+public sealed class PairingSession(ISunshinePairingApi api,IPairingFence fence,Func<PairingScope?> scope,TimeProvider time) : ISunshinePairingSession {
  private readonly SemaphoreSlim serial=new(1,1);
  private PairingScope? offeredScope;private string[] offered=[];private DateTimeOffset offerExpiry;private long offerTimestamp;private volatile bool failed;private readonly object lifecycle=new();private long generation;private CancellationTokenSource? activePair;
- private bool Valid(PairingScope? value)=>value is { Revision:>0 } && !string.IsNullOrWhiteSpace(value.RentalId)&&!string.IsNullOrWhiteSpace(value.BootId)&&value.ExpiresAtUtc>time.GetUtcNow();
+ private bool Valid(PairingScope? value)=>value is { Revision:>0, DeadlineUptimeMilliseconds:>0 } && !string.IsNullOrWhiteSpace(value.RentalId)&&!string.IsNullOrWhiteSpace(value.BootId)&&value.ExpiresAtUtc>time.GetUtcNow();
+ private async Task<bool> VerifyOpenForLeaseAsync(PairingScope value,CancellationToken ct){try{return await fence.VerifyOpenForLeaseAsync(value,ct);}catch(OperationCanceledException) when(ct.IsCancellationRequested){throw;}catch(Exception){return false;}}
  private readonly SemaphoreSlim commandSerial=new(1,1);
  private readonly Dictionary<string,(PairingScope Scope,string Id,DateTimeOffset Until,KamenRaider.Contracts.CommandResult Result)> completed=[];
  public async Task<KamenRaider.Contracts.CommandResult> ExecuteAsync(KamenRaider.Contracts.CommandEnvelope command,CancellationToken ct){await commandSerial.WaitAsync(ct);try{
@@ -26,10 +38,10 @@ public sealed class PairingSession(ISunshinePairingApi api,IPairingFence fence,F
   var result=success&&command.ValidUntilUtc>time.GetUtcNow()?new KamenRaider.Contracts.CommandResult(command.CommandId,"applied",command.LeaseRevision):rejected;
   completed[command.CommandId]=(current,id,command.ValidUntilUtc,result);return result;
  }finally{commandSerial.Release();}}
- public async Task<KamenRaider.Contracts.PairingOffer?> CreateOfferAsync(CancellationToken ct){await ListAsync(ct);await serial.WaitAsync(ct);try{return !failed&&Valid(offeredScope)&&offeredScope==scope()&&time.GetUtcNow()<offerExpiry?new(offeredScope!.RentalId,offeredScope.Revision,offeredScope.BootId,offerExpiry<offeredScope.ExpiresAtUtc?offerExpiry:offeredScope.ExpiresAtUtc,offered.ToArray()):null;}finally{serial.Release();}}
+ public async Task<KamenRaider.Contracts.PairingOffer?> CreateOfferAsync(CancellationToken ct){await ListAsync(ct);await serial.WaitAsync(ct);try{return !failed&&offered.Length>0&&Valid(offeredScope)&&offeredScope==scope()&&time.GetUtcNow()<offerExpiry?new(offeredScope!.RentalId,offeredScope.Revision,offeredScope.BootId,offerExpiry<offeredScope.ExpiresAtUtc?offerExpiry:offeredScope.ExpiresAtUtc,offered.ToArray()):null;}finally{serial.Release();}}
  public async Task<string[]> ListAsync(CancellationToken ct){await serial.WaitAsync(ct);try{
   offered=[];offeredScope=null;var current=scope();
-  if(failed||!Valid(current)||!await fence.BlockAndVerifyAsync(ct))return [];
+  if(failed||!Valid(current)||current!=scope()||!await VerifyOpenForLeaseAsync(current!,ct))return [];
   var ids=await api.PendingIdsAsync(ct);
   if(current!=scope()||!Valid(current)||ids.Any(string.IsNullOrWhiteSpace)||ids.Distinct(StringComparer.Ordinal).Count()!=ids.Length)return [];
   offeredScope=current;offerExpiry=time.GetUtcNow().AddSeconds(30);offerTimestamp=time.GetTimestamp();offered=ids.ToArray();return ids.ToArray();
@@ -37,7 +49,7 @@ public sealed class PairingSession(ISunshinePairingApi api,IPairingFence fence,F
  public async Task<bool> PairAsync(string id,string pin,CancellationToken ct){await serial.WaitAsync(ct);try{
   var current=scope();if(failed||pin is null||pin.Length!=4||pin.Any(c=>c<'0'||c>'9')||!Valid(current)||current!=offeredScope||(time.GetUtcNow()>=offerExpiry||time.GetElapsedTime(offerTimestamp)>=TimeSpan.FromSeconds(30)||time.GetElapsedTime(offerTimestamp)<TimeSpan.Zero)||!offered.Contains(id,StringComparer.Ordinal))return false;
   offered=[];offeredScope=null;
-  if(!await fence.BlockAndVerifyAsync(ct))return false;
+  if(!await VerifyOpenForLeaseAsync(current!,ct))return false;
   if(current!=scope()||!Valid(current)||time.GetUtcNow()>=offerExpiry||time.GetElapsedTime(offerTimestamp)>=TimeSpan.FromSeconds(30)||time.GetElapsedTime(offerTimestamp)<TimeSpan.Zero)return false;
     using var linked=CancellationTokenSource.CreateLinkedTokenSource(ct);long started;
   lock(lifecycle){if(failed)return false;started=generation;activePair=linked;}
@@ -50,8 +62,7 @@ public sealed class PairingSession(ISunshinePairingApi api,IPairingFence fence,F
   lock(lifecycle){failed=true;clearing=++generation;activePair?.Cancel();}
   await serial.WaitAsync(ct);try{
   failed=true;offered=[];offeredScope=null;
-  if(!await fence.BlockAndVerifyAsync(ct))return false;
-  try{await api.ClearAsync(ct);lock(lifecycle){if(clearing!=generation)return false;failed=false;}return true;}catch(Exception ex) when(ex is not OperationCanceledException){return false;}
+  try{if(!await fence.RunFencedCleanupAsync(api.ClearAsync,ct))return false;lock(lifecycle){if(clearing!=generation)return false;failed=false;}return true;}catch(Exception ex) when(ex is not OperationCanceledException){return false;}
  }finally{serial.Release();}}
 }
 

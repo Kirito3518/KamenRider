@@ -22,7 +22,8 @@ public static class StreamGuardRecovery
             new WindowsStreamIngressPolicy(new WindowsFirewallComApi(), installation),
             new WindowsSunshineServiceControl(services, installation),
             TimeProvider.System,
-            new KamenRaider.Agent.Leases.WindowsBootClock());
+            new KamenRaider.Agent.Leases.WindowsBootClock(),
+            new WindowsStreamGrantHistoryStore());
         gate.BlockAsync(CancellationToken.None).GetAwaiter().GetResult();
     }
 }

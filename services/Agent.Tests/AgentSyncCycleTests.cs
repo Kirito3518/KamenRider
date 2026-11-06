@@ -129,7 +129,7 @@ public class AgentSyncCycleTests {
         using var f=new Fixture();await f.Configuration.ApplyAsync(new(1,5000,6000),default);await f.Enforcer.ApplyAsync(f.Command(),default);
         var confirmation=new ActiveLeaseConfirmation("rental",1,"boot",f.Clock.Now.AddSeconds(60));
         await f.Enforcer.ConfirmAsync(confirmation,default);
-        var pairing=new PairingSession(new DelayedPairingApi(f.Clock),new PairingFence(),()=>f.Enforcer.CanStream?new("rental",1,"boot",confirmation.ExpiresAtUtc):null,f.Clock);
+        var pairing=new PairingSession(new DelayedPairingApi(f.Clock),new PairingFence(),()=>f.Enforcer.CurrentPairingScope,f.Clock);
         var dispatcher=new LeaseCommandDispatcher(f.Enforcer,pairing);
         using var transport=new Transport((_,_)=>new(f.Clock.Now,new(1,5000,6000),[],confirmation));
         using var identity=DeviceIdentity.LoadOrCreate(Path.Combine(f.Directory,"identity"));
@@ -162,7 +162,7 @@ public class AgentSyncCycleTests {
     private sealed class Gate:IStreamGate {public Task BlockAsync(CancellationToken ct)=>Task.CompletedTask;public Task AllowAsync(StreamLeaseGrant grant,CancellationToken ct)=>Task.CompletedTask;}
     private sealed class Power:IShutdown {public Task RequestImmediateShutdownAsync(CancellationToken ct)=>Task.CompletedTask;}
     private sealed class TestMachinePreparation(bool result):IMachinePreparation {public int Calls;public Task<bool> PrepareAsync(CommandEnvelope command,CancellationToken cancellationToken){Calls++;return Task.FromResult(result);}}
-    private sealed class PairingFence:IPairingFence {public Task<bool> BlockAndVerifyAsync(CancellationToken ct)=>Task.FromResult(true);}
+    private sealed class PairingFence:IPairingFence {public Task<bool> VerifyOpenForLeaseAsync(PairingScope scope,CancellationToken ct)=>Task.FromResult(true);public async Task<bool> RunFencedCleanupAsync(Func<CancellationToken,Task> clear,CancellationToken ct){await clear(ct);return true;}}
     private sealed class DelayedPairingApi(Clock clock):ISunshinePairingApi {
         public Task<string[]> PendingIdsAsync(CancellationToken ct){clock.Advance(20);return Task.FromResult(new[]{"pending-client"});}
         public Task<bool> SubmitAsync(string id,string pin,CancellationToken ct)=>Task.FromResult(false);
