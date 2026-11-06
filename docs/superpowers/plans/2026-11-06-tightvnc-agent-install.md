@@ -36,9 +36,9 @@
 - Modify: `tests/machines.test.mjs`
 - Modify: `scripts/agent/Test-BootstrapAgentPlan.ps1`
 
-**Interfaces:** Bootstrap accepts `-VncAllowedSourceAddress`; the admin route sources it from `AGENT_VNC_ALLOWED_SOURCE_IP`, or derives a loopback/private literal IP from `AGENT_CONTROLLER_URL` for development. DNS hostnames require the env value.
+**Interfaces:** Bootstrap accepts `-VncAllowedSourceAddress`; the admin route sources it from `AGENT_VNC_ALLOWED_SOURCE_IP`, or derives a private literal IP from `AGENT_CONTROLLER_URL`. Loopback Controller URLs require an explicit LAN source because the gateway targets the admin-confirmed machine LAN IP. DNS hostnames require the env value.
 
-- [x] Add route tests for loopback derivation, configured private IP, and missing/invalid production source configuration.
+- [x] Add route tests for an explicit LAN source with a loopback Controller, configured private IP, and missing/invalid source configuration.
 - [x] Run the focused machine route test and observe the expected failure.
 - [x] Add `AGENT_VNC_ALLOWED_SOURCE_IP` validation and command-line emission; preserve request-time, uncached route behavior.
 - [x] Extend bootstrap input validation and plan output, and pass the source IP to the package installer.
