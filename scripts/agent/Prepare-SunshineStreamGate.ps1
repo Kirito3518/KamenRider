@@ -175,10 +175,11 @@ function Set-StreamGateServiceConfiguration {
     param([string]$Name, [uint32]$StartType, [string[]]$Dependencies)
     [KamenRaider.Install.NativeServiceManager]::SetStartAndDependencies($Name, $StartType, $Dependencies)
 }
-function Invoke-StreamGateServiceControl {
-    param([string[]]$Arguments)
-    & (Join-Path $env:SystemRoot 'System32\sc.exe') @Arguments | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "Service control failed: $($Arguments[0])" }
+function Remove-StreamGateService {
+    param([Parameter(Mandatory)][string]$ServiceName)
+    $scPath = Join-Path $env:SystemRoot 'System32\sc.exe'
+    $output = @(& $scPath delete $ServiceName 2>&1)
+    if ($LASTEXITCODE -ne 0) { throw "Deleting Stream Guard service failed: $($output -join ' ')" }
 }
 function Assert-SunshineStreamGateFirewallPolicy {
     $profiles = @(Get-NetFirewallProfile -PolicyStore ActiveStore -ErrorAction Stop)
@@ -272,7 +273,7 @@ function Restore-SunshineStreamGate {
         } `
         -RemoveGuard {
             if (Get-Service -Name $script:GuardServiceName -ErrorAction SilentlyContinue) {
-                Invoke-StreamGateServiceControl -Arguments @('delete', $script:GuardServiceName)
+                Remove-StreamGateService -ServiceName $script:GuardServiceName
             }
         } `
         -RestoreFirewall {
@@ -364,8 +365,10 @@ try {
     $transaction.GuardServiceCreated = $true
     Set-StreamGateServiceConfiguration -Name $script:GuardServiceName -StartType 2 -Dependencies @()
     $recoveryBinaryPath = (Get-ServiceBinaryPath -Executable $GuardExecutablePath -ContentRoot $ContentRoot) + ' --stream-guard-recover'
-    Invoke-StreamGateServiceControl -Arguments @('failure', $script:GuardServiceName, 'reset=', '86400', 'actions=', 'run/0/restart/5000/restart/15000', 'command=', $recoveryBinaryPath)
-    Invoke-StreamGateServiceControl -Arguments @('failureflag', $script:GuardServiceName, '1')
+    Set-WindowsServiceFailureActions -ServiceName $script:GuardServiceName -ResetPeriod 86400 `
+        -ActionTypes @([uint32]3, [uint32]1, [uint32]1) -Delays @([uint32]0, [uint32]5000, [uint32]15000) `
+        -Command $recoveryBinaryPath
+    Set-WindowsServiceFailureActionsFlag -ServiceName $script:GuardServiceName -Enabled $true
 
     $sunshineDependencies = Get-SunshineStreamDependencies -Existing ([string[]]$priorSunshine.Dependencies) -Required $script:GuardServiceName
     $transaction.SunshineConfigurationChanged = $true

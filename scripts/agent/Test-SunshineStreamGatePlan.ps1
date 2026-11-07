@@ -88,7 +88,7 @@ function Reset-Fixture {
         StartType = 2; Dependencies = @('BaseService'); ConfigReads = 0
         VendorRules = 'TCP:Any:Allow,UDP:Any:Allow'; Unrelated = 'description,account,recovery,display-name'
         BadGuardAccount = $false; MissingAgentDependency = $false
-        CheckRestartFence = $false
+        CheckRestartFence = $false; FailureActions = $null; FailureActionsFlag = $false
     }
 }
 function Step([string]$Name) {
@@ -179,10 +179,22 @@ function Wait-SunshineServiceState {
     if ((Get-Service -Name $Name).Status -ne $State) { throw "Mock service did not reach $State." }
 }
 function New-DisabledWindowsService { param($ServiceName, $BinaryPath, $Account, $Dependencies) Step 'create-guard'; $fixture.Guard = $true }
-function Invoke-StreamGateServiceControl {
-    param($Arguments)
-    Step ([string]$Arguments[0])
-    if ($Arguments[0] -eq 'delete') { $fixture.Guard = $false }
+function Set-WindowsServiceFailureActions {
+    param($ServiceName, $ResetPeriod, $ActionTypes, $Delays, $Command)
+    Step 'failure'
+    $fixture.FailureActions = [pscustomobject]@{ ServiceName = $ServiceName; ResetPeriod = $ResetPeriod; ActionTypes = @($ActionTypes); Delays = @($Delays); Command = $Command }
+}
+function Set-WindowsServiceFailureActionsFlag {
+    param($ServiceName, $Enabled)
+    Step 'failureflag'
+    $fixture.FailureActionsFlag = [bool]$Enabled
+}
+function Remove-StreamGateService {
+    param($ServiceName)
+    Step 'delete'
+    $fixture.Guard = $false
+    $fixture.FailureActions = $null
+    $fixture.FailureActionsFlag = $false
 }
 
 $caseCount = 0
@@ -209,7 +221,7 @@ foreach ($stage in @('create-firewall', 'verify-firewall', 'stop-sunshine', 'cre
         if ($_.Exception.Message -ne "Injected $stage") { throw }
         $rejected = $true
     }
-    if (-not $rejected -or -not $fixture.Failed -or $fixture.Guard -or $fixture.Rule -or -not $fixture.Running -or
+    if (-not $rejected -or -not $fixture.Failed -or $fixture.Guard -or $fixture.FailureActions -or $fixture.FailureActionsFlag -or $fixture.Rule -or -not $fixture.Running -or
         $fixture.StartType -ne 2 -or ($fixture.Dependencies -join ',') -ne 'BaseService') { throw "Failure at $stage did not restore the prior state." }
     if ($fixture.VendorRules -ne 'TCP:Any:Allow,UDP:Any:Allow' -or $fixture.Unrelated -ne 'description,account,recovery,display-name') { throw 'Unrelated Sunshine settings changed.' }
     $caseCount++
@@ -220,6 +232,11 @@ foreach ($priorRule in @('absent', 'True', 'False')) {
     $installed = Install-SunshineStreamGate -GuardExecutablePath $guardPath -ContentRoot ([IO.Path]::GetDirectoryName($guardPath))
     if (-not $fixture.Guard -or $fixture.Running -or $fixture.Rule.Enabled -ne 'True' -or $fixture.StartType -ne 3 -or
         ($fixture.Dependencies -join ',') -ne 'BaseService,KamenRaider Stream Guard') { throw 'Installation did not establish the closed policy.' }
+    $expectedRecovery = (Get-ServiceBinaryPath -Executable $guardPath -ContentRoot ([IO.Path]::GetDirectoryName($guardPath))) + ' --stream-guard-recover'
+    if (-not $fixture.FailureActions -or $fixture.FailureActions.ServiceName -ne 'KamenRaider Stream Guard' -or
+        $fixture.FailureActions.ResetPeriod -ne 86400 -or ($fixture.FailureActions.ActionTypes -join ',') -ne '3,1,1' -or
+        ($fixture.FailureActions.Delays -join ',') -ne '0,5000,15000' -or $fixture.FailureActions.Command -ne $expectedRecovery -or
+        -not $fixture.FailureActionsFlag) { throw 'Stream Guard failure actions must preserve recovery command, restart sequence, and non-crash failure handling.' }
     if ($fixture.Events.IndexOf('verify-firewall') -gt $fixture.Events.IndexOf('stop-sunshine') -or
         $fixture.Events.IndexOf('stop-sunshine') -gt $fixture.Events.IndexOf('create-guard')) { throw 'Installation order must close, stop, then create Guard.' }
     $fixture.CheckRestartFence = $true

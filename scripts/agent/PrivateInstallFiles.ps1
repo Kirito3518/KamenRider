@@ -66,6 +66,8 @@ namespace KamenRaider.Install {
   private static extern bool QueryServiceConfig(IntPtr service,IntPtr config,int bufferSize,out int bytesNeeded);
   [DllImport("advapi32.dll", EntryPoint="ChangeServiceConfigW", CharSet=CharSet.Unicode, SetLastError=true)] [return: MarshalAs(UnmanagedType.Bool)]
   private static extern bool ChangeServiceConfig(IntPtr service,uint serviceType,uint startType,uint errorControl,string binaryPath,string loadOrderGroup,IntPtr tagId,IntPtr dependencies,string account,string password,string displayName);
+   [DllImport("advapi32.dll", EntryPoint="ChangeServiceConfig2W", CharSet=CharSet.Unicode, SetLastError=true)] [return: MarshalAs(UnmanagedType.Bool)]
+   private static extern bool ChangeServiceConfig2(IntPtr service,uint infoLevel,IntPtr info);
   [DllImport("advapi32.dll", SetLastError=true)] [return: MarshalAs(UnmanagedType.Bool)]
   private static extern bool CloseServiceHandle(IntPtr handle);
   [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)]
@@ -77,6 +79,15 @@ namespace KamenRaider.Install {
    public string BinaryPath { get; set; } public uint StartType { get; set; }
    public string Account { get; set; } public string[] Dependencies { get; set; }
   }
+   [StructLayout(LayoutKind.Sequential)]
+   private struct ServiceAction { public uint Type; public uint Delay; }
+   [StructLayout(LayoutKind.Sequential)]
+   private struct ServiceFailureActions {
+    public uint ResetPeriod; public IntPtr RebootMessage; public IntPtr Command;
+    public uint ActionCount; public IntPtr Actions;
+   }
+   [StructLayout(LayoutKind.Sequential)]
+   private struct ServiceFailureActionsFlag { public int Enabled; }
   private static string[] ReadMultiString(IntPtr value) {
    if(value==IntPtr.Zero) return new string[0];
    var result=new System.Collections.Generic.List<string>(); int offset=0;
@@ -132,6 +143,59 @@ namespace KamenRaider.Install {
     } finally {CloseServiceHandle(service);}
    } finally {CloseServiceHandle(manager);}
   }
+   public static void SetFailureActions(string serviceName,uint resetPeriod,uint[] actionTypes,uint[] delays,string command) {
+    if(String.IsNullOrWhiteSpace(serviceName)) throw new ArgumentException("Service name is required.","serviceName");
+    if(actionTypes==null || delays==null || actionTypes.Length==0 || actionTypes.Length!=delays.Length) throw new ArgumentException("Failure action types and delays must have the same non-zero length.");
+    if(String.IsNullOrWhiteSpace(command)) throw new ArgumentException("Failure recovery command is required.","command");
+    for(int i=0;i<actionTypes.Length;i++) if(actionTypes[i]>3) throw new ArgumentOutOfRangeException("actionTypes");
+    IntPtr manager=OpenSCManager(null,null,0x0001);
+    if(manager==IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
+    try {
+     IntPtr service=OpenService(manager,serviceName,0x0012);
+     if(service==IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
+     try {
+      int actionSize=Marshal.SizeOf(typeof(ServiceAction));
+      IntPtr actionBuffer=Marshal.AllocHGlobal(actionSize*actionTypes.Length);
+      IntPtr commandBuffer=IntPtr.Zero;
+      IntPtr configBuffer=IntPtr.Zero;
+      try {
+       commandBuffer=Marshal.StringToHGlobalUni(command);
+       for(int i=0;i<actionTypes.Length;i++) {
+        IntPtr current=IntPtr.Add(actionBuffer,i*actionSize);
+        Marshal.StructureToPtr(new ServiceAction { Type=actionTypes[i], Delay=delays[i] },current,false);
+       }
+       var config=new ServiceFailureActions {
+        ResetPeriod=resetPeriod, RebootMessage=IntPtr.Zero, Command=commandBuffer,
+        ActionCount=(uint)actionTypes.Length, Actions=actionBuffer
+       };
+       configBuffer=Marshal.AllocHGlobal(Marshal.SizeOf(typeof(ServiceFailureActions)));
+       Marshal.StructureToPtr(config,configBuffer,false);
+       if(!ChangeServiceConfig2(service,2,configBuffer)) throw new Win32Exception(Marshal.GetLastWin32Error());
+      } finally {
+       if(configBuffer!=IntPtr.Zero) Marshal.FreeHGlobal(configBuffer);
+       if(commandBuffer!=IntPtr.Zero) Marshal.FreeHGlobal(commandBuffer);
+       Marshal.FreeHGlobal(actionBuffer);
+      }
+     } finally {CloseServiceHandle(service);}
+    } finally {CloseServiceHandle(manager);}
+   }
+   public static void SetFailureActionsFlag(string serviceName,bool enabled) {
+    if(String.IsNullOrWhiteSpace(serviceName)) throw new ArgumentException("Service name is required.","serviceName");
+    IntPtr manager=OpenSCManager(null,null,0x0001);
+    if(manager==IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
+    try {
+     IntPtr service=OpenService(manager,serviceName,0x0002);
+     if(service==IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
+     try {
+      var config=new ServiceFailureActionsFlag { Enabled=enabled?1:0 };
+      IntPtr buffer=Marshal.AllocHGlobal(Marshal.SizeOf(typeof(ServiceFailureActionsFlag)));
+      try {
+       Marshal.StructureToPtr(config,buffer,false);
+       if(!ChangeServiceConfig2(service,4,buffer)) throw new Win32Exception(Marshal.GetLastWin32Error());
+      } finally {Marshal.FreeHGlobal(buffer);}
+     } finally {CloseServiceHandle(service);}
+    } finally {CloseServiceHandle(manager);}
+   }
   public static void CreateDisabledService(string serviceName,string displayName,string binaryPath,string account,string[] serviceDependencies) {
    IntPtr manager=OpenSCManager(null,null,0x0002);
    if(manager==IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
@@ -153,6 +217,17 @@ function New-DisabledWindowsService {
  param([Parameter(Mandatory)][string]$ServiceName,[Parameter(Mandatory)][string]$BinaryPath,[Parameter(Mandatory)][string]$Account,[string[]]$Dependencies=@())
  Initialize-ServiceManagerNativeType
  [KamenRaider.Install.NativeServiceManager]::CreateDisabledService($ServiceName,$ServiceName,$BinaryPath,$Account,$Dependencies)
+}
+function Set-WindowsServiceFailureActions {
+ param([Parameter(Mandatory)][string]$ServiceName,[Parameter(Mandatory)][uint32]$ResetPeriod,[Parameter(Mandatory)][uint32[]]$ActionTypes,[Parameter(Mandatory)][uint32[]]$Delays,[Parameter(Mandatory)][string]$Command)
+ if($ActionTypes.Count -eq 0 -or $ActionTypes.Count -ne $Delays.Count){throw 'Service failure action types and delays must have the same non-zero length.'}
+ Initialize-ServiceManagerNativeType
+ [KamenRaider.Install.NativeServiceManager]::SetFailureActions($ServiceName,$ResetPeriod,$ActionTypes,$Delays,$Command)
+}
+function Set-WindowsServiceFailureActionsFlag {
+ param([Parameter(Mandatory)][string]$ServiceName,[Parameter(Mandatory)][bool]$Enabled)
+ Initialize-ServiceManagerNativeType
+ [KamenRaider.Install.NativeServiceManager]::SetFailureActionsFlag($ServiceName,$Enabled)
 }
 function Get-AgentEnrollmentWaitState {
  param([Parameter(Mandatory)][string]$ServiceStatus,[psobject]$ReceiptStatus)
