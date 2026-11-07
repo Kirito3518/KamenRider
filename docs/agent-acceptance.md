@@ -1,6 +1,6 @@
 # Agent acceptance record
 
-Status: **NOT READY for rentals (2026-11-07)**. The local Agent package is present and its SHA-256 record was verified; localhost Admin install-command generation is enabled. No Agent or Stream Guard service installation was run. Boot/restoration/desktop-health providers and Sunshine credentials/TLS remain unqualified, and hardware plus Restore Rx acceptance remain NOT TESTED. Restore Rx remains untouched.
+Status: **NOT READY for rentals (2026-11-08)**. The local Agent package and SHA-256 record are present; localhost Admin install-command generation is enabled. A first live install attempt reached firewall-rule publication but rolled back before Agent or Stream Guard service registration. Boot/restoration/desktop-health providers and Sunshine credentials/TLS remain unqualified, and hardware plus Restore Rx acceptance remain NOT TESTED. Restore Rx remains untouched.
 
 ## Software evidence (2026-11-06 historical snapshot; superseded by later updates below)
 
@@ -55,3 +55,11 @@ Rental readiness remains **NOT READY**, and live hardware and Restore Rx accepta
 - `pnpm exec vitest run tests/machines-manager.test.tsx` passed 6/6. `NEXT_DIST_DIR=.next-task2-validation pnpm test:machines` passed, including the route harness and 9/9 VNC/installer helper checks.
 - `pnpm exec tsc --noEmit` and the isolated Webpack production build passed; the build output identified `/admin/machines` as Partial Prerender. Targeted ESLint reports a pre-existing `react-hooks/set-state-in-effect` error at the unchanged install-command effect in `src/components/admin/machines-manager.tsx:128`.
 - Diagnostics improve Admin visibility only. They do not affect readiness, rental eligibility, lease allocation, or stream-gate decisions. Rental readiness remains **NOT READY**; hardware acceptance remains **NOT TESTED**. No service, firewall, Sunshine, or Restore Rx state was changed.
+
+## Latest live installation attempt and verifier fix (2026-11-08)
+
+- The first same-host Agent install attempt selected Ethernet 3 (`192.168.1.34`) and failed at `Prepare-SunshineStreamGate.ps1:353`: `The managed Sunshine firewall block rule could not be verified after publication.` The Windows Firewall event log recorded event 2097 adding the exact active inbound Block rule for `C:\Program Files\Sunshine\sunshine.exe` on all profiles, then event 2052 deleting that rule during rollback.
+- A read-only check after failure found no Agent or Stream Guard service, no managed rule in ActiveStore or PersistentStore, Sunshine still Running/Automatic with its prior dependencies, and no Agent install/data directory. This confirms rollback; the install did not complete.
+- The mocked regression reproduced the same failure when a plain Block rule's `OverrideBlockRules` property was null. The verifier now accepts null or `False` for this inapplicable field, still rejects `True`, and continues to require the exact enabled inbound all-profile Block rule and filter shape. `Test-SunshineStreamGatePlan.ps1` passed 55/55 mocked setup/rollback cases on Windows PowerShell 5.1 and PowerShell 7.6.9.
+- `Test-AgentPackageBuild.ps1` passed on Windows PowerShell 5.1. The local published win-x64 package was rebuilt from source commit `656becd` as Agent version `1.0.0+g656becdb146c`; package SHA-256 is `B8EA99E028FE8AD18F53031A96E29EDACC799F32B1BB2C6E64AFA5DD2BB30803`. The SHA sidecar matches and the ZIP's `Prepare-SunshineStreamGate.ps1` hash matches source. A new Admin install command must be requested before retrying.
+- The installation has not been retried. Rental readiness remains **NOT READY** and hardware acceptance remains **NOT TESTED**. No live firewall/service Apply was performed by the verifier fix; Reboot Restore Rx remains untouched.
