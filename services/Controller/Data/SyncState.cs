@@ -33,7 +33,7 @@ public sealed partial class ControllerDatabase {
 
     private static ReadinessDiagnostic[]? ValidateReadinessDiagnostics(ReadinessDiagnostic[]? diagnostics) {
         if(diagnostics is null)return null;
-        if(diagnostics.Length>ReadinessDiagnosticIds.Canonical.Length||diagnostics.Any(item=>item is null||!ReadinessDiagnosticIds.Canonical.Contains(item.CheckId,StringComparer.Ordinal)||item.Status is not (ReadinessDiagnosticStatuses.Passed or ReadinessDiagnosticStatuses.Blocked or ReadinessDiagnosticStatuses.Unavailable or ReadinessDiagnosticStatuses.Unknown))||diagnostics.Select(item=>item.CheckId).Distinct(StringComparer.Ordinal).Count()!=diagnostics.Length)
+        if(diagnostics.Length>ReadinessDiagnosticIds.Canonical.Count||diagnostics.Any(item=>item is null||!ReadinessDiagnosticIds.Canonical.Contains(item.CheckId,StringComparer.Ordinal)||item.Status is not (ReadinessDiagnosticStatuses.Passed or ReadinessDiagnosticStatuses.Blocked or ReadinessDiagnosticStatuses.Unavailable or ReadinessDiagnosticStatuses.Unknown))||diagnostics.Select(item=>item.CheckId).Distinct(StringComparer.Ordinal).Count()!=diagnostics.Length)
             throw new ArgumentException("Invalid heartbeat");
         return ReadinessDiagnosticIds.Canonical.Where(id=>diagnostics.Any(item=>item.CheckId==id)).Select(id=>diagnostics.Single(item=>item.CheckId==id)).ToArray();
     }

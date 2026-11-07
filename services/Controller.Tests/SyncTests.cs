@@ -4,6 +4,14 @@ using System.Security.Cryptography;
 namespace Controller.Tests;
 public class SyncTests {
  sealed class Clock:TimeProvider {public DateTimeOffset Now=DateTimeOffset.UtcNow;public override DateTimeOffset GetUtcNow()=>Now;}
+ [Fact] public void CanonicalReadinessDiagnosticIdsAreImmutableAndStable() {
+ var expected=new[] { "baseline","bootChallenge","restoration","streamFence","desktopHealth","configurationRevision","leaseReconciliation","runtimeHealth" };
+ Assert.Equal(expected,ReadinessDiagnosticIds.Canonical);
+ Assert.IsNotType<string[]>(ReadinessDiagnosticIds.Canonical);
+ var ids=Assert.IsAssignableFrom<IList<string>>(ReadinessDiagnosticIds.Canonical);
+ Assert.True(ids.IsReadOnly);
+ Assert.Throws<NotSupportedException>(()=>ids[0]="changed");
+ }
  [Theory][InlineData("")][InlineData("1.2.3\nready")][InlineData("1/2/3")]
  public void HeartbeatRejectsInvalidAgentVersion(string version) {
  var path=Path.Combine(Path.GetTempPath(),Guid.NewGuid()+".db");

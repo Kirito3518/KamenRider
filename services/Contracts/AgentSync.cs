@@ -1,3 +1,5 @@
+using System.Collections.ObjectModel;
+
 namespace KamenRaider.Contracts;
 public record SyncRequest(string BootId,string LocalIp,string MacAddress,long AppliedConfigRevision,string Readiness,CommandResult[] CommandResults,PairingOffer? PendingPairing=null) {
     public string? AgentVersion { get; init; }
@@ -13,7 +15,7 @@ public static class ReadinessDiagnosticIds {
     public const string ConfigurationRevision="configurationRevision";
     public const string LeaseReconciliation="leaseReconciliation";
     public const string RuntimeHealth="runtimeHealth";
-    public static readonly string[] Canonical=[Baseline,BootChallenge,Restoration,StreamFence,DesktopHealth,ConfigurationRevision,LeaseReconciliation,RuntimeHealth];
+    public static ReadOnlyCollection<string> Canonical { get; } = Array.AsReadOnly(new[] { Baseline,BootChallenge,Restoration,StreamFence,DesktopHealth,ConfigurationRevision,LeaseReconciliation,RuntimeHealth });
 }
 public static class ReadinessDiagnosticStatuses {
     public const string Passed="passed";

@@ -299,7 +299,7 @@ public sealed class BootReconciler(
             _ => ReadinessDiagnosticStatuses.Unknown
         };
 
-        var index = Array.IndexOf(ReadinessDiagnosticIds.Canonical, checkId);
+        var index = ReadinessDiagnosticIds.Canonical.IndexOf(checkId);
         if (index < 0)
         {
             throw new ArgumentOutOfRangeException(nameof(checkId));
