@@ -77,12 +77,12 @@
 - Consumes: Task 1's `MachineDto.ReadinessDiagnostics?: ReadinessDiagnostic[]` response.
 - Produces: an Admin-only checklist for latest check IDs/statuses, with absent reports represented as not reported.
 
-- [ ] **Step 1: Write the failing component and public-route regressions first.** Assert Thai labels for mixed statuses, a clear not-reported state when absent, and no readiness diagnostics in renter-facing JSON.
-- [ ] **Step 2: Run the UI and machine route tests and capture the expected RED result.** Run `pnpm exec vitest run tests/machines-manager.test.tsx` and `pnpm test:machines`; the new assertions must fail because Admin has no diagnostics view yet.
-- [ ] **Step 3: Implement the Admin view and public response assertion.** Keep diagnostics under the Admin machine card only; do not change the public API mapping or rental actions.
-- [ ] **Step 4: Run UI tests, `pnpm test:machines`, `pnpm exec tsc --noEmit`, targeted ESLint, and an isolated Webpack build.** Record exact outputs and any pre-existing lint errors; do not use stale `.next-local` output as build evidence.
-- [ ] **Step 5: Update the roadmap and acceptance record.** State that the diagnostics improve visibility only; boot/restoration/desktop proof, installed Agent/Guard, live VNC/Sunshine/WOL, and hardware acceptance remain NOT READY / NOT TESTED.
-- [ ] **Step 6: Commit Task 2** as `feat(admin): show agent readiness diagnostics`.
+- [x] **Step 1: Write the failing component and public-route regressions first.** Assert Thai labels for mixed statuses, a clear not-reported state when absent, and no readiness diagnostics in renter-facing JSON.
+- [x] **Step 2: Run the UI and machine route tests and capture the expected RED result.** The focused UI run failed as expected with 2 new failures and 3 prior passes. The first route-harness attempt against stale `.next-local` failed unrelated existing PATCH/expiry checks; the fresh isolated build and route run later passed.
+- [x] **Step 3: Implement the Admin view and public response assertion.** Keep diagnostics under the Admin machine card only; do not change the public API mapping or rental actions.
+- [x] **Step 4: Run UI tests, `pnpm test:machines`, `pnpm exec tsc --noEmit`, targeted ESLint, and an isolated Webpack build.** Focused UI tests passed 6/6; `NEXT_DIST_DIR=.next-task2-validation pnpm test:machines` passed (including 9/9 helper tests and route scenarios); TypeScript and isolated Webpack build passed. Targeted ESLint reports the pre-existing `react-hooks/set-state-in-effect` error at `machines-manager.tsx:128`; no diagnostics-specific finding was reported.
+- [x] **Step 5: Update the roadmap and acceptance record.** State that the diagnostics improve visibility only; boot/restoration/desktop proof, installed Agent/Guard, live VNC/Sunshine/WOL, and hardware acceptance remain NOT READY / NOT TESTED.
+- [x] **Step 6: Commit Task 2** as `feat(admin): show agent readiness diagnostics`.
 
 ## Completion
 

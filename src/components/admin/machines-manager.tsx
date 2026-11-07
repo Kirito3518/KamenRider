@@ -1,7 +1,12 @@
 "use client";
 import { useCallback, useEffect, useState, type ChangeEventHandler } from "react";
 import { AdminVncViewerButton } from "@/components/admin/admin-vnc-viewer";
-import type { Lease, Machine } from "@/lib/machine-contracts";
+import type {
+  Lease,
+  Machine,
+  ReadinessDiagnosticCheckId,
+  ReadinessDiagnosticStatus,
+} from "@/lib/machine-contracts";
 import { getInstallCommandExpiryState } from "@/lib/agent-install-expiry.mjs";
 import {
   getSavedVncTargetForMetadataUpdate,
@@ -9,6 +14,25 @@ import {
   mergeVncTargetDrafts,
   updateVncTargetDraft,
 } from "@/lib/admin-vnc-target-drafts.mjs";
+
+const READINESS_CHECK_LABELS: Record<ReadinessDiagnosticCheckId, string> = {
+  baseline: "การตรวจพื้นฐาน",
+  bootChallenge: "การทดสอบยืนยันการบูต",
+  restoration: "การตรวจการคืนค่าสภาพเครื่อง",
+  streamFence: "การตรวจป้องกันการสตรีมก่อนพร้อม",
+  desktopHealth: "การตรวจสุขภาพเดสก์ท็อป",
+  configurationRevision: "การตรวจ revision การตั้งค่า",
+  leaseReconciliation: "การตรวจสถานะ lease",
+  runtimeHealth: "การตรวจความพร้อมขณะทำงาน",
+};
+
+const READINESS_STATUS_LABELS: Record<ReadinessDiagnosticStatus, string> = {
+  passed: "ผ่าน",
+  blocked: "ถูกบล็อก",
+  unavailable: "ไม่มีระบบตรวจสอบ",
+  unknown: "ยังไม่ทราบผล",
+};
+
 async function request(path: string, body?: unknown, method = "POST") {
   const r = await fetch(path, {
     method,
@@ -221,6 +245,34 @@ export function MachinesManager() {
           <p className="break-all font-mono text-sm">
             IP ที่ Agent รายงาน: {m.localIp}
           </p>
+          <section
+            className="space-y-2 rounded border p-3"
+            aria-label="ผลตรวจวินิจฉัยจาก Agent"
+          >
+            <h3 className="font-semibold">ผลตรวจวินิจฉัยจาก Agent</h3>
+            <p className="text-sm">
+              ผลตรวจวินิจฉัยจาก Agent เท่านั้น ไม่ใช่การอนุมัติให้เช่า
+            </p>
+            {m.readinessDiagnostics?.length ? (
+              <ul className="space-y-1 text-sm">
+                {m.readinessDiagnostics.map((diagnostic) => (
+                  <li
+                    key={diagnostic.checkId}
+                    className="flex flex-wrap justify-between gap-2"
+                  >
+                    <span>{READINESS_CHECK_LABELS[diagnostic.checkId]}</span>
+                    <span>{READINESS_STATUS_LABELS[diagnostic.status]}</span>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p role="status">
+                {m.readinessDiagnostics
+                  ? "รายงานนี้ไม่มีรายการตรวจวินิจฉัย"
+                  : "Agent ยังไม่รายงานผลตรวจวินิจฉัย"}
+              </p>
+            )}
+          </section>
           <form
             className="grid gap-3 sm:grid-cols-2"
             onSubmit={(e) => {

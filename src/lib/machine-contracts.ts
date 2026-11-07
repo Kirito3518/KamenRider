@@ -1,3 +1,24 @@
+export type ReadinessDiagnosticCheckId =
+  | "baseline"
+  | "bootChallenge"
+  | "restoration"
+  | "streamFence"
+  | "desktopHealth"
+  | "configurationRevision"
+  | "leaseReconciliation"
+  | "runtimeHealth";
+
+export type ReadinessDiagnosticStatus =
+  | "passed"
+  | "blocked"
+  | "unavailable"
+  | "unknown";
+
+export type ReadinessDiagnostic = {
+  checkId: ReadinessDiagnosticCheckId;
+  status: ReadinessDiagnosticStatus;
+};
+
 export type Machine = {
   machineId: string;
   approvalStatus: string;
@@ -15,6 +36,7 @@ export type Machine = {
   agentVersion: string | null;
   publicKeyFingerprint?: string;
   activeAdminVncSessions: number;
+  readinessDiagnostics?: ReadinessDiagnostic[] | null;
 };
 export type Lease = {
   connection?: { address: string | null; stale: boolean };

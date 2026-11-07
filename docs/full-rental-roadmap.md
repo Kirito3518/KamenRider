@@ -152,7 +152,7 @@ VNC/noVNC เป็นความสามารถของระบบฉบ�
 
 ## สถานะสรุปวันนี้
 
-เว็บ/Controller/Agent มีโครงและ business logic หลายส่วนแล้ว; Controller dev และ Next dev ตอบใน localhost ได้ โดย `/api/machines` และ session API ตอบ 200. Task 16 สร้างและตรวจ package ในเครื่องแล้ว และเปิดการสร้างคำสั่งติดตั้งในหน้า Admin สำหรับ localhost; ยังไม่มีการรันคำสั่งหรือติดตั้ง KamenRaider Agent/Stream Guard. noVNC viewer, read-only WSS gateway, TightVNC installer, Stream Guard และ SQLite backup/restore มีโค้ดและ software tests แต่ยังไม่มี live installation/qualification บนเครื่องลูก. Production readiness ยังคง NOT READY เพราะ boot/restoration/desktop-health providers, trusted Sunshine TLS/credentials, live fence behavior และ hardware acceptance ยังขาด.
+เว็บ/Controller/Agent มีโครงและ business logic หลายส่วนแล้ว; Controller dev และ Next dev ตอบใน localhost ได้ โดย `/api/machines` และ session API ตอบ 200. Task 16 สร้างและตรวจ package ในเครื่องแล้ว และเปิดการสร้างคำสั่งติดตั้งในหน้า Admin สำหรับ localhost; ยังไม่มีการรันคำสั่งหรือติดตั้ง KamenRaider Agent/Stream Guard. หน้า Admin แสดง readiness diagnostics ล่าสุดที่ Agent รายงานเพื่อช่วยวินิจฉัยเท่านั้น โดยไม่เปลี่ยนเกณฑ์ readiness หรือ rental gate และ `/api/machines` ไม่ส่งข้อมูลนี้ให้ผู้เช่า. noVNC viewer, read-only WSS gateway, TightVNC installer, Stream Guard และ SQLite backup/restore มีโค้ดและ software tests แต่ยังไม่มี live installation/qualification บนเครื่องลูก. Production readiness ยังคง NOT READY เพราะ boot/restoration/desktop-health providers, trusted Sunshine TLS/credentials, live fence behavior และ hardware acceptance ยังขาด.
 
 ### Stream Guard installer — Task 5 verification, 2026-11-06
 
@@ -227,3 +227,10 @@ The default-closed Sunshine installer transaction is implemented and verified in
 - After the code commit, rebuild the local win-x64 package from clean main and update only `AGENT_PACKAGE_SHA256` in `.env.local`; verify version, required ZIP entries, absence of TightVNC MSI/default appsettings, and matching archive/record/environment hashes. No tests are required after this final artifact refresh.
 - Do not install services or change machine/firewall/Sunshine state, disclose other environment values, or read or modify Restore Rx.
 - Complete: the package-build regression reproduced the stale `Agent/Agent.deps.json` identity before the fix and passed after it; the package-plan check passed. Publishing now cleans the selected Release/RID outputs so dependency metadata is regenerated for the requested version. Fix committed as `5468891`; runtime behavior and dependencies are unchanged.
+
+### Task 24: Display readiness diagnostics only to administrators (2026-11-07)
+
+- The Admin machine list now renders the Agent's latest bounded readiness check IDs and statuses with Thai labels, a diagnostic-only caption, and a clear not-reported state for older Agents. The renter-facing `/api/machines` response continues to omit diagnostics.
+- The diagnostics are display-only: readiness, rental eligibility, lease allocation, and stream-gate behavior are unchanged.
+- Verification: the focused Admin UI suite passed 6/6; `NEXT_DIST_DIR=.next-task2-validation pnpm test:machines` passed, including 9/9 VNC/installer helper checks and the public machine route regression; `pnpm exec tsc --noEmit` passed; isolated Webpack production build passed with `/admin/machines` as Partial Prerender. Targeted ESLint reports one pre-existing `react-hooks/set-state-in-effect` error at the unchanged install-command effect in `machines-manager.tsx:128`.
+- Rental readiness remains NOT READY and hardware acceptance remains NOT TESTED. This display change does not qualify boot/restoration/desktop evidence, installed Agent/Guard, live VNC/Sunshine/WOL, or a machine for rental; no host, service, firewall, Sunshine, or Restore Rx state was changed.

@@ -48,3 +48,10 @@ This snapshot supersedes the earlier antivirus status above. Its software-suite 
 - Task 20 reported `pnpm test:machines`, `pnpm exec tsc --noEmit`, and an isolated Webpack production build passing. The review noted that no component-level interaction test was added for the refresh/copy UI; manual Admin acceptance remains outstanding.
 
 Rental readiness remains **NOT READY**, and live hardware and Restore Rx acceptance remain **NOT TESTED**. These software checks do not establish live installation, boot restoration, firewall enforcement, Sunshine or VNC behavior, or external-network connectivity.
+
+## Latest software evidence (2026-11-07; readiness diagnostics Admin display)
+
+- The Admin machine list now renders bounded Agent readiness diagnostics with Thai check and status labels. It clearly labels the information as diagnostic-only and says when a report is absent. The public `/api/machines` route regression confirms renter-facing JSON omits `readinessDiagnostics`.
+- `pnpm exec vitest run tests/machines-manager.test.tsx` passed 6/6. `NEXT_DIST_DIR=.next-task2-validation pnpm test:machines` passed, including the route harness and 9/9 VNC/installer helper checks.
+- `pnpm exec tsc --noEmit` and the isolated Webpack production build passed; the build output identified `/admin/machines` as Partial Prerender. Targeted ESLint reports a pre-existing `react-hooks/set-state-in-effect` error at the unchanged install-command effect in `src/components/admin/machines-manager.tsx:128`.
+- Diagnostics improve Admin visibility only. They do not affect readiness, rental eligibility, lease allocation, or stream-gate decisions. Rental readiness remains **NOT READY**; hardware acceptance remains **NOT TESTED**. No service, firewall, Sunshine, or Restore Rx state was changed.

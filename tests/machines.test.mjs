@@ -64,6 +64,10 @@ test("machine API session boundaries, validation, redaction and controller failu
             macAddress: "001122334455",
             sunshinePort: 47990,
             publicKeyFingerprint: "secret-management-fingerprint",
+            readinessDiagnostics: [
+              { checkId: "baseline", status: "passed" },
+              { checkId: "bootChallenge", status: "unavailable" },
+            ],
           },
           ...[ ["held", "ready"], ["not-ready", "notReady"], ["offline", "unreachable"] ].map(([machineId, readiness]) => ({ machineId, approvalStatus: "approved", displayName: machineId, hourlyPriceMinorUnits: 100, readiness, canRent: false })),
         ]),
@@ -113,8 +117,11 @@ test("machine API session boundaries, validation, redaction and controller failu
     const inventory = await call("/machines");
     assert.equal(inventory.status, 200);
     const publicData = await inventory.text();
-    const states = Object.fromEntries(JSON.parse(publicData).map(m => [m.id, m.status]));
+    const publicMachines = JSON.parse(publicData);
+    const states = Object.fromEntries(publicMachines.map(m => [m.id, m.status]));
     assert.deepEqual(states, { pc: "available", held: "busy", "not-ready": "notReady", offline: "unreachable" });
+    assert.ok(publicMachines.every((machine) => !("readinessDiagnostics" in machine)));
+    assert.ok(!publicData.includes("readinessDiagnostics"));
     for (const secret of [
       "192.168.1.4",
       "192.168.1.5",

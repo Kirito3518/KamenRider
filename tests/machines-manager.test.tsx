@@ -30,11 +30,13 @@ describe("MachinesManager install command interactions", () => {
   let unexpectedUrls: string[];
   let clipboardWriteText: ReturnType<typeof vi.fn>;
   let clipboardDescriptor: PropertyDescriptor | undefined;
+  let machinesResponse: unknown[];
 
   beforeEach(() => {
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(new Date(TEST_NOW));
     unexpectedUrls = [];
+    machinesResponse = [];
     clipboardDescriptor = Object.getOwnPropertyDescriptor(
       navigator,
       "clipboard",
@@ -60,7 +62,7 @@ describe("MachinesManager install command interactions", () => {
     ];
     fetchSpy = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url === MACHINES_URL) return jsonResponse([]);
+      if (url === MACHINES_URL) return jsonResponse(machinesResponse);
       if (url === INSTALL_COMMAND_URL) {
         const response = installResponses[installResponseIndex];
         installResponseIndex += 1;
@@ -151,6 +153,102 @@ describe("MachinesManager install command interactions", () => {
       screen.getByText(`หมดอายุเมื่อ (UTC): ${SECOND_EXPIRY}`),
     ).toBeDefined();
     expectNetworkIsolation(2);
+  });
+
+  it("shows the localized Admin-only diagnostic checklist and status for each reported check", async () => {
+    machinesResponse = [
+      {
+        machineId: "readiness-pc",
+        approvalStatus: "approved",
+        displayName: "Readiness PC",
+        localIp: "192.168.1.12",
+        vncLocalIp: null,
+        hourlyPriceMinorUnits: 100,
+        moonlightPort: 47989,
+        sunshinePort: 47990,
+        configRevision: 1,
+        appliedConfigRevision: 1,
+        readiness: "notReady",
+        canRent: false,
+        lastSeenAt: null,
+        agentVersion: "test",
+        activeAdminVncSessions: 0,
+        readinessDiagnostics: [
+          { checkId: "baseline", status: "passed" },
+          { checkId: "bootChallenge", status: "unavailable" },
+          { checkId: "restoration", status: "blocked" },
+        ],
+      },
+    ];
+
+    render(<MachinesManager />);
+
+    expect(await screen.findByText("readiness-pc · approved")).toBeDefined();
+    expect(screen.getByText("ผลตรวจวินิจฉัยจาก Agent เท่านั้น ไม่ใช่การอนุมัติให้เช่า"))
+      .toBeDefined();
+    expect(screen.getByText("การตรวจพื้นฐาน")).toBeDefined();
+    expect(screen.getByText("ผ่าน")).toBeDefined();
+    expect(screen.getByText("การทดสอบยืนยันการบูต")).toBeDefined();
+    expect(screen.getByText("ไม่มีระบบตรวจสอบ")).toBeDefined();
+    expect(screen.getByText("การตรวจการคืนค่าสภาพเครื่อง")).toBeDefined();
+    expect(screen.getByText("ถูกบล็อก")).toBeDefined();
+  });
+
+  it("clearly says when the Agent has not reported diagnostics", async () => {
+    machinesResponse = [
+      {
+        machineId: "no-report-pc",
+        approvalStatus: "approved",
+        displayName: "No report PC",
+        localIp: "192.168.1.13",
+        vncLocalIp: null,
+        hourlyPriceMinorUnits: 100,
+        moonlightPort: 47989,
+        sunshinePort: 47990,
+        configRevision: 1,
+        appliedConfigRevision: 1,
+        readiness: "notReady",
+        canRent: false,
+        lastSeenAt: null,
+        agentVersion: "old-agent",
+        activeAdminVncSessions: 0,
+      },
+    ];
+
+    render(<MachinesManager />);
+
+    expect(await screen.findByText("no-report-pc · approved")).toBeDefined();
+    expect(screen.getByText("Agent ยังไม่รายงานผลตรวจวินิจฉัย"))
+      .toBeDefined();
+  });
+
+  it("distinguishes an empty diagnostic report from a missing report", async () => {
+    machinesResponse = [
+      {
+        machineId: "empty-report-pc",
+        approvalStatus: "approved",
+        displayName: "Empty report PC",
+        localIp: "192.168.1.14",
+        vncLocalIp: null,
+        hourlyPriceMinorUnits: 100,
+        moonlightPort: 47989,
+        sunshinePort: 47990,
+        configRevision: 1,
+        appliedConfigRevision: 1,
+        readiness: "notReady",
+        canRent: false,
+        lastSeenAt: null,
+        agentVersion: "test-agent",
+        activeAdminVncSessions: 0,
+        readinessDiagnostics: [],
+      },
+    ];
+
+    render(<MachinesManager />);
+
+    expect(await screen.findByText("empty-report-pc · approved")).toBeDefined();
+    expect(screen.getByText("รายงานนี้ไม่มีรายการตรวจวินิจฉัย"))
+      .toBeDefined();
   });
 
   function expectNetworkIsolation(expectedInstallRequests: number) {
