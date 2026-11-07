@@ -23,6 +23,12 @@ try {
  if($PSVersionTable.PSEdition -eq 'Core'){
   $verifyDirectory=Join-Path $outputDirectory 'version-verify'
   [IO.Compression.ZipFile]::ExtractToDirectory($archive,$verifyDirectory)
+  $dependencyManifest=Join-Path $verifyDirectory 'Agent/Agent.deps.json'
+  if(-not (Test-Path -LiteralPath $dependencyManifest -PathType Leaf)){throw 'Published Agent dependency manifest is missing.'}
+  $dependencies=[IO.File]::ReadAllText($dependencyManifest) | ConvertFrom-Json
+  $expectedLibraryId="Agent/$($result.AgentVersion)"
+  $projectLibrary=$dependencies.libraries.PSObject.Properties[$expectedLibraryId]
+  if(-not $projectLibrary -or $projectLibrary.Value.type -ne 'project'){throw 'Published Agent dependency identity does not match the package version.'}
   $versionProbe=Join-Path $outputDirectory 'Read-AgentVersion.ps1'
   $versionProbeSource=@'
 param([Parameter(Mandatory)][string]$AssemblyPath)

@@ -17,6 +17,8 @@ foreach($item in $roles){
  $output=Join-Path $OutputDirectory $item
  if($Plan){[pscustomobject]@{Project=$project;Output=$output;Runtime=$Runtime;SelfContained=$true;Version=$Version};continue}
  if($PSCmdlet.ShouldProcess($output,"Publish $item")){
+  & dotnet clean $project -c Release -r $Runtime
+  if($LASTEXITCODE -ne 0){throw "Cleaning $item failed."}
   & dotnet publish $project -c Release -r $Runtime --self-contained true -o $output "-p:Version=$Version" -p:IncludeSourceRevisionInInformationalVersion=false
   if($LASTEXITCODE -ne 0){throw "Publishing $item failed."}
  }
