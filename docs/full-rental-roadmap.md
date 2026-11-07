@@ -211,3 +211,10 @@ The default-closed Sunshine installer transaction is implemented and verified in
 - Keep these as software restart-state tests; they must not claim to simulate a physical power loss or prove Windows filesystem crash semantics. Update the roadmap to keep process-crash and machine shutdown acceptance separate.
 - Run the full Agent test suite. Do not read or modify Restore Rx, install services, or change machine state.
 - Verification: the four `LeaseStoreRestartTests` passed 4/4 and the full `Agent.Tests` suite passed 226/226 with zero failures or skips. A new `LeaseStore` instance loads the saved directory contents; this does not terminate a process mid-write, simulate physical power loss, prove Windows atomic replacement/crash behavior, or qualify shutdown/retry on a real machine. Those remain separate acceptance work.
+
+### Task 22: Reconcile latest software evidence in acceptance record
+
+- Add a latest-software update to `docs/agent-acceptance.md` with the Task 19–21 evidence recorded in the SDD ledger: Agent.Tests 226/226 with zero failures/skips; focused LeaseStoreRestartTests 4/4 after the final filename-fixture correction; Controller.Tests 164/164 for the pairing contract; and Task 20 machine tests, TypeScript check, and isolated Webpack build passing.
+- Keep prior test counts clearly historical, and continue to state rental readiness as NOT READY with hardware acceptance NOT TESTED. Software tests must not be presented as live installation, boot restoration, firewall, Sunshine, VNC, or external-network proof.
+- Documentation-only. Do not run tests, install services, change machine state, or read or modify Restore Rx.
+- Complete: the acceptance record now labels older suite counts as historical and records Task 19–21 evidence. Agent.Tests 226/226 predates the fixture filename correction; focused LeaseStoreRestartTests 4/4 follows it. Task 19 Controller.Tests passed 164/164, Task 20 machine tests/TypeScript/isolated Webpack build passed, and readiness plus live hardware/Restore Rx status remain NOT READY / NOT TESTED. No tests or host operations were run for this documentation update.
