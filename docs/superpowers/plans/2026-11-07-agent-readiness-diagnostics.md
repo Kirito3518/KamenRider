@@ -86,5 +86,5 @@
 
 ## Completion
 
-- [ ] Obtain a fresh Luna Max review of each task diff using the SDD task-review process.
-- [ ] Confirm the working tree is clean and the full range has no production readiness claim unsupported by hardware evidence.
+- [x] Obtain a fresh Luna Max review of each task diff using the SDD task-review process.
+- [x] Confirm the working tree is clean and the full range has no production readiness claim unsupported by hardware evidence.
