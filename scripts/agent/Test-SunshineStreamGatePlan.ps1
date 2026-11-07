@@ -16,8 +16,7 @@ if ($gatePlan.Firewall.Name -ne 'KamenRaider Stream Guard - Sunshine' -or $gateP
     $gatePlan.Firewall.Direction -ne 'Inbound' -or $gatePlan.Firewall.Profile -ne 'Any' -or
     $gatePlan.Firewall.Protocol -ne 'Any' -or
     $gatePlan.Firewall.RemoteAddress -ne 'Any' -or $gatePlan.Firewall.Program -ne 'sunshine.exe resolved from SunshineService ImagePath' -or
-    $gatePlan.Firewall.Enabled -ne $true -or
-    $gatePlan.Firewall.OverrideBlockRules -ne $false) {
+    $gatePlan.Firewall.Enabled -ne $true) {
     throw 'Stream Guard plan must describe the exact enabled all-profile Sunshine block rule.'
 }
 
@@ -136,7 +135,7 @@ function Set-StreamGateServiceConfiguration {
     } else { Step 'guard-config' }
 }
 function New-FixtureRule {
-    [pscustomobject]@{ Enabled = 'True'; Direction = 'Inbound'; Action = 'Block'; Profile = 'Any'; EdgeTraversalPolicy = 'Block'; OverrideBlockRules = 'False'; PolicyStoreSourceType = 'Local' }
+    [pscustomobject]@{ Enabled = 'True'; Direction = 'Inbound'; Action = 'Block'; Profile = 'Any'; EdgeTraversalPolicy = 'Block'; OverrideBlockRules = $null; PolicyStoreSourceType = 'Local' }
 }
 function Get-NetFirewallRule {
     param($PolicyStore, $Name, $ErrorAction)
@@ -236,12 +235,14 @@ $rejected = $false
 try { Restore-SunshineStreamGate -Transaction $installed } catch { $rejected = $_.Exception -is [AggregateException] }
 if (-not $rejected -or -not $fixture.Guard -or $fixture.Running -or $fixture.Rule.Enabled -ne 'True') { throw 'Rollback failure must retain Guard and fence, keep Sunshine stopped, and surface the failure.' }
 $caseCount++
-foreach ($case in @('valid', 'guard-account', 'agent-dependency', 'sunshine-start', 'closed-policy', 'profile', 'policy')) {
+foreach ($case in @('valid', 'override-false', 'override-true', 'guard-account', 'agent-dependency', 'sunshine-start', 'closed-policy', 'profile', 'policy')) {
     Reset-Fixture
     $fixture.StartType = 3; $fixture.Dependencies = @('BaseService', 'KamenRaider Stream Guard'); $fixture.Rule = New-FixtureRule
     switch ($case) {
         'guard-account' { $fixture.BadGuardAccount = $true }
         'agent-dependency' { $fixture.MissingAgentDependency = $true }
+        'override-false' { $fixture.Rule.OverrideBlockRules = 'False' }
+        'override-true' { $fixture.Rule.OverrideBlockRules = 'True' }
         'sunshine-start' { $fixture.StartType = 2 }
         'closed-policy' { $fixture.Rule.Enabled = 'False' }
         'profile' { $fixture.DisabledProfile = 'Public' }
@@ -249,7 +250,7 @@ foreach ($case in @('valid', 'guard-account', 'agent-dependency', 'sunshine-star
     }
     $rejected = $false
     try { Test-InstalledSunshineStreamGate -GuardExecutablePath $guardPath -ContentRoot ([IO.Path]::GetDirectoryName($guardPath)) } catch { $rejected = $true }
-    if ($rejected -ne ($case -ne 'valid') -or $fixture.Events.Count -ne 0) { throw "Enrollment repair validation failed: $case" }
+    if ($rejected -ne ($case -notin @('valid', 'override-false')) -or $fixture.Events.Count -ne 0) { throw "Enrollment repair validation failed: $case" }
     $caseCount++
 }
 foreach ($profile in @('Domain', 'Private', 'Public')) {

@@ -51,7 +51,6 @@ function Get-SunshineStreamGatePlan {
             InterfaceType = 'Any'
             Enabled = $true
             EdgeTraversalPolicy = 'Block'
-            OverrideBlockRules = $false
         }
         Rollback = 'Restore Sunshine startup/dependencies and prior rule state; remove only the transaction-owned Guard service and newly created rule.'
     }
@@ -149,7 +148,7 @@ function Test-SunshineStreamGateFirewallRule {
     if ($application.Count -ne 1 -or $service.Count -ne 1 -or $ports.Count -ne 1 -or $addresses.Count -ne 1 -or $interfaces.Count -ne 1 -or $interfaceTypes.Count -ne 1) { return $false }
     ($AllowDisabled -or $rule.Enabled -eq 'True') -and $rule.Direction -eq 'Inbound' -and $rule.Action -eq 'Block' -and
         [string]$rule.Profile -eq 'Any' -and [string]$rule.EdgeTraversalPolicy -eq 'Block' -and
-        [string]$rule.OverrideBlockRules -eq 'False' -and
+        ($null -eq $rule.OverrideBlockRules -or [string]$rule.OverrideBlockRules -eq 'False') -and
         [string]::Equals([IO.Path]::GetFullPath([string]$application[0].Program), [IO.Path]::GetFullPath($SunshineExecutable), [StringComparison]::OrdinalIgnoreCase) -and
         [string]$service[0].Service -eq 'Any' -and [string]$ports[0].Protocol -eq 'Any' -and
         (@($ports[0].LocalPort) -join ',') -eq 'Any' -and (@($ports[0].RemotePort) -join ',') -eq 'Any' -and
@@ -226,7 +225,7 @@ function New-SunshineStreamGateFirewallRule {
         -DisplayName 'KamenRaider Stream Guard - Sunshine' -Description 'Managed by KamenRaider Stream Guard.' `
         -Direction Inbound -Action Block -Program $SunshineExecutable -Profile Any -Protocol Any `
         -LocalPort Any -RemotePort Any -LocalAddress Any -RemoteAddress Any -InterfaceType Any `
-        -Enabled True -EdgeTraversalPolicy Block -OverrideBlockRules $false -ErrorAction Stop | Out-Null
+        -Enabled True -EdgeTraversalPolicy Block -ErrorAction Stop | Out-Null
 }
 function Close-SunshineStreamGateTransaction {
     param([psobject]$Transaction)
