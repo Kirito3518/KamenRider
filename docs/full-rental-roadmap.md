@@ -218,3 +218,12 @@ The default-closed Sunshine installer transaction is implemented and verified in
 - Keep prior test counts clearly historical, and continue to state rental readiness as NOT READY with hardware acceptance NOT TESTED. Software tests must not be presented as live installation, boot restoration, firewall, Sunshine, VNC, or external-network proof.
 - Documentation-only. Do not run tests, install services, change machine state, or read or modify Restore Rx.
 - Complete: the acceptance record now labels older suite counts as historical and records Task 19–21 evidence. Agent.Tests 226/226 predates the fixture filename correction; focused LeaseStoreRestartTests 4/4 follows it. Task 19 Controller.Tests passed 164/164, Task 20 machine tests/TypeScript/isolated Webpack build passed, and readiness plus live hardware/Restore Rx status remain NOT READY / NOT TESTED. No tests or host operations were run for this documentation update.
+
+### Task 23: Keep Agent package dependency metadata on the current revision
+
+- The actual local ZIP showed its Agent assembly informational version at the current build revision while `Agent/Agent.deps.json` still named an older dirty revision. The package build must publish both identities from the same source-specific `AgentVersion`.
+- Add a package-build regression that compares the Agent project identity in `Agent/Agent.deps.json` with the returned `AgentVersion`; demonstrate the existing stale-metadata failure before changing the publish pipeline.
+- Make the minimal publish/restore change that refreshes dependency metadata when `Version` changes, without changing runtime behavior. Verify with the Agent package-plan and package-build PowerShell checks on PowerShell 7.
+- After the code commit, rebuild the local win-x64 package from clean main and update only `AGENT_PACKAGE_SHA256` in `.env.local`; verify version, required ZIP entries, absence of TightVNC MSI/default appsettings, and matching archive/record/environment hashes. No tests are required after this final artifact refresh.
+- Do not install services or change machine/firewall/Sunshine state, disclose other environment values, or read or modify Restore Rx.
+- Complete: the package-build regression reproduced the stale `Agent/Agent.deps.json` identity before the fix and passed after it; the package-plan check passed. Publishing now cleans the selected Release/RID outputs so dependency metadata is regenerated for the requested version. Fix committed as `5468891`; runtime behavior and dependencies are unchanged.
