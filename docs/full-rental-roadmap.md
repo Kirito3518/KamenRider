@@ -192,3 +192,9 @@ The default-closed Sunshine installer transaction is implemented and verified in
 - `/api/admin/machines/[machineId]` PATCH now preserves the Controller's saved Admin-confirmed VNC target when `vncLocalIp` is omitted. Explicit `null` still clears the target, and a supplied valid IP still saves. The Controller's `expectedRevision` check rejects concurrent stale updates.
 - TDD RED reproduced the bug (`null` forwarded instead of the saved target); GREEN passed for omission, explicit clear, and explicit IP save. `pnpm test:machines` passed, including 8/8 VNC draft/source tests, 22/22 machine configuration scenarios, and the new PATCH regression. Isolated Webpack build, `pnpm test:auth` (8/8), TypeScript, and lint passed; lint retained one existing `<img>` warning. Commit: `fee9b448`.
 - No Agent install, service, firewall, Sunshine, or Restore Rx state changed. Production readiness remains NOT READY; live VNC connectivity and hardware/Restore Rx qualification remain NOT TESTED.
+
+### Task 19: Align Foundation Sunshine pairing slot contract
+
+- The Agent adapter represents Foundation Sunshine's single pending PIN slot with the exact ID `foundation-sunshine-single-pending-slot`. The Controller must accept this exact documented slot ID in signed pairing offers and owner pairing requests, while preserving support for existing lowercase 32-character hexadecimal pairing IDs and rejecting all other values.
+- Define the Foundation slot ID once in the shared Contracts assembly and use it from both Agent and Controller validation; add regression coverage proving an offer reaches the renter and can be queued as a `PairPin` command, plus Agent coverage proving the adapter returns the shared value.
+- Verify with targeted Agent and Controller tests. This is software-only; do not install services or modify firewall/Sunshine/Restore Rx state. Real Moonlight pairing and stream qualification remain separate hardware acceptance.

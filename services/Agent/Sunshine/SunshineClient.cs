@@ -4,6 +4,7 @@ using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
+using KamenRaider.Contracts;
 
 namespace KamenRaider.Agent.Sunshine;
 
@@ -11,7 +12,7 @@ namespace KamenRaider.Agent.Sunshine;
 // application pairing slot; this fork does not expose a pending-client ID.
 public sealed class SunshineClient : ISunshinePairingApi, IDisposable
 {
-    public const string PairingSlotId = "foundation-sunshine-single-pending-slot";
+    public const string PairingSlotId = PairingIds.FoundationSunshineSinglePendingSlotId;
     private const string ClientNamePrefix = "KR-";
     private readonly HttpClient http;
     private readonly TimeSpan handshakeTimeout;
@@ -55,7 +56,7 @@ public sealed class SunshineClient : ISunshinePairingApi, IDisposable
 
     public async Task<bool> SubmitAsync(string id, string pin, CancellationToken ct)
     {
-        if (id != PairingSlotId || pin.Length != 4 || pin.Any(c => c is < '0' or > '9')) return false;
+        if (id != PairingIds.FoundationSunshineSinglePendingSlotId || pin.Length != 4 || pin.Any(c => c is < '0' or > '9')) return false;
 
         var clientName = ClientNamePrefix + Guid.NewGuid().ToString("N");
         if (!await MutationAsync(HttpMethod.Post, "/api/pin", new { pin, name = clientName }, ct)) return false;

@@ -1,12 +1,13 @@
 using System.Net;
 using System.Text.Json;
+using KamenRaider.Contracts;
 using KamenRaider.Agent.Sunshine;
 
 namespace Agent.Tests;
 
 public sealed class FoundationSunshineClientTests
 {
-    private const string SlotId = "foundation-sunshine-single-pending-slot";
+    private const string SlotId = PairingIds.FoundationSunshineSinglePendingSlotId;
 
     [Fact]
     public async Task PendingPairingOfferUsesTheInstalledClientListRoute()

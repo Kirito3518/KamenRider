@@ -14,7 +14,7 @@ public sealed partial class ControllerDatabase {
   try{using var cmd=Command("UPDATE command_outbox SET payload='{}',status=CASE WHEN status='pending' THEN 'expired' ELSE status END WHERE command_id=$id",("$id",id));cmd.ExecuteNonQuery();}
   catch(SqliteException){/* A later database operation reconciles status; the secret is already removed. */}
  }}
- private static bool PairId(string? id)=>id is {Length:32}&&id.All(c=>c is >= '0' and <= '9' or >= 'a' and <= 'f');
+ private static bool PairId(string? id)=>PairingIds.IsValid(id);
  private void ObservePairingOffer(SqliteTransaction tx,string machine,SyncRequest request,long now){
   ExecuteLease(tx,"DELETE FROM pairing_offers WHERE machine_id=$machine",("$machine",machine));var offer=request.PendingPairing;
   if(offer is null)return;

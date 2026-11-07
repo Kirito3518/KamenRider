@@ -26,7 +26,7 @@ public sealed class RentalLifecycleIntegrationTests
     private const string ServiceCredential = "integration-service-credential";
     private const string LocalIp = "192.168.1.40";
     private const string MacAddress = "001122334455";
-    private const string PairingId = "0123456789abcdef0123456789abcdef";
+    private const string PairingId = PairingIds.FoundationSunshineSinglePendingSlotId;
 
     [Fact]
     public async Task SignedEnrollmentLeasePairingExpiryAndRebootReturnMachineToRentalPool()
