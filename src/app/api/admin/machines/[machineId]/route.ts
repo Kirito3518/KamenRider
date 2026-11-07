@@ -7,12 +7,19 @@ export async function PATCH(
   return machineApi(r, true, async (_, call) => {
     const b = await r.json();
     const revision = integer(b.expectedRevision);
+    let vncLocalIp: string | null;
+    if (b.vncLocalIp === undefined) {
+      const machines = await call<Array<{ machineId: string; vncLocalIp: string | null }>>("/internal/machines");
+      vncLocalIp = machines.find((machine) => machine.machineId === machineId)?.vncLocalIp ?? null;
+    } else {
+      vncLocalIp = b.vncLocalIp == null ? null : text(b.vncLocalIp);
+    }
     const body = {
       displayName: text(b.displayName),
       hourlyPriceMinorUnits: integer(b.hourlyPriceMinorUnits, 1),
       moonlightPort: integer(b.moonlightPort, 1, 65535),
       sunshinePort: integer(b.sunshinePort, 1, 65535),
-      vncLocalIp: b.vncLocalIp == null ? null : text(b.vncLocalIp),
+      vncLocalIp,
     };
     return call(
       `/internal/machines/${segment(machineId)}?expectedRevision=${revision}`,

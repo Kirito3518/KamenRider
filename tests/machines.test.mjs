@@ -18,7 +18,7 @@ const call = (path, body, cookie, method) =>
     headers: { ...headers, ...(cookie ? { cookie } : {}) },
     body: body ? JSON.stringify(body) : undefined,
   });
-test("machine API session boundaries, validation, redaction and controller failures", async () => {
+test("machine API session boundaries, validation, redaction and controller failures", async (t) => {
   assert.equal((await call("/my-leases")).status, 401);
   assert.equal((await call("/my-leases/rental-1/extend", { additionalSeconds: 60, expectedRevision: 1, idempotencyKey: "unauthenticated" })).status, 401);
   assert.equal((await call("/admin/machines/pc/approve", {})).status, 401);
@@ -175,9 +175,23 @@ test("machine API session boundaries, validation, redaction and controller failu
       vncLocalIp: "192.168.1.4",
       expectedRevision: 999,
     };
-    const withoutVncTarget = { ...patch, vncLocalIp: null, expectedRevision: 1 };
-    assert.equal((await call("/admin/machines/pc", withoutVncTarget, cookie, "PATCH")).status, 200);
+    await t.test("omitting vncLocalIp preserves the saved Admin-confirmed target", async () => {
+      const withoutVncTarget = {
+        displayName: "PC",
+        hourlyPriceMinorUnits: 100,
+        moonlightPort: 47989,
+        sunshinePort: 47990,
+        expectedRevision: 1,
+      };
+      assert.equal((await call("/admin/machines/pc", withoutVncTarget, cookie, "PATCH")).status, 200);
+      assert.equal(seen.at(-1).body.vncLocalIp, "192.168.1.5");
+    });
+    const clearVncTarget = { ...patch, vncLocalIp: null, expectedRevision: 1 };
+    assert.equal((await call("/admin/machines/pc", clearVncTarget, cookie, "PATCH")).status, 200);
     assert.equal(seen.at(-1).body.vncLocalIp, null);
+    const validVncTarget = { ...patch, expectedRevision: 1 };
+    assert.equal((await call("/admin/machines/pc", validVncTarget, cookie, "PATCH")).status, 200);
+    assert.equal(seen.at(-1).body.vncLocalIp, "192.168.1.4");
     for (const invalid of [
       { ...patch, hourlyPriceMinorUnits: -1 },
       { ...patch, moonlightPort: 65536 },
