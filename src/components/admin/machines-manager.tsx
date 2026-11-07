@@ -1,7 +1,8 @@
 "use client";
-import { useEffect, useState, type ChangeEventHandler } from "react";
+import { useCallback, useEffect, useState, type ChangeEventHandler } from "react";
 import { AdminVncViewerButton } from "@/components/admin/admin-vnc-viewer";
 import type { Lease, Machine } from "@/lib/machine-contracts";
+import { getInstallCommandExpiryState } from "@/lib/agent-install-expiry.mjs";
 import {
   getSavedVncTargetForMetadataUpdate,
   getVncTargetForExplicitSave,
@@ -24,6 +25,9 @@ export function MachinesManager() {
   const [machines, setMachines] = useState<Machine[]>([]);
   const [vncTargetDrafts, setVncTargetDrafts] = useState<Record<string, string>>({});
   const [installCommand, setInstallCommand] = useState<string | null>(null);
+  const [installExpiresAtUtc, setInstallExpiresAtUtc] = useState<string | null>(null);
+  const [installClockNow, setInstallClockNow] = useState(0);
+  const [isRefreshingInstallCommand, setIsRefreshingInstallCommand] = useState(false);
   const [installStatus, setInstallStatus] = useState("กำลังตรวจชุดติดตั้ง…");
   const [copyStatus, setCopyStatus] = useState("");
   const [trialLease, setTrialLease] = useState<Lease | null>(null);
@@ -75,23 +79,59 @@ export function MachinesManager() {
       window.clearInterval(timer);
     };
   }, []);
+  const refreshInstallCommand = useCallback(async (isActive: () => boolean = () => true) => {
+    setIsRefreshingInstallCommand(true);
+    setInstallStatus("กำลังขอคำสั่งติดตั้ง…");
+    setCopyStatus("");
+    try {
+      const response = await fetch("/api/admin/agent-install-command", { cache: "no-store" });
+      if (!response.ok) throw new Error("ตรวจชุดติดตั้งไม่ได้");
+      const result: { available: boolean; command?: string; expiresAtUtc?: string; reason?: string } = await response.json();
+      if (!isActive()) return;
+      const available = result.available && Boolean(result.command) && Boolean(result.expiresAtUtc);
+      setInstallCommand(available ? result.command! : null);
+      setInstallExpiresAtUtc(available ? result.expiresAtUtc! : null);
+      setInstallClockNow(Date.now());
+      setInstallStatus(available ? "ชุดติดตั้งพร้อมใช้งาน" : result.reason || "ชุดติดตั้งยังไม่พร้อม");
+    } catch (error) {
+      if (isActive()) setInstallStatus(`ตรวจชุดติดตั้งไม่ได้: ${String(error)}`);
+    } finally {
+      if (isActive()) setIsRefreshingInstallCommand(false);
+    }
+  }, []);
   useEffect(() => {
     let active = true;
-    fetch("/api/admin/agent-install-command", { cache: "no-store" })
-      .then(async (response) => {
-        if (!response.ok) throw new Error("ตรวจชุดติดตั้งไม่ได้");
-        return response.json();
-      })
-      .then((result: { available: boolean; command?: string; reason?: string }) => {
-        if (!active) return;
-        setInstallCommand(result.available ? result.command || null : null);
-        setInstallStatus(result.available ? "ชุดติดตั้งพร้อมใช้งาน" : result.reason || "ชุดติดตั้งยังไม่พร้อม");
-      })
-      .catch((error) => { if (active) setInstallStatus(`ตรวจชุดติดตั้งไม่ได้: ${String(error)}`); });
+    void refreshInstallCommand(() => active);
     return () => { active = false; };
-  }, []);
+  }, [refreshInstallCommand]);
+  useEffect(() => {
+    if (!installExpiresAtUtc) return;
+    const expiresAtMs = Date.parse(installExpiresAtUtc);
+    const updateClock = () => setInstallClockNow(Date.now());
+    if (!Number.isFinite(expiresAtMs)) {
+      updateClock();
+      return;
+    }
+    const timer = window.setTimeout(updateClock, Math.max(0, expiresAtMs - Date.now()));
+    window.addEventListener("focus", updateClock);
+    document.addEventListener("visibilitychange", updateClock);
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener("focus", updateClock);
+      document.removeEventListener("visibilitychange", updateClock);
+    };
+  }, [installExpiresAtUtc]);
+  const installExpiry = installExpiresAtUtc
+    ? getInstallCommandExpiryState(installExpiresAtUtc, installClockNow)
+    : null;
   async function copyInstallCommand() {
-    if (!installCommand) return;
+    if (!installCommand || !installExpiresAtUtc) return;
+    const expiry = getInstallCommandExpiryState(installExpiresAtUtc, Date.now());
+    setInstallClockNow(Date.now());
+    if (expiry.expired) {
+      setCopyStatus("คำสั่งหมดอายุแล้ว กรุณาขอคำสั่งใหม่");
+      return;
+    }
     try {
       await navigator.clipboard.writeText(installCommand);
       setCopyStatus("คัดลอกคำสั่งแล้ว");
@@ -117,15 +157,32 @@ export function MachinesManager() {
       <h1 className="text-3xl font-bold">เครื่องและ Agent</h1>
       <section className="space-y-2 rounded-xl border p-4">
         <h2 className="text-xl font-semibold">ติดตั้งเครื่องลูก</h2>
-        <p role="status" aria-live="polite">{installStatus}</p>
+        <p role="status" aria-live="polite">
+          {installCommand && installExpiry?.expired ? "คำสั่งติดตั้งหมดอายุแล้ว กรุณาขอคำสั่งใหม่" : installStatus}
+        </p>
+        <button
+          type="button"
+          className="rounded border p-2 disabled:opacity-50"
+          disabled={isRefreshingInstallCommand}
+          onClick={() => void refreshInstallCommand()}
+        >
+          {isRefreshingInstallCommand ? "กำลังขอคำสั่ง…" : "ขอคำสั่งติดตั้งใหม่"}
+        </button>
         {installCommand ? <>
           <ol className="list-inside list-decimal space-y-1 text-sm">
             <li>เปิด PowerShell แบบ Administrator บนเครื่องลูก</li>
             <li>คัดลอกคำสั่งด้านล่างไปรันบนเครื่องนั้น</li>
             <li>หลังลงทะเบียนแล้ว หน้าแอดมินจะเปิดขึ้นและเครื่องจะแสดงเป็น pending</li>
           </ol>
+          <p>หมดอายุเมื่อ (UTC): {installExpiry?.displayUtc || "ไม่ทราบ"}</p>
           <textarea id="agent-install-command" className="w-full rounded border p-2 font-mono text-xs" rows={5} readOnly spellCheck={false} value={installCommand} aria-label="คำสั่งติดตั้ง Agent" />
-          <button className="rounded border p-2" onClick={copyInstallCommand}>คัดลอกคำสั่ง PowerShell</button>
+          <button
+            className="rounded border p-2 disabled:opacity-50"
+            disabled={isRefreshingInstallCommand || !installExpiresAtUtc || installExpiry?.expired !== false}
+            onClick={copyInstallCommand}
+          >
+            คัดลอกคำสั่ง PowerShell
+          </button>
           <p role="status" aria-live="polite">{copyStatus}</p>
         </> : null}
       </section>

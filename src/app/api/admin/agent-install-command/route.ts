@@ -47,15 +47,17 @@ export async function GET(request: Request) {
   const scriptUrl = new URL("/agent/Bootstrap-Agent.ps1", base).toString();
   const returnUrl = new URL("/admin/machines", base).toString();
   let ticket: string;
+  let expiresAtUtc: string;
   try {
     const issued = await controllerRequest<{ ticket: string; expiresAtUtc: string }>("/internal/agent-enrollment-tickets", { method: "POST" });
     if (!/^[A-Za-z0-9_-]{43}$/.test(issued.ticket) || !Number.isFinite(Date.parse(issued.expiresAtUtc)) || Date.parse(issued.expiresAtUtc) <= Date.now()) {
       throw new Error("Invalid enrollment ticket response");
     }
     ticket = issued.ticket;
+    expiresAtUtc = issued.expiresAtUtc;
   } catch {
     return Response.json({ available: false, reason: "ออก ticket ลงทะเบียนจาก Controller ไม่สำเร็จ" }, { headers: { "Cache-Control": "no-store" } });
   }
   const command = `$u=${quoted(scriptUrl)}; $r=Invoke-WebRequest -UseBasicParsing -Uri $u -ErrorAction Stop; $m=New-Object System.IO.MemoryStream; try { $r.RawContentStream.CopyTo($m); $b=$m.ToArray() } finally { $m.Dispose(); $r.RawContentStream.Dispose() }; $h=[BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($b)).Replace('-',''); if($h -ne ${quoted(hash)}) { throw 'Installer script hash mismatch' }; $s=[Text.Encoding]::UTF8.GetString($b); & ([ScriptBlock]::Create($s)) -ControllerUrl ${quoted(controllerUrl.toString())} -PackageUrl ${quoted(packageUrl.toString())} -PackageSha256 ${quoted(packageHash!)} -TrustedRootThumbprint ${quoted(root!)} -EnrollmentTicket ${quoted(ticket)} -InstallReturnUrl ${quoted(returnUrl)} -VncAllowedSourceAddress ${quoted(vncAllowedSourceAddress)}`;
-  return Response.json({ available: true, command, scriptUrl }, { headers: { "Cache-Control": "no-store" } });
+  return Response.json({ available: true, command, scriptUrl, expiresAtUtc }, { headers: { "Cache-Control": "no-store" } });
 }

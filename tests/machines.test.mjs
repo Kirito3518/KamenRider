@@ -276,6 +276,7 @@ test("agent install command is admin-only and withheld until configuration valid
     .join("; ");
 
   const ticketRequests = [];
+  const ticketExpiresAtUtc = new Date(Date.now() + 86_400_000).toISOString();
   const ticketServer = createServer(async (req, res) => {
     let bodyBytes = 0;
     for await (const chunk of req) bodyBytes += chunk.length;
@@ -285,7 +286,7 @@ test("agent install command is admin-only and withheld until configuration valid
       res.writeHead(401).end("{}");
       return;
     }
-    res.end(JSON.stringify({ ticket: "A".repeat(43), expiresAtUtc: new Date(Date.now() + 86_400_000).toISOString() }));
+    res.end(JSON.stringify({ ticket: "A".repeat(43), expiresAtUtc: ticketExpiresAtUtc }));
   });
   await new Promise((resolve) => ticketServer.listen(5089, "127.0.0.1", resolve));
   try {
@@ -302,6 +303,7 @@ test("agent install command is admin-only and withheld until configuration valid
     }
 
     assert.equal(result.available, true);
+    assert.equal(result.expiresAtUtc, ticketExpiresAtUtc);
     assert.deepEqual(ticketRequests, [{ method: "POST", url: "/internal/agent-enrollment-tickets", credential: "test-only", bodyBytes: 0 }]);
     const baseUrl = process.env.AGENT_INSTALL_BASE_URL || process.env.BETTER_AUTH_URL;
     const packageUrl = new URL(process.env.AGENT_PACKAGE_URL);

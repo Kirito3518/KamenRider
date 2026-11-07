@@ -198,3 +198,9 @@ The default-closed Sunshine installer transaction is implemented and verified in
 - The Agent adapter represents Foundation Sunshine's single pending PIN slot with the exact ID `foundation-sunshine-single-pending-slot`. The Controller must accept this exact documented slot ID in signed pairing offers and owner pairing requests, while preserving support for existing lowercase 32-character hexadecimal pairing IDs and rejecting all other values.
 - Define the Foundation slot ID once in the shared Contracts assembly and use it from both Agent and Controller validation; add regression coverage proving an offer reaches the renter and can be queued as a `PairPin` command, plus Agent coverage proving the adapter returns the shared value.
 - Verify with targeted Agent and Controller tests. This is software-only; do not install services or modify firewall/Sunshine/Restore Rx state. Real Moonlight pairing and stream qualification remain separate hardware acceptance.
+
+### Task 20: Show enrollment ticket expiry in Admin installer
+
+- The authenticated Admin install-command response returns the Controller ticket's exact `expiresAtUtc` value along with the generated command.
+- `/admin/machines` shows when the displayed command expires, changes to an expired state and disables copy at/after the deadline, and lets the administrator explicitly refresh to request a new command/ticket. Do not issue replacement tickets automatically in the background.
+- Add route coverage for the expiry value and focused tests for the expiry boundary/state logic. This is software-only; it does not enroll or install a machine.

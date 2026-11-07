@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test:machines": "node --test tests/admin-vnc-target-drafts.test.mjs tests/agent-install-vnc-source.test.mjs && node tests/run-machines.mjs",
+    "test:machines": "node --test tests/admin-vnc-target-drafts.test.mjs tests/agent-install-vnc-source.test.mjs tests/agent-install-expiry.test.mjs && node tests/run-machines.mjs",
     "test:auth": "node tests/run-auth.mjs"
   },
   "dependencies": {
