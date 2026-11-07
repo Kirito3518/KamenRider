@@ -34,7 +34,7 @@ public class LeaseStoreRestartTests
         try
         {
             await new LeaseStore(directory).SaveAsync(expected, CancellationToken.None);
-            var orphanedTemporaryFile = Path.Combine(directory, "interrupted-" + Guid.NewGuid().ToString("N") + ".tmp");
+            var orphanedTemporaryFile = Path.Combine(directory, Guid.NewGuid() + ".tmp");
             await File.WriteAllTextAsync(orphanedTemporaryFile, "{\"RentalId\":\"rental-staged\",\"Revision\":");
 
             var actual = await new LeaseStore(directory).LoadAsync(CancellationToken.None);
