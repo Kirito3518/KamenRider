@@ -79,7 +79,7 @@ VNC/noVNC เป็นความสามารถของระบบฉบ�
 - ต่อเวลาเพิ่ม revision และยังไม่รายงานสำเร็จจน Agent ACK
 - เวลาใช้ UTC, deadline ฝั่ง Agent ใช้ monotonic clock และทำงานได้เมื่อ offline
 - หมดเวลาแล้ว Agent สั่ง Windows shutdown ทันทีโดยไม่มี warning/grace period
-- Agent บันทึก deadline ที่สั้นลงจาก Controller ก่อนรอ stream gate; regression tests ครอบคลุม restart ระหว่าง gate ค้าง, extension ที่ยังไม่ยืนยัน, confirmation ที่ storage ค้างข้าม recovery deadline และ shutdown timeout/retry ด้วย fake adapter; production shutdown adapter จำกัดเวลารอไว้ 15 วินาที ส่วนการจำลอง process crash ระหว่าง atomic file replacement และการทดสอบ shutdown/retry บนเครื่องจริงยังต้องยืนยัน
+- Agent บันทึก deadline ที่สั้นลงจาก Controller ก่อนรอ stream gate; regression tests ครอบคลุม restart ระหว่าง gate ค้าง, extension ที่ยังไม่ยืนยัน, confirmation ที่ storage ค้างข้าม recovery deadline และ shutdown timeout/retry ด้วย fake adapter; production shutdown adapter จำกัดเวลารอไว้ 15 วินาที; Task 21 เพิ่ม software restart-state tests สำหรับ orphaned staging files และ snapshot ที่ publish/clear แล้ว โดยไม่จำลอง physical power loss หรือพิสูจน์ Windows filesystem crash semantics; process crash จริงระหว่าง atomic replacement และการทดสอบ shutdown/retry บนเครื่องจริงยังเป็น acceptance แยกต่างหาก
 - ระยะแรกใช้ trial lease ของแอดมิน ไม่หัก balance; payment/refund เป็นงานแยก
 - เมื่อ boot transition ผ่าน proof และ Controller ยืนยัน `PrepareAvailable` แล้ว reconciliation ปิด lease เก่าเป็น `completed` และปล่อย allocation; migration 010 เปลี่ยน constraint แบบรักษา rowid และ child references
 
@@ -204,3 +204,10 @@ The default-closed Sunshine installer transaction is implemented and verified in
 - The authenticated Admin install-command response returns the Controller ticket's exact `expiresAtUtc` value along with the generated command.
 - `/admin/machines` shows when the displayed command expires, changes to an expired state and disables copy at/after the deadline, and lets the administrator explicitly refresh to request a new command/ticket. Do not issue replacement tickets automatically in the background.
 - Add route coverage for the expiry value and focused tests for the expiry boundary/state logic. This is software-only; it does not enroll or install a machine.
+
+### Task 21: Verify lease snapshot restart boundaries
+
+- Use the real `LeaseStore` and isolated temporary directories to cover restart after a durable snapshot is published, restart with an orphaned/incomplete `.tmp` file from a write interrupted before publication, and restart after a clear tombstone is published. Also verify a rejected `SaveIfAsync` keeps the prior committed snapshot.
+- Keep these as software restart-state tests; they must not claim to simulate a physical power loss or prove Windows filesystem crash semantics. Update the roadmap to keep process-crash and machine shutdown acceptance separate.
+- Run the full Agent test suite. Do not read or modify Restore Rx, install services, or change machine state.
+- Verification: the four `LeaseStoreRestartTests` passed 4/4 and the full `Agent.Tests` suite passed 226/226 with zero failures or skips. A new `LeaseStore` instance loads the saved directory contents; this does not terminate a process mid-write, simulate physical power loss, prove Windows atomic replacement/crash behavior, or qualify shutdown/retry on a real machine. Those remain separate acceptance work.
