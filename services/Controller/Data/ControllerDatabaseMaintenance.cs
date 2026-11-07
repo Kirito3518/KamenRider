@@ -70,6 +70,9 @@ public static class ControllerDatabaseMaintenance
         ["machine_heartbeats"] = [
             new("machine_id", "TEXT"), new("last_seen", "TEXT", true), new("boot_id", "TEXT", true), new("readiness", "TEXT", true)
         ],
+        ["machine_readiness_diagnostics"] = [
+            new("machine_id", "TEXT"), new("diagnostics_json", "TEXT", true), new("updated_at", "TEXT", true)
+        ],
         ["leases"] = [
             new("id", "TEXT"), new("user_id", "TEXT", true), new("machine_id", "TEXT", true), new("state", "TEXT", true),
             new("revision", "INTEGER", true), new("pending_revision", "INTEGER"), new("duration_seconds", "INTEGER", true),
@@ -86,6 +89,7 @@ public static class ControllerDatabaseMaintenance
     {
         ["machines"] = ["machine_id"],
         ["machine_heartbeats"] = ["machine_id"],
+        ["machine_readiness_diagnostics"] = ["machine_id"],
         ["leases"] = ["id"],
         ["command_outbox"] = ["command_id"]
     };
@@ -227,11 +231,19 @@ public static class ControllerDatabaseMaintenance
             foreach (var table in requiredTables)
                 ValidateColumns(connection, table, requiredColumns[table], requiredPrimaryKeys[table]);
 
-            // These uniqueness constraints enforce allocation and command-revision invariants.
-            ValidateIndex(connection, "leases", "leases_machine_allocation", ["machine_id"], "allocation_held=1", required: true);
             using var userVersionCommand = connection.CreateCommand();
             userVersionCommand.CommandText = "PRAGMA user_version";
             var userVersion = Convert.ToInt64(userVersionCommand.ExecuteScalar(), CultureInfo.InvariantCulture);
+            if (userVersion >= 11)
+            {
+                const string diagnosticsTable = "machine_readiness_diagnostics";
+                if (!tables.Contains(diagnosticsTable))
+                    throw new InvalidDataException("The database is missing the version 11 readiness diagnostics table.");
+                ValidateColumns(connection, diagnosticsTable, requiredColumns[diagnosticsTable], requiredPrimaryKeys[diagnosticsTable]);
+            }
+
+            // These uniqueness constraints enforce allocation and command-revision invariants.
+            ValidateIndex(connection, "leases", "leases_machine_allocation", ["machine_id"], "allocation_held=1", required: true);
             var hasCommandRevisionIndex = HasIndex(connection, "command_outbox", "lease_command_revision");
             if (userVersion >= 3 || hasCommandRevisionIndex)
                 ValidateIndex(connection, "command_outbox", "lease_command_revision", ["rental_id", "type", "lease_revision"], "type!='PairPin'", required: true);

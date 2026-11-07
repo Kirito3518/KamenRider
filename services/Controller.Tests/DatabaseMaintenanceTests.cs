@@ -46,6 +46,81 @@ public class DatabaseMaintenanceTests
     }
 
     [Fact]
+    public void BackupRejectsVersionElevenDatabaseWithMissingReadinessDiagnosticsTable()
+    {
+        var root = NewRoot();
+        var databasePath = Path.Combine(root, "controller.db");
+        var backupPath = Path.Combine(root, "backup.db");
+        try
+        {
+            using (var database = new ControllerDatabase(databasePath)) AddMachine(database, "source-machine");
+            using (var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = databasePath, Pooling = false }.ToString()))
+            {
+                connection.Open();
+                using var command = connection.CreateCommand();
+                command.CommandText = "DROP TABLE machine_readiness_diagnostics; PRAGMA user_version=11";
+                command.ExecuteNonQuery();
+            }
+
+            Assert.Throws<InvalidDataException>(() => ControllerDatabaseMaintenance.Backup(databasePath, backupPath));
+            Assert.False(File.Exists(backupPath));
+        }
+        finally { DeleteRoot(root); }
+    }
+
+    [Fact]
+    public void BackupRejectsVersionElevenDatabaseWithMalformedReadinessDiagnosticsTable()
+    {
+        var root = NewRoot();
+        var databasePath = Path.Combine(root, "controller.db");
+        var backupPath = Path.Combine(root, "backup.db");
+        try
+        {
+            using (var database = new ControllerDatabase(databasePath)) AddMachine(database, "source-machine");
+            using (var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = databasePath, Pooling = false }.ToString()))
+            {
+                connection.Open();
+                using var command = connection.CreateCommand();
+                command.CommandText = "DROP TABLE machine_readiness_diagnostics; CREATE TABLE machine_readiness_diagnostics(machine_id TEXT PRIMARY KEY, diagnostics_json TEXT); PRAGMA user_version=11";
+                command.ExecuteNonQuery();
+            }
+
+            Assert.Throws<InvalidDataException>(() => ControllerDatabaseMaintenance.Backup(databasePath, backupPath));
+            Assert.False(File.Exists(backupPath));
+        }
+        finally { DeleteRoot(root); }
+    }
+
+    [Fact]
+    public void BackupAcceptsVersionTenDatabaseWithoutReadinessDiagnosticsTable()
+    {
+        var root = NewRoot();
+        var databasePath = Path.Combine(root, "controller-v10.db");
+        var backupPath = Path.Combine(root, "backup-v10.db");
+        var destinationPath = Path.Combine(root, "destination.db");
+        try
+        {
+            using (var database = new ControllerDatabase(databasePath)) AddMachine(database, "source-machine");
+            using (var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = databasePath, Pooling = false }.ToString()))
+            {
+                connection.Open();
+                using var command = connection.CreateCommand();
+                command.CommandText = "DROP TABLE IF EXISTS machine_readiness_diagnostics; PRAGMA user_version=10";
+                command.ExecuteNonQuery();
+            }
+
+            ControllerDatabaseMaintenance.Backup(databasePath, backupPath);
+            ControllerDatabaseMaintenance.Restore(backupPath, destinationPath);
+            using var restored = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = destinationPath, Pooling = false }.ToString());
+            restored.Open();
+            using var version = restored.CreateCommand();
+            version.CommandText = "PRAGMA user_version";
+            Assert.Equal(10L, version.ExecuteScalar());
+        }
+        finally { DeleteRoot(root); }
+    }
+
+    [Fact]
     public void RestoreReplacesDatabaseWithValidatedBackup()
     {
         var root = NewRoot();

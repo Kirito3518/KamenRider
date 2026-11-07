@@ -17,7 +17,7 @@ public class AgentHostCompositionTests
         using var host = KamenRaider.Agent.AgentHost.Build([], ConfigureTestAgentOptions);
 
         Assert.IsType<UnavailableBootEnvironment>(host.Services.GetRequiredService<IBootEnvironment>());
-        Assert.False(host.Services.GetRequiredService<IBootBaselineEvidence>().HasValidatedBaseline);
+        Assert.Equal(BootEvidenceStatus.Unavailable,host.Services.GetRequiredService<IBootBaselineEvidence>().Status);
         Assert.IsType<KamenRaider.Agent.Sunshine.StreamGuardPipeClient>(host.Services.GetRequiredService<KamenRaider.Agent.Leases.IStreamGate>());
         Assert.Same(host.Services.GetRequiredService<KamenRaider.Agent.Leases.IStreamGate>(), host.Services.GetRequiredService<KamenRaider.Agent.Sunshine.IPairingFence>());
         Assert.Empty(host.Services.GetServices<IHostedService>().OfType<KamenRaider.Agent.Sunshine.StreamGuardPipeServer>());
@@ -71,7 +71,7 @@ public class AgentHostCompositionTests
         });
 
         Assert.IsType<TestBootEnvironment>(host.Services.GetRequiredService<IBootEnvironment>());
-        Assert.True(host.Services.GetRequiredService<IBootBaselineEvidence>().HasValidatedBaseline);
+        Assert.Equal(BootEvidenceStatus.Passed,host.Services.GetRequiredService<IBootBaselineEvidence>().Status);
     }
 
     [Fact]
@@ -152,15 +152,15 @@ public class AgentHostCompositionTests
 
     private sealed class ValidatedBaselineEvidence : IBootBaselineEvidence
     {
-        public bool HasValidatedBaseline => true;
+        public BootEvidenceStatus Status => BootEvidenceStatus.Passed;
     }
 
     private sealed class TestBootEnvironment : IBootEnvironment
     {
-        public Task<bool> VerifyRestorationAsync(ReconciliationChallenge challenge, CancellationToken ct) => Task.FromResult(false);
-        public Task<bool> FenceAndClearAsync(ReconciliationChallenge challenge, CancellationToken ct) => Task.FromResult(false);
-        public Task<bool> VerifyHealthAsync(ReconciliationChallenge challenge, CancellationToken ct) => Task.FromResult(false);
-        public Task<bool> VerifyRuntimeHealthAsync(string bootId, long configurationRevision, CancellationToken ct) => Task.FromResult(false);
+        public Task<BootEvidenceStatus> VerifyRestorationAsync(ReconciliationChallenge challenge, CancellationToken ct) => Task.FromResult(BootEvidenceStatus.Blocked);
+        public Task<BootEvidenceStatus> FenceAndClearAsync(ReconciliationChallenge challenge, CancellationToken ct) => Task.FromResult(BootEvidenceStatus.Blocked);
+        public Task<BootEvidenceStatus> VerifyHealthAsync(ReconciliationChallenge challenge, CancellationToken ct) => Task.FromResult(BootEvidenceStatus.Blocked);
+        public Task<BootEvidenceStatus> VerifyRuntimeHealthAsync(string bootId, long configurationRevision, CancellationToken ct) => Task.FromResult(BootEvidenceStatus.Blocked);
     }
 
     private sealed class TestIngressPolicy : KamenRaider.Agent.Sunshine.IStreamIngressPolicy

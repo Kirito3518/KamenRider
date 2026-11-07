@@ -104,7 +104,7 @@ public sealed class RentalLifecycleIntegrationTests
                 var controllerUri = new Uri("https://localhost/");
                 var reconciliation = new ReconciliationClient(agentHttp, identity, controllerUri);
 
-                var boot = new BootReconciler(clock, gate, configuration, reconciliation, bootEnvironment, importer, baselineValidated: true);
+                var boot = new BootReconciler(clock, gate, configuration, reconciliation, bootEnvironment, importer, new IntegrationBaselineEvidence(BootEvidenceStatus.Passed));
                 Assert.Equal(Readiness.Ready, await boot.ReconcileAsync(default));
                 Assert.Empty(sunshine.Clients);
                 Assert.True(bootEnvironment.FencedCleanupCount > 0);
@@ -186,7 +186,7 @@ public sealed class RentalLifecycleIntegrationTests
                 Assert.Equal("ending", endingLease.State);
 
                 clock.Reboot("boot-2");
-                var afterReboot = new BootReconciler(clock, gate, configuration, reconciliation, bootEnvironment, importer, baselineValidated: true);
+                var afterReboot = new BootReconciler(clock, gate, configuration, reconciliation, bootEnvironment, importer, new IntegrationBaselineEvidence(BootEvidenceStatus.Passed));
                 Assert.Equal(Readiness.Ready, await afterReboot.ReconcileAsync(default));
                 Assert.Empty(sunshine.Clients);
 
@@ -334,33 +334,38 @@ public sealed class RentalLifecycleIntegrationTests
     {
         public int FencedCleanupCount { get; private set; }
 
-        public Task<bool> VerifyRestorationAsync(ReconciliationChallenge challenge, CancellationToken cancellationToken)
+        public Task<BootEvidenceStatus> VerifyRestorationAsync(ReconciliationChallenge challenge, CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            return Task.FromResult(challenge.BootId == clock.BootId);
+            return Task.FromResult(challenge.BootId == clock.BootId ? BootEvidenceStatus.Passed : BootEvidenceStatus.Blocked);
         }
 
-        public async Task<bool> FenceAndClearAsync(ReconciliationChallenge challenge, CancellationToken cancellationToken)
+        public async Task<BootEvidenceStatus> FenceAndClearAsync(ReconciliationChallenge challenge, CancellationToken cancellationToken)
         {
             if (challenge.BootId != clock.BootId)
-                return false;
+                return BootEvidenceStatus.Blocked;
             var cleared = await gate.RunFencedCleanupAsync(sunshine.ClearAsync, cancellationToken);
             if (cleared)
                 FencedCleanupCount++;
-            return cleared && sunshine.Clients.Count == 0;
+            return cleared && sunshine.Clients.Count == 0 ? BootEvidenceStatus.Passed : BootEvidenceStatus.Blocked;
         }
 
-        public Task<bool> VerifyHealthAsync(ReconciliationChallenge challenge, CancellationToken cancellationToken)
+        public Task<BootEvidenceStatus> VerifyHealthAsync(ReconciliationChallenge challenge, CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            return Task.FromResult(challenge.BootId == clock.BootId);
+            return Task.FromResult(challenge.BootId == clock.BootId ? BootEvidenceStatus.Passed : BootEvidenceStatus.Blocked);
         }
 
-        public Task<bool> VerifyRuntimeHealthAsync(string bootId, long configurationRevision, CancellationToken cancellationToken)
+        public Task<BootEvidenceStatus> VerifyRuntimeHealthAsync(string bootId, long configurationRevision, CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            return Task.FromResult(bootId == clock.BootId && configurationRevision > 0);
+            return Task.FromResult(bootId == clock.BootId && configurationRevision > 0 ? BootEvidenceStatus.Passed : BootEvidenceStatus.Blocked);
         }
+    }
+
+    private sealed class IntegrationBaselineEvidence(BootEvidenceStatus status) : IBootBaselineEvidence
+    {
+        public BootEvidenceStatus Status => status;
     }
 
     private sealed class IntegrationPreparation : IMachinePreparation

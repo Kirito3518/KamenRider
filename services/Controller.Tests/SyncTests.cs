@@ -24,4 +24,42 @@ public class SyncTests {
  using(var db=new ControllerDatabase(path,clock:clock)){var machine=Assert.Single(db.List());Assert.Equal("unreachable",machine.Readiness);Assert.Equal("1.2.3",machine.AgentVersion);}
  File.Delete(path);
  }
+
+ [Fact] public void HeartbeatValidatesDiagnosticsAndPersistsThemInCanonicalOrderThenClearsThemWhenOmitted() {
+ using var f=new LeaseFixture();
+ var input=ReadinessDiagnosticIds.Canonical.Reverse().Select(id=>new ReadinessDiagnostic(id,ReadinessDiagnosticStatuses.Passed)).ToArray();
+ f.Db.Sync("pc",new SyncRequest("boot","192.0.2.1","001122334455",f.Db.List().Single().ConfigRevision,"ready",[]) { ReadinessDiagnostics=input });
+ var stored=Assert.Single(f.Db.List());
+ Assert.Equal(ReadinessDiagnosticIds.Canonical,stored.ReadinessDiagnostics!.Select(item=>item.CheckId).ToArray());
+ Assert.True(stored.CanRent);
+
+ f.Db.Sync("pc",new SyncRequest("boot","192.0.2.1","001122334455",f.Db.List().Single().ConfigRevision,"ready",[]) { ReadinessDiagnostics=[new("runtimeHealth",ReadinessDiagnosticStatuses.Blocked)] });
+ var replacement=Assert.Single(f.Db.List());
+ Assert.Equal([new ReadinessDiagnostic("runtimeHealth",ReadinessDiagnosticStatuses.Blocked)],replacement.ReadinessDiagnostics!);
+ Assert.True(replacement.CanRent);
+
+ f.Db.Sync("pc",new SyncRequest("boot","192.0.2.1","001122334455",f.Db.List().Single().ConfigRevision,"notReady",[]) { ReadinessDiagnostics=input });
+ Assert.False(Assert.Single(f.Db.List()).CanRent);
+ f.Db.Sync("pc",new("boot","192.0.2.1","001122334455",f.Db.List().Single().ConfigRevision,"notReady",[]));
+ var oldAgent=Assert.Single(f.Db.List());
+ Assert.Null(oldAgent.ReadinessDiagnostics);
+ Assert.False(oldAgent.CanRent);
+ }
+
+ [Theory]
+ [MemberData(nameof(InvalidDiagnostics))]
+ public void HeartbeatRejectsMalformedDiagnostics(ReadinessDiagnostic[] diagnostics) {
+ using var f=new LeaseFixture();
+ Assert.Throws<ArgumentException>(()=>f.Db.Sync("pc",new SyncRequest("boot","192.0.2.1","001122334455",f.Db.List().Single().ConfigRevision,"notReady",[]) { ReadinessDiagnostics=diagnostics }));
+ Assert.Null(Assert.Single(f.Db.List()).ReadinessDiagnostics);
+ }
+
+ public static IEnumerable<object[]> InvalidDiagnostics() =>
+ [
+  [new ReadinessDiagnostic[] { null! }],
+  [new[] { new ReadinessDiagnostic("futureCheck",ReadinessDiagnosticStatuses.Passed) }],
+  [new[] { new ReadinessDiagnostic(ReadinessDiagnosticIds.Baseline,"futureStatus") }],
+  [new[] { new ReadinessDiagnostic(ReadinessDiagnosticIds.Baseline,ReadinessDiagnosticStatuses.Passed),new ReadinessDiagnostic(ReadinessDiagnosticIds.Baseline,ReadinessDiagnosticStatuses.Blocked) }],
+  [Enumerable.Range(0,9).Select(_=>new ReadinessDiagnostic(ReadinessDiagnosticIds.Baseline,ReadinessDiagnosticStatuses.Passed)).ToArray()],
+ ];
 }

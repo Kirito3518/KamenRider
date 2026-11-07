@@ -22,5 +22,31 @@ public class SyncHttpTests {
  }File.Delete(file);
  }
  sealed class NoNetwork:KamenRaider.Controller.Network.IWakeSender {public Task SendAsync(string mac,string broadcast,CancellationToken ct) {Assert.Equal("001122334455",mac);Assert.Equal("192.0.2.255",broadcast);return Task.CompletedTask;}}
+
+ [Fact] public async Task ReadinessDiagnosticsArePersistedOnlyWhenTheirSignedBodyIsUnchanged() {
+ var file=Path.Combine(Path.GetTempPath(),Guid.NewGuid()+".db");
+ await using(var app=ControllerHost.Build([],b=>{b.Configuration.AddInMemoryCollection(new Dictionary<string,string?>{["InternalUrl"]="http://127.0.0.1:5101",["AgentUrl"]="https://127.0.0.1:5102",["DatabasePath"]=file,["ServiceCredential"]="secret"});b.WebHost.UseTestServer();b.Services.AddTransient<IStartupFilter,LoopbackTestFilter>();})) {
+ await app.StartAsync();using var key=ECDsa.Create();app.Services.GetRequiredService<ControllerDatabase>().EnrollWithTicket(new("pc",Convert.ToBase64String(key.ExportSubjectPublicKeyInfo()),"192.0.2.1","001122334455",1,2));
+ using var client=app.GetTestClient();client.BaseAddress=new("https://localhost");client.DefaultRequestHeaders.Add("Test-Local-Port","5102");
+ var request=new SyncRequest("boot","192.0.2.1","001122334455",1,"notReady",[]) { ReadinessDiagnostics=[new(ReadinessDiagnosticIds.Baseline,ReadinessDiagnosticStatuses.Unavailable)] };
+ var signedBody=JsonSerializer.Serialize(request,new JsonSerializerOptions(JsonSerializerDefaults.Web));
+ var valid=await SendSigned(signedBody,signedBody);Assert.Equal(HttpStatusCode.OK,valid.StatusCode);
+ client.DefaultRequestHeaders.Remove("Test-Local-Port");client.DefaultRequestHeaders.Add("X-Service-Credential","secret");
+ var diagnostics=Assert.Single((await client.GetFromJsonAsync<MachineDto[]>("/internal/machines"))!).ReadinessDiagnostics;
+ Assert.Equal(new ReadinessDiagnostic(ReadinessDiagnosticIds.Baseline,ReadinessDiagnosticStatuses.Unavailable),Assert.Single(diagnostics!));
+ client.DefaultRequestHeaders.Remove("X-Service-Credential");client.DefaultRequestHeaders.Add("Test-Local-Port","5102");
+ var tamperedBody=signedBody.Replace("unavailable","passed",StringComparison.Ordinal);
+ Assert.NotEqual(signedBody,tamperedBody);
+ var tampered=await SendSigned(tamperedBody,signedBody);Assert.Equal(HttpStatusCode.Unauthorized,tampered.StatusCode);
+ await app.StopAsync();
+ async Task<HttpResponseMessage> SendSigned(string body,string bodyUsedForSignature) {
+ var at=DateTimeOffset.UtcNow.ToUnixTimeSeconds();var nonce=Guid.NewGuid().ToString();
+ using var req=new HttpRequestMessage(HttpMethod.Post,"/agent/sync"){Content=new StringContent(body,Encoding.UTF8,"application/json")};
+ req.Headers.Add("X-Agent-Id","pc");req.Headers.Add("X-Agent-Timestamp",at.ToString());req.Headers.Add("X-Agent-Nonce",nonce);
+ req.Headers.Add("X-Agent-Signature",Convert.ToBase64String(key.SignData(Encoding.UTF8.GetBytes($"pc\nPOST\n/agent/sync\n{at}\n{nonce}\n{Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(bodyUsedForSignature)))}"),HashAlgorithmName.SHA256)));
+ return await client.SendAsync(req);
+ }
+ }File.Delete(file);
+ }
 }
 
