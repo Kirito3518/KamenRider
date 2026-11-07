@@ -6,7 +6,7 @@
 
 **Architecture:** Use Vitest, React Testing Library, and jsdom to render the real `MachinesManager` client component. Intercept every fetch and clipboard write in the test so no live enrollment ticket or Controller request can occur.
 
-**Tech Stack:** Existing Next.js 16.4.3, React 19.3.0, TypeScript, plus development-only Vitest, Vite React plugin, jsdom, React Testing Library, DOM Testing Library, and tsconfig-paths plugin.
+**Tech Stack:** Existing Next.js 16.4.3, React 19.3.0, TypeScript, plus development-only Vitest 4.1.2, Vite 6.4.1, `@vitejs/plugin-react` 4.7.0, jsdom 26.1.0, React Testing Library 16.3.3, DOM Testing Library 10.4.2, and `vite-tsconfig-paths` 5.1.4.
 
 **Spec:** `docs/superpowers/specs/2026-11-07-admin-install-command-ui-design.md`; project scope remains `docs/full-rental-roadmap.md`.
 
@@ -15,6 +15,7 @@
 - Do not change production component behavior.
 - Mock every `fetch` call; never call `/api/admin/agent-install-command` on the running app or Controller because it issues a real enrollment ticket.
 - Keep the test limited to Admin install-command display, expiry, copy, refresh, focus, and visibility behavior.
+- Keep the added development test stack compatible with Next.js 16.4.3's Node minimum of `>=20.9.0`; do not raise the application runtime requirement.
 - Do not install services or change machine, firewall, or Sunshine state; do not read or modify Reboot Restore Rx.
 - Work in the authorized main checkout on `master`; preserve existing ignored package/build artifacts and `.env.local`.
 
@@ -40,7 +41,7 @@
 - Consumes: `MachinesManager` from `src/components/admin/machines-manager.tsx` and the current install-command API response (`available`, `command`, `expiresAtUtc`).
 - Produces: a reusable UI test command included in `pnpm test:machines`.
 
-- [ ] Add Vitest/React Testing Library/jsdom development dependencies and a config using the installed Next guide's React plugin and `vite-tsconfig-paths`.
+- [ ] Add the pinned Vitest 4.1.2, Vite 6.4.1, `@vitejs/plugin-react` 4.7.0, jsdom 26.1.0, React Testing Library 16.3.3, DOM Testing Library 10.4.2, and `vite-tsconfig-paths` 5.1.4 development dependencies; these support Next's Node minimum without changing runtime dependencies.
 - [ ] Add a component test that sets the test clock to `2026-11-07T12:00:00.000Z`, mocks `/api/admin/machines` with an empty list, and mocks `/api/admin/agent-install-command` with `first-test-command` expiring at `2026-11-07T12:34:56.789Z` followed by `second-test-command` expiring at `2026-11-07T13:34:56.789Z`; unexpected URLs must throw.
 - [ ] Assert literal UTC expiry display, copy success before expiry, disabled copy at the exact deadline after a focus event, explicit refresh updating the displayed command, and no extra install-command requests after focus/visibility events.
 - [ ] Add the new test to `pnpm test:machines` without changing existing integration coverage.

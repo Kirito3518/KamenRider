@@ -21,6 +21,7 @@ Protect the administrator's install-command flow from regressions in expiry, cop
 ## Constraints and decisions
 
 - Use the repository's existing React and TypeScript versions; add testing packages only as development dependencies.
+- Pin the test tooling to a Node-compatible version line that does not raise Next.js 16.4.3's supported Node minimum of `>=20.9.0`.
 - Keep test expectations as literal commands and UTC timestamps independent of the expiry helper.
 - Fail the mocked fetch on any unexpected URL, and assert install-command request counts around focus, visibility, and explicit refresh.
 - The component's five-second machine-list timer is cleaned up by unmounting the rendered component; the test must not wait for or contact a real service.
