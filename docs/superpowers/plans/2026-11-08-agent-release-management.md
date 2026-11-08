@@ -117,11 +117,11 @@
 - Consumes: Controller URL, machine ID, operation ID/ticket, fixed release version/hash, trusted root thumbprint, and Admin return URL.
 - Produces: verified update status; either the requested version is running or the original installation is restored and the Controller receives rollback status.
 
-- [ ] **Step 1: Add failing plan/mocked tests** for wrong machine, invalid hash, unexpected service identity/path, unsafe ACL/reparse point, and package traversal; assert no service/file mutation before validation.
-- [ ] **Step 2: Add transaction-plan tests** for backup, stage/swap, start failure rollback, interrupted swap recovery, and identity/config preservation using temporary files/fake service APIs only.
-- [ ] **Step 3: Implement the updater** to verify ticket/package/hash/manifest and existing private paths; preserve `identity.json`, enrollment receipt, data, and `appsettings.json`; retain a protected backup; stop/restart only managed Agent/Guard services while keeping the verified stream fence closed.
-- [ ] **Step 4: Implement rollback and status reporting**; keep the Controller lock until target/previous-version heartbeat is confirmed. Preserve backups until one of those outcomes is confirmed; a fresh Admin recovery command uses the same operation.
-- [ ] **Step 5: Run PowerShell 5.1 and PowerShell 7 mock/plan suites**, build the updated package, and commit `feat(agent): update installed binaries with rollback`.
+- [x] **Step 1: Add failing plan/mocked tests** for wrong machine, invalid hash, unexpected service identity/path, unsafe ACL/reparse point, and package traversal; assert no service/file mutation before validation.
+- [x] **Step 2: Add transaction-plan tests** for backup, stage/swap, start failure rollback, interrupted swap recovery, and identity/config preservation using temporary files/fake service APIs only.
+- [x] **Step 3: Implement the updater** to verify ticket/package/hash/manifest and existing private paths; preserve `identity.json`, enrollment receipt, data, and `appsettings.json`; retain a protected backup; stop/restart only managed Agent/Guard services while keeping the verified stream fence closed.
+- [x] **Step 4: Implement rollback and status reporting**; keep the Controller lock until target/previous-version heartbeat is confirmed. Preserve backups until one of those outcomes is confirmed; a fresh Admin recovery command uses the same operation.
+- [x] **Step 5: Run PowerShell 5.1 and PowerShell 7 mock/plan suites**, build the updated package, and commit `feat(agent): update installed binaries with rollback`.
 
 ### Task 5: Build the Admin release dashboard and per-machine Update Agent action
 
