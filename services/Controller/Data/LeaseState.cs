@@ -40,16 +40,16 @@ public sealed partial class ControllerDatabase {
     public LeaseDto CreateTrialLease(string userId,string machineId,int durationSeconds,string idempotencyKey) {
         Identifier(userId); Identifier(machineId); Identifier(idempotencyKey); Duration(durationSeconds);
         lock(gate) {
-            using var tx=connection.BeginTransaction(); var nowUtc=clock.GetUtcNow();var now=nowUtc.ToUnixTimeMilliseconds(); ExpireLeases(tx,now);
+            using var tx=connection.BeginTransaction(); var nowUtc=clock.GetUtcNow();var now=nowUtc.ToUnixTimeMilliseconds(); ExpireLeases(tx,now);ExpireUnstartedAgentUpdates(tx,now);
             var scope="create:"+userId; var fp=JsonSerializer.Serialize(new {machineId,durationSeconds});
             var prior=PriorRequest(tx,scope,idempotencyKey,fp);
             if(prior is not null) {var existing=FindLease(tx,prior)!.Dto;tx.Commit();return existing;}
             string? currentBoot;
-            using(var eligibility=LeaseCommand(tx,"SELECT m.approval_status,m.revision,h.last_seen,h.readiness,EXISTS(SELECT 1 FROM leases l WHERE l.machine_id=m.machine_id AND l.allocation_held=1),a.applied_revision,h.boot_id FROM machines m LEFT JOIN machine_heartbeats h ON h.machine_id=m.machine_id LEFT JOIN machine_config_acks a ON a.machine_id=m.machine_id WHERE m.machine_id=$id",("$id",machineId))) {
+            using(var eligibility=LeaseCommand(tx,"SELECT m.approval_status,m.revision,h.last_seen,h.readiness,EXISTS(SELECT 1 FROM leases l WHERE l.machine_id=m.machine_id AND l.allocation_held=1),a.applied_revision,EXISTS(SELECT 1 FROM agent_update_operations o WHERE o.machine_id=m.machine_id AND o.status NOT IN ('completed','rolledBack','expired')),h.boot_id FROM machines m LEFT JOIN machine_heartbeats h ON h.machine_id=m.machine_id LEFT JOIN machine_config_acks a ON a.machine_id=m.machine_id WHERE m.machine_id=$id",("$id",machineId))) {
                 using var row=eligibility.ExecuteReader();
                 if(!row.Read())throw new InvalidOperationException("Machine is not currently rentable");
-                currentBoot=row.IsDBNull(6)?null:row.GetString(6);
-                var rentability=EvaluateRentability(row.GetString(0),row.GetInt64(1),nowUtc,row.IsDBNull(2)?null:DateTimeOffset.Parse(row.GetString(2)),row.IsDBNull(3)?null:row.GetString(3),row.GetInt64(4)!=0,row.IsDBNull(5)?null:row.GetInt64(5));
+                currentBoot=row.IsDBNull(7)?null:row.GetString(7);
+                var rentability=EvaluateRentability(row.GetString(0),row.GetInt64(1),nowUtc,row.IsDBNull(2)?null:DateTimeOffset.Parse(row.GetString(2)),row.IsDBNull(3)?null:row.GetString(3),row.GetInt64(4)!=0,row.GetInt64(6)!=0,row.IsDBNull(5)?null:row.GetInt64(5));
                 if(!rentability.CanRent)throw new InvalidOperationException("Machine is not currently rentable");
             }
             var id=Guid.NewGuid().ToString("N");

@@ -5,9 +5,16 @@ using System.Text.Json;
 namespace KamenRaider.Controller.Machines;
 public static class MachineEndpoints
 {
+    private static bool IsAdmin(HttpContext context) => !string.IsNullOrWhiteSpace(context.Request.Headers["X-Authenticated-Actor-Id"])
+        && context.Request.Headers["X-Authenticated-Actor-Role"] == "admin";
+
     public static void MapMachines(this WebApplication app) {
         app.MapGet("/internal/machines",(ControllerDatabase db)=>db.List());
         app.MapPost("/internal/agent-enrollment-tickets",(ControllerDatabase db)=>Results.Ok(db.CreateEnrollmentTicket()));
+        app.MapPost("/internal/machines/{id}/agent-updates",(string id,AgentUpdateReservationRequest request,HttpContext context,ControllerDatabase db)=>
+            IsAdmin(context)?Execute(()=>db.ReserveAgentUpdate(id,request.ReleaseVersion)):Results.StatusCode(StatusCodes.Status403Forbidden));
+        app.MapPost("/internal/machines/{id}/agent-updates/{operationId}/recovery-ticket",(string id,string operationId,HttpContext context,ControllerDatabase db)=>
+            IsAdmin(context)?Execute(()=>db.RenewAgentUpdateTicket(id,operationId)):Results.StatusCode(StatusCodes.Status403Forbidden));
         app.MapPatch("/internal/machines/{id}",(string id,MachineUpdate update,long expectedRevision,ControllerDatabase db)=>Execute(()=>db.Update(id,update,expectedRevision)));
         app.MapPost("/internal/machines/{id}/approve",(string id,MachineIdentityConfirmation confirmation,HttpContext context,ControllerDatabase db)=>Execute(()=>db.ApproveVerified(id,context.Request.Headers["X-Authenticated-Actor-Id"].ToString(),confirmation.Fingerprint)));
         app.MapPost("/internal/machines/{id}/reject",(string id,MachineIdentityConfirmation confirmation,ControllerDatabase db)=>Execute(()=>db.RejectPending(id,confirmation.Fingerprint)));

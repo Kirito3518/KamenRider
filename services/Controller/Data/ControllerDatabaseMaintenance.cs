@@ -73,6 +73,19 @@ public static class ControllerDatabaseMaintenance
         ["machine_readiness_diagnostics"] = [
             new("machine_id", "TEXT"), new("diagnostics_json", "TEXT", true), new("updated_at", "TEXT", true)
         ],
+        ["agent_releases"] = [
+            new("version", "TEXT"), new("channel", "TEXT", true), new("release_notes", "TEXT", true),
+            new("package_sha256", "TEXT", true), new("package_path", "TEXT", true), new("package_size_bytes", "INTEGER", true),
+            new("source_commit", "TEXT", true), new("source_dirty", "INTEGER", true), new("release_build", "INTEGER", true),
+            new("package_format", "TEXT", true), new("published_at_unix_ms", "INTEGER", true)
+        ],
+        ["agent_update_operations"] = [
+            new("operation_id", "TEXT"), new("machine_id", "TEXT", true), new("release_version", "TEXT", true),
+            new("target_version", "TEXT", true), new("target_package_sha256", "TEXT", true), new("previous_version", "TEXT", true),
+            new("status", "TEXT", true), new("ticket_hash", "TEXT", true), new("ticket_expires_at_unix_ms", "INTEGER", true),
+            new("ticket_started_at_unix_ms", "INTEGER"), new("started_at_unix_ms", "INTEGER"),
+            new("created_at_unix_ms", "INTEGER", true), new("updated_at_unix_ms", "INTEGER", true)
+        ],
         ["leases"] = [
             new("id", "TEXT"), new("user_id", "TEXT", true), new("machine_id", "TEXT", true), new("state", "TEXT", true),
             new("revision", "INTEGER", true), new("pending_revision", "INTEGER"), new("duration_seconds", "INTEGER", true),
@@ -90,6 +103,8 @@ public static class ControllerDatabaseMaintenance
         ["machines"] = ["machine_id"],
         ["machine_heartbeats"] = ["machine_id"],
         ["machine_readiness_diagnostics"] = ["machine_id"],
+        ["agent_releases"] = ["version"],
+        ["agent_update_operations"] = ["operation_id"],
         ["leases"] = ["id"],
         ["command_outbox"] = ["command_id"]
     };
@@ -240,6 +255,16 @@ public static class ControllerDatabaseMaintenance
                 if (!tables.Contains(diagnosticsTable))
                     throw new InvalidDataException("The database is missing the version 11 readiness diagnostics table.");
                 ValidateColumns(connection, diagnosticsTable, requiredColumns[diagnosticsTable], requiredPrimaryKeys[diagnosticsTable]);
+            }
+            if (userVersion >= 12)
+            {
+                foreach (var table in new[] { "agent_releases", "agent_update_operations" })
+                {
+                    if (!tables.Contains(table))
+                        throw new InvalidDataException($"The database is missing the version 12 {table} table.");
+                    ValidateColumns(connection, table, requiredColumns[table], requiredPrimaryKeys[table]);
+                }
+                ValidateIndex(connection, "agent_update_operations", "agent_update_one_active_per_machine", ["machine_id"], "status NOT IN ('completed','rolledBack','expired')", required: true);
             }
 
             // These uniqueness constraints enforce allocation and command-revision invariants.

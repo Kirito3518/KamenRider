@@ -19,6 +19,7 @@ public sealed partial class ControllerDatabase {
             ExecuteLease(tx,"INSERT INTO machine_heartbeats(machine_id,last_seen,boot_id,readiness,agent_version) VALUES($id,$at,$boot,$ready,$version) ON CONFLICT(machine_id) DO UPDATE SET last_seen=$at,boot_id=$boot,readiness=$ready,agent_version=COALESCE($version,machine_heartbeats.agent_version); UPDATE machines SET local_ip=$ip,mac_address=$mac WHERE machine_id=$id",("$id",id),("$at",now.ToString("O")),("$boot",request.BootId),("$ready",request.Readiness),("$version",request.AgentVersion),("$ip",request.LocalIp),("$mac",request.MacAddress));
             if(diagnostics is null)ExecuteLease(tx,"DELETE FROM machine_readiness_diagnostics WHERE machine_id=$id",("$id",id));
             else ExecuteLease(tx,"INSERT INTO machine_readiness_diagnostics(machine_id,diagnostics_json,updated_at) VALUES($id,$diagnostics,$at) ON CONFLICT(machine_id) DO UPDATE SET diagnostics_json=$diagnostics,updated_at=$at",("$id",id),("$diagnostics",JsonSerializer.Serialize(diagnostics)),("$at",now.ToString("O")));
+            ResolveAgentUpdateFromHeartbeat(tx,id,request.AgentVersion,now.ToUnixTimeMilliseconds());
             // Presence before reconciliation cannot retire a boot, alter command results, or prove a lease.
             if(request.Readiness!="ready") {
                 tx.Commit();return new(now,new(machine.ConfigRevision,machine.MoonlightPort,machine.SunshinePort),[],null);

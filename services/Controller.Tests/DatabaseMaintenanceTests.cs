@@ -8,6 +8,52 @@ namespace Controller.Tests;
 public class DatabaseMaintenanceTests
 {
     [Fact]
+    public void BackupRejectsVersionTwelveDatabaseMissingAgentUpdateOperations()
+    {
+        var root = NewRoot();
+        var databasePath = Path.Combine(root, "controller.db");
+        var backupPath = Path.Combine(root, "backup.db");
+        try
+        {
+            using (var database = new ControllerDatabase(databasePath)) AddMachine(database, "source-machine");
+            using (var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = databasePath, Pooling = false }.ToString()))
+            {
+                connection.Open();
+                using var command = connection.CreateCommand();
+                command.CommandText = "DROP TABLE agent_update_operations;";
+                command.ExecuteNonQuery();
+            }
+
+            Assert.Throws<InvalidDataException>(() => ControllerDatabaseMaintenance.Backup(databasePath, backupPath));
+            Assert.False(File.Exists(backupPath));
+        }
+        finally { DeleteRoot(root); }
+    }
+
+    [Fact]
+    public void BackupRejectsVersionTwelveDatabaseWithoutActiveUpdateUniqueness()
+    {
+        var root = NewRoot();
+        var databasePath = Path.Combine(root, "controller.db");
+        var backupPath = Path.Combine(root, "backup.db");
+        try
+        {
+            using (var database = new ControllerDatabase(databasePath)) AddMachine(database, "source-machine");
+            using (var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = databasePath, Pooling = false }.ToString()))
+            {
+                connection.Open();
+                using var command = connection.CreateCommand();
+                command.CommandText = "DROP INDEX agent_update_one_active_per_machine; CREATE UNIQUE INDEX agent_update_one_active_per_machine ON agent_update_operations(machine_id);";
+                command.ExecuteNonQuery();
+            }
+
+            Assert.Throws<InvalidDataException>(() => ControllerDatabaseMaintenance.Backup(databasePath, backupPath));
+            Assert.False(File.Exists(backupPath));
+        }
+        finally { DeleteRoot(root); }
+    }
+
+    [Fact]
     public async Task BackupCapturesConsistentDataWhileControllerIsActive()
     {
         var root = NewRoot();
