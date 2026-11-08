@@ -31,7 +31,7 @@ try {
  if(-not $squatRejected){throw 'A pre-existing empty directory with untrusted access must be rejected, not repaired in place.'}
  if((Get-Acl -LiteralPath $squatted).Sddl -ne $beforeSddl){throw 'Rejecting a squatted data directory must not mutate its ACL.'}
  $readOnly=Join-Path $root 'read-only-publish';New-Item -ItemType Directory -Path $readOnly | Out-Null
- $serviceSid=[Security.Principal.SecurityIdentifier]::new('S-1-5-80-1111111111-2222222222-3333333333-4444444444-5555555555')
+ $serviceSid=[Security.Principal.SecurityIdentifier]::new('S-1-5-80-1111111111-2222222222-3333333333-4444444444-555555555')
  $servicePrivateAcl=[Security.AccessControl.FileSecurity]::new()
  $servicePrivateAcl.SetOwner($currentSid)
  $servicePrivateAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($serviceSid,[Security.AccessControl.FileSystemRights]::Read,[Security.AccessControl.AccessControlType]::Allow))
@@ -48,13 +48,18 @@ try {
  $readOnlyAcl=Get-Acl -LiteralPath $readOnly
  $serviceRules=@($readOnlyAcl.Access | Where-Object {$_.IdentityReference -eq $serviceSid})
  if($serviceRules.Count -ne 1 -or ($serviceRules[0].FileSystemRights -band [Security.AccessControl.FileSystemRights]::ReadAndExecute) -ne [Security.AccessControl.FileSystemRights]::ReadAndExecute){throw 'Service account must read and execute published binaries.'}
- $writeRights=[Security.AccessControl.FileSystemRights]::WriteData -bor [Security.AccessControl.FileSystemRights]::AppendData -bor [Security.AccessControl.FileSystemRights]::Delete -bor [Security.AccessControl.FileSystemRights]::ChangePermissions
+ $writeRights=[Security.AccessControl.FileSystemRights]::WriteData -bor [Security.AccessControl.FileSystemRights]::AppendData -bor [Security.AccessControl.FileSystemRights]::ChangePermissions -bor [Security.AccessControl.FileSystemRights]::TakeOwnership -bor [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles
  if($serviceRules[0].FileSystemRights -band $writeRights){throw 'Service account must not modify published binaries.'}
  $ticketData=Join-Path $root 'ticket-data';New-PrivateInstallDirectory $ticketData $serviceSid | Out-Null
  $ticket='A'*43;$ticketPath=Publish-PrivateEnrollmentTicket -Directory $ticketData -Ticket $ticket -ServiceSid $serviceSid
  if([IO.File]::ReadAllText($ticketPath) -ne $ticket){throw 'Enrollment ticket was not written to the private data directory.'}
  $ticketAcl=Get-Acl -LiteralPath $ticketPath;$ticketRules=@($ticketAcl.Access | Where-Object {$_.IdentityReference -eq $serviceSid})
- if(-not $ticketAcl.AreAccessRulesProtected -or $ticketRules.Count -ne 1 -or ($ticketRules[0].FileSystemRights -band $writeRights)){throw 'Enrollment ticket must be private and read-only to the Agent service.'}
+ if(-not $ticketAcl.AreAccessRulesProtected -or $ticketRules.Count -ne 1 -or ($ticketRules[0].FileSystemRights -band [Security.AccessControl.FileSystemRights]::Read) -ne [Security.AccessControl.FileSystemRights]::Read -or ($ticketRules[0].FileSystemRights -band [Security.AccessControl.FileSystemRights]::Delete) -ne [Security.AccessControl.FileSystemRights]::Delete -or ($ticketRules[0].FileSystemRights -band $writeRights)){throw 'Enrollment ticket must be private, readable and deletable by the Agent service without write or ACL rights.'}
+ $legacyTicketPath=Join-Path $ticketData 'legacy-enrollment-ticket.txt';[IO.File]::WriteAllText($legacyTicketPath,$ticket);Set-PrivateInstallAcl -Path $legacyTicketPath -ServiceSid $serviceSid
+ Set-PrivateEnrollmentTicketAcl -Path $legacyTicketPath -ServiceSid $serviceSid
+ $repairedTicketRules=@((Get-Acl -LiteralPath $legacyTicketPath).Access | Where-Object {$_.IdentityReference -eq $serviceSid})
+ if($repairedTicketRules.Count -ne 1 -or ($repairedTicketRules[0].FileSystemRights -band [Security.AccessControl.FileSystemRights]::Delete) -ne [Security.AccessControl.FileSystemRights]::Delete){throw 'Enrollment repair must grant the existing Agent ticket its required delete permission.'}
+ Remove-Item -LiteralPath $legacyTicketPath -Force
  $replacementTicket='B'*43;Publish-PrivateEnrollmentTicket -Directory $ticketData -Ticket $replacementTicket -ServiceSid $serviceSid -Replace | Out-Null
  if([IO.File]::ReadAllText($ticketPath) -ne $replacementTicket -or @(Get-ChildItem -LiteralPath $ticketData -Force).Count -ne 1){throw 'Ticket renewal must replace the old private ticket atomically without leaking staging files.'}
  $invalidTicketRejected=$false;try{Publish-PrivateEnrollmentTicket -Directory $ticketData -Ticket 'bad' -ServiceSid $serviceSid | Out-Null}catch{$invalidTicketRejected=$true}

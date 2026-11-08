@@ -12,7 +12,6 @@ $script:TightVncInstallerBytes = 2543616L
 $script:TightVncInstallerSha256 = '9693CB4CDC2E7E482E8E3F5890415B57EF87DE3369FA5C337DB516218A1170CE'
 $script:TightVncRuleName = 'KamenRaiderAdminVnc'
 $script:TightVncRuleDisplayName = 'KamenRaider Admin VNC'
-$script:TightVncDenyAllRule = '0.0.0.0-255.255.255.255:1'
 
 function ConvertTo-AllowedVncSourceAddress {
     param([Parameter(Mandatory)][string]$Address)
@@ -41,15 +40,6 @@ function Get-TightVncInstallPlan {
         InstallerBytes = $script:TightVncInstallerBytes
         InstallerSha256 = $script:TightVncInstallerSha256
         InstallerBundled = $false
-        StageMsiProperties = [ordered]@{
-            ADDLOCAL = 'Server'
-            SERVER_REGISTER_AS_SERVICE = '0'
-            SERVER_ADD_FIREWALL_EXCEPTION = '0'
-            SET_ACCEPTRFBCONNECTIONS = '1'
-            VALUE_OF_ACCEPTRFBCONNECTIONS = '0'
-            SET_IPACCESSCONTROL = '1'
-            VALUE_OF_IPACCESSCONTROL = $script:TightVncDenyAllRule
-        }
         RequiresWindowsFirewallPrivateProfile = $true
         MsiHiddenPasswordProperties = @('VALUE_OF_PASSWORD', 'VALUE_OF_VIEWONLYPASSWORD')
         HiddenPropertiesTransformRequired = $true
@@ -565,34 +555,29 @@ namespace KamenRaider.Install {
 }
 
 function Invoke-TightVncMsiInstall {
-    param([Parameter(Mandatory)][string]$InstallerPath,[Parameter(Mandatory)][string]$TransformPath,[Parameter(Mandatory)][string]$Password,[string]$ProductCode,[switch]$StageOnly)
+    param([Parameter(Mandatory)][string]$InstallerPath,[Parameter(Mandatory)][string]$TransformPath,[Parameter(Mandatory)][string]$Password,[string]$ProductCode,[switch]$FreshInstall)
     $sourceRule = "$script:ValidatedVncSource-$script:ValidatedVncSource`:0,0.0.0.0-255.255.255.255`:1"
-    $serviceRegistration = if ($StageOnly) { '0' } else { '1' }
-    $acceptConnections = if ($StageOnly) { '0' } else { '1' }
-    $ipAccessControl = if ($StageOnly) { $script:TightVncDenyAllRule } else { $sourceRule }
     $properties = @(
         'ADDLOCAL=Server',
-        "SERVER_REGISTER_AS_SERVICE=$serviceRegistration",
+        'SERVER_REGISTER_AS_SERVICE=1',
         'SERVER_ADD_FIREWALL_EXCEPTION=0',
         'SERVER_ALLOW_SAS=0',
         'SET_ACCEPTHTTPCONNECTIONS=1', 'VALUE_OF_ACCEPTHTTPCONNECTIONS=0',
-        'SET_ACCEPTRFBCONNECTIONS=1', "VALUE_OF_ACCEPTRFBCONNECTIONS=$acceptConnections",
+        'SET_ACCEPTRFBCONNECTIONS=1', 'VALUE_OF_ACCEPTRFBCONNECTIONS=1',
         'SET_RFBPORT=1', 'VALUE_OF_RFBPORT=5900',
         'SET_BLOCKREMOTEINPUT=1', 'VALUE_OF_BLOCKREMOTEINPUT=1',
         'SET_USEVNCAUTHENTICATION=1', 'VALUE_OF_USEVNCAUTHENTICATION=1',
-        'SET_IPACCESSCONTROL=1', "VALUE_OF_IPACCESSCONTROL=$ipAccessControl",
+        'SET_IPACCESSCONTROL=1', "VALUE_OF_IPACCESSCONTROL=$sourceRule",
         ('TRANSFORMS="' + $TransformPath + '"'), 'TRANSFORMSSECURE=1',
         'REBOOT=ReallySuppress'
     )
-    if (-not $StageOnly) {
-        $properties += @('SET_PASSWORD=1', "VALUE_OF_PASSWORD=$Password", 'SET_VIEWONLYPASSWORD=1', "VALUE_OF_VIEWONLYPASSWORD=$Password")
-    }
+    $properties += @('SET_PASSWORD=1', "VALUE_OF_PASSWORD=$Password", 'SET_VIEWONLYPASSWORD=1', "VALUE_OF_VIEWONLYPASSWORD=$Password")
     Initialize-WindowsInstallerNativeType
     $window = [IntPtr]::Zero
     $previousUiLevel = [KamenRaider.Install.WindowsInstallerNative]::SetInternalUI(2, [ref]$window)
     try {
         $propertyValues = $properties -join ' '
-        if ($StageOnly) {
+        if ($FreshInstall) {
             $result = [KamenRaider.Install.WindowsInstallerNative]::InstallProduct($InstallerPath, $propertyValues)
         } else {
             if ($ProductCode -notmatch '^\{[A-Fa-f0-9-]{36}\}$') { throw 'TightVNC MSI product code is invalid; maintenance configuration was refused.' }
@@ -695,15 +680,10 @@ try {
         $firewallChangedThisRun = $true
         Invoke-TightVncMsiInstall -InstallerPath $installerPath -TransformPath $transformPath -Password $password -ProductCode ([string]$metadata.ProductCode) | Out-Null
     } else {
-        $msiInstalledThisRun = $true
-        Invoke-TightVncMsiInstall -InstallerPath $installerPath -TransformPath $transformPath -Password $password -StageOnly | Out-Null
-        if (Get-Service -Name 'tvnserver' -ErrorAction SilentlyContinue) { throw 'TightVNC unexpectedly registered a service during its deny-all staging install.' }
-        $listeners = @(Get-NetTCPConnection -State Listen -LocalPort 5900 -ErrorAction SilentlyContinue)
-        if ($listeners.Count) { throw 'TCP port 5900 started listening during deny-all TightVNC staging.' }
-        if (-not (Test-Path -LiteralPath $serverPath -PathType Leaf)) { throw 'TightVNC Server binary is missing after installation.' }
         Set-TightVncFirewallRule -Source $script:ValidatedVncSource -Program $serverPath
         $firewallChangedThisRun = $true
-        Invoke-TightVncMsiInstall -InstallerPath $installerPath -TransformPath $transformPath -Password $password -ProductCode ([string]$metadata.ProductCode) | Out-Null
+        $msiInstalledThisRun = $true
+        Invoke-TightVncMsiInstall -InstallerPath $installerPath -TransformPath $transformPath -Password $password -FreshInstall | Out-Null
     }
 
     Start-TightVncService

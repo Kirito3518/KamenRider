@@ -552,7 +552,8 @@ function Get-AgentVncSetupDecision {
  return 'SkipPendingEnrollment'
 }
 function New-PrivateInstallSecurity {
- param([Security.Principal.SecurityIdentifier]$ServiceSid,[switch]$Directory,[switch]$ReadOnly)
+ param([Security.Principal.SecurityIdentifier]$ServiceSid,[switch]$Directory,[switch]$ReadOnly,[switch]$AllowDelete)
+ if($Directory -and $AllowDelete){throw 'Delete-only enrollment access applies to files, not directories.'}
  $acl=if($Directory){[Security.AccessControl.DirectorySecurity]::new()}else{[Security.AccessControl.FileSecurity]::new()}
  $acl.SetAccessRuleProtection($true,$false)
  $systemSid=[Security.Principal.SecurityIdentifier]::new('S-1-5-18')
@@ -564,6 +565,8 @@ function New-PrivateInstallSecurity {
  foreach($sid in @($ServiceSid,$systemSid,$adminSid,$installerSid)){
   $rights=if($sid -eq $ServiceSid -and $sid -ne $installerSid){
    if($ReadOnly){[Security.AccessControl.FileSystemRights]::ReadAndExecute}
+   # EnrollmentWorker removes its one-time bearer ticket after saving the receipt; it needs file Delete, not write access.
+   elseif($AllowDelete){[Security.AccessControl.FileSystemRights]::Read -bor [Security.AccessControl.FileSystemRights]::Delete}
    elseif($Directory){[Security.AccessControl.FileSystemRights]::Modify}
    else{[Security.AccessControl.FileSystemRights]::Read}
   }else{[Security.AccessControl.FileSystemRights]::FullControl}
@@ -573,9 +576,53 @@ function New-PrivateInstallSecurity {
  return $acl
 }
 function Set-PrivateInstallAcl {
- param([string]$Path,[Security.Principal.SecurityIdentifier]$ServiceSid,[switch]$Directory,[switch]$ReadOnly)
- $acl=New-PrivateInstallSecurity $ServiceSid -Directory:$Directory -ReadOnly:$ReadOnly
+ param([string]$Path,[Security.Principal.SecurityIdentifier]$ServiceSid,[switch]$Directory,[switch]$ReadOnly,[switch]$AllowDelete)
+ $acl=New-PrivateInstallSecurity $ServiceSid -Directory:$Directory -ReadOnly:$ReadOnly -AllowDelete:$AllowDelete
  Set-Acl -LiteralPath $Path -AclObject $acl
+}
+function Initialize-PrivateFileAclNativeType {
+ if(-not ('KamenRaider.Install.NativePrivateFileAclV1' -as [type])){
+  Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+namespace KamenRaider.Install {
+ public static class NativePrivateFileAclV1 {
+  [DllImport("advapi32.dll", EntryPoint="SetNamedSecurityInfoW", CharSet=CharSet.Unicode, ExactSpelling=true)]
+  private static extern UInt32 SetNamedSecurityInfo(String name, UInt32 objectType, UInt32 securityInfo, IntPtr owner, IntPtr group, IntPtr dacl, IntPtr sacl);
+  public static void SetProtectedDacl(String path, byte[] daclBytes) {
+   IntPtr dacl=Marshal.AllocHGlobal(daclBytes.Length);
+   try {
+    Marshal.Copy(daclBytes,0,dacl,daclBytes.Length);
+    // SE_FILE_OBJECT, DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION
+    UInt32 result=SetNamedSecurityInfo(path,1,0x80000004,IntPtr.Zero,IntPtr.Zero,dacl,IntPtr.Zero);
+    if(result!=0)throw new Win32Exception((Int32)result);
+   } finally { Marshal.FreeHGlobal(dacl); }
+  }
+ }
+}
+'@
+ }
+}
+function Set-PrivateEnrollmentTicketAcl {
+ param([Parameter(Mandatory)][string]$Path,[Parameter(Mandatory)][Security.Principal.SecurityIdentifier]$ServiceSid)
+ $file=Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+ if($file.PSIsContainer -or ($file.Attributes -band [IO.FileAttributes]::ReparsePoint) -or (Get-InstallFileLinkCount $Path) -ne 1){throw 'Enrollment ticket must be a regular single-link file.'}
+ $trusted=Get-TrustedInstallSids @($ServiceSid)
+ if(-not (Test-TrustedInstallAcl (Get-Acl -LiteralPath $Path) $trusted -Private)){throw 'Enrollment ticket has untrusted access or ownership.'}
+ $security=New-PrivateInstallSecurity $ServiceSid -AllowDelete
+ $descriptor=[Security.AccessControl.RawSecurityDescriptor]::new($security.GetSecurityDescriptorBinaryForm(),0)
+ $daclBytes=[byte[]]::new($descriptor.DiscretionaryAcl.BinaryLength)
+ $descriptor.DiscretionaryAcl.GetBinaryForm($daclBytes,0)
+ Initialize-PrivateFileAclNativeType
+ [KamenRaider.Install.NativePrivateFileAclV1]::SetProtectedDacl($Path,$daclBytes)
+ $acl=Get-Acl -LiteralPath $Path
+ $rules=@($acl.Access | Where-Object {$_.IdentityReference -eq $ServiceSid})
+ $forbidden=[Security.AccessControl.FileSystemRights]::WriteData -bor [Security.AccessControl.FileSystemRights]::AppendData -bor [Security.AccessControl.FileSystemRights]::WriteAttributes -bor [Security.AccessControl.FileSystemRights]::WriteExtendedAttributes -bor [Security.AccessControl.FileSystemRights]::ChangePermissions -bor [Security.AccessControl.FileSystemRights]::TakeOwnership -bor [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles
+ if(-not $acl.AreAccessRulesProtected -or -not (Test-TrustedInstallAcl $acl $trusted -Private) -or $rules.Count -ne 1 -or
+    ($rules[0].FileSystemRights -band [Security.AccessControl.FileSystemRights]::Read) -ne [Security.AccessControl.FileSystemRights]::Read -or
+    ($rules[0].FileSystemRights -band [Security.AccessControl.FileSystemRights]::Delete) -ne [Security.AccessControl.FileSystemRights]::Delete -or
+    ($rules[0].FileSystemRights -band $forbidden)){throw 'Enrollment ticket ACL did not grant only the required Agent access.'}
 }
 function Publish-PrivateEnrollmentTicket {
  param([Parameter(Mandatory)][string]$Directory,[Parameter(Mandatory)][string]$Ticket,[Parameter(Mandatory)][Security.Principal.SecurityIdentifier]$ServiceSid,[switch]$Replace)
@@ -595,11 +642,10 @@ function Publish-PrivateEnrollmentTicket {
  $file=[IO.File]::Open($temporary,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
  $file.Dispose()
  try {
-  Set-PrivateInstallAcl -Path $temporary -ServiceSid $ServiceSid
   [IO.File]::WriteAllText($temporary,$Ticket,[Text.UTF8Encoding]::new($false))
   $ticketFile=Get-Item -LiteralPath $temporary -Force
   if($ticketFile.PSIsContainer -or ($ticketFile.Attributes -band [IO.FileAttributes]::ReparsePoint) -or (Get-InstallFileLinkCount $temporary) -ne 1){throw 'Enrollment ticket must be a regular single-link file.'}
-  if(-not (Test-TrustedInstallAcl (Get-Acl -LiteralPath $temporary) (Get-TrustedInstallSids @($ServiceSid)) -Private)){throw 'Enrollment ticket ACL is not private.'}
+  Set-PrivateEnrollmentTicketAcl -Path $temporary -ServiceSid $ServiceSid
   if($existing){[IO.File]::Replace($temporary,$path,$backup)}else{[IO.File]::Move($temporary,$path)}
  } catch {
   throw
@@ -651,6 +697,9 @@ function Invoke-AgentEnrollmentRepair {
   Publish-PrivateEnrollmentTicket -Directory $DataDirectory -Ticket $EnrollmentTicket -ServiceSid $ServiceSid -Replace | Out-Null
   $ticketRenewed=$true
  }
+
+ $ticketPath=Join-Path $DataDirectory 'enrollment-ticket.txt'
+ if(Test-Path -LiteralPath $ticketPath -PathType Leaf){Set-PrivateEnrollmentTicketAcl -Path $ticketPath -ServiceSid $ServiceSid}
 
  $service=Get-Service -Name $ServiceName -ErrorAction Stop
  if($service.Status -eq [ServiceProcess.ServiceControllerStatus]::Stopped){Start-Service -Name $ServiceName -ErrorAction Stop}

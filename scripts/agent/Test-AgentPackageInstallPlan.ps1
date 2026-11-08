@@ -2,8 +2,14 @@ $ErrorActionPreference = 'Stop'
 $root = Join-Path ([IO.Path]::GetTempPath()) ('kr-agent-install-plan-' + [Guid]::NewGuid().ToString('N'))
 $package = Join-Path $root 'package'
 $agentDirectory = Join-Path $package 'Agent'
+$originalProgramData = $env:ProgramData
+$originalProgramFiles = $env:ProgramFiles
+$originalProgramFilesX86 = ${env:ProgramFiles(x86)}
 New-Item -ItemType Directory -Path $agentDirectory -Force | Out-Null
 try {
+    $env:ProgramData = Join-Path $root 'ProgramData'
+    $env:ProgramFiles = Join-Path $root 'ProgramFiles'
+    ${env:ProgramFiles(x86)} = Join-Path $root 'ProgramFilesX86'
     foreach ($name in @('Install-AgentPackage.ps1', 'Install-Service.ps1', 'Install-TightVncServer.ps1', 'Prepare-SunshineStreamGate.ps1', 'PrivateInstallFiles.ps1', 'ServiceInstallTransaction.ps1')) {
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination (Join-Path $package $name)
     }
@@ -13,6 +19,13 @@ try {
     $installerSource = [IO.File]::ReadAllText((Join-Path $package 'Install-AgentPackage.ps1'))
     if (-not $installerSource.Contains('[string]$EnrollmentTicket') -or -not $installerSource.Contains('-EnrollmentTicket $EnrollmentTicket')) { throw 'Agent installer must pass the issued ticket to the service installer without putting it in appsettings.' }
     if (-not $installerSource.Contains('Get-AgentInstallMode') -or -not $installerSource.Contains('Invoke-AgentEnrollmentRepair')) { throw 'An existing protected Agent installation must have a ticket-renewal recovery path.' }
+    $privateInstallFilesSource = [IO.File]::ReadAllText((Join-Path $package 'PrivateInstallFiles.ps1'))
+    $repairHelperStart = $privateInstallFilesSource.IndexOf('function Invoke-AgentEnrollmentRepair {', [StringComparison]::Ordinal)
+    $ticketAclRepairPosition = $privateInstallFilesSource.IndexOf('Set-PrivateEnrollmentTicketAcl -Path $ticketPath -ServiceSid $ServiceSid', $repairHelperStart, [StringComparison]::Ordinal)
+    $repairServiceStartPosition = $privateInstallFilesSource.IndexOf('$service=Get-Service -Name $ServiceName', $repairHelperStart, [StringComparison]::Ordinal)
+    if ($repairHelperStart -lt 0 -or $ticketAclRepairPosition -lt $repairHelperStart -or $repairServiceStartPosition -lt $ticketAclRepairPosition) {
+        throw 'Enrollment repair must normalize permissions on an existing ticket before restarting the Agent service.'
+    }
     if (-not $installerSource.Contains('Prepare-SunshineStreamGate.ps1') -or -not $installerSource.Contains('StreamGateSetup')) { throw 'The Agent install plan must include Stream Guard setup and its transaction.' }
     if (-not $installerSource.Contains('-Action Validate') -or -not $installerSource.Contains('-Action Apply') -or
         -not $installerSource.Contains('-Action Rollback') -or -not $installerSource.Contains('-Dependencies @($guardServiceName)')) {
@@ -225,6 +238,9 @@ try {
     } finally { Remove-Item Function:\Get-Acl -Force }
     Write-Output 'Agent install plan and private service-tree ACL tests passed; no services changed.'
 } finally {
+    $env:ProgramData = $originalProgramData
+    $env:ProgramFiles = $originalProgramFiles
+    ${env:ProgramFiles(x86)} = $originalProgramFilesX86
     $resolved = [IO.Path]::GetFullPath($root)
     $tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\') + '\'
     if (-not $resolved.StartsWith($tempRoot, [StringComparison]::OrdinalIgnoreCase) -or [IO.Path]::GetFileName($resolved) -notlike 'kr-agent-install-plan-*') {

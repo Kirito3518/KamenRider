@@ -44,11 +44,11 @@ try {
         $tightVncPlan.InstallerBytes -ne 2543616 -or $tightVncPlan.InstallerSha256 -cne '9693CB4CDC2E7E482E8E3F5890415B57EF87DE3369FA5C337DB516218A1170CE') {
         throw 'TightVNC plan must pin the official x64 2.8.90 MSI URL, byte size, and SHA-256.'
     }
-    if ($tightVncPlan.StageMsiProperties.SERVER_REGISTER_AS_SERVICE -ne '0' -or
-        $tightVncPlan.StageMsiProperties.VALUE_OF_ACCEPTRFBCONNECTIONS -ne '0' -or
-        $tightVncPlan.StageMsiProperties.VALUE_OF_IPACCESSCONTROL -ne '0.0.0.0-255.255.255.255:1' -or
+    if ($tightVncPlan.MsiProperties.SERVER_REGISTER_AS_SERVICE -ne '1' -or
+        $tightVncPlan.MsiProperties.VALUE_OF_ACCEPTRFBCONNECTIONS -ne '1' -or
+        $tightVncPlan.MsiProperties.VALUE_OF_IPACCESSCONTROL -ne '192.168.1.10-192.168.1.10:0,0.0.0.0-255.255.255.255:1' -or
         $tightVncPlan.RequiresWindowsFirewallPrivateProfile -ne $true) {
-        throw 'TightVNC staging must keep the service unregistered and deny every connection until the scoped firewall rule is installed.'
+        throw 'TightVNC initial install must register the service with the exact Controller source ACL and scoped firewall protection.'
     }
     if ($tightVncPlan.HiddenPropertiesTransformRequired -ne $true -or
         $tightVncPlan.HiddenPropertiesTransformPath -ne (Join-Path $dataDirectory 'RemoteDesktop\tightvnc-hidden-properties.mst') -or
@@ -94,13 +94,14 @@ try {
     if (-not $msiFunctionSource.Contains('WindowsInstallerNative]::InstallProduct') -or $msiFunctionSource.Contains('Start-Process')) {
         throw 'The VNC password must not be placed in a child msiexec process command line.'
     }
-    $stageInstallPosition = $installerSource.IndexOf('Invoke-TightVncMsiInstall -InstallerPath $installerPath -TransformPath $transformPath -Password $password -StageOnly', [StringComparison]::Ordinal)
-    $scopedFirewallPosition = $installerSource.IndexOf('Set-TightVncFirewallRule -Source $script:ValidatedVncSource -Program $serverPath', $stageInstallPosition, [StringComparison]::Ordinal)
-    $finalInstallPosition = $installerSource.IndexOf('Invoke-TightVncMsiInstall -InstallerPath $installerPath -TransformPath $transformPath -Password $password -ProductCode', $scopedFirewallPosition, [StringComparison]::Ordinal)
-    $serviceStartPosition = $installerSource.IndexOf('Start-TightVncService', $finalInstallPosition, [StringComparison]::Ordinal)
-    if ($stageInstallPosition -lt 0 -or $scopedFirewallPosition -lt $stageInstallPosition -or
-        $finalInstallPosition -lt $scopedFirewallPosition -or $serviceStartPosition -lt $finalInstallPosition) {
-        throw 'Fresh TightVNC setup must stage deny-all without a service, add the exact firewall rule, then install and start the service.'
+    $firewallCall = 'Set-TightVncFirewallRule -Source $script:ValidatedVncSource -Program $serverPath'
+    $repairFirewallPosition = $installerSource.IndexOf($firewallCall, [StringComparison]::Ordinal)
+    $freshFirewallPosition = if ($repairFirewallPosition -ge 0) { $installerSource.IndexOf($firewallCall, $repairFirewallPosition + $firewallCall.Length, [StringComparison]::Ordinal) } else { -1 }
+    $freshInstallPosition = if ($freshFirewallPosition -ge 0) { $installerSource.IndexOf('Invoke-TightVncMsiInstall -InstallerPath $installerPath -TransformPath $transformPath -Password $password -FreshInstall', $freshFirewallPosition, [StringComparison]::Ordinal) } else { -1 }
+    $serviceStartPosition = if ($freshInstallPosition -ge 0) { $installerSource.IndexOf('Start-TightVncService', $freshInstallPosition, [StringComparison]::Ordinal) } else { -1 }
+    if ($freshFirewallPosition -lt 0 -or $freshInstallPosition -lt $freshFirewallPosition -or $serviceStartPosition -lt $freshInstallPosition -or
+        $installerSource.Contains('-StageOnly')) {
+        throw 'Fresh TightVNC setup must install its exact firewall rule before a single service-registering MSI install.'
     }
     Initialize-WindowsInstallerNativeType
     if (-not ('KamenRaider.Install.WindowsInstallerNative' -as [type])) { throw 'In-process Windows Installer API binding did not load.' }
