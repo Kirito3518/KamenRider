@@ -604,6 +604,10 @@ namespace KamenRaider.Install {
 '@
  }
 }
+function Get-PrivateInstallAccessRulesForSid {
+ param([Parameter(Mandatory)][Security.AccessControl.FileSystemSecurity]$Acl,[Parameter(Mandatory)][Security.Principal.SecurityIdentifier]$ServiceSid)
+ return @($Acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier]) | Where-Object {$_.IdentityReference.Value -eq $ServiceSid.Value})
+}
 function Set-PrivateEnrollmentTicketAcl {
  param([Parameter(Mandatory)][string]$Path,[Parameter(Mandatory)][Security.Principal.SecurityIdentifier]$ServiceSid)
  $file=Get-Item -LiteralPath $Path -Force -ErrorAction Stop
@@ -617,7 +621,7 @@ function Set-PrivateEnrollmentTicketAcl {
  Initialize-PrivateFileAclNativeType
  [KamenRaider.Install.NativePrivateFileAclV1]::SetProtectedDacl($Path,$daclBytes)
  $acl=Get-Acl -LiteralPath $Path
- $rules=@($acl.Access | Where-Object {$_.IdentityReference -eq $ServiceSid})
+ $rules=Get-PrivateInstallAccessRulesForSid -Acl $acl -ServiceSid $ServiceSid
  $forbidden=[Security.AccessControl.FileSystemRights]::WriteData -bor [Security.AccessControl.FileSystemRights]::AppendData -bor [Security.AccessControl.FileSystemRights]::WriteAttributes -bor [Security.AccessControl.FileSystemRights]::WriteExtendedAttributes -bor [Security.AccessControl.FileSystemRights]::ChangePermissions -bor [Security.AccessControl.FileSystemRights]::TakeOwnership -bor [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles
  if(-not $acl.AreAccessRulesProtected -or -not (Test-TrustedInstallAcl $acl $trusted -Private) -or $rules.Count -ne 1 -or
     ($rules[0].FileSystemRights -band [Security.AccessControl.FileSystemRights]::Read) -ne [Security.AccessControl.FileSystemRights]::Read -or

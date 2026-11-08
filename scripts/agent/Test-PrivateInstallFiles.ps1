@@ -53,11 +53,13 @@ try {
  $ticketData=Join-Path $root 'ticket-data';New-PrivateInstallDirectory $ticketData $serviceSid | Out-Null
  $ticket='A'*43;$ticketPath=Publish-PrivateEnrollmentTicket -Directory $ticketData -Ticket $ticket -ServiceSid $serviceSid
  if([IO.File]::ReadAllText($ticketPath) -ne $ticket){throw 'Enrollment ticket was not written to the private data directory.'}
- $ticketAcl=Get-Acl -LiteralPath $ticketPath;$ticketRules=@($ticketAcl.Access | Where-Object {$_.IdentityReference -eq $serviceSid})
+ $ticketAcl=Get-Acl -LiteralPath $ticketPath;$ticketRules=Get-PrivateInstallAccessRulesForSid -Acl $ticketAcl -ServiceSid $serviceSid
+ if(@(Get-PrivateInstallAccessRulesForSid -Acl $ticketAcl -ServiceSid $currentSid).Count -ne 1){throw 'ACL service-SID lookup must translate NTAccount access rules before comparing SIDs.'}
  if(-not $ticketAcl.AreAccessRulesProtected -or $ticketRules.Count -ne 1 -or ($ticketRules[0].FileSystemRights -band [Security.AccessControl.FileSystemRights]::Read) -ne [Security.AccessControl.FileSystemRights]::Read -or ($ticketRules[0].FileSystemRights -band [Security.AccessControl.FileSystemRights]::Delete) -ne [Security.AccessControl.FileSystemRights]::Delete -or ($ticketRules[0].FileSystemRights -band $writeRights)){throw 'Enrollment ticket must be private, readable and deletable by the Agent service without write or ACL rights.'}
  $legacyTicketPath=Join-Path $ticketData 'legacy-enrollment-ticket.txt';[IO.File]::WriteAllText($legacyTicketPath,$ticket);Set-PrivateInstallAcl -Path $legacyTicketPath -ServiceSid $serviceSid
  Set-PrivateEnrollmentTicketAcl -Path $legacyTicketPath -ServiceSid $serviceSid
- $repairedTicketRules=@((Get-Acl -LiteralPath $legacyTicketPath).Access | Where-Object {$_.IdentityReference -eq $serviceSid})
+ $legacyAcl=Get-Acl -LiteralPath $legacyTicketPath
+ $repairedTicketRules=Get-PrivateInstallAccessRulesForSid -Acl $legacyAcl -ServiceSid $serviceSid
  if($repairedTicketRules.Count -ne 1 -or ($repairedTicketRules[0].FileSystemRights -band [Security.AccessControl.FileSystemRights]::Delete) -ne [Security.AccessControl.FileSystemRights]::Delete){throw 'Enrollment repair must grant the existing Agent ticket its required delete permission.'}
  Remove-Item -LiteralPath $legacyTicketPath -Force
  $replacementTicket='B'*43;Publish-PrivateEnrollmentTicket -Directory $ticketData -Ticket $replacementTicket -ServiceSid $serviceSid -Replace | Out-Null
