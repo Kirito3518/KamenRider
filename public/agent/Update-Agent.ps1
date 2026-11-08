@@ -102,8 +102,8 @@ function Invoke-AgentUpdateWorkflow {
         } else { throw 'Controller did not provide a readable Agent package stream.' }
         if ($packageLength -gt 104857600) { throw 'Agent package exceeds 100 MiB.' }
         if ($actualHash -cne $normalized.PackageSha256) { throw 'Agent package SHA-256 does not match the Admin-pinned release hash.' }
-        if ($Actions.PSObject.Properties['Validate']) { & $Actions.Validate $normalized $package.Path }
-        $result = & $Actions.Apply $normalized $package.Path
+        if ($Actions.PSObject.Properties['Validate']) { & $Actions.Validate $normalized $package }
+        $result = & $Actions.Apply $normalized $package
         $status = switch ([string]$result.Outcome) {
             'applied' { 'awaitingHeartbeat' }
             'rolledBack' { 'rollingBack' }
@@ -144,13 +144,25 @@ function Test-AgentUpdateWriteRights {
 }
 
 function Assert-AgentUpdatePathAcl {
-    param([Parameter(Mandatory)][string]$Path,[Parameter(Mandatory)][Security.Principal.SecurityIdentifier[]]$TrustedSids,[Security.Principal.SecurityIdentifier]$RequireModifySid,[switch]$Private)
+    param([Parameter(Mandatory)][string]$Path,[Parameter(Mandatory)][Security.Principal.SecurityIdentifier[]]$TrustedSids,[Security.Principal.SecurityIdentifier]$RequireModifySid,[Security.Principal.SecurityIdentifier]$RequireReadOnlySid,[Security.Principal.SecurityIdentifier]$DisallowServiceWriteSid,[switch]$Private)
     $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop
     $trusted = @($TrustedSids | ForEach-Object { $_.Value })
     if ($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -notin $trusted) { throw "Installation path has an untrusted owner: $Path" }
     $rules = @($acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier]))
     foreach ($rule in $rules) {
         if ($rule.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and $rule.IdentityReference.Value -notin $trusted -and (Test-AgentUpdateWriteRights -Rights ([int]$rule.FileSystemRights) -Private:$Private)) { throw "Installation path has an untrusted writable ACL: $Path" }
+    }
+    if ($RequireReadOnlySid) { $DisallowServiceWriteSid = $RequireReadOnlySid }
+    if ($DisallowServiceWriteSid) {
+        $serviceRules = @($rules | Where-Object { $_.IdentityReference.Value -eq $DisallowServiceWriteSid.Value })
+        $writable = @($serviceRules | Where-Object { $_.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and (Test-AgentUpdateWriteRights -Rights ([int]$_.FileSystemRights)) }).Count -gt 0
+        if ($writable) { throw "Agent service must not have write access to installed binaries: $Path" }
+    }
+    if ($RequireReadOnlySid) {
+        $readExecute = [int][Security.AccessControl.FileSystemRights]::ReadAndExecute
+        $hasRead = @($serviceRules | Where-Object { $_.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and (([int]$_.FileSystemRights -band $readExecute) -eq $readExecute) }).Count -gt 0
+        $denied = @($serviceRules | Where-Object { $_.AccessControlType -eq [Security.AccessControl.AccessControlType]::Deny -and (([int]$_.FileSystemRights -band $readExecute) -ne 0) }).Count -gt 0
+        if (-not $hasRead -or $denied -or -not $acl.AreAccessRulesProtected) { throw "Agent binary directory does not grant protected read-only service access: $Path" }
     }
     if ($RequireModifySid) {
         $modify = [Security.AccessControl.FileSystemRights]::Modify
@@ -209,7 +221,7 @@ function Assert-AgentUpdateSystemRoot {
 }
 
 function Assert-AgentUpdateTrustedTree {
-    param([Parameter(Mandatory)][string]$Path,[Parameter(Mandatory)][Security.Principal.SecurityIdentifier[]]$TrustedSids,[Security.Principal.SecurityIdentifier]$ServiceSid,[switch]$Private)
+    param([Parameter(Mandatory)][string]$Path,[Parameter(Mandatory)][Security.Principal.SecurityIdentifier[]]$TrustedSids,[Security.Principal.SecurityIdentifier]$ServiceSid,[switch]$Private,[switch]$ReadOnly)
     $full = [IO.Path]::GetFullPath($Path)
     if ($full.StartsWith('\\')) { throw 'Network Agent installation paths are not supported.' }
     $programData = [IO.Path]::GetFullPath($env:ProgramData).TrimEnd('\')
@@ -221,7 +233,11 @@ function Assert-AgentUpdateTrustedTree {
         if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "Agent installation path contains a reparse point: $current" }
         if ($item.PSIsContainer -and [string]::Equals([IO.Path]::GetFullPath($current).TrimEnd('\'),$programData,[StringComparison]::OrdinalIgnoreCase)) { Assert-AgentUpdateProgramDataRoot -Path $current }
         elseif ($item.PSIsContainer -and [string]::Equals([IO.Path]::GetFullPath($current).TrimEnd('\'),$systemRoot,[StringComparison]::OrdinalIgnoreCase)) { Assert-AgentUpdateSystemRoot -Path $current }
-        elseif ($item.PSIsContainer) { Assert-AgentUpdatePathAcl -Path $current -TrustedSids $TrustedSids -RequireModifySid $(if ([string]::Equals($current,$full,[StringComparison]::OrdinalIgnoreCase)) { $ServiceSid } else { $null }) -Private:$Private }
+        elseif ($item.PSIsContainer) {
+            $isTarget = [string]::Equals($current,$full,[StringComparison]::OrdinalIgnoreCase)
+            $rootSid = if ($isTarget) { $ServiceSid } else { $null }
+            Assert-AgentUpdatePathAcl -Path $current -TrustedSids $TrustedSids -RequireModifySid $(if (-not $ReadOnly) { $rootSid }) -RequireReadOnlySid $(if ($ReadOnly) { $rootSid }) -Private:($Private -and $isTarget)
+        }
         else { Assert-AgentUpdatePathAcl -Path $current -TrustedSids $TrustedSids -Private:$Private }
         if ([string]::Equals($current,[IO.Path]::GetPathRoot($current).TrimEnd('\'),[StringComparison]::OrdinalIgnoreCase)) { break }
         $parent = [IO.Path]::GetDirectoryName($current)
@@ -235,7 +251,7 @@ function Assert-AgentUpdateTrustedTree {
             $directory = $pending.Pop()
             foreach ($child in @(Get-ChildItem -LiteralPath $directory -Force -ErrorAction Stop)) {
                 if ($child.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "Agent installation tree contains a reparse point: $($child.FullName)" }
-                Assert-AgentUpdatePathAcl -Path $child.FullName -TrustedSids $TrustedSids -Private:$Private
+                Assert-AgentUpdatePathAcl -Path $child.FullName -TrustedSids $TrustedSids -DisallowServiceWriteSid $(if ($ReadOnly) { $ServiceSid }) -Private:$Private
                 if ($child.PSIsContainer) { $pending.Push($child.FullName) }
             }
         }
@@ -259,7 +275,9 @@ function Get-AgentUpdateServiceRecord {
     $records = @(Get-CimInstance -ClassName Win32_Service -Filter ("Name='{0}'" -f $Name.Replace("'","''")) -ErrorAction Stop)
     if ($records.Count -ne 1) { throw "Managed Windows service '$Name' is missing or ambiguous." }
     $record = $records[0]
-    [pscustomobject]@{ Name = [string]$record.Name; Account = [string]$record.StartName; StartMode = [string]$record.StartMode; BinaryPath = [string]$record.PathName; Dependencies = @($record.Dependencies); State = [string]$record.State }
+    $service = Get-Service -Name $Name -ErrorAction Stop
+    $dependencies = @($service.ServicesDependedOn | ForEach-Object { [string]$_.ServiceName })
+    [pscustomobject]@{ Name = [string]$record.Name; Account = [string]$record.StartName; StartMode = [string]$record.StartMode; BinaryPath = [string]$record.PathName; Dependencies = $dependencies; State = [string]$record.State }
 }
 
 function Get-AgentUpdateSunshineExecutable {
@@ -302,20 +320,43 @@ function Test-AgentUpdateStreamFence {
         (@($addresses[0].LocalAddress) -join ',') -eq 'Any' -and (@($addresses[0].RemoteAddress) -join ',') -eq 'Any' -and (@($interfaces[0].InterfaceAlias) -join ',') -eq 'Any' -and [string]$types[0].InterfaceType -eq 'Any'
 }
 
-function Get-AgentUpdateCurrentState {
+function Assert-AgentUpdateHost {
     param([Parameter(Mandatory)]$Request)
     if ($env:OS -ne 'Windows_NT') { throw 'Windows is required.' }
     if (-not ([Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw 'Run the Agent update from an elevated PowerShell session.' }
     if (-not (Test-Path -LiteralPath "Cert:\LocalMachine\Root\$($Request.TrustedRootThumbprint)")) { throw 'The configured Controller trust root is not installed in LocalMachine\Root.' }
+}
+
+function Assert-AgentUpdateVirtualAccountSid {
+    param([Parameter(Mandatory)][Security.Principal.SecurityIdentifier]$ServiceSid)
+    $virtualAccountSid = ([Security.Principal.NTAccount]::new('NT SERVICE\KamenRaider Agent')).Translate([Security.Principal.SecurityIdentifier])
+    if ($virtualAccountSid.Value -ne $ServiceSid.Value) { throw 'Agent service SID does not match its virtual service account.' }
+}
+
+function Get-AgentUpdateCurrentState {
+    param([Parameter(Mandatory)]$Request)
+    Assert-AgentUpdateHost -Request $Request
     $install = Join-Path (Join-Path $env:ProgramFiles 'KamenRaider') 'Agent'
     $data = Join-Path (Join-Path $env:ProgramData 'KamenRaider') 'Agent'
     $serviceSid = Get-AgentUpdateServiceSid -ServiceName 'KamenRaider Agent'
-    $virtualAccountSid = ([Security.Principal.NTAccount]::new('NT SERVICE\KamenRaider Agent')).Translate([Security.Principal.SecurityIdentifier])
-    if ($virtualAccountSid.Value -ne $serviceSid.Value) { throw 'Agent service SID does not match its virtual service account.' }
+    Assert-AgentUpdateVirtualAccountSid -ServiceSid $serviceSid
     $trustedSids = @([Security.Principal.SecurityIdentifier]::new('S-1-5-18'),[Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'),[Security.Principal.SecurityIdentifier]::new('S-1-3-0'),[Security.Principal.SecurityIdentifier]::new('S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'),[Security.Principal.WindowsIdentity]::GetCurrent().User,$serviceSid)
-    Assert-AgentUpdateTrustedTree -Path $install -TrustedSids $trustedSids -ServiceSid $serviceSid
     Assert-AgentUpdateTrustedTree -Path $data -TrustedSids $trustedSids -ServiceSid $serviceSid -Private
-    $workingDirectory = Join-Path (Join-Path $env:ProgramFiles 'KamenRaider') ('.Agent-update-work-' + $Request.OperationId.ToLowerInvariant())
+    $parent = Join-Path $env:ProgramFiles 'KamenRaider'
+    $operation = $Request.OperationId.ToLowerInvariant()
+    $backupDirectory = Join-Path $parent ('.Agent-rollback-' + $operation)
+    foreach ($prefix in @('.Agent-rollback-','.Agent-backup-stage-','.Agent-stage-','.Agent-prior-')) {
+        $recoveryPath = Join-Path $parent ($prefix + $operation)
+        if (Test-Path -LiteralPath $recoveryPath) {
+            if (-not (Test-Path -LiteralPath $recoveryPath -PathType Container)) { throw 'Agent update recovery path is not a real directory.' }
+            Assert-AgentUpdateTrustedTree -Path $recoveryPath -TrustedSids $trustedSids -ServiceSid $serviceSid -ReadOnly -Private
+        }
+    }
+    $hasBackup = Test-Path -LiteralPath $backupDirectory -PathType Container
+    $hasInstall = Test-Path -LiteralPath $install -PathType Container
+    if ($hasInstall) { Assert-AgentUpdateTrustedTree -Path $install -TrustedSids $trustedSids -ServiceSid $serviceSid -ReadOnly }
+    elseif ((Test-Path -LiteralPath $install) -or -not $hasBackup) { throw 'Agent installation is missing and no protected operation backup is available.' }
+    $workingDirectory = Join-Path $parent ('.Agent-update-work-' + $operation)
     if (Test-Path -LiteralPath $workingDirectory) {
         $workingItem = Get-Item -LiteralPath $workingDirectory -Force -ErrorAction Stop
         if (-not $workingItem.PSIsContainer -or ($workingItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'Agent update recovery directory is not a real directory.' }
@@ -324,7 +365,8 @@ function Get-AgentUpdateCurrentState {
     $agentService = Get-AgentUpdateServiceRecord -Name 'KamenRaider Agent'
     $guardService = Get-AgentUpdateServiceRecord -Name 'KamenRaider Stream Guard'
     $sunshineService = Get-AgentUpdateServiceRecord -Name 'SunshineService'
-    if ($agentService.State -ne 'Running' -or $guardService.State -ne 'Running') { throw 'Agent and Stream Guard services must be running before an update reservation is consumed.' }
+    if ($agentService.State -notin @('Running','Stopped') -or $guardService.State -notin @('Running','Stopped')) { throw 'Agent or Stream Guard service state is uncertain.' }
+    if (-not $hasBackup -and ($agentService.State -ne 'Running' -or $guardService.State -ne 'Running')) { throw 'Agent and Stream Guard services must be running before a new update.' }
     $identityPath = Join-Path $data 'identity\identity.json'
     if (-not (Test-Path -LiteralPath $identityPath -PathType Leaf)) { throw 'Agent identity file is missing.' }
     try { $identity = [IO.File]::ReadAllText($identityPath) | ConvertFrom-Json -ErrorAction Stop } catch { throw 'Agent identity file is invalid.' }
@@ -333,7 +375,7 @@ function Get-AgentUpdateCurrentState {
     if (Test-Path -LiteralPath $receiptPath -PathType Leaf) {
         try { $receipt = [IO.File]::ReadAllText($receiptPath) | ConvertFrom-Json -ErrorAction Stop; $receiptMachineId = [string]$receipt.MachineId } catch { throw 'Agent enrollment receipt is invalid.' }
     }
-    $configurationPath = Join-Path $install 'appsettings.json'
+    $configurationPath = Join-Path $(if ($hasInstall) { $install } else { $backupDirectory }) 'appsettings.json'
     if (-not (Test-Path -LiteralPath $configurationPath -PathType Leaf)) { throw 'Existing Agent appsettings.json is missing.' }
     try { $configuration = [IO.File]::ReadAllText($configurationPath) | ConvertFrom-Json -ErrorAction Stop } catch { throw 'Existing Agent appsettings.json is invalid.' }
     $sunshineExecutable = Get-AgentUpdateSunshineExecutable -ImagePath $sunshineService.BinaryPath
@@ -397,6 +439,7 @@ function Test-AgentUpdatePackageArchive {
 
 function Expand-AgentUpdatePackageArchive {
     param([Parameter(Mandatory)][string]$ArchivePath,[Parameter(Mandatory)][string]$Destination)
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
     if (Test-Path -LiteralPath $Destination) { throw 'Agent package extraction destination already exists.' }
     $root = [IO.Path]::GetFullPath($Destination).TrimEnd('\')
     [void](New-Item -ItemType Directory -Path $root)

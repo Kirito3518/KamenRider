@@ -77,9 +77,28 @@ try {
     Assert-AgentUpdateTest ([IO.File]::ReadAllText((Join-Path $fixture.Install 'Agent.exe')) -eq 'old-agent') 'Rollback did not restore old Agent binary.'
     Assert-AgentUpdateTest (Test-Path -LiteralPath $result.BackupDirectory -PathType Container) 'Rollback backup must be retained for verification.'
 
+    $fixture = New-AgentUpdateFixture -Root (Join-Path $root 'rollback-stop-failure')
+    $api = New-AgentUpdateFakeServiceApi -FailAgentStart
+    $serviceState = $api.State
+    $serviceState | Add-Member -NotePropertyName StopAttempts -NotePropertyValue 0
+    $api.StopAgent = { $serviceState.StopAttempts++; $serviceState.Calls.Add('stop-agent'); if ($serviceState.StopAttempts -eq 2) { throw 'fake rollback stop failure' }; $serviceState.Agent = 'Stopped' }.GetNewClosure()
+    $result = Invoke-AgentUpdateTransaction -InstallDirectory $fixture.Install -DataDirectory $fixture.Data -PackageRoot $fixture.Package -OperationId $fixture.OperationId -TargetVersion $fixture.Version -ServiceSid $serviceSid -ServiceApi $api
+    Assert-AgentUpdateTest ($result.Outcome -eq 'failed') 'A failed rollback stop must remain failed and locked.'
+    Assert-AgentUpdateTest ([IO.File]::ReadAllText((Join-Path $fixture.Install 'Agent.exe')) -eq 'new-agent') 'Failed stop must not restore files while a service may still be running.'
+    Assert-AgentUpdateTest (Test-Path -LiteralPath $result.BackupDirectory -PathType Container) 'An uncertain rollback must retain its backup.'
+
+    $fixture = New-AgentUpdateFixture -Root (Join-Path $root 'initial-stop-failure')
+    $api = New-AgentUpdateFakeServiceApi
+    $api.StopGuard = { throw 'fake initial guard stop failure' }
+    $result = Invoke-AgentUpdateTransaction -InstallDirectory $fixture.Install -DataDirectory $fixture.Data -PackageRoot $fixture.Package -OperationId $fixture.OperationId -TargetVersion $fixture.Version -ServiceSid $serviceSid -ServiceApi $api
+    Assert-AgentUpdateTest ($result.Outcome -eq 'failed') 'An uncertain initial stop must not be reported as a verified rollback.'
+    Assert-AgentUpdateTest ([IO.File]::ReadAllText((Join-Path $fixture.Install 'Agent.exe')) -eq 'old-agent') 'A failed initial stop must not swap binaries.'
+
     $fixture = New-AgentUpdateFixture -Root (Join-Path $root 'interrupted')
     $plan = Get-AgentUpdateTransactionPlan -InstallDirectory $fixture.Install -OperationId $fixture.OperationId
-    [IO.Directory]::Move($fixture.Install, $plan.BackupDirectory)
+    Copy-AgentUpdateTree -Source $fixture.Install -Destination $plan.BackupDirectory -ServiceSid $serviceSid -ReadOnlyRoot
+    Set-PrivateInstallAcl -Path (Join-Path $plan.BackupDirectory 'appsettings.json') -ServiceSid $serviceSid
+    Remove-Item -LiteralPath $fixture.Install -Recurse -Force
     $api = New-AgentUpdateFakeServiceApi
     $result = Invoke-AgentUpdateTransaction -InstallDirectory $fixture.Install -DataDirectory $fixture.Data -PackageRoot $fixture.Package -OperationId $fixture.OperationId -TargetVersion $fixture.Version -ServiceSid $serviceSid -ServiceApi $api
     Assert-AgentUpdateTest ($result.Outcome -eq 'rolledBack') 'Interrupted swap must recover the original install.'

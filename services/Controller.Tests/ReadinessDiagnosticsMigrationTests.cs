@@ -16,7 +16,7 @@ public sealed class ReadinessDiagnosticsMigrationTests
             using (new ControllerDatabase(path)) { }
             using (var verify = Open(path))
             {
-                Assert.Equal(12L, Scalar(verify, "PRAGMA user_version"));
+                Assert.Equal(13L, Scalar(verify, "PRAGMA user_version"));
                 Assert.Equal(0L, Scalar(verify, "SELECT COUNT(*) FROM machine_readiness_diagnostics"));
                 Assert.Equal("pc", Scalar(verify, "SELECT machine_id FROM machines"));
                 Assert.Equal("machine_id,diagnostics_json,updated_at", string.Join(',', Columns(verify, "machine_readiness_diagnostics")));
@@ -24,7 +24,7 @@ public sealed class ReadinessDiagnosticsMigrationTests
 
             using (new ControllerDatabase(path)) { }
             using var restarted = Open(path);
-            Assert.Equal(12L, Scalar(restarted, "PRAGMA user_version"));
+            Assert.Equal(13L, Scalar(restarted, "PRAGMA user_version"));
             Assert.Equal(1L, Scalar(restarted, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='machine_readiness_diagnostics'"));
         }
         finally

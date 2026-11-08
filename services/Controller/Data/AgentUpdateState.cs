@@ -104,6 +104,8 @@ public sealed partial class ControllerDatabase
                 targetVersion = row.GetString(0);
                 packageHash = row.GetString(1);
             }
+            if (string.Equals(previousVersion, targetVersion, StringComparison.Ordinal))
+                throw new InvalidOperationException("Agent is already running the requested version");
 
             var ticket = NewAgentUpdateTicket(out var ticketHash);
             var operationId = Guid.NewGuid().ToString("N");
@@ -320,7 +322,7 @@ public sealed partial class ControllerDatabase
     private void ResolveAgentUpdateFromHeartbeat(SqliteTransaction tx, string machineId, string? reportedVersion, long nowMs)
     {
         if (reportedVersion is null) return;
-        using var resolve = Command("UPDATE agent_update_operations SET status=CASE WHEN target_version=$version THEN 'completed' ELSE 'rolledBack' END,updated_at_unix_ms=$now WHERE machine_id=$machine AND started_at_unix_ms IS NOT NULL AND status IN ('installing','awaitingHeartbeat','rollingBack','failed') AND (target_version=$version OR (status='rollingBack' AND previous_version=$version))",
+        using var resolve = Command("UPDATE agent_update_operations SET status=CASE WHEN status='awaitingHeartbeat' THEN 'completed' ELSE 'rolledBack' END,updated_at_unix_ms=$now WHERE machine_id=$machine AND started_at_unix_ms IS NOT NULL AND ((status='awaitingHeartbeat' AND target_version=$version) OR (status='rollingBack' AND previous_version=$version))",
             ("$version", reportedVersion), ("$now", nowMs), ("$machine", machineId));
         resolve.Transaction = tx;
         resolve.ExecuteNonQuery();

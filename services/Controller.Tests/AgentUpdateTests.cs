@@ -16,6 +16,79 @@ namespace Controller.Tests;
 public sealed class AgentUpdateTests
 {
     [Fact]
+    public async Task ReservationRejectsTheInstalledVersionWithoutLockingMachine()
+    {
+        using var fixture = new LeaseFixture();
+        AddRelease(fixture.Path, "1.0.0");
+        fixture.SyncVersion("1.0.0");
+        await using var host = await StartHost(fixture.Db);
+
+        using var response = await Reserve(host.Client, "pc", "1.0.0");
+
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        Assert.True(Assert.Single(fixture.Db.List()).CanRent);
+    }
+
+    [Theory]
+    [InlineData("installing")]
+    [InlineData("failed")]
+    [InlineData("rollingBack")]
+    public async Task TargetHeartbeatCannotCompleteAnUnconfirmedTransaction(string status)
+    {
+        using var fixture = new LeaseFixture();
+        AddRelease(fixture.Path, "2.0.0");
+        fixture.SyncVersion("1.0.0");
+        var update = fixture.Db.ReserveAgentUpdate("pc", "2.0.0");
+        fixture.Db.StartAgentUpdate("pc", update.Ticket);
+        if (status != "installing") fixture.Db.ReportAgentUpdateStatus("pc", update.Ticket, status);
+
+        fixture.SyncVersion("2.0.0");
+
+        Assert.Equal(status, OperationStatus(fixture.Path, update.OperationId));
+        Assert.False(Assert.Single(fixture.Db.List()).CanRent);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Create("unconfirmed-update"));
+    }
+
+    [Fact]
+    public async Task HeartbeatMustFollowItsTransactionReportToReleaseTheLock()
+    {
+        using var fixture = new LeaseFixture();
+        AddRelease(fixture.Path, "2.0.0");
+        fixture.SyncVersion("1.0.0");
+        var update = fixture.Db.ReserveAgentUpdate("pc", "2.0.0");
+        fixture.Db.StartAgentUpdate("pc", update.Ticket);
+
+        fixture.SyncVersion("2.0.0");
+        Assert.Equal("installing", OperationStatus(fixture.Path, update.OperationId));
+        fixture.Db.ReportAgentUpdateStatus("pc", update.Ticket, "awaitingHeartbeat");
+        Assert.False(Assert.Single(fixture.Db.List()).CanRent);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Create("before-target-heartbeat"));
+        fixture.SyncVersion("2.0.0");
+        Assert.Equal("completed", OperationStatus(fixture.Path, update.OperationId));
+        Assert.True(Assert.Single(fixture.Db.List()).CanRent);
+    }
+
+    [Fact]
+    public async Task RollbackHeartbeatMustFollowRollbackReportAndTargetCannotCompleteDuringRollback()
+    {
+        using var fixture = new LeaseFixture();
+        AddRelease(fixture.Path, "2.0.0");
+        fixture.SyncVersion("1.0.0");
+        var update = fixture.Db.ReserveAgentUpdate("pc", "2.0.0");
+        fixture.Db.StartAgentUpdate("pc", update.Ticket);
+
+        fixture.SyncVersion("1.0.0");
+        fixture.Db.ReportAgentUpdateStatus("pc", update.Ticket, "rollingBack");
+        Assert.False(Assert.Single(fixture.Db.List()).CanRent);
+        fixture.SyncVersion("2.0.0");
+        Assert.Equal("rollingBack", OperationStatus(fixture.Path, update.OperationId));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Create("during-rollback"));
+        fixture.SyncVersion("1.0.0");
+        Assert.Equal("rolledBack", OperationStatus(fixture.Path, update.OperationId));
+        Assert.True(Assert.Single(fixture.Db.List()).CanRent);
+    }
+
+    [Fact]
     public async Task UpdateReservationRejectsMachineWithHeldLease()
     {
         using var fixture = new LeaseFixture();

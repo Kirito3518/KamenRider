@@ -145,7 +145,7 @@ function Get-AgentUpdateLiveServiceApi {
     param([Parameter(Mandatory)][string]$AgentServiceName, [Parameter(Mandatory)][string]$GuardServiceName)
     return [pscustomobject]@{
         StopAgent = { $service = Get-Service -Name $AgentServiceName -ErrorAction Stop; if ($service.Status -ne 'Stopped') { Stop-Service -Name $AgentServiceName -ErrorAction Stop; $service.WaitForStatus('Stopped',[TimeSpan]::FromSeconds(30)) } }.GetNewClosure()
-        StopGuard = { $service = Get-Service -Name $GuardServiceName -ErrorAction Stop; if ($service.Status -ne 'Stopped') { Stop-Service -Name $GuardServiceName -Force -ErrorAction Stop; $service.WaitForStatus('Stopped',[TimeSpan]::FromSeconds(30)) } }.GetNewClosure()
+        StopGuard = { $service = Get-Service -Name $GuardServiceName -ErrorAction Stop; if ($service.Status -ne 'Stopped') { Stop-Service -Name $GuardServiceName -ErrorAction Stop; $service.WaitForStatus('Stopped',[TimeSpan]::FromSeconds(30)) } }.GetNewClosure()
         StartGuard = { $service = Get-Service -Name $GuardServiceName -ErrorAction Stop; if ($service.Status -ne 'Running') { Start-Service -Name $GuardServiceName -ErrorAction Stop; $service.WaitForStatus('Running',[TimeSpan]::FromSeconds(30)) } }.GetNewClosure()
         StartAgent = { $service = Get-Service -Name $AgentServiceName -ErrorAction Stop; if ($service.Status -ne 'Running') { Start-Service -Name $AgentServiceName -ErrorAction Stop; $service.WaitForStatus('Running',[TimeSpan]::FromSeconds(30)) } }.GetNewClosure()
     }
@@ -184,7 +184,12 @@ function Invoke-AgentUpdateTransaction {
     if (-not (Test-Path -LiteralPath $install -PathType Container) -and -not (Test-Path -LiteralPath $plan.BackupDirectory -PathType Container)) { throw 'Existing Agent installation and its rollback backup are both missing.' }
 
     if (Test-Path -LiteralPath $plan.BackupDirectory -PathType Container) {
+        foreach ($existing in @($plan.BackupDirectory,$plan.BackupStageDirectory,$plan.StageDirectory,$plan.PriorDirectory)) {
+            if (Test-Path -LiteralPath $existing) { Assert-AgentUpdatePrivateTree -Path $existing -ServiceSid $ServiceSid }
+        }
         if (-not (Test-Path -LiteralPath $install -PathType Container)) {
+            & $ServiceApi.StopAgent
+            & $ServiceApi.StopGuard
             Copy-AgentUpdateTree -Source $plan.BackupDirectory -Destination $install -ServiceSid $ServiceSid -ReadOnlyRoot
             Set-PrivateInstallAcl -Path (Join-Path $install 'appsettings.json') -ServiceSid $ServiceSid
             Assert-AgentUpdatePrivateTree -Path $install -ServiceSid $ServiceSid
@@ -195,6 +200,8 @@ function Invoke-AgentUpdateTransaction {
         }
         $installedVersion = Get-AgentUpdatePackageVersion -AgentDirectory $install
         if ($installedVersion -ceq $TargetVersion) {
+            & $ServiceApi.StopAgent
+            & $ServiceApi.StopGuard
             Invoke-AgentUpdateServiceStart -ServiceApi $ServiceApi
             return [pscustomobject]@{ Outcome = 'applied'; InstallDirectory = $install; BackupDirectory = $plan.BackupDirectory; Message = 'The requested Agent version was already swapped; backup retained pending heartbeat.' }
         }
@@ -211,6 +218,7 @@ function Invoke-AgentUpdateTransaction {
     $backupCreated = $false
     $swapStarted = $false
     $servicesTouched = $false
+    $servicesStopped = $false
     try {
         Copy-AgentUpdateTree -Source (Join-Path $package 'Agent') -Destination $stage -ServiceSid $ServiceSid -ReadOnlyRoot
         [IO.File]::Copy($configuration, (Join-Path $stage 'appsettings.json'), $false)
@@ -230,6 +238,7 @@ function Invoke-AgentUpdateTransaction {
         $servicesTouched = $true
         & $ServiceApi.StopAgent
         & $ServiceApi.StopGuard
+        $servicesStopped = $true
         [IO.Directory]::Move($install, $prior)
         $swapStarted = $true
         [IO.Directory]::Move($stage, $install)
@@ -243,11 +252,11 @@ function Invoke-AgentUpdateTransaction {
     } catch {
         $failure = $_.Exception.Message
         $rollbackSucceeded = $false
-        if ($backupCreated -and ($swapStarted -or $servicesTouched)) {
+        if ($backupCreated -and $servicesTouched -and $servicesStopped) {
             try {
                 if ($swapStarted) {
-                    try { & $ServiceApi.StopAgent } catch { }
-                    try { & $ServiceApi.StopGuard } catch { }
+                    & $ServiceApi.StopAgent
+                    & $ServiceApi.StopGuard
                     if (Test-Path -LiteralPath $install) {
                         if (Test-Path -LiteralPath $stage) { throw 'Both failed install and stage paths exist; preserving all files for manual recovery.' }
                         [IO.Directory]::Move($install, $stage)

@@ -17,7 +17,7 @@
 - Updates are per-machine and manual. No background rollout or bulk action is in scope.
 - Package hashes must match before extraction or file replacement. Paths from uploaded ZIP entries must not escape the staging directory.
 - The update operation is bound to one machine, one release, one target version, one package hash, and one short-lived ticket. Replayed starts/downloads and machine mismatch are rejected; recovery replaces the prior ticket without creating a new operation.
-- Update reservation requires a versioned heartbeat no older than 20 seconds; an unstarted ticket expires after 10 minutes. Once started, only target-version or verified rollback-version heartbeat resolves the lock.
+- Update reservation requires a versioned heartbeat no older than 20 seconds and a different target version; an unstarted ticket expires after 10 minutes. Once started, only a target heartbeat following an `awaitingHeartbeat` report, or a previous-version heartbeat following a `rollingBack` report, resolves the lock. The updater reports `rollingBack` only after restoration and verified restart, and reports uncertain stop/restore/restart as `failed`.
 - Uploaded ZIP size is limited to 100 MiB, expanded size to 500 MiB, and entry count to 5,000; dirty development packages are rejected for release.
 - Release package builds write outside `public/` and carry a release-build marker; enrollment's existing static package flow remains separate.
 - Preserve the machine identity, private data, existing Agent configuration, service identity, and service dependencies while applying an update.
@@ -28,7 +28,7 @@
 ## Review Focus
 
 - A lease races with update reservation — both operations serialize in Controller; test both orderings and assert one winner.
-- A stale or old-version heartbeat arrives after update starts — it must not clear the lock; test that only target or verified rollback confirmation resolves it.
+- A heartbeat arrives while the updater is still running or rolling back — it must not clear the lock; test the required report followed by the corresponding fresh heartbeat, and retain the lock on uncertainty.
 - A one-time ticket is replayed, expires, or is supplied with a different machine ID — reject without downloading or applying the package.
 - Uploaded ZIP contains a traversal entry, duplicate manifest, wrong version, or excessive size — reject before publishing or extraction.
 - The process exits between backup and new service start — preserve recovery material and keep the machine locked until recovery is confirmed.

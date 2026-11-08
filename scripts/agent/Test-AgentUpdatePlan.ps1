@@ -122,7 +122,9 @@ try {
         Report = { param($request,$status) $traversalLog.Add("report:$status") }.GetNewClosure()
         Cleanup = { $traversalStream.Dispose(); $traversalLog.Add('cleanup') }.GetNewClosure()
     }
-    Assert-AgentUpdateThrows { Invoke-AgentUpdateWorkflow -Request $traversalRequest -LocalState $validState -Actions $traversalActions } 'Traversal archive reached the update transaction.'
+    $traversalError = $null
+    try { Invoke-AgentUpdateWorkflow -Request $traversalRequest -LocalState $validState -Actions $traversalActions } catch { $traversalError = $_.Exception.Message }
+    if ($traversalError -notmatch 'unsafe path') { throw "Traversal must be rejected for its unsafe path, got: $traversalError" }
     if ($traversalLog -contains 'apply' -or $traversalLog -notcontains 'report:failed') { throw 'Traversal archive was not rejected before binary or service mutation.' }
     if (Test-Path -LiteralPath $archivePath) { throw 'Traversal validation wrote the in-memory archive to disk before rejection.' }
 } finally {
