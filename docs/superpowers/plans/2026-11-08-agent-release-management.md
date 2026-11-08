@@ -91,6 +91,7 @@
 - Modify: `services/Controller/Machines/MachineEndpoints.cs` and Agent endpoints
 - Create: `src/app/api/admin/agent-releases/route.ts`
 - Create: `src/app/api/admin/machines/[machineId]/agent-update-command/route.ts`
+- Create: `services/Controller/Data/Migrations/013-agent-update-downloads.sql`
 - Test: Next route authorization tests and Controller update-ticket tests
 
 **Interfaces:**
@@ -98,7 +99,7 @@
 - Produces: short-lived operation ticket, fixed package hash/version, and one-time copyable PowerShell update command; Controller's HTTPS package endpoint authorizes download only for that operation/ticket. Recovery issues a new ticket for the same active operation without creating or releasing a lock.
 
 - [ ] **Step 1: Add failing route/API tests** for unauthenticated/non-admin/cross-origin requests, wrong machine, wrong release, ticket replay, expiry, and download without a valid update ticket.
-- [ ] **Step 2: Implement Controller operation issue/start/download/status/recovery endpoints** while keeping package selection and target version immutable for that operation; one ticket authorizes one start, one package download, and operation status reports, and a recovery ticket replaces it on the existing failed/interrupted operation.
+- [ ] **Step 2: Add migration 013 for durable per-ticket start/package-download consumption. Implement Controller operation issue/start/download/status/recovery endpoints** while keeping package selection and target version immutable for that operation; one ticket authorizes one start, one package download, and operation status reports, and a recovery ticket replaces it on the existing failed/interrupted operation and resets its one-download allowance.
 - [ ] **Step 3: Implement Admin publish/list/command routes** using the existing session and same-origin checks; avoid minting tickets on GET/mount.
 - [ ] **Step 4: Implement ticketed Controller package retrieval** with bounded response, exact stored hash, and no public static path.
 - [ ] **Step 5: Run focused route and Controller tests**, then commit `feat(admin): issue machine-scoped Agent update commands`.
