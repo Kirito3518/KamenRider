@@ -11,12 +11,15 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 # staging and the actual transaction execute against disposable files.
 function Assert-AgentUpdateHost { param($Request) }
 function Assert-AgentUpdateVirtualAccountSid { param($ServiceSid) }
+function Get-AgentUpdateLockParent { return Join-Path $env:ProgramData 'KamenRaider' }
 function Get-AgentUpdateServiceSid { param($ServiceName) return $global:PublicUpdateFixture.ServiceSid }
 function Assert-AgentUpdateTrustedTree {
-    param($Path,$TrustedSids,$ServiceSid,[switch]$Private,[switch]$ReadOnly)
+    param($Path,$TrustedSids,$ServiceSid,[switch]$Private,[switch]$ReadOnly,[switch]$AncestorsOnly)
     if (-not (Test-Path -LiteralPath $Path -PathType Container)) { throw "Agent installation path is missing: $Path" }
     if ($ServiceSid -and -not $Private -and -not $ReadOnly) { throw 'Agent binaries were not checked using read-only service permissions.' }
-    foreach ($item in @((Get-Item -LiteralPath $Path -Force)) + @(Get-ChildItem -LiteralPath $Path -Force -Recurse)) {
+    $items = @((Get-Item -LiteralPath $Path -Force))
+    if (-not $AncestorsOnly) { $items += @(Get-ChildItem -LiteralPath $Path -Force -Recurse) }
+    foreach ($item in $items) {
         if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Untrusted reparse point in update tree.' }
     }
 }
@@ -55,6 +58,11 @@ try {
         $install = Join-Path $env:ProgramFiles 'KamenRaider\Agent'
         $data = Join-Path $env:ProgramData 'KamenRaider\Agent'
         $package = Join-Path $scenarioRoot 'package'
+        New-Item -ItemType Directory -Path $env:ProgramFiles -Force | Out-Null
+        New-Item -ItemType Directory -Path $env:ProgramData -Force | Out-Null
+        $fixtureSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')
+        New-PrivateInstallDirectory -Path (Join-Path $env:ProgramFiles 'KamenRaider') -ServiceSid $fixtureSid -ReadOnly | Out-Null
+        New-PrivateInstallDirectory -Path (Join-Path $env:ProgramData 'KamenRaider') -ServiceSid $fixtureSid -ReadOnly | Out-Null
         foreach ($directory in @($install,(Join-Path $data 'identity'),(Join-Path $package 'Agent'))) { New-Item -ItemType Directory -Path $directory -Force | Out-Null }
         [IO.File]::WriteAllText((Join-Path $install 'Agent.exe'),'old-agent')
         [IO.File]::WriteAllText((Join-Path $install 'Agent.deps.json'),'{"libraries":{"Agent/1.2.3":{"type":"project"}}}')

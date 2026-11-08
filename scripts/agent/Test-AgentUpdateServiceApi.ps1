@@ -23,6 +23,10 @@ function global:Get-Acl { param($LiteralPath,$ErrorAction) return $global:AgentU
 try {
     $failures = [Collections.Generic.List[string]]::new()
     try {
+        $expectedLockParent = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)) 'KamenRaider'
+        if ((Get-AgentUpdateLockParent) -ne $expectedLockParent) { throw 'Agent lock location must use the machine-wide Windows data directory.' }
+    } catch { $failures.Add($_.Exception.Message) }
+    try {
         $record = Get-AgentUpdateServiceRecord -Name 'KamenRaider Agent'
         if ('KamenRaider Stream Guard' -notin @($record.Dependencies)) { throw 'Service preflight did not read the configured Guard dependency.' }
     } catch { $failures.Add($_.Exception.Message) }

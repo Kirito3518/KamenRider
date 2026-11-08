@@ -22,6 +22,7 @@
 - Release package builds write outside `public/` and carry a release-build marker; enrollment's existing static package flow remains separate.
 - Preserve the machine identity, private data, existing Agent configuration, service identity, and service dependencies while applying an update.
 - On uncertain service or rollback state, fail closed: keep the maintenance lock and do not expose the machine as rentable.
+- Serialize all updater and recovery processes on the same machine with a protected local lock held before preflight and ticket start through status reporting; concurrent invocations fail before touching the operation, and process exit releases the lock.
 - An Admin can renew a ticket for the same failed/interrupted locked operation; recovery never creates a second operation or unlocks the machine early.
 - Reboot Restore Rx remains untouched.
 

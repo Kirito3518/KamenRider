@@ -54,6 +54,7 @@ The user selected a separate **Update Agent** action with a machine maintenance 
 - An update may start only from a fresh, versioned heartbeat with a different target version so the Controller has a distinct source version to verify on rollback.
 - The Agent service has read-only access to installed binaries. Never force a Guard stop or stop Sunshine or other dependent services; an unsuccessful stop leaves the operation failed and locked.
 - On uncertain service or rollback state, fail closed: keep the maintenance lock and do not expose the machine as rentable.
+- A machine-wide local update lock is held before local-state validation and ticket start through the final status report. A concurrent recovery must fail without consuming its ticket or mutating files or services; the operating system releases the lock if the updater exits or crashes. Protect the lock path from untrusted writers and reparse or hard-link redirection.
 - Reboot Restore Rx remains untouched.
 
 ## Acceptance

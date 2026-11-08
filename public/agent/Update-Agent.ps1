@@ -144,8 +144,8 @@ function Test-AgentUpdateWriteRights {
 }
 
 function Assert-AgentUpdatePathAcl {
-    param([Parameter(Mandatory)][string]$Path,[Parameter(Mandatory)][Security.Principal.SecurityIdentifier[]]$TrustedSids,[Security.Principal.SecurityIdentifier]$RequireModifySid,[Security.Principal.SecurityIdentifier]$RequireReadOnlySid,[Security.Principal.SecurityIdentifier]$DisallowServiceWriteSid,[switch]$Private)
-    $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop
+    param([Parameter(Mandatory)][string]$Path,[Parameter(Mandatory)][Security.Principal.SecurityIdentifier[]]$TrustedSids,[Security.Principal.SecurityIdentifier]$RequireModifySid,[Security.Principal.SecurityIdentifier]$RequireReadOnlySid,[Security.Principal.SecurityIdentifier]$DisallowServiceWriteSid,[switch]$Private,[Security.AccessControl.FileSystemSecurity]$Acl)
+    if (-not $Acl) { $Acl = Get-Acl -LiteralPath $Path -ErrorAction Stop }
     $trusted = @($TrustedSids | ForEach-Object { $_.Value })
     if ($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -notin $trusted) { throw "Installation path has an untrusted owner: $Path" }
     $rules = @($acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier]))
@@ -221,7 +221,7 @@ function Assert-AgentUpdateSystemRoot {
 }
 
 function Assert-AgentUpdateTrustedTree {
-    param([Parameter(Mandatory)][string]$Path,[Parameter(Mandatory)][Security.Principal.SecurityIdentifier[]]$TrustedSids,[Security.Principal.SecurityIdentifier]$ServiceSid,[switch]$Private,[switch]$ReadOnly)
+    param([Parameter(Mandatory)][string]$Path,[Parameter(Mandatory)][Security.Principal.SecurityIdentifier[]]$TrustedSids,[Security.Principal.SecurityIdentifier]$ServiceSid,[switch]$Private,[switch]$ReadOnly,[switch]$AncestorsOnly)
     $full = [IO.Path]::GetFullPath($Path)
     if ($full.StartsWith('\\')) { throw 'Network Agent installation paths are not supported.' }
     $programData = [IO.Path]::GetFullPath($env:ProgramData).TrimEnd('\')
@@ -245,7 +245,7 @@ function Assert-AgentUpdateTrustedTree {
         $current = $parent
     }
     $root = Get-Item -LiteralPath $full -Force
-    if ($root.PSIsContainer) {
+    if ($root.PSIsContainer -and -not $AncestorsOnly) {
         $pending = [Collections.Generic.Stack[string]]::new(); $pending.Push($full)
         while ($pending.Count -gt 0) {
             $directory = $pending.Pop()
@@ -256,6 +256,71 @@ function Assert-AgentUpdateTrustedTree {
             }
         }
     }
+}
+
+function Assert-AgentUpdateLockParent {
+    param([Parameter(Mandatory)][string]$Path,[Parameter(Mandatory)][Security.Principal.SecurityIdentifier[]]$TrustedSids)
+    if (-not (Test-Path -LiteralPath $Path -PathType Container)) { throw 'The managed Agent installation parent is missing.' }
+    Assert-AgentUpdateTrustedTree -Path $Path -TrustedSids $TrustedSids -AncestorsOnly
+}
+
+function Get-AgentUpdateLockParent {
+    # The Windows common application-data location is machine-wide and does
+    # not vary with the caller's ProgramFiles environment or bitness.
+    $root = [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
+    if (-not $root -or -not [IO.Path]::IsPathRooted($root) -or $root.StartsWith('\\')) { throw 'A local machine-wide ProgramData path is required for Agent updates.' }
+    return Join-Path ([IO.Path]::GetFullPath($root)) 'KamenRaider'
+}
+
+function Initialize-AgentUpdateLockNativeType {
+    if (-not ('KamenRaider.Update.NativeLockFileV1' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+namespace KamenRaider.Update {
+ public static class NativeLockFileV1 {
+  [StructLayout(LayoutKind.Sequential)]
+  private struct FileInformation {
+   public uint Attributes;
+   public System.Runtime.InteropServices.ComTypes.FILETIME Creation, Access, Write;
+   public uint Volume, SizeHigh, SizeLow, NumberOfLinks, IndexHigh, IndexLow;
+  }
+  [DllImport("kernel32.dll", SetLastError=true)] [return: MarshalAs(UnmanagedType.Bool)]
+  private static extern bool GetFileInformationByHandle(SafeFileHandle file, out FileInformation information);
+  public static bool IsRegularSingleLink(SafeFileHandle file) {
+   FileInformation info;
+   if (!GetFileInformationByHandle(file,out info)) throw new Win32Exception(Marshal.GetLastWin32Error());
+   const uint directory=0x10, reparsePoint=0x400;
+   return (info.Attributes & (directory | reparsePoint)) == 0 && info.NumberOfLinks == 1;
+  }
+ }
+}
+'@
+    }
+}
+
+function Enter-AgentUpdateLocalLock {
+    $parent = Get-AgentUpdateLockParent
+    $trusted = @([Security.Principal.SecurityIdentifier]::new('S-1-5-18'),[Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'),[Security.Principal.SecurityIdentifier]::new('S-1-3-0'),[Security.Principal.SecurityIdentifier]::new('S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'),[Security.Principal.WindowsIdentity]::GetCurrent().User)
+    # No service SID is trusted for writing the parent or lock file. The fixed
+    # filename serializes every operation for this installation, across sessions.
+    Assert-AgentUpdateLockParent -Path $parent -TrustedSids $trusted
+    $path = Join-Path $parent '.Agent-update.lock'
+    if (Test-Path -LiteralPath $path) {
+        $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
+        if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'Agent update lock must be a regular single-link file.' }
+    }
+    try { $file = [IO.File]::Open($path,[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None) }
+    catch [IO.IOException] { throw 'Another Agent update is already running or the local update lock is unavailable.' }
+    try {
+        Initialize-AgentUpdateLockNativeType
+        if (-not [KamenRaider.Update.NativeLockFileV1]::IsRegularSingleLink($file.SafeFileHandle)) { throw 'Agent update lock must be a regular single-link file.' }
+        $acl = if ($PSVersionTable.PSEdition -eq 'Desktop') { $file.GetAccessControl() } else { [IO.FileSystemAclExtensions]::GetAccessControl($file) }
+        Assert-AgentUpdatePathAcl -Path $path -TrustedSids $trusted -Acl $acl
+        return $file
+    } catch { $file.Dispose(); throw }
 }
 
 function Remove-AgentUpdatePrivateWorkDirectory {
@@ -616,9 +681,13 @@ function Invoke-AgentUpdateMain {
         PackageSha256 = $BoundParameters.PackageSha256; TrustedRootThumbprint = $BoundParameters.TrustedRootThumbprint; AdminReturnUrl = $BoundParameters.AdminReturnUrl
     }
     $normalized = Test-AgentUpdateRequest -Request $request
-    $state = Get-AgentUpdateCurrentState -Request $normalized
-    $actions = New-AgentUpdateActions -Request $normalized -State $state
-    $result = Invoke-AgentUpdateWorkflow -Request $normalized -LocalState $state -Actions $actions
+    Assert-AgentUpdateHost -Request $normalized
+    $lock = Enter-AgentUpdateLocalLock
+    try {
+        $state = Get-AgentUpdateCurrentState -Request $normalized
+        $actions = New-AgentUpdateActions -Request $normalized -State $state
+        $result = Invoke-AgentUpdateWorkflow -Request $normalized -LocalState $state -Actions $actions
+    } finally { $lock.Dispose() }
     Write-Output $result.Result.Message
     if ($result.Status -eq 'awaitingHeartbeat') { Write-Output "Agent $($normalized.TargetVersion) is running. Controller maintenance remains locked until its heartbeat confirms the version. The rollback copy is retained." }
     elseif ($result.Status -eq 'rollingBack') { Write-Warning 'Agent binaries were restored. Controller maintenance remains locked until a heartbeat confirms the previous version.' }
