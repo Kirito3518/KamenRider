@@ -57,7 +57,7 @@
 **Interfaces:**
 - Consumes: approved machine state, held lease state, and Agent heartbeat version from Controller SQLite.
 - Produces: a machine-scoped update reservation/maintenance lock; a new lease cannot be allocated while an update operation is active.
-- Operation statuses: `awaitingInstaller`, `installing`, `rollingBack`, `completed`, `rolledBack`, `expired`, `failed`. A `failed` started operation remains locked until recovery is confirmed.
+- Operation statuses: `awaitingInstaller`, `installing`, `awaitingHeartbeat`, `rollingBack`, `completed`, `rolledBack`, `expired`, `failed`. `completed` and `rolledBack` require a confirming heartbeat; a started `failed` operation remains locked until recovery is confirmed.
 
 - [ ] **Step 1: Add failing tests** for update reservation with a held lease, lease/update race serialization, `CanRent=false` during maintenance, expired unstarted ticket cleanup, failed-operation lock retention, same-operation recovery-ticket renewal, and target/rollback heartbeat resolution.
 - [ ] **Step 2: Run focused Controller tests** with isolated output; verify the new behavior fails before implementation.
@@ -136,7 +136,7 @@
 
 - [ ] **Step 1: Add failing UI tests** for summary counts, stable/beta labels, warnings, upload validation, per-machine update lock state, and copyable command flow.
 - [ ] **Step 2: Implement the dashboard** with accessible status text, bounded polling, release history, and upload controls; require the uploaded package manifest version to match the displayed release version; show SHA-256 status without exposing credentials/tickets before an Admin explicitly requests a command.
-- [ ] **Step 3: Add the separate per-machine Update Agent button**; disable while a lease is held, show awaiting/installing/failed/rolled-back results, and offer recovery for a failed/interrupted locked operation.
+- [ ] **Step 3: Add the separate per-machine Update Agent button**; disable while a lease is held, show awaiting-installer/installing/awaiting-heartbeat/rolling-back/failed/rolled-back results, and offer recovery for a failed/interrupted locked operation.
 - [ ] **Step 4: Verify relevant Next.js 16.4 docs and run focused UI/API tests plus TypeScript/build checks**, then commit `feat(admin): add Agent release dashboard`.
 
 ### Task 6: Reconcile operational acceptance and documentation
