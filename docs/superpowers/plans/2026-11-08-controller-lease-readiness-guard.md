@@ -14,6 +14,7 @@
 
 - Require approval, a fresh heartbeat no older than 20 seconds, reported readiness `ready`, an applied configuration revision equal to the current machine revision, and no held allocation.
 - Evaluate eligibility inside the same Controller database transaction that creates a lease.
+- Obtain the live heartbeat boot ID from that same transaction when binding the lease preparation command; do not duplicate the heartbeat freshness cutoff.
 - Reject an ineligible request without creating a lease or recording its idempotency key.
 - Preserve successful lease preparation, durable idempotent retries, and single-allocation concurrency behavior.
 - No Reboot Restore Rx operation is part of this work.
@@ -31,13 +32,19 @@
 - Modify `services/Controller/Data/ControllerDatabase.cs` to share the existing `CanRent` projection predicate.
 - Modify `services/Controller/Data/LeaseState.cs` to evaluate current eligibility transactionally before inserting a lease.
 - Modify `services/Controller.Tests/LeaseTests.cs` to exercise rejected and permitted allocation states through the real database fixture.
+- Modify `services/Controller.Tests/LeaseReviewTests.cs`, `services/Controller.Tests/BootChallengeTests.cs`, `services/Controller.Tests/PairingTests.cs`, and `services/Controller.Tests/LeaseHttpTests.cs` only where their setup creates a new lease after the machine became stale or the test clock is misaligned. Preserve each scenario's assertion and intent under the new allocation contract.
 
 ### Task 1: Enforce rental readiness during lease allocation
 
 **Files:**
 - Modify: `services/Controller/Data/ControllerDatabase.cs`
 - Modify: `services/Controller/Data/LeaseState.cs`
-- Test: `services/Controller.Tests/LeaseTests.cs`
+- Test: `services/Controller.Tests/LeaseTests.cs`, plus the existing Controller tests listed below that require valid setup under the rental gate.
+
+**Supporting tests:**
+- `services/Controller.Tests/LeaseReviewTests.cs`: stale machines cannot receive a new allocation; preserve any subsequent held-allocation behavior by allocating while ready first.
+- `services/Controller.Tests/BootChallengeTests.cs` and `services/Controller.Tests/PairingTests.cs`: keep the heartbeat fresh/current when time movement is incidental to the test; retain stale state when staleness is the subject.
+- `services/Controller.Tests/LeaseHttpTests.cs`: align its heartbeat with the ControllerHost system clock before exercising lease HTTP behavior.
 
 **Interfaces:**
 - Consumes: current machine revision, current config acknowledgment, heartbeat status/time, approval state, and allocation state stored in Controller SQLite.
@@ -47,13 +54,15 @@
   - Add a focused test proving `CreateTrialLease` rejects `notReady` and `unknown` heartbeats and creates no held allocation.
   - Add a focused test proving a heartbeat older than 20 seconds is rejected.
   - Add a focused test proving a stale config acknowledgment is rejected, then a current acknowledgment permits lease creation.
+  - Update only supporting test setup whose newly rejected allocation was an incidental consequence of an expired heartbeat or mismatched clock; keep all assertions that directly test stale-state rejection and the behavior of already-held allocations.
   - Keep the existing ready/current-config and cross-connection allocation/idempotency tests.
 - [ ] **Step 2: Run the focused tests to verify RED**
   - Run `dotnet test services/Controller.Tests/Controller.Tests.csproj --no-restore --filter FullyQualifiedName~LeaseTests` with an isolated `%TEMP%` `BaseOutputPath` so the live Controller process does not lock build outputs.
   - Expected: the new unready/stale-state cases fail because lease creation currently succeeds; pre-existing tests pass.
 - [ ] **Step 3: Implement a shared eligibility predicate**
   - Use one helper in `ControllerDatabase` for the exact `CanRent` rules already used by `List()`.
-  - In `LeaseState.CreateTrialLease`, read current machine, heartbeat, config acknowledgment, and allocation from the active transaction; reject when the shared predicate is false before inserting the lease or saving the idempotency key.
+  - In `LeaseState.CreateTrialLease`, read current machine, heartbeat (including boot ID), config acknowledgment, and allocation from the active transaction; reject when the shared predicate is false before inserting the lease or saving the idempotency key.
+  - Use the same eligible heartbeat snapshot to bind the preparation command; remove any duplicate heartbeat-age check.
   - Use the injected `TimeProvider` for freshness. Do not add a second freshness threshold.
 - [ ] **Step 4: Run the focused tests to verify GREEN**
   - Run the same isolated focused test command.
