@@ -290,3 +290,10 @@ The default-closed Sunshine installer transaction is implemented and verified in
 - The `/admin/machines` page no longer requests a command on mount. An Admin must explicitly click the install button to request a fresh command.
 - `pnpm test:machines` and `pnpm build` passed. The machine test suite covers the focused MachinesManager UI and install-command route regressions, including no request on mount, explicit POST, and the authenticated same-origin Admin boundary.
 - This is software-flow evidence only. No installed service or machine state changed. Rental readiness remains **NOT READY** and hardware acceptance remains **NOT TESTED**; these checks do not qualify installation, live services, VNC, streaming, WOL, restoration, external networking, or Restore Rx behavior.
+
+### Task 33: Refresh the local Agent package from current HEAD (2026-11-08)
+
+- Rebuilt the local win-x64 package from clean HEAD `0d4fdeb686a3` as Agent version `1.0.0+g0d4fdeb686a3`, SHA-256 `60F6245B241134826130A003DDD09DE6C7A30FEBE254E8A08BCB37D3C2F1F5F8`.
+- Windows PowerShell 5.1 `Test-AgentPackageBuild.ps1` passed. The package assembly informational version and `Agent.deps.json` project identity both match the source revision reported by the build; the required archive entries are present, and the default `appsettings.json` and TightVNC MSI are excluded.
+- The archive SHA-256, sidecar, `.env.local` `AGENT_PACKAGE_SHA256`, and localhost-served bytes match. The static package URL returned HTTP 200 and 36,597,772 bytes.
+- This verifies the local package artifact and served bytes only. The package has not been run on the host. Rental readiness remains **NOT READY** and hardware acceptance remains **NOT TESTED**; no enrollment ticket, service, machine, firewall, Sunshine, or Restore Rx state was changed.
