@@ -75,7 +75,7 @@ public class AgentHostCompositionTests
     }
 
     [Fact]
-    public async Task AgentHostRunsBootPairingCleanupThroughTheRegisteredSessionWithoutClaimingOtherEvidence()
+    public async Task DefaultBootProviderKeepsRestorationDesktopAndRuntimeHealthUnavailableDespiteSuppliedBootAndRevisionIdentifiers()
     {
         var pairing = new RecordingPairingSession(clearResult: true);
         using var host = KamenRaider.Agent.AgentHost.Build([], builder =>
@@ -84,13 +84,17 @@ public class AgentHostCompositionTests
             builder.Services.AddSingleton<KamenRaider.Agent.Sunshine.ISunshinePairingSession>(pairing);
         });
         var environment = host.Services.GetRequiredService<IBootEnvironment>();
-        var challenge = new ReconciliationChallenge("challenge", "boot", null, null, DateTimeOffset.UtcNow.AddMinutes(1));
+        var bootId = "test-os-boot-id";
+        var configurationRevision = 41L;
+        var challenge = new ReconciliationChallenge("challenge", bootId, null, null, DateTimeOffset.UtcNow.AddMinutes(1));
 
+        Assert.IsType<KamenRaider.Agent.Startup.StreamGuardBootEnvironment>(environment);
+        Assert.Equal(BootEvidenceStatus.Unavailable, host.Services.GetRequiredService<IBootBaselineEvidence>().Status);
         Assert.Equal(BootEvidenceStatus.Unavailable, await environment.VerifyRestorationAsync(challenge, default));
         Assert.Equal(BootEvidenceStatus.Passed, await environment.FenceAndClearAsync(challenge, default));
         Assert.Equal(1, pairing.ClearCalls);
         Assert.Equal(BootEvidenceStatus.Unavailable, await environment.VerifyHealthAsync(challenge, default));
-        Assert.Equal(BootEvidenceStatus.Unavailable, await environment.VerifyRuntimeHealthAsync("boot", 1, default));
+        Assert.Equal(BootEvidenceStatus.Unavailable, await environment.VerifyRuntimeHealthAsync(bootId, configurationRevision, default));
     }
 
     [Fact]

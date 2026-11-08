@@ -5,6 +5,8 @@ using KamenRaider.Controller.Data;
 
 namespace KamenRaider.Controller.RemoteDesktop;
 
+public sealed record AdminVncTargetProbeRequest(string MachineId, string TargetAddress);
+
 public static class AdminVncEndpoints
 {
     private const string TicketProtocolPrefix = "kamen-vnc-";
@@ -29,6 +31,33 @@ public static class AdminVncEndpoints
             catch (ArgumentException)
             {
                 return Results.BadRequest(new { error = "Invalid VNC session request" });
+            }
+        });
+
+        app.MapPost("/internal/admin-vnc-target-probes", async (
+            AdminVncTargetProbeRequest request,
+            HttpContext context,
+            ControllerDatabase database,
+            IAdminVncTargetProbe probe,
+            CancellationToken cancellationToken) =>
+        {
+            if (!string.Equals(context.Request.Headers["X-Authenticated-Actor-Role"].ToString(), "admin", StringComparison.Ordinal)
+                || string.IsNullOrWhiteSpace(context.Request.Headers["X-Authenticated-Actor-Id"].ToString()))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+
+            try
+            {
+                var address = database.ValidateAdminVncTargetProbe(request.MachineId, request.TargetAddress);
+                var supported = await probe.SupportsReadOnlyGatewayAsync(address, cancellationToken);
+                return Results.Ok(new { supported });
+            }
+            catch (UnauthorizedAccessException)
+            {
+                return Results.StatusCode(StatusCodes.Status409Conflict);
+            }
+            catch (ArgumentException)
+            {
+                return Results.BadRequest(new { error = "Invalid VNC target probe request" });
             }
         });
 

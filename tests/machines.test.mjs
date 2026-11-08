@@ -41,6 +41,7 @@ test("machine API session boundaries, validation, redaction and controller failu
   assert.equal((await call("/my-leases/rental-1/extend", { additionalSeconds: 60, expectedRevision: 1, idempotencyKey: "unauthenticated" })).status, 401);
   assert.equal((await call("/admin/machines/pc/approve", {})).status, 401);
   assert.equal((await call("/admin/vnc-ticket", { machineId: "pc" })).status, 401);
+  assert.equal((await call("/admin/vnc-target-check", { machineId: "pc", targetAddress: "10.0.0.8" })).status, 401);
   assert.equal((await call("/machines")).status, 503);
   const seen = [];
   let leaseOwnerId = "";
@@ -65,6 +66,11 @@ test("machine API session boundaries, validation, redaction and controller failu
     if (req.url === "/internal/admin-vnc-tickets") {
       assert.equal(req.method, "POST");
       res.end(JSON.stringify({ ticket: "V".repeat(43), expiresAtUtc: new Date(Date.now() + 60_000).toISOString() }));
+      return;
+    }
+    if (req.url === "/internal/admin-vnc-target-probes") {
+      assert.equal(req.method, "POST");
+      res.end(JSON.stringify({ supported: true }));
       return;
     }
     if (req.url === "/internal/machines") {
@@ -126,6 +132,7 @@ test("machine API session boundaries, validation, redaction and controller failu
       403,
     );
     assert.equal((await call("/admin/vnc-ticket", { machineId: "pc" }, cookie)).status, 403);
+    assert.equal((await call("/admin/vnc-target-check", { machineId: "pc", targetAddress: "10.0.0.8" }, cookie)).status, 403);
     const inventory = await call("/machines");
     assert.equal(inventory.status, 200);
     const publicData = await inventory.text();
@@ -246,6 +253,31 @@ test("machine API session boundaries, validation, redaction and controller failu
     assert.equal(vncRequest.headers["x-authenticated-actor-id"], created.user.id);
     assert.equal(vncRequest.headers["x-authenticated-actor-role"], "admin");
     assert.deepEqual(vncRequest.body, { machineId: "pc", allowedOrigin: base });
+    assert.equal(
+      (await call("/admin/vnc-target-check", { machineId: "pc" }, cookie)).status,
+      400,
+    );
+    const targetCheck = await call(
+      "/admin/vnc-target-check",
+      {
+        machineId: "pc",
+        targetAddress: "10.0.0.18",
+        host: "vnc.example.com",
+        port: 22,
+      },
+      cookie,
+    );
+    assert.equal(targetCheck.status, 200);
+    assert.equal(targetCheck.headers.get("cache-control"), "no-store");
+    assert.deepEqual(await targetCheck.json(), { supported: true });
+    const targetProbeRequest = seen.at(-1);
+    assert.equal(targetProbeRequest.url, "/internal/admin-vnc-target-probes");
+    assert.equal(targetProbeRequest.headers["x-authenticated-actor-id"], created.user.id);
+    assert.equal(targetProbeRequest.headers["x-authenticated-actor-role"], "admin");
+    assert.deepEqual(targetProbeRequest.body, {
+      machineId: "pc",
+      targetAddress: "10.0.0.18",
+    });
     assert.equal(
       (
         await fetch(`${base}/api/admin/machines/pc/wake`, {

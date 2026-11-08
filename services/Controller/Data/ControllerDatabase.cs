@@ -1,5 +1,7 @@
 using Microsoft.Data.Sqlite;
 using KamenRaider.Contracts;
+using KamenRaider.Controller.RemoteDesktop;
+using System.Net;
 using System.Security.Cryptography;
 using System.Text.Json;
 namespace KamenRaider.Controller.Data;
@@ -113,6 +115,17 @@ public sealed partial class ControllerDatabase : IDisposable
             transaction.Commit();return new(token,expires);
         }
     }
+    public IPAddress ValidateAdminVncTargetProbe(string machineId,string? targetAddress) {
+        Identifier(machineId);var address=AdminVncTargetAddress.Parse(targetAddress);lock(gate) {
+            var now=clock.GetUtcNow();
+            using var machine=Command("SELECT h.last_seen FROM machines m JOIN machine_heartbeats h ON h.machine_id=m.machine_id WHERE m.machine_id=$id",("$id",machineId));
+            using var row=machine.ExecuteReader();
+            if(!row.Read())throw new UnauthorizedAccessException("Machine is not currently reachable");
+            var lastSeen=DateTimeOffset.Parse(row.GetString(0));
+            if(lastSeen>now||now-lastSeen>TimeSpan.FromSeconds(20))throw new UnauthorizedAccessException("Machine is not currently reachable");
+            return address;
+        }
+    }
     public AdminVncTarget ConsumeAdminVncTicket(string ticket,string origin) {
         if(ticket is null||!System.Text.RegularExpressions.Regex.IsMatch(ticket,@"\A[A-Za-z0-9_-]{43}\z",System.Text.RegularExpressions.RegexOptions.CultureInvariant))throw new UnauthorizedAccessException("VNC session ticket is invalid");
         var hash=Convert.ToHexString(SHA256.HashData(System.Text.Encoding.ASCII.GetBytes(ticket)));var requestOrigin=AdminVncOrigin(origin);lock(gate) {
@@ -142,19 +155,9 @@ public sealed partial class ControllerDatabase : IDisposable
         return origin.GetLeftPart(UriPartial.Authority).TrimEnd('/');
     }
     private static string? VncTargetAddress(string? value) {
-        if(string.IsNullOrEmpty(value))return null;
-        if(value.Length>45||value!=value.Trim()||!System.Net.IPAddress.TryParse(value,out var address)||address.ToString().Contains('%')||!IsPrivateNetworkAddress(address.ToString()))throw new ArgumentException("VNC target must be a private LAN IP address");
-        if(address.IsIPv4MappedToIPv6)address=address.MapToIPv4();
-        return address.ToString();
+        return AdminVncTargetAddress.Normalize(value);
     }
-    private static bool IsPrivateNetworkAddress(string value) {
-        if(!System.Net.IPAddress.TryParse(value,out var address))return false;
-        if(address.IsIPv4MappedToIPv6)address=address.MapToIPv4();
-        var bytes=address.GetAddressBytes();
-        if(address.AddressFamily==System.Net.Sockets.AddressFamily.InterNetwork)
-            return bytes[0]==10||bytes[0]==172&&bytes[1] is >=16 and <=31||bytes[0]==192&&bytes[1]==168;
-        return address.AddressFamily==System.Net.Sockets.AddressFamily.InterNetworkV6&&address.IsIPv6UniqueLocal;
-    }
+    private static bool IsPrivateNetworkAddress(string value) => AdminVncTargetAddress.TryParse(value,out _);
     private static void ValidateNetworkMetadata(string? ip, string? mac) {
         if (string.IsNullOrWhiteSpace(ip) || ip.Length > 45 || !System.Net.IPAddress.TryParse(ip, out var address)
             || address.ToString().Contains('%') || ip != address.ToString())

@@ -57,6 +57,7 @@ public static class ControllerHost
         builder.Services.AddSingleton<ControllerDatabase>(sp => new ControllerDatabase(
             sp.GetRequiredService<IOptions<ControllerOptions>>().Value.DatabasePath,
             clock: sp.GetRequiredService<TimeProvider>()));
+        builder.Services.TryAddSingleton<IAdminVncTargetProbe, AdminVncTargetProbe>();
         builder.Services.AddSingleton<AgentAuthentication>();
         builder.Services.AddSingleton<LeaseService>();
         builder.Services.TryAddSingleton<KamenRaider.Controller.Network.IWakeSender>(_ => new KamenRaider.Controller.Network.WakeService(settings.WakeInterfaceAddress));

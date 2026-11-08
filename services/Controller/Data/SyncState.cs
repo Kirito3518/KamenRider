@@ -8,7 +8,9 @@ public sealed partial class ControllerDatabase {
             if(string.IsNullOrWhiteSpace(request.BootId)||request.BootId.Length>128||request.Readiness is not ("ready" or "notReady" or "unknown")||request.CommandResults is null||request.CommandResults.Length>100||request.CommandResults.Any(r=>r is null)||request.AgentVersion is { } version&&(string.IsNullOrWhiteSpace(version)||version.Length>64||version.Any(c=>!char.IsAsciiLetterOrDigit(c)&&c is not ('.' or '-' or '+'))))
                 throw new ArgumentException("Invalid heartbeat");
             var diagnostics=ValidateReadinessDiagnostics(request.ReadinessDiagnostics);
-            var machine=List().SingleOrDefault(x=>x.MachineId==id)??throw new KeyNotFoundException();var now=clock.GetUtcNow();
+            var machine=List().SingleOrDefault(x=>x.MachineId==id)??throw new KeyNotFoundException();
+            if(request.AppliedConfigRevision>machine.ConfigRevision)throw new ArgumentException("Agent acknowledged a configuration revision not issued by the Controller");
+            var now=clock.GetUtcNow();
             using var tx=connection.BeginTransaction();
             if(request.Readiness=="ready")RegisterBoot(tx,id,request.BootId);
             else RejectRetiredBoot(tx,id,request.BootId);

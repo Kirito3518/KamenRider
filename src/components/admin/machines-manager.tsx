@@ -1,5 +1,5 @@
 "use client";
-import { useCallback, useEffect, useState, type ChangeEventHandler } from "react";
+import { useCallback, useEffect, useRef, useState, type ChangeEventHandler } from "react";
 import { AdminVncViewerButton } from "@/components/admin/admin-vnc-viewer";
 import type {
   Lease,
@@ -33,6 +33,21 @@ const READINESS_STATUS_LABELS: Record<ReadinessDiagnosticStatus, string> = {
   unknown: "ยังไม่ทราบผล",
 };
 
+type AgentInstallCommandResult = {
+  available: boolean;
+  command?: string;
+  expiresAtUtc?: string;
+  reason?: string;
+};
+
+async function fetchInstallCommand(): Promise<AgentInstallCommandResult> {
+  const response = await fetch("/api/admin/agent-install-command", {
+    cache: "no-store",
+  });
+  if (!response.ok) throw new Error("ตรวจชุดติดตั้งไม่ได้");
+  return (await response.json()) as AgentInstallCommandResult;
+}
+
 async function request(path: string, body?: unknown, method = "POST") {
   const r = await fetch(path, {
     method,
@@ -48,11 +63,15 @@ async function request(path: string, body?: unknown, method = "POST") {
 export function MachinesManager() {
   const [machines, setMachines] = useState<Machine[]>([]);
   const [vncTargetDrafts, setVncTargetDrafts] = useState<Record<string, string>>({});
+  const [vncTargetCheckStatuses, setVncTargetCheckStatuses] = useState<
+    Record<string, { targetAddress: string; checkedAt: number | null; state: "checking" | "supported" | "unsupported" | "error" }>
+  >({});
+  const vncTargetCheckRuns = useRef(new Map<string, number>());
   const [installCommand, setInstallCommand] = useState<string | null>(null);
   const [installExpiresAtUtc, setInstallExpiresAtUtc] = useState<string | null>(null);
   const [installClockNow, setInstallClockNow] = useState(0);
-  const [isRefreshingInstallCommand, setIsRefreshingInstallCommand] = useState(false);
-  const [installStatus, setInstallStatus] = useState("กำลังตรวจชุดติดตั้ง…");
+  const [isRefreshingInstallCommand, setIsRefreshingInstallCommand] = useState(true);
+  const [installStatus, setInstallStatus] = useState("กำลังขอคำสั่งติดตั้ง…");
   const [copyStatus, setCopyStatus] = useState("");
   const [trialLease, setTrialLease] = useState<Lease | null>(null);
   const [loadStatus, setLoadStatus] = useState("กำลังโหลด…");
@@ -103,31 +122,43 @@ export function MachinesManager() {
       window.clearInterval(timer);
     };
   }, []);
-  const refreshInstallCommand = useCallback(async (isActive: () => boolean = () => true) => {
+  const refreshInstallCommand = useCallback(async () => {
     setIsRefreshingInstallCommand(true);
     setInstallStatus("กำลังขอคำสั่งติดตั้ง…");
     setCopyStatus("");
     try {
-      const response = await fetch("/api/admin/agent-install-command", { cache: "no-store" });
-      if (!response.ok) throw new Error("ตรวจชุดติดตั้งไม่ได้");
-      const result: { available: boolean; command?: string; expiresAtUtc?: string; reason?: string } = await response.json();
-      if (!isActive()) return;
+      const result = await fetchInstallCommand();
       const available = result.available && Boolean(result.command) && Boolean(result.expiresAtUtc);
       setInstallCommand(available ? result.command! : null);
       setInstallExpiresAtUtc(available ? result.expiresAtUtc! : null);
       setInstallClockNow(Date.now());
       setInstallStatus(available ? "ชุดติดตั้งพร้อมใช้งาน" : result.reason || "ชุดติดตั้งยังไม่พร้อม");
     } catch (error) {
-      if (isActive()) setInstallStatus(`ตรวจชุดติดตั้งไม่ได้: ${String(error)}`);
+      setInstallStatus(`ตรวจชุดติดตั้งไม่ได้: ${String(error)}`);
     } finally {
-      if (isActive()) setIsRefreshingInstallCommand(false);
+      setIsRefreshingInstallCommand(false);
     }
   }, []);
   useEffect(() => {
     let active = true;
-    void refreshInstallCommand(() => active);
+    async function loadInitialInstallCommand() {
+      try {
+        const result = await fetchInstallCommand();
+        if (!active) return;
+        const available = result.available && Boolean(result.command) && Boolean(result.expiresAtUtc);
+        setInstallCommand(available ? result.command! : null);
+        setInstallExpiresAtUtc(available ? result.expiresAtUtc! : null);
+        setInstallClockNow(Date.now());
+        setInstallStatus(available ? "ชุดติดตั้งพร้อมใช้งาน" : result.reason || "ชุดติดตั้งยังไม่พร้อม");
+      } catch (error) {
+        if (active) setInstallStatus(`ตรวจชุดติดตั้งไม่ได้: ${String(error)}`);
+      } finally {
+        if (active) setIsRefreshingInstallCommand(false);
+      }
+    }
+    void loadInitialInstallCommand();
     return () => { active = false; };
-  }, [refreshInstallCommand]);
+  }, []);
   useEffect(() => {
     if (!installExpiresAtUtc) return;
     const expiresAtMs = Date.parse(installExpiresAtUtc);
@@ -174,6 +205,53 @@ export function MachinesManager() {
     } catch (e) {
       setMessage(String(e));
       return false;
+    }
+  }
+  function invalidateVncTargetCheck(machineId: string) {
+    vncTargetCheckRuns.current.set(
+      machineId,
+      (vncTargetCheckRuns.current.get(machineId) ?? 0) + 1,
+    );
+    setVncTargetCheckStatuses((current) => {
+      if (!(machineId in current)) return current;
+      const next = { ...current };
+      delete next[machineId];
+      return next;
+    });
+  }
+  async function checkVncTarget(machineId: string) {
+    const targetAddress = getVncTargetForExplicitSave(vncTargetDrafts[machineId]);
+    if (!targetAddress) {
+      setMessage("กรอก IPv4 LAN ส่วนตัวหรือ IPv6 ULA ที่ยืนยันกับเครื่องจริงก่อนตรวจสอบ");
+      return;
+    }
+
+    const requestId = (vncTargetCheckRuns.current.get(machineId) ?? 0) + 1;
+    vncTargetCheckRuns.current.set(machineId, requestId);
+    setVncTargetCheckStatuses((current) => ({
+      ...current,
+      [machineId]: { targetAddress, checkedAt: null, state: "checking" },
+    }));
+    try {
+      const result = (await request("/api/admin/vnc-target-check", {
+        machineId,
+        targetAddress,
+      })) as { supported: boolean };
+      if (vncTargetCheckRuns.current.get(machineId) !== requestId) return;
+      setVncTargetCheckStatuses((current) => ({
+        ...current,
+        [machineId]: {
+          targetAddress,
+          checkedAt: Date.now(),
+          state: result.supported ? "supported" : "unsupported",
+        },
+      }));
+    } catch {
+      if (vncTargetCheckRuns.current.get(machineId) !== requestId) return;
+      setVncTargetCheckStatuses((current) => ({
+        ...current,
+        [machineId]: { targetAddress, checkedAt: null, state: "error" },
+      }));
     }
   }
   return (
@@ -319,49 +397,70 @@ export function MachinesManager() {
                 name="vncIp"
                 value={vncTargetDrafts[m.machineId] ?? ""}
                 required={false}
-                onChange={(event) =>
+                onChange={(event) => {
+                  const value = event.currentTarget.value;
+                  invalidateVncTargetCheck(m.machineId);
                   setVncTargetDrafts((current) =>
-                    updateVncTargetDraft(
-                      current,
-                      m.machineId,
-                      event.currentTarget.value,
-                    ),
-                  )
-                }
+                    updateVncTargetDraft(current, m.machineId, value),
+                  );
+                }}
               />
             </label>
             <button className="rounded border p-2">บันทึก metadata</button>
-            <button
-              type="button"
-              className="rounded border p-2"
-              onClick={async () => {
-                const target = getVncTargetForExplicitSave(
-                  vncTargetDrafts[m.machineId],
-                );
-                if (!target) {
-                  setMessage("กรอก IPv4 LAN ส่วนตัวหรือ IPv6 ULA ที่ยืนยันกับเครื่องจริงก่อนบันทึก");
-                  return;
-                }
-                const saved = await act(
-                  `/api/admin/machines/${encodeURIComponent(m.machineId)}`,
-                  {
-                    displayName: m.displayName,
-                    hourlyPriceMinorUnits: m.hourlyPriceMinorUnits,
-                    moonlightPort: m.moonlightPort,
-                    sunshinePort: m.sunshinePort,
-                    vncLocalIp: target,
-                    expectedRevision: m.configRevision,
-                  },
-                  "PATCH",
-                );
-                if (!saved) return;
-                setVncTargetDrafts((current) =>
-                  updateVncTargetDraft(current, m.machineId, target),
-                );
-              }}
-            >
-              บันทึก IP เป้าหมาย VNC ที่ยืนยันแล้ว
-            </button>
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                className="rounded border p-2 disabled:opacity-50"
+                disabled={vncTargetCheckStatuses[m.machineId]?.state === "checking"}
+                onClick={() => void checkVncTarget(m.machineId)}
+              >
+                {vncTargetCheckStatuses[m.machineId]?.state === "checking"
+                  ? "กำลังตรวจสอบ VNC…"
+                  : "ตรวจสอบ VNC"}
+              </button>
+              <button
+                type="button"
+                className="rounded border p-2"
+                onClick={async () => {
+                  const target = getVncTargetForExplicitSave(
+                    vncTargetDrafts[m.machineId],
+                  );
+                  if (!target) {
+                    setMessage("กรอก IPv4 LAN ส่วนตัวหรือ IPv6 ULA ที่ยืนยันกับเครื่องจริงก่อนบันทึก");
+                    return;
+                  }
+                  const saved = await act(
+                    `/api/admin/machines/${encodeURIComponent(m.machineId)}`,
+                    {
+                      displayName: m.displayName,
+                      hourlyPriceMinorUnits: m.hourlyPriceMinorUnits,
+                      moonlightPort: m.moonlightPort,
+                      sunshinePort: m.sunshinePort,
+                      vncLocalIp: target,
+                      expectedRevision: m.configRevision,
+                    },
+                    "PATCH",
+                  );
+                  if (!saved) return;
+                  setVncTargetDrafts((current) =>
+                    updateVncTargetDraft(current, m.machineId, target),
+                  );
+                }}
+              >
+                บันทึก IP เป้าหมาย VNC ที่ยืนยันแล้ว
+              </button>
+            </div>
+            {vncTargetCheckStatuses[m.machineId] ? (
+              <p role="status" aria-live="polite" className="text-sm">
+                {vncTargetCheckStatuses[m.machineId].state === "checking"
+                  ? `กำลังตรวจ ${vncTargetCheckStatuses[m.machineId].targetAddress}:5900…`
+                  : vncTargetCheckStatuses[m.machineId].state === "supported"
+                    ? `พบ VNC ที่รองรับบน ${vncTargetCheckStatuses[m.machineId].targetAddress}:5900 · ตรวจเมื่อ ${new Date(vncTargetCheckStatuses[m.machineId].checkedAt!).toLocaleString()} ตามเวลาท้องถิ่น (ยังไม่ได้ยืนยันรหัสผ่าน)`
+                    : vncTargetCheckStatuses[m.machineId].state === "unsupported"
+                      ? `ไม่พบ VNC ที่รองรับบน ${vncTargetCheckStatuses[m.machineId].targetAddress}:5900`
+                      : `ตรวจสอบ ${vncTargetCheckStatuses[m.machineId].targetAddress}:5900 ไม่สำเร็จ`}
+              </p>
+            ) : null}
           </form>
           {m.approvalStatus === "pending" ? (
             <form

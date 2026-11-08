@@ -33,6 +33,15 @@ public class SyncTests {
  File.Delete(path);
  }
 
+ [Fact] public void HeartbeatCannotAcknowledgeAConfigurationAheadOfTheController() {
+ using var f=new LeaseFixture();var before=Assert.Single(f.Db.List());Assert.True(before.CanRent);
+ Assert.Throws<ArgumentException>(()=>f.Db.Sync("pc",new("boot","192.0.2.1","001122334455",before.ConfigRevision+1,"ready",[])));
+ var updated=f.Db.Update("pc",new("PC",500,5000,6000),before.ConfigRevision);
+ Assert.False(updated.CanRent);
+ f.Db.Sync("pc",new("boot","192.0.2.1","001122334455",updated.ConfigRevision,"ready",[]));
+ Assert.True(f.Db.List().Single().CanRent);
+ }
+
  [Fact] public void HeartbeatValidatesDiagnosticsAndPersistsThemInCanonicalOrderThenClearsThemWhenOmitted() {
  using var f=new LeaseFixture();
  var input=ReadinessDiagnosticIds.Canonical.Reverse().Select(id=>new ReadinessDiagnostic(id,ReadinessDiagnosticStatuses.Passed)).ToArray();

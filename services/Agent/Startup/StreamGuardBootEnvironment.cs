@@ -4,7 +4,8 @@ using KamenRaider.Contracts;
 namespace KamenRaider.Agent.Startup;
 
 // Boot pairing cleanup can use the existing Guard-backed pairing session. This provider does not
-// establish Reboot Restore Rx, desktop, capture, audio, or input evidence.
+// establish Reboot Restore Rx, desktop, capture, audio, or input evidence. Boot identity and
+// configuration revision are continuity checks, not substitutes for that independent evidence.
 public sealed class StreamGuardBootEnvironment(Func<ISunshinePairingSession> pairingSession) : IBootEnvironment
 {
     public Task<BootEvidenceStatus> VerifyRestorationAsync(ReconciliationChallenge challenge, CancellationToken ct)

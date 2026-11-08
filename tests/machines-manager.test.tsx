@@ -11,7 +11,8 @@ import { MachinesManager } from "@/components/admin/machines-manager";
 
 const MACHINES_URL = "/api/admin/machines";
 const INSTALL_COMMAND_URL = "/api/admin/agent-install-command";
-const ALLOWED_URLS = new Set([MACHINES_URL, INSTALL_COMMAND_URL]);
+const VNC_TARGET_CHECK_URL = "/api/admin/vnc-target-check";
+const ALLOWED_URLS = new Set([MACHINES_URL, INSTALL_COMMAND_URL, VNC_TARGET_CHECK_URL]);
 const TEST_NOW = "2026-11-07T12:00:00.000Z";
 const FIRST_COMMAND = "first-test-command";
 const FIRST_EXPIRY = "2026-11-07T12:34:56.789Z";
@@ -72,6 +73,9 @@ describe("MachinesManager install command interactions", () => {
         }
         return jsonResponse(response);
       }
+      if (url === VNC_TARGET_CHECK_URL) {
+        return jsonResponse({ supported: true });
+      }
 
       unexpectedUrls.push(url);
       throw new Error(`Unexpected fetch URL: ${url}`);
@@ -107,6 +111,93 @@ describe("MachinesManager install command interactions", () => {
     expect(await screen.findByText("คัดลอกคำสั่งแล้ว")).toBeDefined();
     expect(clipboardWriteText).toHaveBeenCalledWith(FIRST_COMMAND);
     expectNetworkIsolation(1);
+  });
+
+  it("keeps the initial install-command refresh busy until the command arrives", async () => {
+    let resolveInitialRequest: ((response: Response) => void) | undefined;
+    fetchSpy.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === MACHINES_URL) return jsonResponse(machinesResponse);
+      if (url === INSTALL_COMMAND_URL) {
+        return new Promise<Response>((resolve) => {
+          resolveInitialRequest = resolve;
+        });
+      }
+      unexpectedUrls.push(url);
+      throw new Error(`Unexpected fetch URL: ${url}`);
+    });
+
+    render(<MachinesManager />);
+
+    const refreshButton = screen.getByRole("button", {
+      name: "กำลังขอคำสั่ง…",
+    }) as HTMLButtonElement;
+    expect(refreshButton.disabled).toBe(true);
+    expect(screen.queryByLabelText("คำสั่งติดตั้ง Agent")).toBeNull();
+
+    await act(async () => {
+      resolveInitialRequest?.(
+        jsonResponse({
+          available: true,
+          command: FIRST_COMMAND,
+          expiresAtUtc: FIRST_EXPIRY,
+        }),
+      );
+    });
+
+    expect(refreshButton.disabled).toBe(false);
+    expect(screen.getByLabelText("คำสั่งติดตั้ง Agent")).toHaveProperty(
+      "value",
+      FIRST_COMMAND,
+    );
+    expectNetworkIsolation(1);
+  });
+
+  it("keeps an explicit install-command refresh busy until the replacement arrives", async () => {
+    render(<MachinesManager />);
+    const commandField = (await screen.findByLabelText(
+      "คำสั่งติดตั้ง Agent",
+    )) as HTMLTextAreaElement;
+    expect(commandField.value).toBe(FIRST_COMMAND);
+
+    let resolveReplacement: ((response: Response) => void) | undefined;
+    fetchSpy.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === MACHINES_URL) return jsonResponse(machinesResponse);
+      if (url === INSTALL_COMMAND_URL) {
+        return new Promise<Response>((resolve) => {
+          resolveReplacement = resolve;
+        });
+      }
+      unexpectedUrls.push(url);
+      throw new Error(`Unexpected fetch URL: ${url}`);
+    });
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "ขอคำสั่งติดตั้งใหม่" }),
+    );
+    const busyButton = screen.getByRole("button", {
+      name: "กำลังขอคำสั่ง…",
+    }) as HTMLButtonElement;
+    expect(busyButton.disabled).toBe(true);
+
+    await act(async () => {
+      resolveReplacement?.(
+        jsonResponse({
+          available: true,
+          command: SECOND_COMMAND,
+          expiresAtUtc: SECOND_EXPIRY,
+        }),
+      );
+    });
+
+    expect(commandField.value).toBe(SECOND_COMMAND);
+    expect(
+      (screen.getByRole("button", {
+        name: "ขอคำสั่งติดตั้งใหม่",
+      }) as HTMLButtonElement).disabled,
+    ).toBe(false);
+    expectNetworkIsolation(2);
   });
 
   it("disables copy at the exact expiry deadline after focus", async () => {
@@ -249,6 +340,93 @@ describe("MachinesManager install command interactions", () => {
     expect(await screen.findByText("empty-report-pc · approved")).toBeDefined();
     expect(screen.getByText("รายงานนี้ไม่มีรายการตรวจวินิจฉัย"))
       .toBeDefined();
+  });
+
+  it("verifies the entered private VNC target before saving and clears stale verification", async () => {
+    machinesResponse = [
+      {
+        machineId: "vnc-target-pc",
+        approvalStatus: "approved",
+        displayName: "VNC target PC",
+        localIp: "192.168.1.14",
+        vncLocalIp: null,
+        hourlyPriceMinorUnits: 100,
+        moonlightPort: 47989,
+        sunshinePort: 47990,
+        configRevision: 1,
+        appliedConfigRevision: 1,
+        readiness: "notReady",
+        canRent: false,
+        lastSeenAt: "2026-11-08T12:00:00.000Z",
+        agentVersion: "test-agent",
+        activeAdminVncSessions: 0,
+      },
+    ];
+
+    render(<MachinesManager />);
+
+    const targetInput = (await screen.findByLabelText(
+      "IP เป้าหมาย VNC (ตรวจสอบกับเครื่องจริงก่อนบันทึก)",
+    )) as HTMLInputElement;
+    fireEvent.change(targetInput, { target: { value: " 192.168.1.18 " } });
+    fireEvent.click(screen.getByRole("button", { name: "ตรวจสอบ VNC" }));
+
+    const successStatus = `พบ VNC ที่รองรับบน 192.168.1.18:5900 · ตรวจเมื่อ ${new Date(TEST_NOW).toLocaleString()} ตามเวลาท้องถิ่น (ยังไม่ได้ยืนยันรหัสผ่าน)`;
+    expect(await screen.findByText(successStatus))
+      .toBeDefined();
+    const checkRequest = fetchSpy.mock.calls.find(
+      ([input]) => String(input) === VNC_TARGET_CHECK_URL,
+    );
+    expect(checkRequest).toBeDefined();
+    expect(JSON.parse(String(checkRequest?.[1]?.body))).toEqual({
+      machineId: "vnc-target-pc",
+      targetAddress: "192.168.1.18",
+    });
+    expect(
+      fetchSpy.mock.calls.some(([input]) => String(input).startsWith("/api/admin/machines/")),
+    ).toBe(false);
+
+    fireEvent.change(targetInput, { target: { value: "192.168.1.19" } });
+    expect(screen.queryByText(successStatus))
+      .toBeNull();
+    expectNetworkIsolation(1);
+  });
+
+  it("does not probe a public VNC target", async () => {
+    machinesResponse = [
+      {
+        machineId: "unsafe-vnc-pc",
+        approvalStatus: "approved",
+        displayName: "Unsafe VNC PC",
+        localIp: "192.168.1.14",
+        vncLocalIp: null,
+        hourlyPriceMinorUnits: 100,
+        moonlightPort: 47989,
+        sunshinePort: 47990,
+        configRevision: 1,
+        appliedConfigRevision: 1,
+        readiness: "notReady",
+        canRent: false,
+        lastSeenAt: "2026-11-08T12:00:00.000Z",
+        agentVersion: "test-agent",
+        activeAdminVncSessions: 0,
+      },
+    ];
+
+    render(<MachinesManager />);
+
+    const targetInput = (await screen.findByLabelText(
+      "IP เป้าหมาย VNC (ตรวจสอบกับเครื่องจริงก่อนบันทึก)",
+    )) as HTMLInputElement;
+    fireEvent.change(targetInput, { target: { value: "203.0.113.8" } });
+    fireEvent.click(screen.getByRole("button", { name: "ตรวจสอบ VNC" }));
+
+    expect(await screen.findByText(/กรอก IPv4 LAN ส่วนตัวหรือ IPv6 ULA/))
+      .toBeDefined();
+    expect(
+      fetchSpy.mock.calls.some(([input]) => String(input) === VNC_TARGET_CHECK_URL),
+    ).toBe(false);
+    expectNetworkIsolation(1);
   });
 
   function expectNetworkIsolation(expectedInstallRequests: number) {
