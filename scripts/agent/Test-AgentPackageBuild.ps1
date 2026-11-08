@@ -20,6 +20,7 @@ try {
   $entries=@($zip.Entries | ForEach-Object FullName)
   foreach($entry in $entries){if($entry.Contains('\') -or $entry.StartsWith('/') -or $entry.Split('/') -contains '..'){throw "Unsafe or non-portable ZIP path: $entry"}}
   foreach($required in @('Agent/Agent.exe','Install-AgentPackage.ps1','Install-Service.ps1','Install-TightVncServer.ps1','Prepare-SunshineStreamGate.ps1','PrivateInstallFiles.ps1','ServiceInstallTransaction.ps1')){if($required -notin $entries){throw "Package is missing $required."}}
+  foreach($updateScript in @('Update-AgentPackage.ps1','Update-Agent.ps1')){if($updateScript -in $entries){throw "Enrollment package must retain its existing output and omit $updateScript."}}
   $defaultManifestEntry=$zip.GetEntry('AgentPackage.manifest.json')
   if(-not $defaultManifestEntry){throw 'Enrollment package is missing its manifest.'}
   $defaultManifestReader=[IO.StreamReader]::new($defaultManifestEntry.Open())
@@ -67,6 +68,7 @@ Write-Output $attribute.InformationalVersion
   try {$manifest=$manifestReader.ReadToEnd() | ConvertFrom-Json} finally {$manifestReader.Dispose()}
   if($manifest.packageFormatVersion -ne 1 -or $manifest.agentInformationalVersion -ne '2.3.4' -or $manifest.sourceCommit -notmatch '\A[0-9a-f]{12}\z' -or $manifest.sourceDirty -ne $expectedSourceDirty -or -not $manifest.releaseBuild){throw 'Release manifest values are invalid.'}
   if($manifestEntry.Name -cne 'AgentPackage.manifest.json'){throw 'Manifest path must be stable and case-sensitive.'}
+  foreach($requiredUpdateScript in @('Update-AgentPackage.ps1','Update-Agent.ps1')){if(-not $releaseZip.GetEntry($requiredUpdateScript)){throw "Release archive is missing $requiredUpdateScript."}}
  } finally {$releaseZip.Dispose()}
  if($PSVersionTable.PSEdition -eq 'Core'){
   $releaseVerifyDirectory=Join-Path $outputDirectory 'release-version-verify'

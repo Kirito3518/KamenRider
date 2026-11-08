@@ -17,6 +17,8 @@ if(Test-Path -LiteralPath $root){throw 'Plan must not create the requested outpu
 if($archiveBefore -ne $null){if((Get-FileHash -LiteralPath $default.ArchivePath -Algorithm SHA256).Hash -ne $archiveBefore){throw 'Default Plan changed an existing archive.'}}elseif(Test-Path -LiteralPath $default.ArchivePath){throw 'Default Plan created the archive.'}
 $release=& $build -ReleaseVersion '2.3.4' -Plan
 if($release.AgentVersion -ne '2.3.4' -or $release.ReleaseVersion -ne '2.3.4'){throw 'Release plan must use the explicit release version.'}
+foreach($entry in @('Update-AgentPackage.ps1','Update-Agent.ps1')){if($entry -notin $release.PackageEntries){throw "Release package plan is missing $entry."}}
+foreach($entry in @('Update-AgentPackage.ps1','Update-Agent.ps1')){if($entry -in $default.PackageEntries){throw "Enrollment package plan must not change by including $entry."}}
 if($release.ManifestPath -ne 'AgentPackage.manifest.json' -or $release.Manifest.packageFormatVersion -ne 1){throw 'Release plan must include the versioned package manifest.'}
 $publicRoot=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\public'))+[IO.Path]::DirectorySeparatorChar
 if($release.ArchivePath.StartsWith($publicRoot,[StringComparison]::OrdinalIgnoreCase)){throw 'Default release output must be private and outside public/.'}

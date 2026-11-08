@@ -30,13 +30,17 @@ $manifestPath='AgentPackage.manifest.json'
 $agentVersion=if($releaseBuild){$ReleaseVersion}else{$agentVersion}
 $manifest=[pscustomobject]@{packageFormatVersion=1;agentInformationalVersion=$agentVersion;sourceCommit=$revision;sourceDirty=($statusLines.Count -gt 0);releaseBuild=$releaseBuild}
 $scriptNames=@('Install-AgentPackage.ps1','Install-Service.ps1','Install-TightVncServer.ps1','Prepare-SunshineStreamGate.ps1','PrivateInstallFiles.ps1','ServiceInstallTransaction.ps1')
+if($releaseBuild){$scriptNames+=@('Update-AgentPackage.ps1','Update-Agent.ps1')}
 $entries=@('Agent')+$scriptNames+$manifestPath
 if($Plan){
  [pscustomobject]@{ProjectPath=$project;OutputDirectory=$OutputDirectory;Runtime=$Runtime;SelfContained=$true;ArchivePath=$archive;HashFilePath=$hashFile;PackageEntries=$entries;AgentVersion=$agentVersion;ReleaseVersion=$(if($releaseBuild){$ReleaseVersion}else{$null});ReleaseBuild=$releaseBuild;ManifestPath=$manifestPath;Manifest=$manifest}
  return
 }
 if(-not (Test-Path -LiteralPath $project -PathType Leaf)){throw 'Agent project is missing.'}
-foreach($name in $scriptNames){if(-not (Test-Path -LiteralPath (Join-Path $PSScriptRoot $name) -PathType Leaf)){throw "Required installer script is missing: $name"}}
+foreach($name in $scriptNames){
+ $source=if($name -eq 'Update-Agent.ps1'){Join-Path (Split-Path $PSScriptRoot -Parent) '..\public\agent\Update-Agent.ps1'}else{Join-Path $PSScriptRoot $name}
+ if(-not (Test-Path -LiteralPath $source -PathType Leaf)){throw "Required installer script is missing: $name"}
+}
 if(-not $PSCmdlet.ShouldProcess($archive,"Publish self-contained Agent package for $Runtime")){return}
 $tempRoot=[IO.Path]::GetTempPath()
 $stage=Join-Path $tempRoot ('kr-agent-package-'+[guid]::NewGuid().ToString('N'))
@@ -58,7 +62,10 @@ try {
   if(-not $item.PSIsContainer -and $item.Name -ieq 'appsettings.json'){continue}
   Copy-Item -LiteralPath $item.FullName -Destination $packageAgent -Recurse
  }
- foreach($name in $scriptNames){Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination (Join-Path $packageRoot $name)}
+ foreach($name in $scriptNames){
+  $source=if($name -eq 'Update-Agent.ps1'){Join-Path (Split-Path $PSScriptRoot -Parent) '..\public\agent\Update-Agent.ps1'}else{Join-Path $PSScriptRoot $name}
+  Copy-Item -LiteralPath $source -Destination (Join-Path $packageRoot $name)
+ }
  $manifestJson=ConvertTo-Json -InputObject $manifest -Depth 4
  [IO.File]::WriteAllText((Join-Path $packageRoot $manifestPath),$manifestJson+[Environment]::NewLine,[Text.UTF8Encoding]::new($false))
  Add-Type -AssemblyName System.IO.Compression
