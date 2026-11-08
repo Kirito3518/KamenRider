@@ -78,11 +78,11 @@
 - Consumes: `AgentPackage.zip`, channel `stable|beta`, release notes, version manifest, and Admin actor metadata. The build accepts an explicit release version that must equal the Agent's embedded informational version.
 - Produces: immutable release metadata and a private content-addressed artifact, returned only by authorized Controller endpoints.
 
-- [ ] **Step 1: Add failing package tests** for manifest generation, release/private output mode, package/version mismatch, ZIP traversal, duplicate entries, maximum size, and immutable version/hash conflicts.
-- [ ] **Step 2: Implement the package manifest** with exact Agent informational version, source commit, clean/dirty state, release-build marker, and package format version; allow the build caller to set a release version and include the manifest in the archive. Release mode defaults to a private artifact directory outside `public/`; the existing enrollment build output remains compatible.
-- [ ] **Step 3: Implement Controller validation/storage** with streaming size limits, server-computed SHA-256, atomic publication, and no overwrite of existing release bytes.
+- [x] **Step 1: Add failing package tests** for manifest generation, release/private output mode, package/version mismatch, ZIP traversal, duplicate entries, maximum size, and immutable version/hash conflicts.
+- [x] **Step 2: Implement the package manifest** with exact Agent informational version, source commit, clean/dirty state, release-build marker, and package format version; allow the build caller to set a release version and include the manifest in the archive. Release mode defaults to a private artifact directory outside `public/`; the existing enrollment build output remains compatible.
+- [x] **Step 3: Implement Controller validation/storage** with streaming size limits, server-computed SHA-256, atomic publication, and no overwrite of existing release bytes.
 - [ ] Reject packages above 100 MiB compressed, 500 MiB declared expanded size, or 5,000 entries; reject dirty or non-release manifests and repeated versions with different hashes.
-- [ ] **Step 4: Run focused package/store tests** without installing services or MSI, then commit `feat(agent): publish immutable versioned packages`.
+- [x] **Step 4: Run focused package/store tests** without installing services or MSI, then commit `feat(agent): publish immutable versioned packages`.
 
 ### Task 3: Add update tickets, authenticated Admin APIs, and package download
 
