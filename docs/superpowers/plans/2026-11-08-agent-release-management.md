@@ -59,11 +59,11 @@
 - Produces: a machine-scoped update reservation/maintenance lock; a new lease cannot be allocated while an update operation is active.
 - Operation statuses: `awaitingInstaller`, `installing`, `awaitingHeartbeat`, `rollingBack`, `completed`, `rolledBack`, `expired`, `failed`. `completed` and `rolledBack` require a confirming heartbeat; a started `failed` operation remains locked until recovery is confirmed.
 
-- [ ] **Step 1: Add failing tests** for update reservation with a held lease, lease/update race serialization, `CanRent=false` during maintenance, expired unstarted ticket cleanup, failed-operation lock retention, same-operation recovery-ticket renewal, and target/rollback heartbeat resolution.
-- [ ] **Step 2: Run focused Controller tests** with isolated output; verify the new behavior fails before implementation.
-- [ ] **Step 3: Add migration 012 and Controller transaction methods** for release metadata/update operation state. Reserve the lock only after confirming no allocation exists in the same transaction; preserve a one-active-operation-per-machine invariant.
-- [ ] **Step 4: Reuse the existing rental predicate** to include active maintenance; resolve operations only through the specified version/ticket-confirmed transitions.
-- [ ] **Step 5: Run focused and full Controller tests**, then commit `feat(controller): add Agent update maintenance locks`.
+- [x] **Step 1: Add failing tests** for update reservation with a held lease, lease/update race serialization, `CanRent=false` during maintenance, expired unstarted ticket cleanup, failed-operation lock retention, same-operation recovery-ticket renewal, and target/rollback heartbeat resolution.
+- [x] **Step 2: Run focused Controller tests** with isolated output; verify the new behavior fails before implementation.
+- [x] **Step 3: Add migration 012 and Controller transaction methods** for release metadata/update operation state. Reserve the lock only after confirming no allocation exists in the same transaction; preserve a one-active-operation-per-machine invariant.
+- [x] **Step 4: Reuse the existing rental predicate** to include active maintenance; resolve operations only through the specified version/ticket-confirmed transitions.
+- [x] **Step 5: Run focused and full Controller tests**, then commit `feat(controller): add Agent update maintenance locks`.
 
 ### Task 2: Publish immutable, versioned Agent packages
 
