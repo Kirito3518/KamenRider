@@ -113,3 +113,10 @@ Rental readiness remains **NOT READY**, and live hardware and Restore Rx accepta
 - `https://localhost:7443/` completed TLS validation using the LocalMachine trusted root and returned HTTP 404 at `/`; the Agent configuration points to that loopback URL. The Agent service remains Stopped/Automatic. A non-elevated `Start-Service` attempt was denied because the shell cannot open the service; no service state changed.
 - ActiveStore contains the prior Sunshine inbound TCP/UDP allow rules on Any profile and the enabled Stream Guard inbound Block rule for the Sunshine program on Any profile. This read-only inventory does not qualify traffic blocking or existing-stream cutoff. Sunshine remains Stopped/Manual, Stream Guard Running/Automatic, and TightVNC is absent.
 - The current shell still cannot elevate and the UAC launch remains blocked by tool policy. The owner must run the recovery command in an elevated PowerShell session. Rental readiness remains **NOT READY**; hardware acceptance remains **NOT TESTED**. Reboot Restore Rx was not queried, controlled, or modified.
+
+## Latest software evidence (2026-11-08; explicit Admin Agent install-command flow)
+
+- Commit `b6af8ac` changes the install-command route to accept only an authenticated, same-origin Admin POST. GET does not issue a command or mint an enrollment ticket.
+- The `/admin/machines` page does not request an install command on mount. The Admin button explicitly requests a fresh command.
+- `pnpm test:machines` and `pnpm build` passed. `pnpm test:machines` includes the focused MachinesManager UI and install-command route tests for the no-request-on-mount behavior, explicit POST, and authenticated same-origin Admin boundary.
+- This is software-flow evidence only: no installed service or machine state changed. Rental readiness remains **NOT READY** and hardware acceptance remains **NOT TESTED**. These software checks do not qualify installation, live services, VNC, streaming, WOL, restoration, or external networking. Reboot Restore Rx remains untouched.
