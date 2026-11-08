@@ -169,11 +169,11 @@ function Wait-SunshineServiceState {
 
 function Get-StreamGateServiceConfiguration {
     param([string]$Name)
-    [KamenRaider.Install.NativeServiceManager]::QueryConfiguration($Name)
+    [KamenRaider.Install.NativeServiceManagerV2]::QueryConfiguration($Name)
 }
 function Set-StreamGateServiceConfiguration {
     param([string]$Name, [uint32]$StartType, [string[]]$Dependencies)
-    [KamenRaider.Install.NativeServiceManager]::SetStartAndDependencies($Name, $StartType, $Dependencies)
+    [KamenRaider.Install.NativeServiceManagerV2]::SetStartAndDependencies($Name, $StartType, $Dependencies)
 }
 function Remove-StreamGateService {
     param([Parameter(Mandatory)][string]$ServiceName)

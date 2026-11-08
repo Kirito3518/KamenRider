@@ -49,13 +49,15 @@ function Get-ServiceBinaryPath {
  return ('"{0}" --contentRoot "{1}"' -f $executablePath,$contentRootPath)
 }
 function Initialize-ServiceManagerNativeType {
- if(-not ('KamenRaider.Install.NativeServiceManager' -as [type])){
+ # Add-Type cannot replace a type already loaded in this PowerShell process. Use
+ # a versioned name so a package update can rerun in the same elevated session.
+ if(-not ('KamenRaider.Install.NativeServiceManagerV2' -as [type])){
   Add-Type -TypeDefinition @'
 using System;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
 namespace KamenRaider.Install {
- public static class NativeServiceManager {
+ public static class NativeServiceManagerV2 {
   [DllImport("advapi32.dll", EntryPoint="OpenSCManagerW", CharSet=CharSet.Unicode, SetLastError=true)]
   private static extern IntPtr OpenSCManager(string machineName,string databaseName,uint desiredAccess);
   [DllImport("advapi32.dll", EntryPoint="CreateServiceW", CharSet=CharSet.Unicode, SetLastError=true)]
@@ -216,18 +218,18 @@ namespace KamenRaider.Install {
 function New-DisabledWindowsService {
  param([Parameter(Mandatory)][string]$ServiceName,[Parameter(Mandatory)][string]$BinaryPath,[Parameter(Mandatory)][string]$Account,[string[]]$Dependencies=@())
  Initialize-ServiceManagerNativeType
- [KamenRaider.Install.NativeServiceManager]::CreateDisabledService($ServiceName,$ServiceName,$BinaryPath,$Account,$Dependencies)
+ [KamenRaider.Install.NativeServiceManagerV2]::CreateDisabledService($ServiceName,$ServiceName,$BinaryPath,$Account,$Dependencies)
 }
 function Set-WindowsServiceFailureActions {
  param([Parameter(Mandatory)][string]$ServiceName,[Parameter(Mandatory)][uint32]$ResetPeriod,[Parameter(Mandatory)][uint32[]]$ActionTypes,[Parameter(Mandatory)][uint32[]]$Delays,[Parameter(Mandatory)][string]$Command)
  if($ActionTypes.Count -eq 0 -or $ActionTypes.Count -ne $Delays.Count){throw 'Service failure action types and delays must have the same non-zero length.'}
  Initialize-ServiceManagerNativeType
- [KamenRaider.Install.NativeServiceManager]::SetFailureActions($ServiceName,$ResetPeriod,$ActionTypes,$Delays,$Command)
+ [KamenRaider.Install.NativeServiceManagerV2]::SetFailureActions($ServiceName,$ResetPeriod,$ActionTypes,$Delays,$Command)
 }
 function Set-WindowsServiceFailureActionsFlag {
  param([Parameter(Mandatory)][string]$ServiceName,[Parameter(Mandatory)][bool]$Enabled)
  Initialize-ServiceManagerNativeType
- [KamenRaider.Install.NativeServiceManager]::SetFailureActionsFlag($ServiceName,$Enabled)
+ [KamenRaider.Install.NativeServiceManagerV2]::SetFailureActionsFlag($ServiceName,$Enabled)
 }
 function Get-AgentEnrollmentWaitState {
  param([Parameter(Mandatory)][string]$ServiceStatus,[psobject]$ReceiptStatus)

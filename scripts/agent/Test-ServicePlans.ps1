@@ -10,7 +10,7 @@ $serviceSid = Get-ServiceSid -ServiceName 'KamenRaider Agent'
 $expectedServiceSid = [regex]::Match(((& sc.exe showsid 'KamenRaider Agent') -join "`n"), 'SERVICE SID:\s*(S-1-5-80(?:-\d+){5})').Groups[1].Value
 if (-not $expectedServiceSid -or $serviceSid.Value -ne $expectedServiceSid) { throw 'Service SID lookup must work before the service is created.' }
 Initialize-ServiceManagerNativeType
-if (-not ('KamenRaider.Install.NativeServiceManager' -as [type])) { throw 'Native service creation API did not load.' }
+if (-not ('KamenRaider.Install.NativeServiceManagerV2' -as [type])) { throw 'Native service creation API did not load.' }
 $binaryPath = Get-ServiceBinaryPath -Executable 'C:\Program Files\KamenRaider\Agent\Agent.exe' -ContentRoot 'C:\Program Files\KamenRaider\Agent'
 if ($binaryPath -ne '"C:\Program Files\KamenRaider\Agent\Agent.exe" --contentRoot "C:\Program Files\KamenRaider\Agent"') { throw 'Service binary command line must preserve quoted paths containing spaces.' }
 $root = [IO.Path]::GetFullPath((Join-Path ([IO.Path]::GetTempPath()) ('kr-install-test-' + [Guid]::NewGuid().ToString('N'))))
