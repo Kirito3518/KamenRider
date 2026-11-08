@@ -1,0 +1,331 @@
+using KamenRaider.Controller.Agents;
+using KamenRaider.Controller.Data;
+using KamenRaider.Controller.Machines;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.TestHost;
+using Microsoft.Data.Sqlite;
+using Microsoft.Extensions.DependencyInjection;
+using System.IO.Compression;
+using System.Net;
+using System.Net.Http.Json;
+using System.Net.Http.Headers;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+
+namespace Controller.Tests;
+
+public sealed class AgentReleaseStoreTests
+{
+    [Fact]
+    public async Task ReleaseListAndPublishRequireAnAdminActor()
+    {
+        using var fixture = new ReleaseFixture();
+        await using var host = await fixture.StartHost();
+        host.Client.DefaultRequestHeaders.Clear();
+
+        using var anonymousList = await host.Client.GetAsync("/internal/agent-releases");
+        using var anonymousPublish = await Publish(host.Client, fixture.CreatePackage("2.3.4"), "2.3.4");
+        host.Client.DefaultRequestHeaders.Add("X-Authenticated-Actor-Id", "ordinary-user");
+        host.Client.DefaultRequestHeaders.Add("X-Authenticated-Actor-Role", "user");
+        using var nonAdminList = await host.Client.GetAsync("/internal/agent-releases");
+        host.Client.DefaultRequestHeaders.Clear();
+        host.Client.DefaultRequestHeaders.Add("X-Authenticated-Actor-Id", "admin-user");
+        host.Client.DefaultRequestHeaders.Add("X-Authenticated-Actor-Role", "admin");
+        using var adminList = await host.Client.GetAsync("/internal/agent-releases");
+
+        Assert.Equal(HttpStatusCode.Forbidden, anonymousList.StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, anonymousPublish.StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, nonAdminList.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, adminList.StatusCode);
+        Assert.Empty(fixture.ListReleaseVersions());
+    }
+
+    [Fact]
+    public async Task PublishesOnlyAValidatedPackageAndKeepsBytesPrivateAndContentAddressed()
+    {
+        using var fixture = new ReleaseFixture();
+        await using var host = await fixture.StartHost();
+        var package = fixture.CreatePackage("2.3.4");
+
+        using var response = await Publish(host.Client, package, "2.3.4");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var dto = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("2.3.4", dto.GetProperty("version").GetString());
+        Assert.Equal(Convert.ToHexString(SHA256.HashData(package)), dto.GetProperty("packageSha256").GetString());
+        Assert.False(dto.TryGetProperty("packagePath", out _));
+        var stored = fixture.ReadStoredRelease("2.3.4");
+        Assert.Equal(Convert.ToHexString(SHA256.HashData(package)), stored.Hash);
+        Assert.Equal(package.LongLength, stored.Size);
+        Assert.True(File.Exists(stored.Path));
+        Assert.StartsWith(fixture.ArtifactRoot, Path.GetFullPath(stored.Path), StringComparison.OrdinalIgnoreCase);
+        Assert.False(Path.GetFullPath(stored.Path).StartsWith(Path.Combine(fixture.Root, "public") + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task RejectsVersionMismatchDirtyAndNonReleaseManifestsBeforePublishing()
+    {
+        using var fixture = new ReleaseFixture();
+        await using var host = await fixture.StartHost();
+
+        using var mismatch = await Publish(host.Client, fixture.CreatePackage("2.3.5"), "2.3.4");
+        using var binaryMismatch = await Publish(host.Client, fixture.CreatePackage("2.3.4", agentLibraryVersion: "2.3.5"), "2.3.4");
+        using var dirty = await Publish(host.Client, fixture.CreatePackage("2.3.4", sourceDirty: true), "2.3.4");
+        using var development = await Publish(host.Client, fixture.CreatePackage("2.3.4", releaseBuild: false), "2.3.4");
+
+        Assert.Equal(HttpStatusCode.BadRequest, mismatch.StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, binaryMismatch.StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, dirty.StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, development.StatusCode);
+        Assert.Empty(fixture.ListReleaseVersions());
+    }
+
+    [Fact]
+    public async Task RejectsZipTraversalAndDuplicateEntryNames()
+    {
+        using var fixture = new ReleaseFixture();
+        await using var host = await fixture.StartHost();
+
+        using var traversal = await Publish(host.Client, fixture.CreatePackage("2.3.4", traversal: true), "2.3.4");
+        using var duplicate = await Publish(host.Client, fixture.CreatePackage("2.3.4", duplicate: true), "2.3.4");
+        using var duplicateManifest = await Publish(host.Client, fixture.CreatePackage("2.3.4", duplicateManifest: true), "2.3.4");
+
+        Assert.Equal(HttpStatusCode.BadRequest, traversal.StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, duplicate.StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, duplicateManifest.StatusCode);
+        Assert.Empty(fixture.ListReleaseVersions());
+    }
+
+    [Fact]
+    public async Task RejectsPackagesOverCompressedExpandedAndEntryCountLimits()
+    {
+        using var fixture = new ReleaseFixture();
+        await using var host = await fixture.StartHost();
+
+        using var oversizedStream = fixture.OpenOversizedCompressedPackage();
+        using var compressed = await Publish(host.Client, new StreamContent(oversizedStream), "2.3.4");
+        using var expanded = await Publish(host.Client, fixture.CreateExpandedSizeSpoofedPackage("2.3.4"), "2.3.4");
+        using var entries = await Publish(host.Client, fixture.CreatePackage("2.3.4", extraEntries: 5001), "2.3.4");
+
+        Assert.Equal(HttpStatusCode.RequestEntityTooLarge, compressed.StatusCode);
+        Assert.Equal(HttpStatusCode.RequestEntityTooLarge, expanded.StatusCode);
+        Assert.Equal(HttpStatusCode.RequestEntityTooLarge, entries.StatusCode);
+        Assert.Empty(fixture.ListReleaseVersions());
+    }
+
+    [Fact]
+    public async Task ReusedVersionCannotReplaceItsPublishedHashOrBytes()
+    {
+        using var fixture = new ReleaseFixture();
+        await using var host = await fixture.StartHost();
+        var originalPackage = fixture.CreatePackage("2.3.4", marker: "first");
+        var replacementPackage = fixture.CreatePackage("2.3.4", marker: "second");
+
+        using var first = await Publish(host.Client, originalPackage, "2.3.4");
+        var stored = fixture.ReadStoredRelease("2.3.4");
+        var originalHash = stored.Hash;
+        using var replacement = await Publish(host.Client, replacementPackage, "2.3.4");
+
+        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+        Assert.Equal(HttpStatusCode.Conflict, replacement.StatusCode);
+        Assert.Equal(originalHash, fixture.ReadStoredRelease("2.3.4").Hash);
+        Assert.Equal(originalHash, Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(stored.Path))));
+    }
+
+    [Fact]
+    public async Task ProvidesVerifiedReadHandleByReleaseHashWithoutExposingThePrivatePath()
+    {
+        using var fixture = new ReleaseFixture();
+        var store = new AgentReleaseStore(fixture.ArtifactRoot);
+        var package = fixture.CreatePackage("2.3.4");
+        using var staged = await store.StageAsync(new MemoryStream(package));
+        var published = store.PublishStaged(fixture.Db, staged, "2.3.4", "stable", "release notes", "admin-user");
+
+        var openMethod = typeof(AgentReleaseStore).GetMethod("OpenReadByHash");
+        Assert.NotNull(openMethod);
+        var handle = Assert.IsAssignableFrom<IDisposable>(openMethod.Invoke(store, [published.PackageSha256]));
+        try
+        {
+            var handleType = handle.GetType();
+            var content = Assert.IsAssignableFrom<Stream>(handleType.GetProperty("Content")?.GetValue(handle));
+            var sha256 = Assert.IsType<string>(handleType.GetProperty("Sha256")?.GetValue(handle));
+            var length = Assert.IsType<long>(handleType.GetProperty("Length")?.GetValue(handle));
+            using var bytes = new MemoryStream();
+            await content.CopyToAsync(bytes);
+            Assert.Equal(published.PackageSha256, sha256);
+            Assert.Equal(package.LongLength, length);
+            Assert.Equal(package, bytes.ToArray());
+            Assert.DoesNotContain("Path", handleType.GetProperties().Select(property => property.Name));
+        }
+        finally
+        {
+            handle.Dispose();
+        }
+    }
+
+    private static Task<HttpResponseMessage> Publish(HttpClient client, byte[] package, string version)
+    {
+        var content = new ByteArrayContent(package);
+        return Publish(client, content, version);
+    }
+
+    private static async Task<HttpResponseMessage> Publish(HttpClient client, HttpContent packageContent, string version)
+    {
+        using var form = new MultipartFormDataContent();
+        form.Add(new StringContent(version), "version");
+        form.Add(new StringContent("stable"), "channel");
+        form.Add(new StringContent("release notes"), "releaseNotes");
+        packageContent.Headers.ContentType = new MediaTypeHeaderValue("application/zip");
+        form.Add(packageContent, "package", "AgentPackage.zip");
+        return await client.PostAsync("/internal/agent-releases", form);
+    }
+
+    private sealed class ReleaseFixture : IDisposable
+    {
+        public ReleaseFixture()
+        {
+            Root = Path.Combine(Path.GetTempPath(), "kr-agent-release-store-test-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(Root);
+            DatabasePath = Path.Combine(Root, "controller.db");
+            ArtifactRoot = Path.Combine(Root, "private", "agent-releases");
+            Db = new ControllerDatabase(DatabasePath);
+        }
+
+        public string Root { get; }
+        public string DatabasePath { get; }
+        public string ArtifactRoot { get; }
+        public ControllerDatabase Db { get; }
+
+        public async Task<TestHost> StartHost()
+        {
+            var builder = WebApplication.CreateBuilder();
+            builder.WebHost.UseTestServer();
+            builder.Services.AddSingleton(Db);
+            builder.Services.AddSingleton(new AgentReleaseStore(ArtifactRoot));
+            var app = builder.Build();
+            app.MapMachines();
+            app.MapAgentReleases();
+            await app.StartAsync();
+            var client = app.GetTestClient();
+            client.DefaultRequestHeaders.Add("X-Authenticated-Actor-Id", "admin-user");
+            client.DefaultRequestHeaders.Add("X-Authenticated-Actor-Role", "admin");
+            return new TestHost(app, client);
+        }
+
+        public byte[] CreatePackage(string version, bool sourceDirty = false, bool releaseBuild = true,
+            bool traversal = false, bool duplicate = false, bool duplicateManifest = false, int extraEntries = 0,
+            string marker = "package", string? agentLibraryVersion = null)
+        {
+            using var memory = new MemoryStream();
+            using (var archive = new ZipArchive(memory, ZipArchiveMode.Create, leaveOpen: true))
+            {
+                AddEntry(archive, "Agent/Agent.exe", marker);
+                AddEntry(archive, "Agent/Agent.dll", "agent-library");
+                var dependencyVersion = agentLibraryVersion ?? version;
+                AddEntry(archive, "Agent/Agent.deps.json", JsonSerializer.Serialize(new { libraries = new Dictionary<string, object> { ["Agent/" + dependencyVersion] = new { type = "project" } } }));
+                AddEntry(archive, "Install-AgentPackage.ps1", "install");
+                AddEntry(archive, "Install-Service.ps1", "service");
+                AddEntry(archive, "Install-TightVncServer.ps1", "vnc");
+                AddEntry(archive, "Prepare-SunshineStreamGate.ps1", "sunshine");
+                AddEntry(archive, "PrivateInstallFiles.ps1", "private");
+                AddEntry(archive, "ServiceInstallTransaction.ps1", "transaction");
+                if (traversal) AddEntry(archive, "../escape.txt", "unsafe");
+                if (duplicate) AddEntry(archive, "Agent/Agent.exe", "replacement");
+                for (var index = 0; index < extraEntries; index++) AddEntry(archive, $"extra/{index:D5}.txt", string.Empty);
+                var manifest = JsonSerializer.Serialize(new
+                {
+                    packageFormatVersion = 1,
+                    agentInformationalVersion = version,
+                    sourceCommit = "0123456789ab",
+                    sourceDirty,
+                    releaseBuild,
+                });
+                AddEntry(archive, "AgentPackage.manifest.json", manifest);
+                if (duplicateManifest) AddEntry(archive, "AgentPackage.manifest.json", manifest);
+            }
+            return memory.ToArray();
+        }
+
+        public FileStream OpenOversizedCompressedPackage()
+        {
+            var path = Path.Combine(Root, "oversized.zip");
+            using (var file = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                file.SetLength(100L * 1024 * 1024 + 1);
+            return new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+        }
+
+        public byte[] CreateExpandedSizeSpoofedPackage(string version)
+        {
+            var bytes = CreatePackage(version);
+            var entryName = Encoding.ASCII.GetBytes("Agent/Agent.exe");
+            for (var index = 0; index < bytes.Length - 46; index++)
+            {
+                if (BitConverter.ToUInt32(bytes, index) != 0x02014b50) continue;
+                var nameLength = BitConverter.ToUInt16(bytes, index + 28);
+                if (nameLength != entryName.Length || !bytes.AsSpan(index + 46, nameLength).SequenceEqual(entryName)) continue;
+                BitConverter.GetBytes(500L * 1024 * 1024 + 1).AsSpan(0, 4).CopyTo(bytes.AsSpan(index + 24, 4));
+                return bytes;
+            }
+            throw new InvalidOperationException("Could not locate Agent executable ZIP entry");
+        }
+
+        public IReadOnlyList<string> ListReleaseVersions()
+        {
+            using var connection = OpenDatabase();
+            using var command = connection.CreateCommand();
+            command.CommandText = "SELECT version FROM agent_releases ORDER BY version";
+            using var rows = command.ExecuteReader();
+            var versions = new List<string>();
+            while (rows.Read()) versions.Add(rows.GetString(0));
+            return versions;
+        }
+
+        public (string Path, string Hash, long Size) ReadStoredRelease(string version)
+        {
+            using var connection = OpenDatabase();
+            using var command = connection.CreateCommand();
+            command.CommandText = "SELECT package_path,package_sha256,package_size_bytes FROM agent_releases WHERE version=$version";
+            command.Parameters.AddWithValue("$version", version);
+            using var row = command.ExecuteReader();
+            Assert.True(row.Read());
+            return (row.GetString(0), row.GetString(1), row.GetInt64(2));
+        }
+
+        private SqliteConnection OpenDatabase()
+        {
+            var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = DatabasePath, Pooling = false }.ToString());
+            connection.Open();
+            return connection;
+        }
+
+        private static void AddEntry(ZipArchive archive, string name, string contents)
+        {
+            var entry = archive.CreateEntry(name, CompressionLevel.Optimal);
+            using var writer = new StreamWriter(entry.Open(), new UTF8Encoding(false));
+            writer.Write(contents);
+        }
+
+        public void Dispose()
+        {
+            Db.Dispose();
+            var resolved = Path.GetFullPath(Root);
+            var temp = Path.GetFullPath(Path.GetTempPath()).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+            if (!resolved.StartsWith(temp, StringComparison.OrdinalIgnoreCase) || !Path.GetFileName(resolved).StartsWith("kr-agent-release-store-test-", StringComparison.Ordinal))
+                throw new InvalidOperationException("Unsafe release-store test cleanup path");
+            if (Directory.Exists(resolved)) Directory.Delete(resolved, recursive: true);
+        }
+    }
+
+    private sealed class TestHost(WebApplication app, HttpClient client) : IAsyncDisposable
+    {
+        public HttpClient Client { get; } = client;
+
+        public async ValueTask DisposeAsync()
+        {
+            Client.Dispose();
+            await app.DisposeAsync();
+        }
+    }
+}

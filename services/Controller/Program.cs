@@ -57,6 +57,11 @@ public static class ControllerHost
         builder.Services.AddSingleton<ControllerDatabase>(sp => new ControllerDatabase(
             sp.GetRequiredService<IOptions<ControllerOptions>>().Value.DatabasePath,
             clock: sp.GetRequiredService<TimeProvider>()));
+        builder.Services.AddSingleton<AgentReleaseStore>(sp => {
+            var databasePath = sp.GetRequiredService<IOptions<ControllerOptions>>().Value.DatabasePath;
+            var databaseDirectory = Path.GetDirectoryName(Path.GetFullPath(databasePath))!;
+            return new AgentReleaseStore(Path.Combine(databaseDirectory, "agent-releases"));
+        });
         builder.Services.TryAddSingleton<IAdminVncTargetProbe, AdminVncTargetProbe>();
         builder.Services.AddSingleton<AgentAuthentication>();
         builder.Services.AddSingleton<LeaseService>();
@@ -89,6 +94,7 @@ public static class ControllerHost
         app.MapLeases();
         app.MapPairing();
         app.MapAdminVnc();
+        app.MapAgentReleases();
         return app;
     }
 }

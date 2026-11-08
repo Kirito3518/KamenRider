@@ -2,6 +2,7 @@
 param(
  [string]$OutputDirectory,
  [ValidateSet('win-x64','win-arm64')][string]$Runtime='win-x64',
+ [string]$ReleaseVersion,
  [switch]$Plan
 )
 $ErrorActionPreference='Stop'
@@ -15,16 +16,23 @@ $statusLines=@(& git -C $repo status --porcelain --untracked-files=all)
 if($LASTEXITCODE -ne 0){throw 'Git working-tree status is required to version the Agent package.'}
 $agentVersion="1.0.0+g$revision"
 if($statusLines.Count -gt 0){$agentVersion+='.dirty.'+[DateTime]::UtcNow.ToString('yyyyMMddHHmmss',[Globalization.CultureInfo]::InvariantCulture)}
-if(-not $OutputDirectory){$OutputDirectory=Join-Path $repo 'public/agent'}
+if($ReleaseVersion -and ($ReleaseVersion.Length -gt 64 -or $ReleaseVersion -notmatch '\A(?:\d+\.\d+\.\d+|1\.0\.0\+g[0-9a-f]{12,40}(?:\.dirty\.\d{14})?)\z')){throw 'ReleaseVersion must be a supported informational version.'}
+$releaseBuild= -not [string]::IsNullOrWhiteSpace($ReleaseVersion)
+if(-not $OutputDirectory){$OutputDirectory=if($releaseBuild){Join-Path $repo 'agent-release-artifacts'}else{Join-Path $repo 'public/agent'}}
 if(-not [IO.Path]::IsPathRooted($OutputDirectory)){throw 'OutputDirectory must be absolute.'}
 $OutputDirectory=[IO.Path]::GetFullPath($OutputDirectory)
+$publicRoot=[IO.Path]::GetFullPath((Join-Path $repo 'public')).TrimEnd([IO.Path]::DirectorySeparatorChar)+[IO.Path]::DirectorySeparatorChar
+if($releaseBuild -and ($OutputDirectory.TrimEnd([IO.Path]::DirectorySeparatorChar)+[IO.Path]::DirectorySeparatorChar).StartsWith($publicRoot,[StringComparison]::OrdinalIgnoreCase)){throw 'Release packages must be written outside public/.'}
 $project=Join-Path $repo 'services/Agent/Agent.csproj'
 $archive=Join-Path $OutputDirectory 'AgentPackage.zip'
 $hashFile=Join-Path $OutputDirectory 'AgentPackage.sha256'
+$manifestPath='AgentPackage.manifest.json'
+$agentVersion=if($releaseBuild){$ReleaseVersion}else{$agentVersion}
+$manifest=[pscustomobject]@{packageFormatVersion=1;agentInformationalVersion=$agentVersion;sourceCommit=$revision;sourceDirty=($statusLines.Count -gt 0);releaseBuild=$releaseBuild}
 $scriptNames=@('Install-AgentPackage.ps1','Install-Service.ps1','Install-TightVncServer.ps1','Prepare-SunshineStreamGate.ps1','PrivateInstallFiles.ps1','ServiceInstallTransaction.ps1')
-$entries=@('Agent')+$scriptNames
+$entries=@('Agent')+$scriptNames+$manifestPath
 if($Plan){
- [pscustomobject]@{ProjectPath=$project;OutputDirectory=$OutputDirectory;Runtime=$Runtime;SelfContained=$true;ArchivePath=$archive;HashFilePath=$hashFile;PackageEntries=$entries;AgentVersion=$agentVersion}
+ [pscustomobject]@{ProjectPath=$project;OutputDirectory=$OutputDirectory;Runtime=$Runtime;SelfContained=$true;ArchivePath=$archive;HashFilePath=$hashFile;PackageEntries=$entries;AgentVersion=$agentVersion;ReleaseVersion=$(if($releaseBuild){$ReleaseVersion}else{$null});ReleaseBuild=$releaseBuild;ManifestPath=$manifestPath;Manifest=$manifest}
  return
 }
 if(-not (Test-Path -LiteralPath $project -PathType Leaf)){throw 'Agent project is missing.'}
@@ -51,6 +59,8 @@ try {
   Copy-Item -LiteralPath $item.FullName -Destination $packageAgent -Recurse
  }
  foreach($name in $scriptNames){Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination (Join-Path $packageRoot $name)}
+ $manifestJson=ConvertTo-Json -InputObject $manifest -Depth 4
+ [IO.File]::WriteAllText((Join-Path $packageRoot $manifestPath),$manifestJson+[Environment]::NewLine,[Text.UTF8Encoding]::new($false))
  Add-Type -AssemblyName System.IO.Compression
  Add-Type -AssemblyName System.IO.Compression.FileSystem
  $stagedArchive=Join-Path $stage 'AgentPackage.zip'
@@ -77,7 +87,7 @@ try {
  }
  $hash=(Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToUpperInvariant()
  [IO.File]::WriteAllText($hashFile,$hash+[Environment]::NewLine,[Text.Encoding]::ASCII)
- [pscustomobject]@{PackagePath=$archive;Sha256=$hash;HashFilePath=$hashFile;Runtime=$Runtime;AgentVersion=$agentVersion}
+ [pscustomobject]@{PackagePath=$archive;Sha256=$hash;HashFilePath=$hashFile;Runtime=$Runtime;AgentVersion=$agentVersion;ReleaseVersion=$(if($releaseBuild){$ReleaseVersion}else{$null});ReleaseBuild=$releaseBuild;ManifestPath=$manifestPath;Manifest=$manifest}
 } finally {
  if($outputTemp -and (Test-Path -LiteralPath $outputTemp)){Remove-Item -LiteralPath $outputTemp -Force}
  if($outputBackup -and (Test-Path -LiteralPath $outputBackup)){Remove-Item -LiteralPath $outputBackup -Force}
