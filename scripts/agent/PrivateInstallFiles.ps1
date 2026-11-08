@@ -231,6 +231,24 @@ function Set-WindowsServiceFailureActionsFlag {
  Initialize-ServiceManagerNativeType
  [KamenRaider.Install.NativeServiceManagerV2]::SetFailureActionsFlag($ServiceName,$Enabled)
 }
+function Ensure-AgentEventLogSource {
+ param([Parameter(Mandatory)][string]$SourceName)
+ if($env:OS -ne 'Windows_NT'){throw 'Windows is required to register the Agent event source.'}
+ if(-not ([Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)){
+  throw 'Run Agent installation from an elevated PowerShell session to register its Event Log source.'
+ }
+ if(-not ('System.Diagnostics.EventLog' -as [type])){throw 'Windows Event Log APIs are unavailable in this PowerShell session.'}
+ if([Diagnostics.EventLog]::SourceExists($SourceName,'.')){
+  $existingLog=[Diagnostics.EventLog]::LogNameFromSourceName($SourceName,'.')
+  if(-not [string]::Equals($existingLog,'Application',[StringComparison]::OrdinalIgnoreCase)){
+   throw "Agent event source '$SourceName' is already registered to '$existingLog'; refusing to remap it."
+  }
+  return
+ }
+ [Diagnostics.EventLog]::CreateEventSource($SourceName,'Application')
+ $sourceKey="Registry::HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\EventLog\Application\$SourceName"
+ if(-not (Test-Path -LiteralPath $sourceKey)){throw "Agent Event Log source '$SourceName' was not published."}
+}
 function Get-AgentEnrollmentWaitState {
  param([Parameter(Mandatory)][string]$ServiceStatus,[psobject]$ReceiptStatus)
  if($ServiceStatus -eq 'Running'){
@@ -250,8 +268,8 @@ function Get-AgentEnrollmentRecoveryInstruction {
  }
 }
 function Get-AgentInstallMode {
- param([Parameter(Mandatory)][bool]$ServiceExists,[Parameter(Mandatory)][bool]$InstallDirectoryExists,[Parameter(Mandatory)][bool]$DataDirectoryExists,[bool]$GuardServiceExists=$false)
- if(-not $ServiceExists -and -not $InstallDirectoryExists -and -not $DataDirectoryExists -and -not $GuardServiceExists){return 'install'}
+ param([Parameter(Mandatory)][bool]$ServiceExists,[Parameter(Mandatory)][bool]$InstallDirectoryExists,[Parameter(Mandatory)][bool]$DataDirectoryExists,[bool]$GuardServiceExists=$false,[bool]$EmptyIdentityDirectoryResidue=$false)
+ if(-not $ServiceExists -and -not $InstallDirectoryExists -and (-not $DataDirectoryExists -or $EmptyIdentityDirectoryResidue) -and -not $GuardServiceExists){return 'install'}
  if($ServiceExists -and $InstallDirectoryExists -and $DataDirectoryExists -and $GuardServiceExists){return 'repair-enrollment'}
  throw 'Agent installation is incomplete or inconsistent; refusing to overwrite service, binaries or identity data.'
 }
@@ -423,6 +441,33 @@ function Assert-EmptyInstallDirectory {
   if(-not $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)){throw 'Data directory must be a real directory.'}
   if(@(Get-ChildItem -LiteralPath $Path -Force).Count -ne 0){throw 'Data directory must be empty.'}
  }
+}
+function Test-EmptyAgentIdentityDirectoryResidue {
+ param([Parameter(Mandatory)][string]$DataDirectory,[Parameter(Mandatory)][Security.Principal.SecurityIdentifier]$ServiceSid)
+ if(-not (Test-Path -LiteralPath $DataDirectory -PathType Container)){return $false}
+ $dataItem=Get-Item -LiteralPath $DataDirectory -Force
+ if($dataItem.Attributes -band [IO.FileAttributes]::ReparsePoint){return $false}
+ $identityPath=Join-Path $dataItem.FullName 'identity'
+ $children=@(Get-ChildItem -LiteralPath $DataDirectory -Force -ErrorAction Stop)
+ if($children.Count -ne 1 -or $children[0].Name -ine 'identity' -or -not $children[0].PSIsContainer -or ($children[0].Attributes -band [IO.FileAttributes]::ReparsePoint)){return $false}
+ if(@(Get-ChildItem -LiteralPath $identityPath -Force -ErrorAction Stop).Count -ne 0){return $false}
+ $trusted=Get-TrustedInstallSids @($ServiceSid)
+ $dataAcl=Get-Acl -LiteralPath $DataDirectory -ErrorAction Stop
+ $identityAcl=Get-Acl -LiteralPath $identityPath -ErrorAction Stop
+ if(-not $dataAcl.AreAccessRulesProtected -or
+    -not (Test-TrustedInstallAcl $dataAcl $trusted -Private -RequireModifySid $ServiceSid) -or
+    $identityAcl.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $ServiceSid.Value -or
+    -not (Test-TrustedInstallAcl $identityAcl $trusted -IncludeInheritedChildRules -Private -RequireModifySid $ServiceSid)){return $false}
+ return $true
+}
+function Assert-AgentDataDirectoryReady {
+ param([Parameter(Mandatory)][string]$Path,[Parameter(Mandatory)][Security.Principal.SecurityIdentifier]$ServiceSid,[switch]$AllowEmptyIdentityDirectory)
+ if(-not (Test-Path -LiteralPath $Path)){return}
+ $item=Get-Item -LiteralPath $Path -Force
+ if(-not $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)){throw 'Data directory must be a real directory.'}
+ if(@(Get-ChildItem -LiteralPath $Path -Force -ErrorAction Stop).Count -eq 0){return}
+ if($AllowEmptyIdentityDirectory -and (Test-EmptyAgentIdentityDirectoryResidue -DataDirectory $Path -ServiceSid $ServiceSid)){return}
+ throw 'Data directory must be empty or contain only a verified empty identity directory from interrupted Agent startup.'
 }
 function Assert-ServiceIsAbsent {
  param([Parameter(Mandatory)][string]$ServiceName)
@@ -683,8 +728,8 @@ function New-PrivateInstallDirectory {
  return $item
 }
 function Initialize-PrivateDataDirectory {
- param([Parameter(Mandatory)][string]$Path,[Parameter(Mandatory)][Security.Principal.SecurityIdentifier]$ServiceSid)
- Assert-EmptyInstallDirectory $Path
+ param([Parameter(Mandatory)][string]$Path,[Parameter(Mandatory)][Security.Principal.SecurityIdentifier]$ServiceSid,[switch]$AllowEmptyIdentityDirectory)
+ if($AllowEmptyIdentityDirectory){Assert-AgentDataDirectoryReady -Path $Path -ServiceSid $ServiceSid -AllowEmptyIdentityDirectory}else{Assert-EmptyInstallDirectory $Path}
  $created=$false
  if(Test-Path -LiteralPath $Path){
   $existingAcl=Get-Acl -LiteralPath $Path
@@ -694,7 +739,7 @@ function Initialize-PrivateDataDirectory {
   New-PrivateInstallDirectory $Path $ServiceSid | Out-Null
   $created=$true
  }
- Assert-EmptyInstallDirectory $Path
+ if($AllowEmptyIdentityDirectory){Assert-AgentDataDirectoryReady -Path $Path -ServiceSid $ServiceSid -AllowEmptyIdentityDirectory}else{Assert-EmptyInstallDirectory $Path}
  return $created
 }
 function Publish-PrivateConfiguration {

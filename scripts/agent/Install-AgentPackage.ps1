@@ -139,11 +139,17 @@ $serviceAccount = "NT SERVICE\$serviceName"
 $serviceSid = Get-ServiceSid -ServiceName $serviceName
 $existingService = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
 $existingGuardService = Get-Service -Name $guardServiceName -ErrorAction SilentlyContinue
+$emptyIdentityDirectoryResidue = $false
+if (-not $existingService -and -not $existingGuardService -and -not (Test-Path -LiteralPath $installDirectory) -and (Test-Path -LiteralPath $dataDirectory)) {
+    Assert-TrustedInstallParent $dataDirectory -ServiceSid $serviceSid
+    $emptyIdentityDirectoryResidue = Test-EmptyAgentIdentityDirectoryResidue -DataDirectory $dataDirectory -ServiceSid $serviceSid
+}
 $installMode = Get-AgentInstallMode `
     -ServiceExists ([bool]$existingService) `
     -InstallDirectoryExists (Test-Path -LiteralPath $installDirectory) `
     -DataDirectoryExists (Test-Path -LiteralPath $dataDirectory) `
-    -GuardServiceExists ([bool]$existingGuardService)
+    -GuardServiceExists ([bool]$existingGuardService) `
+    -EmptyIdentityDirectoryResidue $emptyIdentityDirectoryResidue
 
 if (-not (Test-Path -LiteralPath "Cert:\LocalMachine\Root\$TrustedRootThumbprint")) {
     throw 'Provision and verify the certificate trust chain before installation.'
@@ -212,7 +218,7 @@ $publishParentCreatedByThisRun = $false
 
 Assert-TrustedInstallParent $publishParent
 Assert-TrustedInstallParent $dataDirectory -ServiceSid $serviceSid
-Assert-EmptyInstallDirectory $dataDirectory
+Assert-AgentDataDirectoryReady -Path $dataDirectory -ServiceSid $serviceSid -AllowEmptyIdentityDirectory:$emptyIdentityDirectoryResidue
 if (Test-Path -LiteralPath $installDirectory) { throw 'Agent installation directory already exists; reviewed upgrade or repair is required.' }
 Assert-ServiceIsAbsent $serviceName
 Assert-TrustedPublishTree $sourceDirectory

@@ -44,9 +44,13 @@ public sealed class DeviceIdentity : IDisposable
             var service = WindowsIdentity.GetCurrent().User!;
             var administrators = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
             var system = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
+            var existingDirectoryOwner = directoryInfo.GetAccessControl(AccessControlSections.Owner)
+                .GetOwner(typeof(SecurityIdentifier));
+            if (!service.Equals(existingDirectoryOwner))
+                throw new UnauthorizedAccessException("Identity directory owner does not match the current service account.");
+
             var directorySecurity = new DirectorySecurity();
             directorySecurity.SetAccessRuleProtection(true, false);
-            directorySecurity.SetOwner(service);
             foreach (var sid in new[] { service, administrators, system }.Distinct())
             {
                 directorySecurity.AddAccessRule(new FileSystemAccessRule(
@@ -57,6 +61,10 @@ public sealed class DeviceIdentity : IDisposable
                     AccessControlType.Allow));
             }
             directoryInfo.SetAccessControl(directorySecurity);
+            var appliedDirectorySecurity = directoryInfo.GetAccessControl(AccessControlSections.Access | AccessControlSections.Owner);
+            if (!appliedDirectorySecurity.AreAccessRulesProtected ||
+                !service.Equals(appliedDirectorySecurity.GetOwner(typeof(SecurityIdentifier))))
+                throw new UnauthorizedAccessException("Identity directory ACL could not be secured for the current service account.");
 
             var path = Path.Combine(identityDirectory, "identity.json");
             if (!File.Exists(path))
@@ -87,12 +95,20 @@ public sealed class DeviceIdentity : IDisposable
             if ((identityInfo.Attributes & FileAttributes.ReparsePoint) != 0)
                 throw new InvalidDataException("Identity file must not be a reparse point");
 
+            var existingFileOwner = identityInfo.GetAccessControl(AccessControlSections.Owner)
+                .GetOwner(typeof(SecurityIdentifier));
+            if (!service.Equals(existingFileOwner))
+                throw new UnauthorizedAccessException("Identity file owner does not match the current service account.");
+
             var fileSecurity = new FileSecurity();
             fileSecurity.SetAccessRuleProtection(true, false);
-            fileSecurity.SetOwner(service);
             foreach (var sid in new[] { service, administrators, system }.Distinct())
                 fileSecurity.AddAccessRule(new FileSystemAccessRule(sid, FileSystemRights.FullControl, AccessControlType.Allow));
             identityInfo.SetAccessControl(fileSecurity);
+            var appliedFileSecurity = identityInfo.GetAccessControl(AccessControlSections.Access | AccessControlSections.Owner);
+            if (!appliedFileSecurity.AreAccessRulesProtected ||
+                !service.Equals(appliedFileSecurity.GetOwner(typeof(SecurityIdentifier))))
+                throw new UnauthorizedAccessException("Identity file ACL could not be secured for the current service account.");
 
             saved = JsonSerializer.Deserialize<Saved>(File.ReadAllText(path))
                 ?? throw new InvalidDataException("Invalid identity");

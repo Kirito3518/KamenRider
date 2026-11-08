@@ -39,7 +39,7 @@ try {
  $packageRoot=Join-Path $stage 'package'
  New-Item -ItemType Directory -Path $stage | Out-Null
  $publishScript=Join-Path $PSScriptRoot 'Publish-Services.ps1'
- & $publishScript -Role Agent -OutputDirectory $publishRoot -Runtime $Runtime -Version $agentVersion
+ & $publishScript -Role Agent -OutputDirectory $publishRoot -Runtime $Runtime -Version $agentVersion -ArtifactsPath (Join-Path $stage 'dotnet-artifacts')
  if($LASTEXITCODE -ne 0){throw 'Agent publish failed.'}
  $publishedAgent=Join-Path $publishRoot 'Agent'
  if(-not (Test-Path -LiteralPath (Join-Path $publishedAgent 'Agent.exe') -PathType Leaf)){throw 'Published Agent.exe is missing.'}

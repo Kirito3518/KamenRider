@@ -61,7 +61,8 @@ $serviceSid = Get-ServiceSid -ServiceName $serviceName
 Assert-TrustedInstallParent $PublishDirectory
 Assert-TrustedInstallParent $DataDirectory -ServiceSid $serviceSid
 Assert-TrustedInstallParent $ConfigurationFile
-Assert-EmptyInstallDirectory $DataDirectory
+if ($Role -eq 'Agent') { Assert-AgentDataDirectoryReady -Path $DataDirectory -ServiceSid $serviceSid -AllowEmptyIdentityDirectory }
+else { Assert-EmptyInstallDirectory $DataDirectory }
 if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) { throw 'Publish executable is missing.' }
 if (-not (Test-Path -LiteralPath $ConfigurationFile -PathType Leaf)) { throw 'Provide a provisioned configuration file.' }
 if (Test-Path -LiteralPath (Join-Path $PublishDirectory 'appsettings.json')) { throw 'Service configuration already exists; reviewed upgrade or repair is required.' }
@@ -75,6 +76,12 @@ Assert-ServiceIsAbsent $serviceName
 
 if (-not $PSCmdlet.ShouldProcess($serviceName, 'Create service, secure configuration and data, and configure startup')) { return }
 
+if ($Role -eq 'Agent') {
+    # AddWindowsService uses the Agent assembly name as the default Event Log source.
+    # Register it elevated so the restricted service identity can write startup failures.
+    Ensure-AgentEventLogSource -SourceName 'Agent'
+}
+
 $binaryPath = Get-ServiceBinaryPath -Executable $executable -ContentRoot $PublishDirectory
 $dataDirectoryState = [pscustomobject]@{ Created = $false }
 Invoke-ServiceInstallTransaction -Create {
@@ -85,7 +92,7 @@ Invoke-ServiceInstallTransaction -Create {
     return $true
 } -Configure {
     Assert-ServiceSidMatchesVirtualAccount -ServiceName $serviceName -ExpectedSid $serviceSid
-    $dataDirectoryState.Created = Initialize-PrivateDataDirectory $DataDirectory $serviceSid
+    $dataDirectoryState.Created = Initialize-PrivateDataDirectory $DataDirectory $serviceSid -AllowEmptyIdentityDirectory:($Role -eq 'Agent')
     if ($Role -eq 'Agent') { Publish-PrivateEnrollmentTicket -Directory $DataDirectory -Ticket $EnrollmentTicket -ServiceSid $serviceSid | Out-Null }
     Publish-PrivateConfiguration $ConfigurationFile $PublishDirectory $serviceSid
     & sc.exe failure $serviceName reset= 86400 actions= restart/5000/restart/15000/restart/60000 | Out-Null

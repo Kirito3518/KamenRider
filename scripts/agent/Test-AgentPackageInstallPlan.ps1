@@ -119,6 +119,20 @@ try {
     if ((Get-AgentInstallMode -ServiceExists $true -InstallDirectoryExists $true -DataDirectoryExists $true -GuardServiceExists $true) -ne 'repair-enrollment') { throw 'An existing Agent and Guard installation must use the enrollment-ticket repair path.' }
     $partialInstallRejected=$false;try{Get-AgentInstallMode -ServiceExists $true -InstallDirectoryExists $false -DataDirectoryExists $true -GuardServiceExists $false | Out-Null}catch{$partialInstallRejected=$true}
     if(-not $partialInstallRejected){throw 'A partial installation must not be overwritten by the ticket-repair path.'}
+    $residueDataDirectory = Join-Path $package 'interrupted-data'
+    $residueServiceSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+    New-PrivateInstallDirectory $residueDataDirectory $residueServiceSid | Out-Null
+    $residueIdentityDirectory = Join-Path $residueDataDirectory 'identity'
+    New-Item -ItemType Directory -Path $residueIdentityDirectory | Out-Null
+    if (-not (Test-EmptyAgentIdentityDirectoryResidue -DataDirectory $residueDataDirectory -ServiceSid $residueServiceSid)) { throw 'An empty, trusted identity directory from interrupted Agent startup must be recognized.' }
+    Assert-AgentDataDirectoryReady -Path $residueDataDirectory -ServiceSid $residueServiceSid -AllowEmptyIdentityDirectory
+    if ((Get-AgentInstallMode -ServiceExists $false -InstallDirectoryExists $false -DataDirectoryExists $true -GuardServiceExists $false -EmptyIdentityDirectoryResidue $true) -ne 'install') { throw 'An exact empty identity-directory residue must permit a safe fresh install.' }
+    $residueFile = Join-Path $residueIdentityDirectory 'unexpected.json'
+    [IO.File]::WriteAllText($residueFile, '{}')
+    if (Test-EmptyAgentIdentityDirectoryResidue -DataDirectory $residueDataDirectory -ServiceSid $residueServiceSid) { throw 'An identity directory containing a file must not be treated as an interrupted-startup residue.' }
+    $unsafeResidueRejected = $false
+    try { Assert-AgentDataDirectoryReady -Path $residueDataDirectory -ServiceSid $residueServiceSid -AllowEmptyIdentityDirectory } catch { $unsafeResidueRejected = $true }
+    if (-not $unsafeResidueRejected) { throw 'An identity directory containing a file must block a fresh install.' }
     if ($plan.InstallReturnUrl -ne 'http://localhost:3000/admin/machines') { throw 'Validated return URL was not preserved.' }
     if ($plan.ConfigurationStagingParent -ne $plan.InstallDirectory) { throw 'Configuration staging must stay inside the protected Agent installation directory.' }
     if (Test-Path -LiteralPath $plan.DataDirectory) { throw 'Plan mode created the data directory.' }

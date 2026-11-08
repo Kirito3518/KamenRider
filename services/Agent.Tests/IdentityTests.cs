@@ -1,6 +1,7 @@
 using KamenRaider.Agent.Identity;
 using KamenRaider.Controller.Security;
 using System.Security.AccessControl;
+using System.Security.Principal;
 namespace Agent.Tests;
 public class IdentityTests
 {
@@ -33,9 +34,17 @@ public class IdentityTests
             Assert.Single(identities.Select(x=>x.PublicKey).Distinct());
             Assert.Equal(originalAcl,new DirectoryInfo(dir).GetAccessControl(comparedSections).GetSecurityDescriptorSddlForm(comparedSections));
             var identityDirectory=Path.Combine(dir,"identity");
-            Assert.True(File.Exists(Path.Combine(identityDirectory,"identity.json")));
+            var identityPath=Path.Combine(identityDirectory,"identity.json");
+            Assert.True(File.Exists(identityPath));
             Assert.False(File.Exists(Path.Combine(dir,"identity.json")));
             Assert.DoesNotContain(Directory.EnumerateFiles(identityDirectory),x=>Path.GetFileName(x).EndsWith(".tmp",StringComparison.OrdinalIgnoreCase));
+            var serviceSid=WindowsIdentity.GetCurrent().User!;
+            var directoryAcl=new DirectoryInfo(identityDirectory).GetAccessControl(AccessControlSections.Access|AccessControlSections.Owner);
+            var fileAcl=new FileInfo(identityPath).GetAccessControl(AccessControlSections.Access|AccessControlSections.Owner);
+            Assert.True(directoryAcl.AreAccessRulesProtected);
+            Assert.True(fileAcl.AreAccessRulesProtected);
+            Assert.Equal(serviceSid,directoryAcl.GetOwner(typeof(SecurityIdentifier)));
+            Assert.Equal(serviceSid,fileAcl.GetOwner(typeof(SecurityIdentifier)));
         } finally {
             foreach(var identity in identities) identity.Dispose();
             Directory.Delete(dir,true);
