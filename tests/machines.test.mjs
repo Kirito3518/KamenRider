@@ -295,9 +295,6 @@ test("machine API session boundaries, validation, redaction and controller failu
 });
 
 test("agent install command is admin-only and withheld until configuration validates", async () => {
-  const unauthenticated = await call("/admin/agent-install-command");
-  assert.equal(unauthenticated.status, 401);
-
   const suffix = crypto.randomUUID().replaceAll("-", "").slice(0, 10);
   const signup = await call("/auth/sign-up/email", {
     name: "Agent install test",
@@ -307,12 +304,6 @@ test("agent install command is admin-only and withheld until configuration valid
   });
   assert.equal(signup.status, 200);
   const created = await signup.json();
-  let cookie = signup.headers
-    .getSetCookie()
-    .map((value) => value.split(";")[0])
-    .join("; ");
-  assert.equal((await call("/admin/agent-install-command", undefined, cookie)).status, 403);
-
   const db = new Database(process.env.TEST_AUTH_DB);
   try {
     db.prepare("UPDATE user SET role='admin' WHERE id=?").run(created.user.id);
@@ -323,7 +314,20 @@ test("agent install command is admin-only and withheld until configuration valid
     email: `${suffix}@example.com`,
     password: "Test-password-928!",
   });
-  cookie = login.headers
+  const cookie = login.headers
+    .getSetCookie()
+    .map((value) => value.split(";")[0])
+    .join("; ");
+
+  const regularSuffix = crypto.randomUUID().replaceAll("-", "").slice(0, 10);
+  const regularSignup = await call("/auth/sign-up/email", {
+    name: "Agent install regular user",
+    username: `agent_regular_${regularSuffix}`,
+    email: `${regularSuffix}@example.com`,
+    password: "Test-password-928!",
+  });
+  assert.equal(regularSignup.status, 200);
+  const regularUserCookie = regularSignup.headers
     .getSetCookie()
     .map((value) => value.split(";")[0])
     .join("; ");
@@ -343,7 +347,22 @@ test("agent install command is admin-only and withheld until configuration valid
   });
   await new Promise((resolve) => ticketServer.listen(5089, "127.0.0.1", resolve));
   try {
-    const response = await call("/admin/agent-install-command", undefined, cookie);
+    const getResponse = await call("/admin/agent-install-command", undefined, cookie, "GET");
+    assert.equal(getResponse.status, 405);
+    assert.deepEqual(ticketRequests, []);
+
+    const unauthenticated = await call("/admin/agent-install-command", undefined, undefined, "POST");
+    assert.equal(unauthenticated.status, 401);
+    assert.equal((await call("/admin/agent-install-command", undefined, regularUserCookie, "POST")).status, 403);
+
+    const wrongOrigin = await fetch(`${base}/api/admin/agent-install-command`, {
+      method: "POST",
+      headers: { ...headers, origin: "https://evil.example", cookie },
+    });
+    assert.equal(wrongOrigin.status, 403);
+    assert.deepEqual(ticketRequests, []);
+
+    const response = await call("/admin/agent-install-command", undefined, cookie, "POST");
     assert.equal(response.status, 200);
     assert.equal(response.headers.get("cache-control"), "no-store");
     const result = await response.json();
@@ -386,7 +405,7 @@ test("agent install command is admin-only and withheld until configuration valid
     assert.ok(result.command.includes(`-InstallReturnUrl ${quoted(returnUrl)}`));
     assert.ok(result.command.includes(`-PackageSha256 ${quoted(process.env.AGENT_PACKAGE_SHA256.toUpperCase())}`));
     assert.ok(result.command.includes(`-TrustedRootThumbprint ${quoted(process.env.AGENT_TRUST_ROOT_THUMBPRINT.toUpperCase())}`));
-    assert.match(result.command, /-EnrollmentTicket '[A-Za-z0-9_-]{43}'/);
+    assert.ok(/-EnrollmentTicket '[A-Za-z0-9_-]{43}'/.test(result.command), "command contains an enrollment ticket");
     assert.ok(result.command.includes(quoted(scriptHash)));
   } finally {
     await new Promise((resolve) => ticketServer.close(resolve));

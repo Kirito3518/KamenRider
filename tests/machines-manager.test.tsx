@@ -95,8 +95,37 @@ describe("MachinesManager install command interactions", () => {
     vi.restoreAllMocks();
   });
 
+  function requestInitialInstallCommand() {
+    fireEvent.click(screen.getByRole("button", { name: "ขอคำสั่งติดตั้ง" }));
+  }
+
+  it("does not request an install command until the Admin clicks the install button", () => {
+    render(<MachinesManager />);
+
+    expect(
+      fetchSpy.mock.calls.filter(([input]) => String(input) === INSTALL_COMMAND_URL),
+    ).toHaveLength(0);
+    expect(
+      screen.getByRole("button", { name: "ขอคำสั่งติดตั้ง" }),
+    ).toBeDefined();
+  });
+
+  it("requests the install command with POST after an explicit click", async () => {
+    render(<MachinesManager />);
+
+    fireEvent.click(screen.getByRole("button", { name: "ขอคำสั่งติดตั้ง" }));
+
+    const commandField = await screen.findByLabelText("คำสั่งติดตั้ง Agent");
+    expect(commandField).toHaveProperty("value", FIRST_COMMAND);
+    const installRequest = fetchSpy.mock.calls.find(
+      ([input]) => String(input) === INSTALL_COMMAND_URL,
+    );
+    expect(installRequest?.[1]?.method).toBe("POST");
+  });
+
   it("shows the literal UTC expiry and copies the command before its deadline", async () => {
     render(<MachinesManager />);
+    requestInitialInstallCommand();
 
     const commandField = await screen.findByLabelText("คำสั่งติดตั้ง Agent");
     expect(commandField).toHaveProperty("value", FIRST_COMMAND);
@@ -113,7 +142,7 @@ describe("MachinesManager install command interactions", () => {
     expectNetworkIsolation(1);
   });
 
-  it("keeps the initial install-command refresh busy until the command arrives", async () => {
+  it("keeps an explicit install-command request busy until the command arrives", async () => {
     let resolveInitialRequest: ((response: Response) => void) | undefined;
     fetchSpy.mockImplementation(async (input: RequestInfo | URL) => {
       const url = String(input);
@@ -128,6 +157,7 @@ describe("MachinesManager install command interactions", () => {
     });
 
     render(<MachinesManager />);
+    requestInitialInstallCommand();
 
     const refreshButton = screen.getByRole("button", {
       name: "กำลังขอคำสั่ง…",
@@ -155,6 +185,7 @@ describe("MachinesManager install command interactions", () => {
 
   it("keeps an explicit install-command refresh busy until the replacement arrives", async () => {
     render(<MachinesManager />);
+    requestInitialInstallCommand();
     const commandField = (await screen.findByLabelText(
       "คำสั่งติดตั้ง Agent",
     )) as HTMLTextAreaElement;
@@ -202,6 +233,7 @@ describe("MachinesManager install command interactions", () => {
 
   it("disables copy at the exact expiry deadline after focus", async () => {
     render(<MachinesManager />);
+    requestInitialInstallCommand();
 
     const copyButton = (await screen.findByRole("button", {
       name: "คัดลอกคำสั่ง PowerShell",
@@ -222,6 +254,7 @@ describe("MachinesManager install command interactions", () => {
 
   it("requests a replacement only on explicit refresh, not focus or visibility", async () => {
     render(<MachinesManager />);
+    requestInitialInstallCommand();
 
     const commandField = (await screen.findByLabelText(
       "คำสั่งติดตั้ง Agent",
@@ -389,7 +422,7 @@ describe("MachinesManager install command interactions", () => {
     fireEvent.change(targetInput, { target: { value: "192.168.1.19" } });
     expect(screen.queryByText(successStatus))
       .toBeNull();
-    expectNetworkIsolation(1);
+    expectNetworkIsolation(0);
   });
 
   it("does not probe a public VNC target", async () => {
@@ -426,7 +459,7 @@ describe("MachinesManager install command interactions", () => {
     expect(
       fetchSpy.mock.calls.some(([input]) => String(input) === VNC_TARGET_CHECK_URL),
     ).toBe(false);
-    expectNetworkIsolation(1);
+    expectNetworkIsolation(0);
   });
 
   function expectNetworkIsolation(expectedInstallRequests: number) {

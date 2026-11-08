@@ -42,6 +42,7 @@ type AgentInstallCommandResult = {
 
 async function fetchInstallCommand(): Promise<AgentInstallCommandResult> {
   const response = await fetch("/api/admin/agent-install-command", {
+    method: "POST",
     cache: "no-store",
   });
   if (!response.ok) throw new Error("ตรวจชุดติดตั้งไม่ได้");
@@ -70,8 +71,8 @@ export function MachinesManager() {
   const [installCommand, setInstallCommand] = useState<string | null>(null);
   const [installExpiresAtUtc, setInstallExpiresAtUtc] = useState<string | null>(null);
   const [installClockNow, setInstallClockNow] = useState(0);
-  const [isRefreshingInstallCommand, setIsRefreshingInstallCommand] = useState(true);
-  const [installStatus, setInstallStatus] = useState("กำลังขอคำสั่งติดตั้ง…");
+  const [isRefreshingInstallCommand, setIsRefreshingInstallCommand] = useState(false);
+  const [installStatus, setInstallStatus] = useState("กดปุ่มเพื่อขอคำสั่งติดตั้ง");
   const [copyStatus, setCopyStatus] = useState("");
   const [trialLease, setTrialLease] = useState<Lease | null>(null);
   const [loadStatus, setLoadStatus] = useState("กำลังโหลด…");
@@ -138,26 +139,6 @@ export function MachinesManager() {
     } finally {
       setIsRefreshingInstallCommand(false);
     }
-  }, []);
-  useEffect(() => {
-    let active = true;
-    async function loadInitialInstallCommand() {
-      try {
-        const result = await fetchInstallCommand();
-        if (!active) return;
-        const available = result.available && Boolean(result.command) && Boolean(result.expiresAtUtc);
-        setInstallCommand(available ? result.command! : null);
-        setInstallExpiresAtUtc(available ? result.expiresAtUtc! : null);
-        setInstallClockNow(Date.now());
-        setInstallStatus(available ? "ชุดติดตั้งพร้อมใช้งาน" : result.reason || "ชุดติดตั้งยังไม่พร้อม");
-      } catch (error) {
-        if (active) setInstallStatus(`ตรวจชุดติดตั้งไม่ได้: ${String(error)}`);
-      } finally {
-        if (active) setIsRefreshingInstallCommand(false);
-      }
-    }
-    void loadInitialInstallCommand();
-    return () => { active = false; };
   }, []);
   useEffect(() => {
     if (!installExpiresAtUtc) return;
@@ -268,7 +249,11 @@ export function MachinesManager() {
           disabled={isRefreshingInstallCommand}
           onClick={() => void refreshInstallCommand()}
         >
-          {isRefreshingInstallCommand ? "กำลังขอคำสั่ง…" : "ขอคำสั่งติดตั้งใหม่"}
+          {isRefreshingInstallCommand
+            ? "กำลังขอคำสั่ง…"
+            : installCommand
+              ? "ขอคำสั่งติดตั้งใหม่"
+              : "ขอคำสั่งติดตั้ง"}
         </button>
         {installCommand ? <>
           <ol className="list-inside list-decimal space-y-1 text-sm">

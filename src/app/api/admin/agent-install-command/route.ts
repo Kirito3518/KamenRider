@@ -18,10 +18,14 @@ function allowedUrl(value: string | undefined, originOnly = false) {
 
 function quoted(value: string) { return `'${value.replaceAll("'", "''")}'`; }
 
-export async function GET(request: Request) {
+export async function POST(request: Request) {
   const session = await (await getAuth()).api.getSession({ headers: request.headers });
   if (!session) return Response.json({ error: "Authentication required" }, { status: 401, headers: { "Cache-Control": "no-store" } });
   if (session.user.role !== "admin") return Response.json({ error: "Forbidden" }, { status: 403, headers: { "Cache-Control": "no-store" } });
+  const expectedOrigin = new URL(process.env.BETTER_AUTH_URL || request.url).origin;
+  if (request.headers.get("origin") !== expectedOrigin) {
+    return Response.json({ error: "คำขอมาจากเว็บไซต์ที่ไม่ได้รับอนุญาต" }, { status: 403, headers: { "Cache-Control": "no-store" } });
+  }
 
   const base = allowedUrl(process.env.AGENT_INSTALL_BASE_URL, true);
   const packageUrl = allowedUrl(process.env.AGENT_PACKAGE_URL);
