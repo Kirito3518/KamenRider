@@ -2,6 +2,8 @@ using KamenRaider.Contracts;
 using KamenRaider.Controller.Data;
 using Microsoft.Data.Sqlite;
 using System.IO.Compression;
+using System.Reflection.Metadata;
+using System.Reflection.PortableExecutable;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -115,7 +117,7 @@ public sealed class AgentReleaseStore
         {
             throw;
         }
-        catch (Exception exception) when (exception is InvalidDataException or EndOfStreamException or JsonException or DecoderFallbackException or NotSupportedException)
+        catch (Exception exception) when (exception is InvalidDataException or EndOfStreamException or JsonException or DecoderFallbackException or NotSupportedException or BadImageFormatException)
         {
             throw new AgentReleaseValidationException("Agent package is not a valid supported ZIP archive", exception);
         }
@@ -166,7 +168,7 @@ public sealed class AgentReleaseStore
         }
     }
 
-    private static (string Sha256, AgentPackageManifest Manifest) ValidatePackage(string path, long compressedSize, string version)
+    private (string Sha256, AgentPackageManifest Manifest) ValidatePackage(string path, long compressedSize, string version)
     {
         if (compressedSize <= 0 || compressedSize > MaximumCompressedBytes)
             throw new AgentReleaseTooLargeException("Agent package exceeds the 100 MiB compressed limit");
@@ -238,6 +240,7 @@ public sealed class AgentReleaseStore
         if (!string.Equals(manifest.AgentInformationalVersion, version, StringComparison.Ordinal))
             throw new AgentReleaseValidationException("Release version does not match the Agent informational version in the package manifest");
         ValidateAgentDependencyVersion(paths, archive, version);
+        ValidateAgentAssemblyInformationalVersion(archive, version);
         if (!SourceCommit.IsMatch(manifest.SourceCommit))
             throw new AgentReleaseValidationException("Agent package manifest sourceCommit is invalid");
         if (manifest.SourceDirty || !manifest.ReleaseBuild)
@@ -262,6 +265,95 @@ public sealed class AgentReleaseStore
             || type.ValueKind != JsonValueKind.String
             || !string.Equals(type.GetString(), "project", StringComparison.Ordinal))
             throw new AgentReleaseValidationException("Agent package version does not match the published Agent project identity");
+    }
+
+    private void ValidateAgentAssemblyInformationalVersion(ZipArchive archive, string version)
+    {
+        var assemblyEntry = archive.GetEntry("Agent/Agent.dll");
+        if (assemblyEntry is null || assemblyEntry.Length <= 0 || assemblyEntry.Length > MaximumExpandedBytes)
+            throw new AgentReleaseValidationException("Agent package is missing a valid Agent/Agent.dll");
+
+        var metadataPath = Path.Combine(artifactRoot, ".AgentAssemblyMetadata-" + Guid.NewGuid().ToString("N") + ".tmp");
+        try
+        {
+            using (var input = assemblyEntry.Open())
+            using (var output = new FileStream(metadataPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 64 * 1024, FileOptions.SequentialScan))
+            {
+                var buffer = new byte[64 * 1024];
+                long copied = 0;
+                while (true)
+                {
+                    var read = input.Read(buffer, 0, buffer.Length);
+                    if (read == 0) break;
+                    copied += read;
+                    if (copied > assemblyEntry.Length || copied > MaximumExpandedBytes)
+                        throw new AgentReleaseValidationException("Agent/Agent.dll exceeds its declared size");
+                    output.Write(buffer, 0, read);
+                }
+                if (copied != assemblyEntry.Length)
+                    throw new AgentReleaseValidationException("Agent/Agent.dll does not match its declared ZIP size");
+            }
+
+            using var assemblyFile = File.OpenRead(metadataPath);
+            using var peReader = new PEReader(assemblyFile, PEStreamOptions.LeaveOpen);
+            if (!peReader.HasMetadata)
+                throw new AgentReleaseValidationException("Agent/Agent.dll is not a managed assembly");
+            var metadata = peReader.GetMetadataReader();
+            if (!metadata.IsAssembly)
+                throw new AgentReleaseValidationException("Agent/Agent.dll does not contain assembly metadata");
+
+            string? informationalVersion = null;
+            var assembly = metadata.GetAssemblyDefinition();
+            foreach (var attributeHandle in assembly.GetCustomAttributes())
+            {
+                var attribute = metadata.GetCustomAttribute(attributeHandle);
+                if (!IsAssemblyInformationalVersionAttribute(metadata, attribute.Constructor))
+                    continue;
+                if (informationalVersion is not null)
+                    throw new AgentReleaseValidationException("Agent/Agent.dll has duplicate informational version attributes");
+
+                var value = metadata.GetBlobReader(attribute.Value);
+                if (value.ReadUInt16() != 1)
+                    throw new AgentReleaseValidationException("Agent/Agent.dll has malformed informational version metadata");
+                informationalVersion = value.ReadSerializedString();
+                var namedArgumentCount = value.ReadUInt16();
+                if (namedArgumentCount != 0 || value.RemainingBytes != 0)
+                    throw new AgentReleaseValidationException("Agent/Agent.dll has malformed informational version metadata");
+            }
+
+            if (!string.Equals(informationalVersion, version, StringComparison.Ordinal))
+                throw new AgentReleaseValidationException("Release version does not match Agent/Agent.dll AssemblyInformationalVersion");
+        }
+        catch (AgentReleaseValidationException)
+        {
+            throw;
+        }
+        catch (Exception exception) when (exception is BadImageFormatException or ArgumentOutOfRangeException or InvalidOperationException)
+        {
+            throw new AgentReleaseValidationException("Agent/Agent.dll has invalid assembly metadata", exception);
+        }
+        finally
+        {
+            TryDelete(metadataPath);
+        }
+    }
+
+    private static bool IsAssemblyInformationalVersionAttribute(MetadataReader metadata, EntityHandle constructor)
+    {
+        EntityHandle typeHandle = constructor.Kind switch
+        {
+            HandleKind.MemberReference => metadata.GetMemberReference((MemberReferenceHandle)constructor).Parent,
+            HandleKind.MethodDefinition => metadata.GetMethodDefinition((MethodDefinitionHandle)constructor).GetDeclaringType(),
+            _ => default,
+        };
+        if (typeHandle.Kind != HandleKind.TypeReference) return false;
+        var type = metadata.GetTypeReference((TypeReferenceHandle)typeHandle);
+        if (!string.Equals(metadata.GetString(type.Namespace), "System.Reflection", StringComparison.Ordinal)
+            || !string.Equals(metadata.GetString(type.Name), "AssemblyInformationalVersionAttribute", StringComparison.Ordinal)
+            || type.ResolutionScope.Kind != HandleKind.AssemblyReference)
+            return false;
+        var assemblyName = metadata.GetString(metadata.GetAssemblyReference((AssemblyReferenceHandle)type.ResolutionScope).Name);
+        return assemblyName is "System.Runtime" or "System.Private.CoreLib" or "mscorlib";
     }
 
     private static string ValidateEntryPath(string entryName, bool isDirectory)

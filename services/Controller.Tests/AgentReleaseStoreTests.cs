@@ -10,9 +10,11 @@ using System.IO.Compression;
 using System.Net;
 using System.Net.Http.Json;
 using System.Net.Http.Headers;
+using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using Controller.Tests.Fixtures;
 
 namespace Controller.Tests;
 
@@ -79,6 +81,24 @@ public sealed class AgentReleaseStoreTests
         Assert.Equal(HttpStatusCode.BadRequest, binaryMismatch.StatusCode);
         Assert.Equal(HttpStatusCode.BadRequest, dirty.StatusCode);
         Assert.Equal(HttpStatusCode.BadRequest, development.StatusCode);
+        Assert.Empty(fixture.ListReleaseVersions());
+    }
+
+    [Fact]
+    public async Task RejectsEmbeddedAssemblyVersionMismatchWhenManifestAndDependenciesMatch()
+    {
+        using var fixture = new ReleaseFixture();
+        await using var host = await fixture.StartHost();
+        const string releaseVersion = "2.3.4";
+        var agentAssembly = typeof(KamenRaider.Agent.AgentOptions).Assembly;
+        var embeddedVersion = agentAssembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()!.InformationalVersion;
+        Assert.NotEqual(releaseVersion, embeddedVersion);
+        Assert.Equal(releaseVersion, typeof(AgentMetadataFixture).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()!.InformationalVersion);
+
+        var package = fixture.CreatePackage(releaseVersion, agentAssemblyPath: agentAssembly.Location);
+        using var response = await Publish(host.Client, package, releaseVersion);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
         Assert.Empty(fixture.ListReleaseVersions());
     }
 
@@ -216,13 +236,17 @@ public sealed class AgentReleaseStoreTests
 
         public byte[] CreatePackage(string version, bool sourceDirty = false, bool releaseBuild = true,
             bool traversal = false, bool duplicate = false, bool duplicateManifest = false, int extraEntries = 0,
-            string marker = "package", string? agentLibraryVersion = null)
+            string marker = "package", string? agentLibraryVersion = null, string? agentAssemblyPath = null)
         {
+            agentAssemblyPath ??= typeof(AgentMetadataFixture).Assembly.Location;
             using var memory = new MemoryStream();
             using (var archive = new ZipArchive(memory, ZipArchiveMode.Create, leaveOpen: true))
             {
                 AddEntry(archive, "Agent/Agent.exe", marker);
-                AddEntry(archive, "Agent/Agent.dll", "agent-library");
+                var agentAssemblyEntry = archive.CreateEntry("Agent/Agent.dll", CompressionLevel.Optimal);
+                using (var agentAssemblyOutput = agentAssemblyEntry.Open())
+                using (var agentAssemblyInput = File.OpenRead(agentAssemblyPath))
+                    agentAssemblyInput.CopyTo(agentAssemblyOutput);
                 var dependencyVersion = agentLibraryVersion ?? version;
                 AddEntry(archive, "Agent/Agent.deps.json", JsonSerializer.Serialize(new { libraries = new Dictionary<string, object> { ["Agent/" + dependencyVersion] = new { type = "project" } } }));
                 AddEntry(archive, "Install-AgentPackage.ps1", "install");

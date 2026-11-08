@@ -20,6 +20,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Compile Remove="Fixtures\AgentMetadataFixture\**\*.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
     <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
       <_Parameter1>ControllerProjectPath</_Parameter1>
       <_Parameter2>$(MSBuildProjectDirectory)\..\Controller\Controller.csproj</_Parameter2>
@@ -28,6 +32,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Agent\Agent.csproj" />
+    <ProjectReference Include="Fixtures\AgentMetadataFixture\AgentMetadataFixture.csproj" />
     <ProjectReference Include="..\Controller\Controller.csproj" />
   </ItemGroup>
 
