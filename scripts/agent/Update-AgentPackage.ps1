@@ -28,6 +28,7 @@ function Get-AgentUpdateTransactionPlan {
         BackupStageDirectory = Join-Path $parent ('.Agent-backup-stage-' + $id)
         StageDirectory = Join-Path $parent ('.Agent-stage-' + $id)
         PriorDirectory = Join-Path $parent ('.Agent-prior-' + $id)
+        RestoreDirectory = Join-Path $parent ('.Agent-restore-' + $id)
         OperationId = $id
     }
 }
@@ -131,14 +132,45 @@ function Copy-AgentUpdateTree {
 function Assert-AgentUpdatePrivateTree {
     param([Parameter(Mandatory)][string]$Path,[Parameter(Mandatory)][Security.Principal.SecurityIdentifier]$ServiceSid)
     $trusted = Get-TrustedInstallSids @($ServiceSid)
-    $pending = [Collections.Generic.Stack[string]]::new(); $pending.Push([IO.Path]::GetFullPath($Path))
+    $root = [IO.Path]::GetFullPath($Path)
+    $pending = [Collections.Generic.Stack[string]]::new(); $pending.Push($root)
     while ($pending.Count -gt 0) {
         $current = $pending.Pop()
         $item = Get-Item -LiteralPath $current -Force -ErrorAction Stop
         if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Private Agent update tree contains a reparse point.' }
-        if (-not (Test-TrustedInstallAcl (Get-Acl -LiteralPath $current) $trusted -Private)) { throw 'Private Agent update tree has an untrusted owner or ACL.' }
+        $acl = Get-Acl -LiteralPath $current
+        if (($current -eq $root -and (-not $item.PSIsContainer -or -not $acl.AreAccessRulesProtected)) -or -not (Test-TrustedInstallAcl $acl $trusted -Private)) { throw 'Private Agent update tree has an untrusted owner or ACL.' }
+        foreach ($rule in $acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])) {
+            if ($rule.IdentityReference.Value -eq $ServiceSid.Value -and $rule.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and (Test-DisallowedInstallAceRights ([int]$rule.FileSystemRights))) { throw 'Agent service may not write to a recovery binary tree.' }
+        }
         if ($item.PSIsContainer) { foreach ($child in @(Get-ChildItem -LiteralPath $current -Force -ErrorAction Stop)) { $pending.Push($child.FullName) } }
     }
+}
+
+function Restore-AgentUpdateBackup {
+    param([Parameter(Mandatory)]$Plan,[Parameter(Mandatory)][Security.Principal.SecurityIdentifier]$ServiceSid)
+    # The operation-bound directory remains as a durable rollback marker, even
+    # after its verified child has been atomically renamed into place.
+    if (Test-Path -LiteralPath $Plan.RestoreDirectory) {
+        Assert-AgentUpdatePrivateTree -Path $Plan.RestoreDirectory -ServiceSid $ServiceSid
+    } else {
+        New-PrivateInstallDirectory -Path $Plan.RestoreDirectory -ServiceSid $ServiceSid -ReadOnly | Out-Null
+    }
+    $restored = Join-Path $Plan.RestoreDirectory 'Agent'
+    if (Test-Path -LiteralPath $restored) {
+        Assert-AgentUpdatePrivateTree -Path $restored -ServiceSid $ServiceSid
+        Remove-Item -LiteralPath $restored -Recurse -Force
+    }
+    Copy-AgentUpdateTree -Source $Plan.BackupDirectory -Destination $restored -ServiceSid $ServiceSid -ReadOnlyRoot
+    Set-PrivateInstallAcl -Path (Join-Path $restored 'appsettings.json') -ServiceSid $ServiceSid
+    Assert-AgentUpdatePrivateTree -Path $restored -ServiceSid $ServiceSid
+    if (-not (Test-AgentUpdateTreesEquivalent -First $restored -Second $Plan.BackupDirectory)) { throw 'Restored Agent files do not match the protected backup.' }
+    if (Test-Path -LiteralPath $Plan.InstallDirectory) {
+        Assert-AgentUpdatePrivateTree -Path $Plan.InstallDirectory -ServiceSid $ServiceSid
+        Remove-Item -LiteralPath $Plan.InstallDirectory -Recurse -Force
+    }
+    [IO.Directory]::Move($restored,$Plan.InstallDirectory)
+    Assert-AgentUpdatePrivateTree -Path $Plan.InstallDirectory -ServiceSid $ServiceSid
 }
 
 function Get-AgentUpdateLiveServiceApi {
@@ -180,32 +212,36 @@ function Invoke-AgentUpdateTransaction {
     . ([ScriptBlock]::Create([IO.File]::ReadAllText($helperPath)))
     if (-not $ServiceSid) { $ServiceSid = Get-ServiceSid -ServiceName 'KamenRaider Agent' }
     if (-not (Test-Path -LiteralPath (Join-Path $data 'identity\identity.json') -PathType Leaf)) { throw 'Agent identity file is missing.' }
-    if ((Test-Path -LiteralPath $plan.StageDirectory) -and -not (Test-Path -LiteralPath $plan.BackupDirectory)) { throw 'A previous Agent update stage is present; refusing ambiguous recovery.' }
+    if ((Test-Path -LiteralPath $plan.BackupDirectory) -and -not (Test-Path -LiteralPath $plan.BackupDirectory -PathType Container)) { throw 'Agent rollback backup is not a directory.' }
     if (-not (Test-Path -LiteralPath $install -PathType Container) -and -not (Test-Path -LiteralPath $plan.BackupDirectory -PathType Container)) { throw 'Existing Agent installation and its rollback backup are both missing.' }
 
+    if (-not (Test-Path -LiteralPath $plan.BackupDirectory)) {
+        if ((Test-Path -LiteralPath $plan.PriorDirectory) -or (Test-Path -LiteralPath $plan.RestoreDirectory)) { throw 'Recovery state is ambiguous without the protected rollback backup.' }
+        # Before the backup is published the original installation has not been
+        # swapped. Validate all abandoned trees before removing either one.
+        $abandoned = @($plan.StageDirectory,$plan.BackupStageDirectory | Where-Object { Test-Path -LiteralPath $_ })
+        foreach ($path in $abandoned) { Assert-AgentUpdatePrivateTree -Path $path -ServiceSid $ServiceSid }
+        foreach ($path in $abandoned) { Remove-Item -LiteralPath $path -Recurse -Force }
+    }
+
     if (Test-Path -LiteralPath $plan.BackupDirectory -PathType Container) {
-        foreach ($existing in @($plan.BackupDirectory,$plan.BackupStageDirectory,$plan.StageDirectory,$plan.PriorDirectory)) {
+        foreach ($existing in @($plan.BackupDirectory,$plan.BackupStageDirectory,$plan.StageDirectory,$plan.PriorDirectory,$plan.RestoreDirectory)) {
             if (Test-Path -LiteralPath $existing) { Assert-AgentUpdatePrivateTree -Path $existing -ServiceSid $ServiceSid }
         }
-        if (-not (Test-Path -LiteralPath $install -PathType Container)) {
+        foreach ($required in @('Agent.exe','Agent.deps.json','appsettings.json')) {
+            if (-not (Test-Path -LiteralPath (Join-Path $plan.BackupDirectory $required) -PathType Leaf)) { throw 'Protected rollback backup is incomplete.' }
+        }
+        if ((Get-AgentUpdatePackageVersion -AgentDirectory $plan.BackupDirectory) -ceq $TargetVersion) { throw 'Protected rollback backup does not identify a previous Agent version.' }
+        $resumeUpdate = (Test-Path -LiteralPath $install -PathType Container) -and -not (Test-Path -LiteralPath $plan.RestoreDirectory) -and (Test-AgentUpdateTreesEquivalent -First $install -Second $plan.BackupDirectory)
+        if (-not $resumeUpdate) {
             & $ServiceApi.StopAgent
             & $ServiceApi.StopGuard
-            Copy-AgentUpdateTree -Source $plan.BackupDirectory -Destination $install -ServiceSid $ServiceSid -ReadOnlyRoot
-            Set-PrivateInstallAcl -Path (Join-Path $install 'appsettings.json') -ServiceSid $ServiceSid
-            Assert-AgentUpdatePrivateTree -Path $install -ServiceSid $ServiceSid
+            Restore-AgentUpdateBackup -Plan $plan -ServiceSid $ServiceSid
             if (Test-Path -LiteralPath $plan.StageDirectory) { Remove-Item -LiteralPath $plan.StageDirectory -Recurse -Force }
             if (Test-Path -LiteralPath $plan.PriorDirectory) { Remove-Item -LiteralPath $plan.PriorDirectory -Recurse -Force }
             Invoke-AgentUpdateServiceStart -ServiceApi $ServiceApi
             return [pscustomobject]@{ Outcome = 'rolledBack'; InstallDirectory = $install; BackupDirectory = $plan.BackupDirectory; Message = 'Interrupted Agent swap restored from its protected backup.' }
         }
-        $installedVersion = Get-AgentUpdatePackageVersion -AgentDirectory $install
-        if ($installedVersion -ceq $TargetVersion) {
-            & $ServiceApi.StopAgent
-            & $ServiceApi.StopGuard
-            Invoke-AgentUpdateServiceStart -ServiceApi $ServiceApi
-            return [pscustomobject]@{ Outcome = 'applied'; InstallDirectory = $install; BackupDirectory = $plan.BackupDirectory; Message = 'The requested Agent version was already swapped; backup retained pending heartbeat.' }
-        }
-        if (-not (Test-AgentUpdateTreesEquivalent -First $install -Second $plan.BackupDirectory)) { throw 'A protected rollback backup exists but the installed version does not match that backup.' }
         if (Test-Path -LiteralPath $plan.StageDirectory) { Remove-Item -LiteralPath $plan.StageDirectory -Recurse -Force }
         if (Test-Path -LiteralPath $plan.PriorDirectory) { Remove-Item -LiteralPath $plan.PriorDirectory -Recurse -Force }
     }
@@ -257,13 +293,7 @@ function Invoke-AgentUpdateTransaction {
                 if ($swapStarted) {
                     & $ServiceApi.StopAgent
                     & $ServiceApi.StopGuard
-                    if (Test-Path -LiteralPath $install) {
-                        if (Test-Path -LiteralPath $stage) { throw 'Both failed install and stage paths exist; preserving all files for manual recovery.' }
-                        [IO.Directory]::Move($install, $stage)
-                    }
-                    Copy-AgentUpdateTree -Source $plan.BackupDirectory -Destination $install -ServiceSid $ServiceSid -ReadOnlyRoot
-                    Set-PrivateInstallAcl -Path (Join-Path $install 'appsettings.json') -ServiceSid $ServiceSid
-                    Assert-AgentUpdatePrivateTree -Path $install -ServiceSid $ServiceSid
+                    Restore-AgentUpdateBackup -Plan $plan -ServiceSid $ServiceSid
                     if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
                     if (Test-Path -LiteralPath $prior) { Remove-Item -LiteralPath $prior -Recurse -Force }
                 }

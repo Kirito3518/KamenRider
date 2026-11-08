@@ -1,3 +1,4 @@
+param([string]$RecoveryCase)
 $ErrorActionPreference = 'Stop'
 $packageUpdater = Join-Path $PSScriptRoot 'Update-AgentPackage.ps1'
 . $packageUpdater -DefineFunctionsOnly
@@ -104,6 +105,82 @@ try {
     Assert-AgentUpdateTest ($result.Outcome -eq 'rolledBack') 'Interrupted swap must recover the original install.'
     Assert-AgentUpdateTest ([IO.File]::ReadAllText((Join-Path $fixture.Install 'Agent.exe')) -eq 'old-agent') 'Interrupted swap recovery lost old Agent binary.'
     Assert-AgentUpdateTest ($api.State.Calls -contains 'start-guard' -and $api.State.Calls -contains 'start-agent') 'Interrupted recovery must restore files and restart the managed services.'
+
+    if (-not $RecoveryCase -or $RecoveryCase -eq 'pre-backup') {
+        $fixture = New-AgentUpdateFixture -Root (Join-Path $root 'partial-stage')
+        $plan = Get-AgentUpdateTransactionPlan -InstallDirectory $fixture.Install -OperationId $fixture.OperationId
+        foreach ($partial in @($plan.StageDirectory,$plan.BackupStageDirectory)) {
+            New-PrivateInstallDirectory -Path $partial -ServiceSid $serviceSid -ReadOnly | Out-Null
+            [IO.File]::WriteAllText((Join-Path $partial 'incomplete.txt'),'incomplete')
+        }
+        $api = New-AgentUpdateFakeServiceApi
+        $result = Invoke-AgentUpdateTransaction -InstallDirectory $fixture.Install -DataDirectory $fixture.Data -PackageRoot $fixture.Package -OperationId $fixture.OperationId -TargetVersion $fixture.Version -ServiceSid $serviceSid -ServiceApi $api
+        Assert-AgentUpdateTest ($result.Outcome -eq 'applied') 'An interrupted stage before backup publication must safely resume the update.'
+        Assert-AgentUpdateTest ([IO.File]::ReadAllText((Join-Path $fixture.Install 'Agent.exe')) -eq 'new-agent') 'Pre-backup recovery did not install the target binary.'
+        Assert-AgentUpdateTest ([IO.File]::ReadAllText((Join-Path $plan.BackupDirectory 'Agent.exe')) -eq 'old-agent') 'Pre-backup recovery did not protect the original binary.'
+
+        $fixture = New-AgentUpdateFixture -Root (Join-Path $root 'unsafe-stage')
+        $plan = Get-AgentUpdateTransactionPlan -InstallDirectory $fixture.Install -OperationId $fixture.OperationId
+        New-Item -ItemType Directory -Path $plan.StageDirectory | Out-Null
+        [IO.File]::WriteAllText((Join-Path $plan.StageDirectory 'untrusted.txt'),'untrusted')
+        $api = New-AgentUpdateFakeServiceApi
+        $rejected = $false
+        try { Invoke-AgentUpdateTransaction -InstallDirectory $fixture.Install -DataDirectory $fixture.Data -PackageRoot $fixture.Package -OperationId $fixture.OperationId -TargetVersion $fixture.Version -ServiceSid $serviceSid -ServiceApi $api | Out-Null } catch { $rejected = $true }
+        Assert-AgentUpdateTest $rejected 'An unprotected abandoned stage must be rejected.'
+        Assert-AgentUpdateTest (Test-Path -LiteralPath (Join-Path $plan.StageDirectory 'untrusted.txt')) 'An untrusted stage must not be removed.'
+        Assert-AgentUpdateTest ($api.State.Calls.Count -eq 0) 'An untrusted stage must not cause service mutations.'
+
+        $fixture = New-AgentUpdateFixture -Root (Join-Path $root 'ambiguous-prior')
+        $plan = Get-AgentUpdateTransactionPlan -InstallDirectory $fixture.Install -OperationId $fixture.OperationId
+        New-PrivateInstallDirectory -Path $plan.PriorDirectory -ServiceSid $serviceSid -ReadOnly | Out-Null
+        $api = New-AgentUpdateFakeServiceApi
+        $rejected = $false
+        try { Invoke-AgentUpdateTransaction -InstallDirectory $fixture.Install -DataDirectory $fixture.Data -PackageRoot $fixture.Package -OperationId $fixture.OperationId -TargetVersion $fixture.Version -ServiceSid $serviceSid -ServiceApi $api | Out-Null } catch { $rejected = $true }
+        Assert-AgentUpdateTest $rejected 'A prior directory without its operation backup must remain ambiguous.'
+        Assert-AgentUpdateTest ((Test-Path -LiteralPath $plan.PriorDirectory) -and $api.State.Calls.Count -eq 0) 'Ambiguous recovery must preserve files and service state.'
+    }
+    if (-not $RecoveryCase -or $RecoveryCase -eq 'partial-restore') {
+        foreach ($withConfig in @($false,$true)) {
+            $fixture = New-AgentUpdateFixture -Root (Join-Path $root "partial-restore-$withConfig")
+            $plan = Get-AgentUpdateTransactionPlan -InstallDirectory $fixture.Install -OperationId $fixture.OperationId
+            Copy-AgentUpdateTree -Source $fixture.Install -Destination $plan.BackupDirectory -ServiceSid $serviceSid -ReadOnlyRoot
+            Set-PrivateInstallAcl -Path (Join-Path $plan.BackupDirectory 'appsettings.json') -ServiceSid $serviceSid
+            Remove-Item -LiteralPath $fixture.Install -Recurse -Force
+            New-PrivateInstallDirectory -Path $fixture.Install -ServiceSid $serviceSid -ReadOnly | Out-Null
+            [IO.File]::WriteAllText((Join-Path $fixture.Install 'Agent.exe'),'partial-agent')
+            if ($withConfig) {
+                Copy-Item -LiteralPath (Join-Path $plan.BackupDirectory 'Agent.deps.json') -Destination $fixture.Install
+                Copy-Item -LiteralPath (Join-Path $plan.BackupDirectory 'appsettings.json') -Destination $fixture.Install
+                Set-PrivateInstallAcl -Path (Join-Path $fixture.Install 'appsettings.json') -ServiceSid $serviceSid
+            }
+            $api = New-AgentUpdateFakeServiceApi
+            $api.State.Agent = 'Stopped'; $api.State.Guard = 'Stopped'
+            $result = Invoke-AgentUpdateTransaction -InstallDirectory $fixture.Install -DataDirectory $fixture.Data -PackageRoot $fixture.Package -OperationId $fixture.OperationId -TargetVersion $fixture.Version -ServiceSid $serviceSid -ServiceApi $api
+            Assert-AgentUpdateTest ($result.Outcome -eq 'rolledBack') 'An interrupted partial restore must complete a verified rollback.'
+            Assert-AgentUpdateTest (Test-AgentUpdateTreesEquivalent -First $fixture.Install -Second $plan.BackupDirectory) 'Restored installation must exactly match the protected backup.'
+            Assert-AgentUpdateTest ($api.State.Calls -contains 'stop-agent' -and $api.State.Calls -contains 'stop-guard' -and $api.State.Calls -contains 'start-agent') 'Partial recovery must stop and restart both managed services.'
+        }
+
+        $fixture = New-AgentUpdateFixture -Root (Join-Path $root 'retry-restore')
+        $plan = Get-AgentUpdateTransactionPlan -InstallDirectory $fixture.Install -OperationId $fixture.OperationId
+        Copy-AgentUpdateTree -Source $fixture.Install -Destination $plan.BackupDirectory -ServiceSid $serviceSid -ReadOnlyRoot
+        Set-PrivateInstallAcl -Path (Join-Path $plan.BackupDirectory 'appsettings.json') -ServiceSid $serviceSid
+        Remove-Item -LiteralPath $fixture.Install -Recurse -Force
+        New-PrivateInstallDirectory -Path $fixture.Install -ServiceSid $serviceSid -ReadOnly | Out-Null
+        [IO.File]::WriteAllText((Join-Path $fixture.Install 'Agent.exe'),'partial-agent')
+        New-PrivateInstallDirectory -Path $plan.RestoreDirectory -ServiceSid $serviceSid -ReadOnly | Out-Null
+        New-PrivateInstallDirectory -Path (Join-Path $plan.RestoreDirectory 'Agent') -ServiceSid $serviceSid -ReadOnly | Out-Null
+        [IO.File]::WriteAllText((Join-Path $plan.RestoreDirectory 'Agent\Agent.exe'),'partial-copy')
+        $api = New-AgentUpdateFakeServiceApi -FailAgentStart
+        $api.State.Agent = 'Stopped'; $api.State.Guard = 'Stopped'
+        $rejected = $false
+        try { Invoke-AgentUpdateTransaction -InstallDirectory $fixture.Install -DataDirectory $fixture.Data -PackageRoot $fixture.Package -OperationId $fixture.OperationId -TargetVersion $fixture.Version -ServiceSid $serviceSid -ServiceApi $api | Out-Null } catch { $rejected = $true }
+        Assert-AgentUpdateTest $rejected 'A failed restored Agent start must not report rollback.'
+        Assert-AgentUpdateTest (Test-Path -LiteralPath $plan.RestoreDirectory -PathType Container) 'An interrupted rollback must retain its operation-bound marker.'
+        $result = Invoke-AgentUpdateTransaction -InstallDirectory $fixture.Install -DataDirectory $fixture.Data -PackageRoot $fixture.Package -OperationId $fixture.OperationId -TargetVersion $fixture.Version -ServiceSid $serviceSid -ServiceApi $api
+        Assert-AgentUpdateTest ($result.Outcome -eq 'rolledBack') 'A retry after restoring files must finish rollback, not resume the update.'
+        Assert-AgentUpdateTest (Test-AgentUpdateTreesEquivalent -First $fixture.Install -Second $plan.BackupDirectory) 'A repeated rollback must leave the original backup intact and installed.'
+    }
     Write-Output 'Agent update transaction tests passed using temporary files and fake service APIs only.'
 } finally {
     if (Test-Path -LiteralPath $root) {

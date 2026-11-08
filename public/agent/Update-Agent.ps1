@@ -345,7 +345,7 @@ function Get-AgentUpdateCurrentState {
     $parent = Join-Path $env:ProgramFiles 'KamenRaider'
     $operation = $Request.OperationId.ToLowerInvariant()
     $backupDirectory = Join-Path $parent ('.Agent-rollback-' + $operation)
-    foreach ($prefix in @('.Agent-rollback-','.Agent-backup-stage-','.Agent-stage-','.Agent-prior-')) {
+    foreach ($prefix in @('.Agent-rollback-','.Agent-backup-stage-','.Agent-stage-','.Agent-prior-','.Agent-restore-')) {
         $recoveryPath = Join-Path $parent ($prefix + $operation)
         if (Test-Path -LiteralPath $recoveryPath) {
             if (-not (Test-Path -LiteralPath $recoveryPath -PathType Container)) { throw 'Agent update recovery path is not a real directory.' }
@@ -375,7 +375,9 @@ function Get-AgentUpdateCurrentState {
     if (Test-Path -LiteralPath $receiptPath -PathType Leaf) {
         try { $receipt = [IO.File]::ReadAllText($receiptPath) | ConvertFrom-Json -ErrorAction Stop; $receiptMachineId = [string]$receipt.MachineId } catch { throw 'Agent enrollment receipt is invalid.' }
     }
-    $configurationPath = Join-Path $(if ($hasInstall) { $install } else { $backupDirectory }) 'appsettings.json'
+    # A published, protected backup is the authority during recovery. The
+    # installation may be an incomplete copy, including a truncated config.
+    $configurationPath = Join-Path $(if ($hasBackup) { $backupDirectory } else { $install }) 'appsettings.json'
     if (-not (Test-Path -LiteralPath $configurationPath -PathType Leaf)) { throw 'Existing Agent appsettings.json is missing.' }
     try { $configuration = [IO.File]::ReadAllText($configurationPath) | ConvertFrom-Json -ErrorAction Stop } catch { throw 'Existing Agent appsettings.json is invalid.' }
     $sunshineExecutable = Get-AgentUpdateSunshineExecutable -ImagePath $sunshineService.BinaryPath

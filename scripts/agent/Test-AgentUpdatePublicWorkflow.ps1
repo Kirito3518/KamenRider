@@ -1,3 +1,4 @@
+param([string]$ScenarioFilter)
 $ErrorActionPreference = 'Stop'
 $script:publicUpdater = Join-Path $PSScriptRoot '..\..\public\agent\Update-Agent.ps1'
 $script:internalUpdater = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot 'Update-AgentPackage.ps1'))
@@ -46,7 +47,8 @@ $oldProgramFiles = $env:ProgramFiles
 $oldProgramData = $env:ProgramData
 try {
     New-Item -ItemType Directory -Path $root | Out-Null
-    foreach ($scenario in @('success','interrupted','interrupted-stop-failure')) {
+    foreach ($scenario in @('success','interrupted','interrupted-stop-failure','stage-before-backup','partial-restore-no-config','partial-restore-with-config','partial-restore-corrupt-config','partial-restore-target-deps','partial-restore-stop-failure')) {
+        if ($ScenarioFilter -and $scenario -ne $ScenarioFilter) { continue }
         $scenarioRoot = Join-Path $root $scenario
         $env:ProgramFiles = Join-Path $scenarioRoot 'ProgramFiles'
         $env:ProgramData = Join-Path $scenarioRoot 'ProgramData'
@@ -81,7 +83,7 @@ Invoke-AgentUpdateTransaction @transaction
         } finally { $zip.Dispose() }
         $global:PublicUpdateFixture = [pscustomobject]@{
             Install=$install; Data=$data; Agent='Running'; Guard='Running'; Events=[Collections.Generic.List[string]]::new()
-            ArchiveBytes=[IO.File]::ReadAllBytes($archive); ServiceSid=[Security.Principal.SecurityIdentifier]::new('S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'); ServiceApi=$null; FailStop=($scenario -eq 'interrupted-stop-failure')
+            ArchiveBytes=[IO.File]::ReadAllBytes($archive); ServiceSid=[Security.Principal.SecurityIdentifier]::new('S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'); ServiceApi=$null; FailStop=($scenario -in @('interrupted-stop-failure','partial-restore-stop-failure'))
         }
         $global:PublicUpdateFixture.ServiceApi = [pscustomobject]@{
             StopAgent={ $global:PublicUpdateFixture.Events.Add('stop-agent'); $global:PublicUpdateFixture.Agent='Stopped' }
@@ -91,6 +93,30 @@ Invoke-AgentUpdateTransaction @transaction
         }
         $operation = 'ffeeddccbbaa99887766554433221100'
         $backup = Join-Path (Split-Path $install -Parent) ('.Agent-rollback-' + $operation)
+        if ($scenario -eq 'stage-before-backup') {
+            foreach ($prefix in @('.Agent-stage-','.Agent-backup-stage-')) {
+                $partial = Join-Path (Split-Path $install -Parent) ($prefix + $operation)
+                New-PrivateInstallDirectory -Path $partial -ServiceSid $global:PublicUpdateFixture.ServiceSid -ReadOnly | Out-Null
+                [IO.File]::WriteAllText((Join-Path $partial 'partial-file'),'incomplete')
+            }
+        }
+        if ($scenario -like 'partial-restore-*') {
+            New-PrivateInstallDirectory -Path $backup -ServiceSid $global:PublicUpdateFixture.ServiceSid -ReadOnly | Out-Null
+            Get-ChildItem -LiteralPath $install -File | Copy-Item -Destination $backup
+            Set-PrivateInstallAcl -Path (Join-Path $backup 'appsettings.json') -ServiceSid $global:PublicUpdateFixture.ServiceSid
+            Remove-Item -LiteralPath $install -Recurse -Force
+            New-PrivateInstallDirectory -Path $install -ServiceSid $global:PublicUpdateFixture.ServiceSid -ReadOnly | Out-Null
+            [IO.File]::WriteAllText((Join-Path $install 'Agent.exe'),'partial-agent')
+            if ($scenario -ne 'partial-restore-no-config') {
+                Copy-Item -LiteralPath (Join-Path $backup 'Agent.deps.json') -Destination $install
+                Copy-Item -LiteralPath (Join-Path $backup 'appsettings.json') -Destination $install
+                Set-PrivateInstallAcl -Path (Join-Path $install 'appsettings.json') -ServiceSid $global:PublicUpdateFixture.ServiceSid
+                if ($scenario -eq 'partial-restore-corrupt-config') { [IO.File]::WriteAllText((Join-Path $install 'appsettings.json'),'{incomplete') }
+                if ($scenario -eq 'partial-restore-target-deps') { [IO.File]::WriteAllText((Join-Path $install 'Agent.deps.json'),'{"libraries":{"Agent/2.3.4":{"type":"project"}}}') }
+            }
+            $global:PublicUpdateFixture.Agent = 'Stopped'
+            $global:PublicUpdateFixture.Guard = 'Stopped'
+        }
         if ($scenario -like 'interrupted*') {
             New-PrivateInstallDirectory -Path $backup -ServiceSid $global:PublicUpdateFixture.ServiceSid -ReadOnly | Out-Null
             Get-ChildItem -LiteralPath $install -File | Copy-Item -Destination $backup
@@ -112,12 +138,19 @@ Invoke-AgentUpdateTransaction @transaction
             if ((Test-Path -LiteralPath $install) -or -not (Test-Path -LiteralPath $backup -PathType Container)) { throw 'Failed recovery stop must retain the backup and not restore files.' }
             continue
         }
+        if ($scenario -eq 'partial-restore-stop-failure') {
+            if ($mainError -notmatch 'fake Guard stop uncertainty' -or $events -notcontains 'http:failed' -or $events -contains 'http:rollingBack' -or $events -contains 'start-agent') { throw "Partial recovery stop failure was not reported as uncertain: $mainError; $($events -join ',')" }
+            if ([IO.File]::ReadAllText((Join-Path $install 'Agent.exe')) -ne 'partial-agent' -or -not (Test-Path -LiteralPath $backup -PathType Container)) { throw 'Failed recovery stop must preserve both the partial installation and backup.' }
+            continue
+        }
         if ($mainError) { throw $mainError }
-        $expectedStatus = if ($scenario -eq 'success') { 'http:awaitingHeartbeat' } else { 'http:rollingBack' }
-        $expectedBinary = if ($scenario -eq 'success') { 'new-agent' } else { 'old-agent' }
+        $expectedStatus = if ($scenario -in @('success','stage-before-backup')) { 'http:awaitingHeartbeat' } else { 'http:rollingBack' }
+        $expectedBinary = if ($scenario -in @('success','stage-before-backup')) { 'new-agent' } else { 'old-agent' }
         if ([IO.File]::ReadAllText((Join-Path $install 'Agent.exe')) -ne $expectedBinary) { throw "$scenario did not leave the expected Agent binary." }
         if ($events.IndexOf('http:start') -lt 0 -or $events.IndexOf('http:package') -le $events.IndexOf('http:start') -or $events.IndexOf($expectedStatus) -le $events.IndexOf('start-agent')) { throw "$scenario did not report its outcome after service startup: $($events -join ',')" }
+        if ($expectedStatus -eq 'http:rollingBack' -and $events -contains 'http:awaitingHeartbeat') { throw "$scenario reported target success while rolling back." }
         if (-not (Test-Path -LiteralPath $backup -PathType Container)) { throw "$scenario did not retain the rollback backup." }
+        if ($scenario -like 'partial-restore-*' -and (Get-FileHash -LiteralPath (Join-Path $install 'appsettings.json')).Hash -ne (Get-FileHash -LiteralPath (Join-Path $backup 'appsettings.json')).Hash) { throw "$scenario did not restore the protected configuration." }
         if (-not [IO.File]::ReadAllText((Join-Path $data 'identity\identity.json')).Contains('keep')) { throw "$scenario changed Agent identity." }
     }
     Write-Output 'Public Agent update and interrupted recovery passed with fake HTTP, fake services, and temporary files.'
