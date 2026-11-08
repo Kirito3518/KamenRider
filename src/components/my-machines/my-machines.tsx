@@ -4,6 +4,7 @@ import type { Lease, Offer } from "@/lib/machine-contracts";
 import { Navbar } from "@/components/ui/layout/Navbar";
 import { Footer } from "@/components/ui/layout/Footer";
 const foundationSunshineSlot = "foundation-sunshine-single-pending-slot";
+const leaseRefreshIntervalMs = 15_000;
 async function api(path: string, body?: unknown) {
   const r = await fetch(path, {
     method: body ? "POST" : "GET",
@@ -21,22 +22,76 @@ async function api(path: string, body?: unknown) {
 export function MyMachines() {
   const [leases, setLeases] = useState<Lease[]>([]);
   const [message, setMessage] = useState("กำลังโหลด…");
+  const refreshLeasesRef = useRef<(() => Promise<void>) | null>(null);
+  const leaseMutationVersion = useRef(0);
+  const leaseMutationsInFlight = useRef(0);
+  const refreshAfterMutation = useRef(false);
   useEffect(() => {
     let active = true;
-    api("/api/my-leases")
-      .then((data) => {
+    let inFlight = false;
+    const refresh = async () => {
+      if (!active || document.visibilityState !== "visible" || inFlight) return;
+      inFlight = true;
+      if (leaseMutationsInFlight.current === 0)
+        refreshAfterMutation.current = false;
+      const mutationVersionAtStart = leaseMutationVersion.current;
+      try {
+        const data = (await api("/api/my-leases")) as Lease[];
         if (active) {
+          if (
+            leaseMutationsInFlight.current > 0 ||
+            mutationVersionAtStart !== leaseMutationVersion.current
+          )
+            return;
           setLeases(data);
           setMessage("");
         }
-      })
-      .catch((e) => {
-        if (active) setMessage(String(e));
-      });
+      } catch (error) {
+        if (
+          active &&
+          leaseMutationsInFlight.current === 0 &&
+          mutationVersionAtStart === leaseMutationVersion.current
+        )
+          setMessage(String(error));
+      } finally {
+        inFlight = false;
+        if (
+          active &&
+          document.visibilityState === "visible" &&
+          leaseMutationsInFlight.current === 0 &&
+          refreshAfterMutation.current
+        ) {
+          refreshAfterMutation.current = false;
+          void refresh();
+        }
+      }
+    };
+    refreshLeasesRef.current = refresh;
+    void refresh();
+    const intervalId = window.setInterval(
+      () => void refresh(),
+      leaseRefreshIntervalMs,
+    );
+    document.addEventListener("visibilitychange", refresh);
     return () => {
       active = false;
+      window.clearInterval(intervalId);
+      document.removeEventListener("visibilitychange", refresh);
+      if (refreshLeasesRef.current === refresh) refreshLeasesRef.current = null;
     };
   }, []);
+  const beginLeaseMutation = () => {
+    leaseMutationsInFlight.current += 1;
+    leaseMutationVersion.current += 1;
+  };
+  const endLeaseMutation = () => {
+    leaseMutationsInFlight.current -= 1;
+    leaseMutationVersion.current += 1;
+    if (leaseMutationsInFlight.current === 0) {
+      refreshAfterMutation.current = true;
+      void refreshLeasesRef.current?.();
+    }
+  };
   return (
     <div className="flex min-h-screen flex-col">
       <Navbar />
@@ -46,11 +101,7 @@ export function MyMachines() {
         <p role="status">{message}</p>
         <button
           className="rounded border p-2"
-          onClick={() =>
-            api("/api/my-leases")
-              .then(setLeases)
-              .catch((e) => setMessage(String(e)))
-          }
+          onClick={() => void refreshLeasesRef.current?.()}
         >
           รีเฟรช
         </button>
@@ -61,11 +112,17 @@ export function MyMachines() {
           <LeaseCard
             key={lease.id}
             lease={lease}
-            onLeaseUpdate={(updated) =>
+            onLeaseMutationStart={beginLeaseMutation}
+            onLeaseMutationEnd={endLeaseMutation}
+            onLeaseUpdate={(updated) => {
               setLeases((current) =>
-                current.map((item) => (item.id === updated.id ? updated : item)),
-              )
-            }
+                current.map((item) =>
+                  item.id === updated.id
+                    ? { ...item, ...updated, agent: updated.agent ?? item.agent }
+                    : item,
+                ),
+              );
+            }}
           />
         ))}
       </main>
@@ -75,9 +132,13 @@ export function MyMachines() {
 }
 function LeaseCard({
   lease,
+  onLeaseMutationStart,
+  onLeaseMutationEnd,
   onLeaseUpdate,
 }: {
   lease: Lease;
+  onLeaseMutationStart: () => void;
+  onLeaseMutationEnd: () => void;
   onLeaseUpdate: (lease: Lease) => void;
 }) {
   const [offer, setOffer] = useState<Offer>(null);
@@ -114,6 +175,16 @@ function LeaseCard({
           : ""}
       </p>
       <p>สิ้นสุด: {lease.expiresAtUtc || "ยังไม่เริ่มนับเวลา"}</p>
+      <p>
+        {lease.agent?.reachability === "reachable"
+          ? "Agent ติดต่อได้"
+          : lease.agent?.reachability === "unreachable"
+            ? "Agent ติดต่อไม่ได้"
+            : "ยังไม่ทราบสถานะการเชื่อมต่อของ Agent"}
+      </p>
+      <p className="text-sm text-muted-foreground">
+        Heartbeat ล่าสุด: {lease.agent?.lastSeenAt || "ไม่มีข้อมูล"}
+      </p>
       <p className="text-sm text-muted-foreground">
         {lease.connection?.address
           ? `${lease.connection.address}${lease.connection.stale ? " (ข้อมูลเก่า — ตรวจสอบกับผู้ดูแล)" : ""}`
@@ -205,6 +276,7 @@ function LeaseCard({
             onSubmit={async (event) => {
               event.preventDefault();
               setExtensionBusy(true);
+              onLeaseMutationStart();
               try {
                 const updated = (await api(
                   `/api/my-leases/${encodeURIComponent(lease.id)}/extend`,
@@ -222,6 +294,7 @@ function LeaseCard({
               } catch (error) {
                 setMessage(String(error));
               } finally {
+                onLeaseMutationEnd();
                 setExtensionBusy(false);
               }
             }}

@@ -18,6 +18,24 @@ const call = (path, body, cookie, method) =>
     headers: { ...headers, ...(cookie ? { cookie } : {}) },
     body: body ? JSON.stringify(body) : undefined,
   });
+const makeControllerMachine = (overrides) => ({
+  machineId: "pc",
+  approvalStatus: "approved",
+  displayName: "PC",
+  localIp: "192.168.1.4",
+  vncLocalIp: "192.168.1.5",
+  hourlyPriceMinorUnits: 100,
+  moonlightPort: 47989,
+  sunshinePort: 47990,
+  configRevision: 3,
+  appliedConfigRevision: 3,
+  readiness: "ready",
+  canRent: true,
+  lastSeenAt: "2026-11-08T00:00:00Z",
+  agentVersion: "1.0.0",
+  activeAdminVncSessions: 0,
+  ...overrides,
+});
 test("machine API session boundaries, validation, redaction and controller failures", async (t) => {
   assert.equal((await call("/my-leases")).status, 401);
   assert.equal((await call("/my-leases/rental-1/extend", { additionalSeconds: 60, expectedRevision: 1, idempotencyKey: "unauthenticated" })).status, 401);
@@ -50,28 +68,22 @@ test("machine API session boundaries, validation, redaction and controller failu
       return;
     }
     if (req.url === "/internal/machines") {
-      res.end(
-        JSON.stringify([
-          {
-            machineId: "pc",
-            approvalStatus: "approved",
-            displayName: "PC",
-            hourlyPriceMinorUnits: 100,
-            readiness: "ready",
-            canRent: true,
-            localIp: "192.168.1.4",
-            vncLocalIp: "192.168.1.5",
-            macAddress: "001122334455",
-            sunshinePort: 47990,
-            publicKeyFingerprint: "secret-management-fingerprint",
-            readinessDiagnostics: [
-              { checkId: "baseline", status: "passed" },
-              { checkId: "bootChallenge", status: "unavailable" },
-            ],
-          },
-          ...[ ["held", "ready"], ["not-ready", "notReady"], ["offline", "unreachable"] ].map(([machineId, readiness]) => ({ machineId, approvalStatus: "approved", displayName: machineId, hourlyPriceMinorUnits: 100, readiness, canRent: false })),
-        ]),
-      );
+      res.end(JSON.stringify([
+        makeControllerMachine({
+          macAddress: "001122334455",
+          publicKeyFingerprint: "secret-management-fingerprint",
+          readinessDiagnostics: [
+            { checkId: "baseline", status: "passed" },
+            { checkId: "bootChallenge", status: "unavailable" },
+          ],
+        }),
+        makeControllerMachine({ machineId: "held", displayName: "held", canRent: false }),
+        makeControllerMachine({ machineId: "not-ready", displayName: "not-ready", readiness: "notReady", canRent: false }),
+        makeControllerMachine({ machineId: "offline", displayName: "offline", readiness: "unreachable", canRent: false }),
+        makeControllerMachine({ machineId: "pending", displayName: "pending", approvalStatus: "pending", canRent: true }),
+        makeControllerMachine({ machineId: "truthy-can-rent", displayName: "truthy-can-rent", canRent: 1 }),
+        makeControllerMachine({ machineId: "missing-can-rent", displayName: "missing-can-rent", canRent: undefined }),
+      ]));
       return;
     }
     const extendMatch = req.url.match(/^\/internal\/leases\/([^/]+)\/extend$/);
@@ -118,8 +130,10 @@ test("machine API session boundaries, validation, redaction and controller failu
     assert.equal(inventory.status, 200);
     const publicData = await inventory.text();
     const publicMachines = JSON.parse(publicData);
-    const states = Object.fromEntries(publicMachines.map(m => [m.id, m.status]));
-    assert.deepEqual(states, { pc: "available", held: "busy", "not-ready": "notReady", offline: "unreachable" });
+    await t.test("public machine inventory includes only explicitly approved rentable machines", () => {
+      assert.deepEqual(publicMachines.map((machine) => machine.id), ["pc"]);
+      assert.equal(publicMachines[0].status, "available");
+    });
     assert.ok(publicMachines.every((machine) => !("readinessDiagnostics" in machine)));
     assert.ok(!publicData.includes("readinessDiagnostics"));
     for (const secret of [

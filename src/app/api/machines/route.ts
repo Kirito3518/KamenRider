@@ -6,7 +6,7 @@ export function GET(request: Request) {
     false,
     async (_, call) =>
       (await call<Machine[]>("/internal/machines"))
-        .filter((m) => m.approvalStatus === "approved")
+        .filter((m) => m.approvalStatus === "approved" && m.canRent === true)
         .map((m) => ({
           id: m.machineId,
           name: m.displayName,

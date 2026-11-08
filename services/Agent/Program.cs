@@ -26,7 +26,9 @@ public static class AgentHost
         builder.Services.TryAddSingleton<KamenRaider.Agent.Sunshine.StreamGuardPipeClient>();
         builder.Services.TryAddSingleton<KamenRaider.Agent.Leases.IStreamGate>(sp => sp.GetRequiredService<KamenRaider.Agent.Sunshine.StreamGuardPipeClient>());
         builder.Services.TryAddSingleton<KamenRaider.Agent.Sunshine.IPairingFence>(sp => sp.GetRequiredService<KamenRaider.Agent.Sunshine.StreamGuardPipeClient>());
-        builder.Services.TryAddSingleton<KamenRaider.Agent.Startup.IBootEnvironment,KamenRaider.Agent.Startup.UnavailableBootEnvironment>();
+        builder.Services.TryAddSingleton<KamenRaider.Agent.Startup.IBootEnvironment>(sp =>
+            new KamenRaider.Agent.Startup.StreamGuardBootEnvironment(
+                () => sp.GetRequiredService<KamenRaider.Agent.Sunshine.ISunshinePairingSession>()));
         builder.Services.TryAddSingleton<KamenRaider.Agent.Startup.IBootBaselineEvidence,KamenRaider.Agent.Startup.UnvalidatedBootBaselineEvidence>();
         builder.Services.AddSingleton<KamenRaider.Agent.Power.WindowsShutdown>();
         builder.Services.AddSingleton<KamenRaider.Agent.Power.IShutdown>(sp=>new KamenRaider.Agent.Power.BoundedShutdown(sp.GetRequiredService<KamenRaider.Agent.Power.WindowsShutdown>(),TimeSpan.FromSeconds(15)));

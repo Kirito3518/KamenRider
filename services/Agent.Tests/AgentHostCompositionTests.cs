@@ -16,7 +16,7 @@ public class AgentHostCompositionTests
     {
         using var host = KamenRaider.Agent.AgentHost.Build([], ConfigureTestAgentOptions);
 
-        Assert.IsType<UnavailableBootEnvironment>(host.Services.GetRequiredService<IBootEnvironment>());
+        Assert.IsType<KamenRaider.Agent.Startup.StreamGuardBootEnvironment>(host.Services.GetRequiredService<IBootEnvironment>());
         Assert.Equal(BootEvidenceStatus.Unavailable,host.Services.GetRequiredService<IBootBaselineEvidence>().Status);
         Assert.IsType<KamenRaider.Agent.Sunshine.StreamGuardPipeClient>(host.Services.GetRequiredService<KamenRaider.Agent.Leases.IStreamGate>());
         Assert.Same(host.Services.GetRequiredService<KamenRaider.Agent.Leases.IStreamGate>(), host.Services.GetRequiredService<KamenRaider.Agent.Sunshine.IPairingFence>());
@@ -72,6 +72,41 @@ public class AgentHostCompositionTests
 
         Assert.IsType<TestBootEnvironment>(host.Services.GetRequiredService<IBootEnvironment>());
         Assert.Equal(BootEvidenceStatus.Passed,host.Services.GetRequiredService<IBootBaselineEvidence>().Status);
+    }
+
+    [Fact]
+    public async Task AgentHostRunsBootPairingCleanupThroughTheRegisteredSessionWithoutClaimingOtherEvidence()
+    {
+        var pairing = new RecordingPairingSession(clearResult: true);
+        using var host = KamenRaider.Agent.AgentHost.Build([], builder =>
+        {
+            ConfigureTestAgentOptions(builder);
+            builder.Services.AddSingleton<KamenRaider.Agent.Sunshine.ISunshinePairingSession>(pairing);
+        });
+        var environment = host.Services.GetRequiredService<IBootEnvironment>();
+        var challenge = new ReconciliationChallenge("challenge", "boot", null, null, DateTimeOffset.UtcNow.AddMinutes(1));
+
+        Assert.Equal(BootEvidenceStatus.Unavailable, await environment.VerifyRestorationAsync(challenge, default));
+        Assert.Equal(BootEvidenceStatus.Passed, await environment.FenceAndClearAsync(challenge, default));
+        Assert.Equal(1, pairing.ClearCalls);
+        Assert.Equal(BootEvidenceStatus.Unavailable, await environment.VerifyHealthAsync(challenge, default));
+        Assert.Equal(BootEvidenceStatus.Unavailable, await environment.VerifyRuntimeHealthAsync("boot", 1, default));
+    }
+
+    [Fact]
+    public async Task AgentHostDoesNotPassBootFenceEvidenceWhenPairingCleanupFails()
+    {
+        var pairing = new RecordingPairingSession(clearResult: false);
+        using var host = KamenRaider.Agent.AgentHost.Build([], builder =>
+        {
+            ConfigureTestAgentOptions(builder);
+            builder.Services.AddSingleton<KamenRaider.Agent.Sunshine.ISunshinePairingSession>(pairing);
+        });
+        var environment = host.Services.GetRequiredService<IBootEnvironment>();
+        var challenge = new ReconciliationChallenge("challenge", "boot", null, null, DateTimeOffset.UtcNow.AddMinutes(1));
+
+        Assert.Equal(BootEvidenceStatus.Blocked, await environment.FenceAndClearAsync(challenge, default));
+        Assert.Equal(1, pairing.ClearCalls);
     }
 
     [Fact]
@@ -217,6 +252,23 @@ public class AgentHostCompositionTests
             ct.ThrowIfCancellationRequested();
             Blocked = false;
             return Task.CompletedTask;
+        }
+    }
+
+    private sealed class RecordingPairingSession(bool clearResult) : KamenRaider.Agent.Sunshine.ISunshinePairingSession
+    {
+        public int ClearCalls { get; private set; }
+
+        public Task<KamenRaider.Contracts.PairingOffer?> CreateOfferAsync(CancellationToken ct) => Task.FromResult<KamenRaider.Contracts.PairingOffer?>(null);
+        public Task<string[]> ListAsync(CancellationToken ct) => Task.FromResult(Array.Empty<string>());
+        public Task<KamenRaider.Contracts.CommandResult> ExecuteAsync(KamenRaider.Contracts.CommandEnvelope command, CancellationToken ct) =>
+            Task.FromResult(new KamenRaider.Contracts.CommandResult(command.CommandId, "failed", command.LeaseRevision, "PairingUnavailable"));
+
+        public Task<bool> ClearAsync(CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+            ClearCalls++;
+            return Task.FromResult(clearResult);
         }
     }
 }

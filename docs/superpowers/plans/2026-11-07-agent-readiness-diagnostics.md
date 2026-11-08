@@ -25,7 +25,7 @@
 ## Review Focus
 
 - Missing or expired boot challenge blocks readiness and marks later, unvisited checks `unknown`.
-- The default unqualified baseline and boot providers report `unavailable`, not a claimed hardware failure or pass.
+- The default unqualified baseline, restoration, desktop-health, and runtime-health providers report `unavailable`, not a claimed hardware failure or pass. The Guard-backed stream-fence cleanup provider is wired, but `BootReconciler` reaches it only after baseline and restoration pass; those default gates are unavailable, so the stream-fence check remains unvisited (`unknown`) in the current composition.
 - A malformed, oversized, duplicate, or unknown diagnostic cannot enter Controller storage.
 - An old Agent with no diagnostic property stays compatible and clears the prior report.
 - Changing diagnostic values alone cannot change `CanRent`; a `notReady` heartbeat remains non-rentable even if its report contains only `passed` checks.

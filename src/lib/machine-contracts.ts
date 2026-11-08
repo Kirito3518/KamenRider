@@ -38,7 +38,13 @@ export type Machine = {
   activeAdminVncSessions: number;
   readinessDiagnostics?: ReadinessDiagnostic[] | null;
 };
+export type AgentReachability = "reachable" | "unreachable" | "unknown";
+export type AgentHeartbeat = {
+  reachability: AgentReachability;
+  lastSeenAt: string | null;
+};
 export type Lease = {
+  agent?: AgentHeartbeat;
   connection?: { address: string | null; stale: boolean };
   id: string;
   machineId: string;
