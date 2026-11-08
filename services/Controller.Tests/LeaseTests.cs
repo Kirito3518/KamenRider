@@ -39,6 +39,41 @@ public sealed class LeaseFixture : IDisposable {
     public void Dispose() { Db.Dispose(); File.Delete(Path); }
 }
 public class LeaseTests {
+    [Theory]
+    [InlineData("notReady")]
+    [InlineData("unknown")]
+    public async Task CreateTrialLeaseRejectsUnreadyHeartbeatWithoutCreatingAllocation(string readiness) {
+        using var f=new LeaseFixture();
+        f.Db.Sync("pc",new("boot","192.0.2.1","001122334455",3,readiness,[]));
+
+        await Assert.ThrowsAsync<InvalidOperationException>(()=>f.Create());
+
+        Assert.Empty(await f.Leases.GetUserLeasesAsync("alice",default));
+    }
+
+    [Fact] public async Task CreateTrialLeaseRejectsHeartbeatOlderThanTwentySeconds() {
+        using var f=new LeaseFixture();
+        f.Time.Now=f.Time.Now.AddSeconds(21);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(()=>f.Create());
+
+        Assert.Empty(await f.Leases.GetUserLeasesAsync("alice",default));
+    }
+
+    [Fact] public async Task CreateTrialLeaseRequiresCurrentConfigurationAcknowledgment() {
+        using var f=new LeaseFixture();
+        var current=Assert.Single(f.Db.List());
+        f.Db.Update("pc",new("PC",500,5000,6000),current.ConfigRevision);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(()=>f.Create("same-key"));
+        Assert.Empty(await f.Leases.GetUserLeasesAsync("alice",default));
+
+        f.Sync();
+        var lease=await f.Create("same-key");
+
+        Assert.Equal(lease.Id,Assert.Single(await f.Leases.GetUserLeasesAsync("alice",default)).Id);
+    }
+
     [Fact] public void AvailabilityWaitsForCurrentConfigurationAcknowledgmentAfterAdminEdit() {
         using var f=new LeaseFixture();var before=Assert.Single(f.Db.List());Assert.True(before.CanRent);Assert.Equal(3,before.AppliedConfigRevision);
         var updated=f.Db.Update("pc",new("PC",500,5000,6000),before.ConfigRevision);

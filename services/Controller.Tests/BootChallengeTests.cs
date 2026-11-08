@@ -12,8 +12,8 @@ public class BootChallengeTests {
   await Assert.ThrowsAsync<InvalidOperationException>(()=>f.Create("another"));
  }
  [Fact] public async Task ReplayedProofCannotReleaseReplacementAllocation() {
-  using var f=new LeaseFixture();await f.Active();f.Time.Now=f.Time.Now.AddMinutes(2);var challenge=Issue(f);
-  Assert.Equal("PrepareAvailable",Prove(f,challenge).Action);var next=await f.Create("next");
+  using var f=new LeaseFixture();await f.Active();f.Time.Now=f.Time.Now.AddMinutes(2);f.Sync();var challenge=Issue(f);
+  Assert.Equal("PrepareAvailable",Prove(f,challenge).Action);f.Sync("new");var next=await f.Create("next");
   Assert.Equal("Hold",Prove(f,challenge).Action);Assert.Equal("preparing",f.Db.GetLease(next.Id)!.State);
   await Assert.ThrowsAsync<InvalidOperationException>(()=>f.Create("third"));
  }

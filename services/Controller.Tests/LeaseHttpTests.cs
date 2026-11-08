@@ -34,6 +34,7 @@ public class LeaseHttpTests {
     }
     [Fact] public async Task TrustedAdminCanCreateAndExtendForCustomerWhileBrowserAssertionsCannot() {
         using var f=new LeaseFixture();
+        f.Time.Now=DateTimeOffset.UtcNow;f.Sync();
         await using var app=ControllerHost.Build([], b=> {
             b.Configuration.AddInMemoryCollection(new Dictionary<string,string?> { ["InternalUrl"]="http://127.0.0.1:5101",["AgentUrl"]="https://127.0.0.1:5102",["DatabasePath"]=f.Path,["ServiceCredential"]="secret" });
             b.WebHost.UseTestServer(); b.Services.AddTransient<IStartupFilter,LoopbackTestFilter>(); b.Services.AddSingleton(f.Db);

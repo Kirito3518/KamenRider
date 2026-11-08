@@ -168,6 +168,11 @@ public sealed partial class ControllerDatabase : IDisposable
             throw new ArgumentException("Invalid MAC address");
     }
     private static void Ports(int moon,int sun) {if(moon is <1 or >65535 || sun is <1 or >65535)throw new ArgumentException("Invalid port");}
+    private static (string Readiness,bool CanRent) EvaluateRentability(string approvalStatus,long revision,DateTimeOffset now,DateTimeOffset? lastSeen,string? reportedReadiness,bool allocationHeld,long? appliedRevision) {
+        var readiness=lastSeen is null?"unknown":now-lastSeen.Value>TimeSpan.FromSeconds(20)?"unreachable":reportedReadiness??"unknown";
+        var canRent=approvalStatus=="approved" && readiness=="ready" && !allocationHeld && appliedRevision==revision;
+        return (readiness,canRent);
+    }
     public MachineDto[] List() {lock(gate) {
         // Read heartbeat, configuration acknowledgment and allocation from the same SQLite snapshot.
         var now=clock.GetUtcNow();
@@ -175,8 +180,9 @@ public sealed partial class ControllerDatabase : IDisposable
         using var r=cmd.ExecuteReader(); var rows=new List<MachineDto>();
         while(r.Read()) {
             DateTimeOffset? seen=r.IsDBNull(11)?null:DateTimeOffset.Parse(r.GetString(11));
-            var readiness=seen is null?"unknown":now-seen.Value>TimeSpan.FromSeconds(20)?"unreachable":r.GetString(13);
-            rows.Add(new MachineDto(r.GetString(0),r.GetString(1),r.GetString(2),r.GetInt64(3),r.GetString(4),r.GetString(5),r.GetInt32(6),r.GetInt32(7),r.GetInt64(8),seen,r.IsDBNull(12)?null:r.GetString(12),readiness,r.IsDBNull(17)?null:r.GetString(17),r.IsDBNull(9)?null:r.GetString(9),r.IsDBNull(10)?null:DateTimeOffset.Parse(r.GetString(10))) {AppliedConfigRevision=r.IsDBNull(15)?null:r.GetInt64(15),VncLocalIp=r.IsDBNull(16)?null:r.GetString(16),ActiveAdminVncSessions=r.GetInt32(18),CanRent=r.GetString(1)=="approved" && readiness=="ready" && r.GetInt64(14)==0 && !r.IsDBNull(15) && r.GetInt64(15)==r.GetInt64(8),ReadinessDiagnostics=r.IsDBNull(19)?null:JsonSerializer.Deserialize<ReadinessDiagnostic[]>(r.GetString(19))});
+            long? appliedRevision=r.IsDBNull(15)?null:r.GetInt64(15);
+            var rentability=EvaluateRentability(r.GetString(1),r.GetInt64(8),now,seen,r.IsDBNull(13)?null:r.GetString(13),r.GetInt64(14)!=0,appliedRevision);
+            rows.Add(new MachineDto(r.GetString(0),r.GetString(1),r.GetString(2),r.GetInt64(3),r.GetString(4),r.GetString(5),r.GetInt32(6),r.GetInt32(7),r.GetInt64(8),seen,r.IsDBNull(12)?null:r.GetString(12),rentability.Readiness,r.IsDBNull(17)?null:r.GetString(17),r.IsDBNull(9)?null:r.GetString(9),r.IsDBNull(10)?null:DateTimeOffset.Parse(r.GetString(10))) {AppliedConfigRevision=appliedRevision,VncLocalIp=r.IsDBNull(16)?null:r.GetString(16),ActiveAdminVncSessions=r.GetInt32(18),CanRent=rentability.CanRent,ReadinessDiagnostics=r.IsDBNull(19)?null:JsonSerializer.Deserialize<ReadinessDiagnostic[]>(r.GetString(19))});
         }
         r.Close();
         for(var i=0;i<rows.Count;i++){var row=rows[i];rows[i]=row with {PublicKeyFingerprint=Convert.ToHexString(SHA256.HashData(Convert.FromBase64String(PublicKey(row.MachineId)!)))};}
