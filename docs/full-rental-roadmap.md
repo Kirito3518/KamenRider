@@ -146,7 +146,7 @@ VNC/noVNC เป็นความสามารถของระบบฉบ�
 ### 10. Acceptance, operations และส่งมอบ — ยังไม่ครบ
 
 - Software integration test is implemented and passing for signed enrollment → pending/approve → ready → lease → pair → extend → expiry/shutdown → boot/reconcile → available/new allocation using Controller TestServer and fake machine adapters. Installer/package and real machine/hardware acceptance remain separate and unverified.
-- ทดสอบ collision สองผู้เช่า, command replay, Controller restart, Agent crash, network offline และ expiry boundary
+- Software regressions already cover concurrent lease allocation across database connections and durable retries (`LeaseTests.AllocationIsUniqueAcrossConnectionsAndRetriesAreDurable`), command replay and Controller restart (`CommandTests` and `BootChallengeTests`), offline boot and Agent lease-state restart (`BootTests`, `LeaseStoreRestartTests`, `LeaseEnforcerTests`), and expiry boundaries. These are simulated software checks; live Agent/Guard service crash recovery, disconnected expiry/shutdown, WOL, stream cutoff, and cold boot remain hardware acceptance items in `docs/agent-acceptance.md`.
 - Hardware matrix: WOL, stream isolation, active session cutoff, old-client reconnect, cold boot, audio/input/capture, external ports
 - บันทึก pass/fail/not-tested แยก fake tests กับ hardware tests
 - Controller มี online verified SQLite backup/restore CLI พร้อม activity lock และ pre-restore snapshot; validator ตรวจ required columns/types/nullability/primary keys และ allocation/command-revision uniqueness ก่อนทำ snapshot หรือแทนที่ฐาน; ทดสอบด้วยฐานชั่วคราวเท่านั้น ยังต้องทำ production restore drill, รับรอง ACL/การเก็บ backup และทำ certificate/secret recovery กับ identity revoke/re-enroll runbook
