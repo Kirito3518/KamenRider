@@ -4,6 +4,58 @@ $root = Join-Path ([IO.Path]::GetTempPath()) ('kr-tightvnc-plan-' + [Guid]::NewG
 $dataDirectory = Join-Path $root 'AgentData'
 New-Item -ItemType Directory -Path $root | Out-Null
 try {
+    $nativeTypeName = 'KamenRaider.Install.WindowsInstallerNative'
+    $nativeType = $nativeTypeName -as [type]
+    if (-not $nativeType) {
+        Add-Type -TypeDefinition @'
+using System;
+namespace KamenRaider.Install {
+    public static class WindowsInstallerNative {
+        public static int InstallProductCallCount;
+        public static int ConfigureProductCallCount;
+        public static string LastInstallProductPath;
+        public static string LastInstallProductProperties;
+        public static string LastConfigureProductCode;
+        public static int LastConfigureProductInstallLevel;
+        public static int LastConfigureProductInstallState;
+        public static string LastConfigureProductProperties;
+
+        public static void Reset() {
+            InstallProductCallCount = 0;
+            ConfigureProductCallCount = 0;
+            LastInstallProductPath = null;
+            LastInstallProductProperties = null;
+            LastConfigureProductCode = null;
+            LastConfigureProductInstallLevel = 0;
+            LastConfigureProductInstallState = 0;
+            LastConfigureProductProperties = null;
+        }
+
+        public static UInt32 SetInternalUI(UInt32 level, ref IntPtr window) { return 0; }
+        public static UInt32 InstallProduct(String packagePath, String propertyValues) {
+            InstallProductCallCount++;
+            LastInstallProductPath = packagePath;
+            LastInstallProductProperties = propertyValues;
+            return 0;
+        }
+        public static UInt32 ConfigureProduct(String productCode, Int32 installLevel, Int32 installState, String propertyValues) {
+            ConfigureProductCallCount++;
+            LastConfigureProductCode = productCode;
+            LastConfigureProductInstallLevel = installLevel;
+            LastConfigureProductInstallState = installState;
+            LastConfigureProductProperties = propertyValues;
+            return 0;
+        }
+    }
+}
+'@
+        $nativeType = $nativeTypeName -as [type]
+    }
+    if (-not $nativeType.GetField('InstallProductCallCount')) {
+        throw 'TightVNC API regression test requires its recording Windows Installer test double.'
+    }
+    [KamenRaider.Install.WindowsInstallerNative]::Reset()
+
     $tightVncPlan = . $installer -AllowedSourceAddress '192.168.1.10' -DataDirectory $dataDirectory -Plan
     foreach ($functionName in @('Merge-TightVncHiddenPropertyList', 'Test-WindowsInstallerCommandLineLoggingEnabled', 'Get-TightVncServiceFailureDisposition', 'Test-TightVncFailureStopRequired')) {
         if (-not (Get-Command $functionName -ErrorAction SilentlyContinue)) { throw "TightVNC security helper is missing: $functionName" }
@@ -104,7 +156,28 @@ try {
         throw 'Fresh TightVNC setup must install its exact firewall rule before a single service-registering MSI install.'
     }
     Initialize-WindowsInstallerNativeType
-    if (-not ('KamenRaider.Install.WindowsInstallerNative' -as [type])) { throw 'In-process Windows Installer API binding did not load.' }
+    if (-not ('KamenRaider.Install.WindowsInstallerNative' -as [type])) { throw 'Recording Windows Installer API test double did not load.' }
+    $testProductCode = '{11111111-1111-1111-1111-111111111111}'
+    [KamenRaider.Install.WindowsInstallerNative]::Reset()
+    $null = Invoke-TightVncMsiInstall -InstallerPath 'C:\tightvnc-test.msi' -TransformPath 'C:\tightvnc-test.mst' -Password 'TestPass1' -FreshInstall
+    $freshInstallProperties = [string][KamenRaider.Install.WindowsInstallerNative]::LastInstallProductProperties
+    if ([KamenRaider.Install.WindowsInstallerNative]::InstallProductCallCount -ne 1 -or
+        [KamenRaider.Install.WindowsInstallerNative]::ConfigureProductCallCount -ne 0 -or
+        [KamenRaider.Install.WindowsInstallerNative]::LastInstallProductPath -cne 'C:\tightvnc-test.msi' -or
+        $freshInstallProperties -notmatch '(?:^|\s)SERVER_REGISTER_AS_SERVICE=1(?:\s|$)' -or
+        $freshInstallProperties -match '(?:^|\s)SERVER_REGISTER_AS_SERVICE=0(?:\s|$)') {
+        throw 'Fresh TightVNC install must pass service registration enabled to its single MsiInstallProduct invocation.'
+    }
+
+    [KamenRaider.Install.WindowsInstallerNative]::Reset()
+    $null = Invoke-TightVncMsiInstall -InstallerPath 'C:\tightvnc-test.msi' -TransformPath 'C:\tightvnc-test.mst' -Password 'TestPass1' -ProductCode $testProductCode
+    if ([KamenRaider.Install.WindowsInstallerNative]::InstallProductCallCount -ne 0 -or
+        [KamenRaider.Install.WindowsInstallerNative]::ConfigureProductCallCount -ne 1 -or
+        [KamenRaider.Install.WindowsInstallerNative]::LastConfigureProductCode -cne $testProductCode -or
+        [KamenRaider.Install.WindowsInstallerNative]::LastConfigureProductInstallLevel -ne 0 -or
+        [KamenRaider.Install.WindowsInstallerNative]::LastConfigureProductInstallState -ne 5) {
+        throw 'Managed TightVNC repair must retain its separate MsiConfigureProductEx invocation.'
+    }
     if ($installerSource -notmatch 'MsiConfigureProductExW' -or -not $installerSource.Contains('WindowsInstallerNative]::ConfigureProduct')) {
         throw 'Final MSI properties must use MsiConfigureProductEx for an installed product.'
     }
@@ -165,7 +238,7 @@ try {
     $orphanServiceRejected = $false
     try { Get-TightVncInstallDecision -InstalledVersions @() -ManagedInstall $false -InstallationFootprintDetected $true | Out-Null } catch { $orphanServiceRejected = $true }
     if (-not $orphanServiceRejected) { throw 'An orphan TightVNC service or installation directory must be rejected.' }
-    Write-Output 'TightVNC installer plan, source firewall scope, product decision and MSI trust tests passed; no MSI or service was installed.'
+    Write-Output 'TightVNC installer plan, source firewall scope, product decision, MSI trust, and MSI API service-registration/repair regression tests passed; no MSI or service was installed.'
 } finally {
     $resolved = [IO.Path]::GetFullPath($root)
     $temp = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\') + '\'

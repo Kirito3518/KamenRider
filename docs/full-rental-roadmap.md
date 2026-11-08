@@ -1,7 +1,7 @@
 # แผนระบบเช่าคอม KamenRaiderPlay ฉบับเต็ม
 
 สถานะเอกสาร: roadmap รวมของระบบเว็บ, Controller, Agent และช่องทางดูแลเครื่อง  
-อัปเดต: 2026-11-07
+อัปเดต: 2026-11-08
 
 ## เป้าหมายระบบ
 
@@ -297,3 +297,10 @@ The default-closed Sunshine installer transaction is implemented and verified in
 - Windows PowerShell 5.1 `Test-AgentPackageBuild.ps1` passed. The package assembly informational version and `Agent.deps.json` project identity both match the source revision reported by the build; the required archive entries are present, and the default `appsettings.json` and TightVNC MSI are excluded.
 - The archive SHA-256, sidecar, `.env.local` `AGENT_PACKAGE_SHA256`, and localhost-served bytes match. The static package URL returned HTTP 200 and 36,597,772 bytes.
 - This verifies the local package artifact and served bytes only. The package has not been run on the host. Rental readiness remains **NOT READY** and hardware acceptance remains **NOT TESTED**; no enrollment ticket, service, machine, firewall, Sunshine, or Restore Rx state was changed.
+
+### Task 34: Cover TightVNC service registration regression (2026-11-08)
+
+- The root cause was the prior fresh-install split: its first MSI call used `SERVER_REGISTER_AS_SERVICE=0`, then `MsiConfigureProductEx` attempted to enable service registration. That maintenance API does not replay the MSI service-registration install action, so the `tvnserver` service was not created.
+- Existing source fix `7b71017` sends `SERVER_REGISTER_AS_SERVICE=1` in the single fresh `MsiInstallProduct` call, then verifies and starts the service. Managed repair keeps its separate `MsiConfigureProductEx` path. This task adds regression coverage and documentation only; production installer behavior was not changed.
+- The focused Windows PowerShell 5.1 regression exercises `Invoke-TightVncMsiInstall` through a recording API test double, verifies the captured fresh-install properties and call counts, and verifies managed repair still uses `MsiConfigureProductEx`. The check passed without installing an MSI or service. A temporary `SERVER_REGISTER_AS_SERVICE=0` mutation failed at the new fresh-install assertion as expected.
+- Refreshed package `1.0.0+g0d4fdeb686a3` contains the existing fix and remains uninstalled. The real-machine retest is pending. Rental readiness remains **NOT READY** and hardware acceptance remains **NOT TESTED**; this software regression does not qualify live VNC, services, firewall, or hardware behavior.
