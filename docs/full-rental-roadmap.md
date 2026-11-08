@@ -154,7 +154,7 @@ VNC/noVNC เป็นความสามารถของระบบฉบ�
 
 ## สถานะสรุปวันนี้
 
-เว็บ/Controller/Agent มีโครงและ business logic หลายส่วนแล้ว; Controller dev และ Next dev ตอบใน localhost ได้. การติดตั้งรอบล่าสุดลงทะเบียนเครื่อง pending และสร้าง Agent/Guard แต่ service Agent หยุดจาก ticket ACL; TightVNC ยังไม่ติดตั้งเพราะ MSI ไม่ได้สร้าง service ใน maintenance reconfiguration. Commit `7b71017` แก้สิทธิ์ ticket และ fresh MSI setup; `9d0582c` แก้การเทียบ ACL identity เป็น SID; `f1bc320` เพิ่ม boot cleanup composition และสถานะเช่าแบบสด พร้อมปรับตัวกรองเครื่องเช่า. Package ปัจจุบันสร้างจาก `f1bc320` แล้ว แต่ยังไม่ได้รันซ้ำบนเครื่อง. หน้า Admin แสดง readiness diagnostics เพื่อวินิจฉัยเท่านั้น; noVNC, Stream Guard, SQLite backup/restore มี software tests แต่ยังไม่มี live qualification. Production readiness ยังคง NOT READY เพราะ boot/restoration/desktop-health providers, Sunshine TLS/credentials, live fence, VNC และ hardware acceptance ยังขาด.
+เว็บ/Controller/Agent มีโครงและ business logic หลายส่วนแล้ว; Controller dev และ Next dev ตอบใน localhost ได้. Inventory แบบอ่านอย่างเดียวล่าสุดพบ Agent และ Stream Guard เป็น `Running/Automatic`, Sunshine เป็น `Stopped/Manual` และไม่มี service `tvnserver`. Controller แสดงเครื่อง `PC ทดสอบ 1` ราคา `20 THB/hour` เป็น `pending/notReady/canRent=false` โดย applied config revision 2. Local package `1.0.0+g0d4fdeb686a3` มี TightVNC service-registration fix อยู่แล้ว แต่ยังไม่ได้ติดตั้ง; การ retest บนเครื่องจริงยัง pending. Rental readiness ยังคง **NOT READY** และ hardware acceptance ยังคง **NOT TESTED**; software regression ไม่ได้ยืนยันการติดตั้งหรือการทำงานจริงของ VNC, service, firewall หรือ hardware. Reboot Restore Rx ยังคง untouched.
 
 ### Stream Guard installer — Task 5 verification, 2026-11-06
 
