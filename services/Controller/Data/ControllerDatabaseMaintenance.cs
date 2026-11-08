@@ -266,7 +266,15 @@ public static class ControllerDatabaseMaintenance
                 }
                 ValidateIndex(connection, "agent_update_operations", "agent_update_one_active_per_machine", ["machine_id"], "status NOT IN ('completed','rolledBack','expired')", required: true);
             }
-
+            if (userVersion >= 13)
+                ValidateColumns(connection, "agent_update_operations", [
+                    new("operation_id", "TEXT"), new("machine_id", "TEXT", true), new("release_version", "TEXT", true),
+                    new("target_version", "TEXT", true), new("target_package_sha256", "TEXT", true), new("previous_version", "TEXT", true),
+                    new("status", "TEXT", true), new("ticket_hash", "TEXT", true), new("ticket_expires_at_unix_ms", "INTEGER", true),
+                    new("ticket_started_at_unix_ms", "INTEGER"), new("started_at_unix_ms", "INTEGER"),
+                    new("created_at_unix_ms", "INTEGER", true), new("updated_at_unix_ms", "INTEGER", true),
+                    new("ticket_package_downloaded_at_unix_ms", "INTEGER")
+                ], ["operation_id"]);
             // These uniqueness constraints enforce allocation and command-revision invariants.
             ValidateIndex(connection, "leases", "leases_machine_allocation", ["machine_id"], "allocation_held=1", required: true);
             var hasCommandRevisionIndex = HasIndex(connection, "command_outbox", "lease_command_revision");

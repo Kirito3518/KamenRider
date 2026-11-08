@@ -1,5 +1,6 @@
 using KamenRaider.Contracts;
 using KamenRaider.Controller.Data;
+using KamenRaider.Controller.Agents;
 using KamenRaider.Controller.Machines;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
@@ -208,6 +209,122 @@ public sealed class AgentUpdateTests
     }
 
     [Fact]
+    public async Task PublicUpdateEndpointsBindStartAndOnePackageDownloadToTheCurrentTicket()
+    {
+        using var fixture = new LeaseFixture();
+        var package = System.Text.Encoding.UTF8.GetBytes("test Agent package bytes");
+        var packageHash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(package));
+        AddRelease(fixture.Path, "2.0.0", packageHash, package.Length);
+        var storeRoot = Path.Combine(Path.GetDirectoryName(fixture.Path)!, "agent-releases");
+        var packageDirectory = Path.Combine(storeRoot, "sha256", packageHash[..2].ToLowerInvariant());
+        Directory.CreateDirectory(packageDirectory);
+        await File.WriteAllBytesAsync(Path.Combine(packageDirectory, packageHash.ToLowerInvariant() + ".zip"), package);
+        fixture.SyncVersion("1.0.0");
+        await using var host = await StartHost(fixture.Db, storeRoot);
+        using var reservation = await Reserve(host.Client, "pc", "2.0.0");
+        var operationId = await ReadString(reservation, "operationId");
+        var ticket = await ReadString(reservation, "ticket");
+
+        using var absentTicket = await host.Client.GetAsync($"/agent/machines/pc/agent-updates/{operationId}/package");
+        Assert.Equal(HttpStatusCode.Unauthorized, absentTicket.StatusCode);
+
+        var request = new
+        {
+            ticket,
+            releaseVersion = "2.0.0",
+            targetVersion = "2.0.0",
+            targetPackageSha256 = packageHash,
+        };
+        using var wrongMachine = await host.Client.PostAsJsonAsync($"/agent/machines/other/agent-updates/{operationId}/start", request);
+        Assert.Equal(HttpStatusCode.Unauthorized, wrongMachine.StatusCode);
+        using var wrongRelease = await host.Client.PostAsJsonAsync($"/agent/machines/pc/agent-updates/{operationId}/start", request with { releaseVersion = "3.0.0" });
+        Assert.Equal(HttpStatusCode.Unauthorized, wrongRelease.StatusCode);
+        using var wrongHash = await host.Client.PostAsJsonAsync($"/agent/machines/pc/agent-updates/{operationId}/start", request with { targetPackageSha256 = new string('C', 64) });
+        Assert.Equal(HttpStatusCode.Unauthorized, wrongHash.StatusCode);
+
+        using var started = await host.Client.PostAsJsonAsync($"/agent/machines/pc/agent-updates/{operationId}/start", request);
+        Assert.Equal(HttpStatusCode.OK, started.StatusCode);
+        using var repeatedStart = await host.Client.PostAsJsonAsync($"/agent/machines/pc/agent-updates/{operationId}/start", request);
+        Assert.Equal(HttpStatusCode.Unauthorized, repeatedStart.StatusCode);
+
+        var statusReport = new
+        {
+            ticket,
+            releaseVersion = "2.0.0",
+            targetVersion = "2.0.0",
+            targetPackageSha256 = packageHash,
+            status = "awaitingHeartbeat",
+        };
+        using var wrongStatusIdentity = await host.Client.PostAsJsonAsync($"/agent/machines/pc/agent-updates/{operationId}/status", statusReport with { targetVersion = "3.0.0" });
+        Assert.Equal(HttpStatusCode.Unauthorized, wrongStatusIdentity.StatusCode);
+        using var reported = await host.Client.PostAsJsonAsync($"/agent/machines/pc/agent-updates/{operationId}/status", statusReport);
+        Assert.Equal(HttpStatusCode.OK, reported.StatusCode);
+        Assert.Equal("no-store", reported.Headers.CacheControl?.ToString());
+        using var repeatedReport = await host.Client.PostAsJsonAsync($"/agent/machines/pc/agent-updates/{operationId}/status", statusReport);
+        Assert.Equal(HttpStatusCode.OK, repeatedReport.StatusCode);
+
+        using var wrongDownloadRelease = CreatePackageRequest("3.0.0", "2.0.0", packageHash, ticket, operationId);
+        using var rejectedDownload = await host.Client.SendAsync(wrongDownloadRelease);
+        Assert.Equal(HttpStatusCode.Unauthorized, rejectedDownload.StatusCode);
+        using var download = await host.Client.SendAsync(CreatePackageRequest("2.0.0", "2.0.0", packageHash, ticket, operationId));
+        Assert.Equal(HttpStatusCode.OK, download.StatusCode);
+        Assert.Equal("no-store", download.Headers.CacheControl?.ToString());
+        Assert.Equal("application/zip", download.Content.Headers.ContentType?.MediaType);
+        Assert.Equal(package, await download.Content.ReadAsByteArrayAsync());
+
+        using var repeatedDownload = await host.Client.SendAsync(CreatePackageRequest("2.0.0", "2.0.0", packageHash, ticket, operationId));
+        Assert.Equal(HttpStatusCode.Unauthorized, repeatedDownload.StatusCode);
+        using var reopenedDatabase = new ControllerDatabase(fixture.Path, clock: fixture.Time);
+        Assert.Throws<UnauthorizedAccessException>(() => reopenedDatabase.ConsumeAgentUpdatePackageDownload(
+            "pc", operationId, ticket, "2.0.0", "2.0.0", packageHash));
+    }
+
+    [Fact]
+    public async Task ExpiredUpdateTicketCannotStartAndRecoveryResetsTheDownloadAllowanceForItsReplacement()
+    {
+        using var fixture = new LeaseFixture();
+        var package = System.Text.Encoding.UTF8.GetBytes("test Agent package bytes");
+        var packageHash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(package));
+        AddRelease(fixture.Path, "2.0.0", packageHash, package.Length);
+        var storeRoot = Path.Combine(Path.GetDirectoryName(fixture.Path)!, "agent-releases");
+        var packageDirectory = Path.Combine(storeRoot, "sha256", packageHash[..2].ToLowerInvariant());
+        Directory.CreateDirectory(packageDirectory);
+        await File.WriteAllBytesAsync(Path.Combine(packageDirectory, packageHash.ToLowerInvariant() + ".zip"), package);
+        fixture.SyncVersion("1.0.0");
+        await using var host = await StartHost(fixture.Db, storeRoot);
+
+        using (var expiredReservation = await Reserve(host.Client, "pc", "2.0.0"))
+        {
+            var expiredOperationId = await ReadString(expiredReservation, "operationId");
+            var expiredTicket = await ReadString(expiredReservation, "ticket");
+            fixture.Time.Now = fixture.Time.Now.AddMinutes(10);
+            using var expiredStart = await host.Client.PostAsync($"/agent/machines/pc/agent-updates/{expiredOperationId}/start", CreateStartContent(expiredTicket, packageHash));
+            Assert.Equal(HttpStatusCode.Unauthorized, expiredStart.StatusCode);
+        }
+
+        fixture.SyncVersion("1.0.0");
+        using var reservation = await Reserve(host.Client, "pc", "2.0.0");
+        var operationId = await ReadString(reservation, "operationId");
+        var oldTicket = await ReadString(reservation, "ticket");
+        using var start = await host.Client.PostAsync($"/agent/machines/pc/agent-updates/{operationId}/start", CreateStartContent(oldTicket, packageHash));
+        Assert.Equal(HttpStatusCode.OK, start.StatusCode);
+        using var firstDownload = await host.Client.SendAsync(CreatePackageRequest("2.0.0", "2.0.0", packageHash, oldTicket, operationId));
+        Assert.Equal(HttpStatusCode.OK, firstDownload.StatusCode);
+        Assert.Equal("failed", fixture.Db.ReportAgentUpdateStatus("pc", oldTicket, "failed").Status);
+
+        using var recovery = await host.Client.PostAsync($"/internal/machines/pc/agent-updates/{operationId}/recovery-ticket", content: null);
+        Assert.Equal(HttpStatusCode.OK, recovery.StatusCode);
+        var newTicket = await ReadString(recovery, "ticket");
+        Assert.NotEqual(oldTicket, newTicket);
+        using var oldTicketDownload = await host.Client.SendAsync(CreatePackageRequest("2.0.0", "2.0.0", packageHash, oldTicket, operationId));
+        Assert.Equal(HttpStatusCode.Unauthorized, oldTicketDownload.StatusCode);
+        using var recoveredStart = await host.Client.PostAsync($"/agent/machines/pc/agent-updates/{operationId}/start", CreateStartContent(newTicket, packageHash));
+        Assert.Equal(HttpStatusCode.OK, recoveredStart.StatusCode);
+        using var recoveredDownload = await host.Client.SendAsync(CreatePackageRequest("2.0.0", "2.0.0", packageHash, newTicket, operationId));
+        Assert.Equal(HttpStatusCode.OK, recoveredDownload.StatusCode);
+    }
+
+    [Fact]
     public async Task TargetHeartbeatCompletesOperationAndVerifiedRollbackHeartbeatResolvesRollback()
     {
         using var fixture = new LeaseFixture();
@@ -246,31 +363,48 @@ public sealed class AgentUpdateTests
         }
     }
 
-    private static async Task<TestHost> StartHost(ControllerDatabase database)
+    private static async Task<TestHost> StartHost(ControllerDatabase database, string? storeRoot = null)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
         builder.Services.AddSingleton(database);
+        var artifactRoot = storeRoot ?? Path.Combine(Path.GetTempPath(), "agent-update-tests", Guid.NewGuid().ToString("N"));
+        builder.Services.AddSingleton(new AgentReleaseStore(artifactRoot));
         var app = builder.Build();
         app.MapMachines();
+        app.MapAgentReleases();
         await app.StartAsync();
         var client = app.GetTestClient();
         client.DefaultRequestHeaders.Add("X-Authenticated-Actor-Id", "admin");
         client.DefaultRequestHeaders.Add("X-Authenticated-Actor-Role", "admin");
-        return new TestHost(app, client);
+        return new TestHost(app, client, artifactRoot);
     }
 
     private static Task<HttpResponseMessage> Reserve(HttpClient client, string machineId, string releaseVersion) =>
         client.PostAsJsonAsync($"/internal/machines/{machineId}/agent-updates", new { releaseVersion });
 
-    private static void AddRelease(string path, string version)
+    private static JsonContent CreateStartContent(string ticket, string packageHash) =>
+        JsonContent.Create(new { ticket, releaseVersion = "2.0.0", targetVersion = "2.0.0", targetPackageSha256 = packageHash });
+
+    private static HttpRequestMessage CreatePackageRequest(string releaseVersion, string targetVersion, string packageHash, string ticket, string operationId = "placeholder")
+    {
+        var request = new HttpRequestMessage(HttpMethod.Get, $"/agent/machines/pc/agent-updates/{operationId}/package");
+        request.Headers.Add("X-Agent-Update-Ticket", ticket);
+        request.Headers.Add("X-Agent-Update-Release-Version", releaseVersion);
+        request.Headers.Add("X-Agent-Update-Target-Version", targetVersion);
+        request.Headers.Add("X-Agent-Update-Package-SHA256", packageHash);
+        return request;
+    }
+
+    private static void AddRelease(string path, string version, string? packageHash = null, long packageSize = 100)
     {
         using var connection = Open(path);
         using var command = connection.CreateCommand();
-        command.CommandText = "INSERT INTO agent_releases(version,channel,release_notes,package_sha256,package_path,package_size_bytes,source_commit,source_dirty,release_build,package_format,published_at_unix_ms) VALUES($version,'stable','release notes',$hash,$package,100,'test-commit',0,1,'AgentPackage.zip',1)";
+        command.CommandText = "INSERT INTO agent_releases(version,channel,release_notes,package_sha256,package_path,package_size_bytes,source_commit,source_dirty,release_build,package_format,published_at_unix_ms) VALUES($version,'stable','release notes',$hash,$package,$size,'test-commit',0,1,'AgentPackage.zip',1)";
         command.Parameters.AddWithValue("$version", version);
-        command.Parameters.AddWithValue("$hash", new string('a', 64));
+        command.Parameters.AddWithValue("$hash", packageHash ?? new string('a', 64));
         command.Parameters.AddWithValue("$package", $"/private/{version}.zip");
+        command.Parameters.AddWithValue("$size", packageSize);
         command.ExecuteNonQuery();
     }
 
@@ -306,7 +440,7 @@ public sealed class AgentUpdateTests
         return connection;
     }
 
-    private sealed class TestHost(WebApplication app, HttpClient client) : IAsyncDisposable
+    private sealed class TestHost(WebApplication app, HttpClient client, string artifactRoot) : IAsyncDisposable
     {
         public HttpClient Client { get; } = client;
 
@@ -314,6 +448,7 @@ public sealed class AgentUpdateTests
         {
             Client.Dispose();
             await app.DisposeAsync();
+            if (Directory.Exists(artifactRoot)) Directory.Delete(artifactRoot, recursive: true);
         }
     }
 }

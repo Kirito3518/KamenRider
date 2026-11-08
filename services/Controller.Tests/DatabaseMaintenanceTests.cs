@@ -54,6 +54,29 @@ public class DatabaseMaintenanceTests
     }
 
     [Fact]
+    public void BackupRejectsVersionThirteenDatabaseMissingDurableUpdateDownloadState()
+    {
+        var root = NewRoot();
+        var databasePath = Path.Combine(root, "controller.db");
+        var backupPath = Path.Combine(root, "backup.db");
+        try
+        {
+            using (var database = new ControllerDatabase(databasePath)) AddMachine(database, "source-machine");
+            using (var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = databasePath, Pooling = false }.ToString()))
+            {
+                connection.Open();
+                using var command = connection.CreateCommand();
+                command.CommandText = "ALTER TABLE agent_update_operations DROP COLUMN ticket_package_downloaded_at_unix_ms;";
+                command.ExecuteNonQuery();
+            }
+
+            Assert.Throws<InvalidDataException>(() => ControllerDatabaseMaintenance.Backup(databasePath, backupPath));
+            Assert.False(File.Exists(backupPath));
+        }
+        finally { DeleteRoot(root); }
+    }
+
+    [Fact]
     public async Task BackupCapturesConsistentDataWhileControllerIsActive()
     {
         var root = NewRoot();

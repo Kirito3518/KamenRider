@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import Database from "better-sqlite3";
 const base = process.env.TEST_AUTH_URL || "http://localhost:3002";
 const headers = {
@@ -12,6 +12,9 @@ const headers = {
   "X-Authenticated-Actor-Role": "admin",
   "X-Service-Credential": "forged",
 };
+let agentUpdateAdminCookie;
+let agentUpdateRegularCookie;
+let agentUpdateAdminId;
 const call = (path, body, cookie, method) =>
   fetch(`${base}/api${path}`, {
     method: method || (body ? "POST" : "GET"),
@@ -318,6 +321,8 @@ test("agent install command is admin-only and withheld until configuration valid
     .getSetCookie()
     .map((value) => value.split(";")[0])
     .join("; ");
+  agentUpdateAdminCookie = cookie;
+  agentUpdateAdminId = created.user.id;
 
   const regularSuffix = crypto.randomUUID().replaceAll("-", "").slice(0, 10);
   const regularSignup = await call("/auth/sign-up/email", {
@@ -331,6 +336,7 @@ test("agent install command is admin-only and withheld until configuration valid
     .getSetCookie()
     .map((value) => value.split(";")[0])
     .join("; ");
+  agentUpdateRegularCookie = regularUserCookie;
 
   const ticketRequests = [];
   const ticketExpiresAtUtc = new Date(Date.now() + 86_400_000).toISOString();
@@ -409,5 +415,182 @@ test("agent install command is admin-only and withheld until configuration valid
     assert.ok(result.command.includes(quoted(scriptHash)));
   } finally {
     await new Promise((resolve) => ticketServer.close(resolve));
+  }
+});
+
+test("agent update release and command routes enforce Admin origin and forward explicit selections", async () => {
+  const unauthenticatedList = await call("/admin/agent-releases");
+  assert.equal(unauthenticatedList.status, 401);
+  assert.equal(unauthenticatedList.headers.get("cache-control"), "no-store");
+  const unauthenticatedPublish = await call("/admin/agent-releases", undefined, undefined, "POST");
+  assert.equal(unauthenticatedPublish.status, 401);
+  assert.equal(unauthenticatedPublish.headers.get("cache-control"), "no-store");
+  const unauthenticatedCommand = await call("/admin/machines/pc/agent-update-command", undefined, undefined, "POST");
+  assert.equal(unauthenticatedCommand.status, 401);
+  assert.equal(unauthenticatedCommand.headers.get("cache-control"), "no-store");
+
+  assert.ok(agentUpdateAdminCookie && agentUpdateRegularCookie && agentUpdateAdminId, "the preceding auth test supplies Admin and regular sessions");
+  const adminCookie = agentUpdateAdminCookie;
+  const regularCookie = agentUpdateRegularCookie;
+  const adminId = agentUpdateAdminId;
+
+  const requests = [];
+  const ticket = "U".repeat(43);
+  const recoveryTicket = "R".repeat(43);
+  const expiresAtUtc = new Date(Date.now() + 10 * 60_000).toISOString();
+  const release = {
+    version: "2.0.0",
+    channel: "stable",
+    releaseNotes: "test release",
+    packageSha256: "B".repeat(64),
+    packageSizeBytes: 1024,
+    sourceCommit: "0123456789ab",
+    sourceDirty: false,
+    publishedAtUtc: new Date().toISOString(),
+  };
+  const controller = createServer(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const rawBody = Buffer.concat(chunks).toString("utf8");
+    requests.push({
+      method: req.method,
+      url: req.url,
+      headers: req.headers,
+      rawBody,
+      body: rawBody && req.headers["content-type"]?.startsWith("application/json") ? JSON.parse(rawBody) : null,
+    });
+    res.setHeader("content-type", "application/json");
+    if (req.headers["x-service-credential"] !== "test-only") {
+      res.writeHead(401).end("{}");
+      return;
+    }
+    if (req.method === "GET" && req.url === "/internal/agent-releases") {
+      res.end(JSON.stringify([release]));
+      return;
+    }
+    if (req.method === "POST" && req.url === "/internal/agent-releases") {
+      res.end(JSON.stringify(release));
+      return;
+    }
+    if (req.method === "POST" && req.url === "/internal/machines/pc/agent-updates") {
+      res.end(JSON.stringify({
+        operationId: "operation-1",
+        machineId: "pc",
+        ticket,
+        expiresAtUtc,
+        releaseVersion: "2.0.0",
+        targetVersion: "2.0.0",
+        targetPackageSha256: release.packageSha256,
+      }));
+      return;
+    }
+    if (req.method === "POST" && req.url === "/internal/machines/pc/agent-updates/operation-1/recovery-ticket") {
+      res.end(JSON.stringify({
+        operationId: "operation-1",
+        machineId: "pc",
+        ticket: recoveryTicket,
+        expiresAtUtc,
+        releaseVersion: "2.0.0",
+        targetVersion: "2.0.0",
+        targetPackageSha256: release.packageSha256,
+      }));
+      return;
+    }
+    res.writeHead(404).end("{}");
+  });
+  await new Promise((resolve) => controller.listen(5089, "127.0.0.1", resolve));
+
+  const scriptPath = new URL("../public/agent/Update-Agent.ps1", import.meta.url);
+  const scriptWasPresent = existsSync(scriptPath);
+  const originalScript = scriptWasPresent ? readFileSync(scriptPath) : null;
+  if (!scriptWasPresent) writeFileSync(scriptPath, "# test-only update script\n");
+  try {
+    assert.equal((await call("/admin/machines/pc/agent-update-command", undefined, adminCookie, "GET")).status, 405);
+    const regularCommand = await call("/admin/machines/pc/agent-update-command", { releaseVersion: "2.0.0" }, regularCookie);
+    assert.equal(regularCommand.status, 403);
+    assert.equal(regularCommand.headers.get("cache-control"), "no-store");
+    const crossOrigin = await fetch(`${base}/api/admin/machines/pc/agent-update-command`, {
+      method: "POST",
+      headers: { ...headers, origin: "https://evil.example", cookie: adminCookie },
+      body: JSON.stringify({ releaseVersion: "2.0.0" }),
+    });
+    assert.equal(crossOrigin.status, 403);
+    assert.equal(crossOrigin.headers.get("cache-control"), "no-store");
+    assert.deepEqual(requests, []);
+
+    const releases = await call("/admin/agent-releases", undefined, adminCookie);
+    assert.equal(releases.status, 200);
+    assert.equal(releases.headers.get("cache-control"), "no-store");
+    assert.deepEqual(await releases.json(), [release]);
+    const listRequest = requests.at(-1);
+    assert.equal(listRequest.method, "GET");
+    assert.equal(listRequest.url, "/internal/agent-releases");
+    assert.equal(listRequest.headers["x-authenticated-actor-id"], adminId);
+    assert.equal(listRequest.headers["x-authenticated-actor-role"], "admin");
+    assert.equal(listRequest.headers["x-service-credential"], "test-only");
+
+    const form = new FormData();
+    form.append("version", "2.0.0");
+    form.append("channel", "stable");
+    form.append("releaseNotes", "test release");
+    form.append("package", new Blob(["package bytes"], { type: "application/zip" }), "AgentPackage.zip");
+    const wrongOriginUpload = await fetch(`${base}/api/admin/agent-releases`, {
+      method: "POST",
+      headers: { origin: "https://evil.example", cookie: adminCookie },
+      body: form,
+    });
+    assert.equal(wrongOriginUpload.status, 403);
+    assert.equal(requests.length, 1);
+    const published = await fetch(`${base}/api/admin/agent-releases`, {
+      method: "POST",
+      headers: { origin: base, cookie: adminCookie, "x-authenticated-actor-id": "forged", "x-authenticated-actor-role": "admin" },
+      body: form,
+    });
+    assert.equal(published.status, 200);
+    assert.equal(published.headers.get("cache-control"), "no-store");
+    const uploadRequest = requests.at(-1);
+    assert.equal(uploadRequest.method, "POST");
+    assert.equal(uploadRequest.url, "/internal/agent-releases");
+    assert.match(uploadRequest.headers["content-type"], /^multipart\/form-data; boundary=/);
+    assert.equal(uploadRequest.headers["x-authenticated-actor-id"], adminId);
+    assert.equal(uploadRequest.headers["x-authenticated-actor-role"], "admin");
+    assert.ok(uploadRequest.rawBody.includes("AgentPackage.zip"));
+    assert.ok(uploadRequest.rawBody.includes("package bytes"));
+
+    const command = await call("/admin/machines/pc/agent-update-command", { releaseVersion: "2.0.0" }, adminCookie);
+    assert.equal(command.status, 200);
+    assert.equal(command.headers.get("cache-control"), "no-store");
+    const commandResult = await command.json();
+    assert.match(commandResult.command, /-OperationId 'operation-1'/);
+    assert.match(commandResult.command, /-UpdateTicket 'U{43}'/);
+    assert.match(commandResult.command, /-PackageSha256 'B{64}'/);
+    assert.equal(commandResult.releaseVersion, "2.0.0");
+    const commandBase = process.env.AGENT_INSTALL_BASE_URL || process.env.BETTER_AUTH_URL;
+    assert.equal(commandResult.scriptUrl, new URL("/agent/Update-Agent.ps1", commandBase).toString());
+    assert.ok(commandResult.command.includes(`-ControllerUrl '${new URL(process.env.AGENT_CONTROLLER_URL).toString()}'`));
+    assert.ok(commandResult.command.includes(`-TrustedRootThumbprint '${process.env.AGENT_TRUST_ROOT_THUMBPRINT.toUpperCase()}'`));
+    assert.ok(commandResult.command.includes(`-AdminReturnUrl '${new URL("/admin/agent-releases", commandBase).toString()}'`));
+    const commandRequest = requests.at(-1);
+    assert.equal(commandRequest.method, "POST");
+    assert.equal(commandRequest.url, "/internal/machines/pc/agent-updates");
+    assert.deepEqual(commandRequest.body, { releaseVersion: "2.0.0" });
+    assert.equal(commandRequest.headers["x-authenticated-actor-id"], adminId);
+    assert.equal(commandRequest.headers["x-authenticated-actor-role"], "admin");
+    assert.equal(commandRequest.headers["x-service-credential"], "test-only");
+
+    const recoveryCommand = await call("/admin/machines/pc/agent-update-command", { operationId: "operation-1" }, adminCookie);
+    assert.equal(recoveryCommand.status, 200);
+    const recoveryResult = await recoveryCommand.json();
+    assert.match(recoveryResult.command, /-UpdateTicket 'R{43}'/);
+    assert.equal(recoveryResult.operationId, "operation-1");
+    const recoveryRequest = requests.at(-1);
+    assert.equal(recoveryRequest.method, "POST");
+    assert.equal(recoveryRequest.url, "/internal/machines/pc/agent-updates/operation-1/recovery-ticket");
+    assert.equal(recoveryRequest.headers["x-authenticated-actor-id"], adminId);
+    assert.equal(recoveryRequest.headers["x-service-credential"], "test-only");
+  } finally {
+    if (!scriptWasPresent) unlinkSync(scriptPath);
+    else writeFileSync(scriptPath, originalScript);
+    await new Promise((resolve) => controller.close(resolve));
   }
 });

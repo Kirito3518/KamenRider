@@ -16,30 +16,27 @@ export async function machineApi(
     if (!publicAccess && !session)
       return Response.json(
         { error: "Authentication required" },
-        { status: 401 },
+        { status: 401, headers: { "Cache-Control": "no-store" } },
       );
     if (admin && session?.user.role !== "admin")
-      return Response.json({ error: "Forbidden" }, { status: 403 });
+      return Response.json({ error: "Forbidden" }, { status: 403, headers: { "Cache-Control": "no-store" } });
     if (
       request.method !== "GET" &&
       request.headers.get("origin") !==
         new URL(process.env.BETTER_AUTH_URL || request.url).origin
     )
-      return Response.json({ error: "Forbidden origin" }, { status: 403 });
+      return Response.json({ error: "Forbidden origin" }, { status: 403, headers: { "Cache-Control": "no-store" } });
     const actor = {
       id: session?.user.id || "",
       role: session?.user.role || "user",
     };
-    const result = await action(actor, <T>(path: string, init?: RequestInit) =>
-      controllerRequest<T>(path, {
-        ...init,
-        headers: {
-          "Content-Type": "application/json",
-          "X-Authenticated-Actor-Id": actor.id,
-          "X-Authenticated-Actor-Role": actor.role,
-        },
-      }),
-    );
+    const result = await action(actor, <T>(path: string, init?: RequestInit) => {
+      const headers = new Headers(init?.headers);
+      if (!headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+      headers.set("X-Authenticated-Actor-Id", actor.id);
+      headers.set("X-Authenticated-Actor-Role", actor.role);
+      return controllerRequest<T>(path, { ...init, headers });
+    });
     return Response.json(result, { headers: { "Cache-Control": "no-store" } });
   } catch (error) {
     const status =

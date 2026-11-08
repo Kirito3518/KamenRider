@@ -23,7 +23,7 @@ export async function controllerRequest<T>(
       ...init,
       cache: "no-store",
       redirect: "error",
-      signal: AbortSignal.timeout(5000),
+      signal: AbortSignal.timeout(path === "/internal/agent-releases" && init?.method === "POST" ? 300_000 : 5000),
       headers: {
         ...Object.fromEntries(new Headers(init?.headers)),
         "X-Service-Credential": credential,
@@ -31,7 +31,7 @@ export async function controllerRequest<T>(
     });
     if (!response.ok)
       throw new ControllerError(
-        [400, 403, 404, 409, 429].includes(response.status)
+        [400, 403, 404, 409, 413, 429].includes(response.status)
           ? response.status
           : 503,
       );

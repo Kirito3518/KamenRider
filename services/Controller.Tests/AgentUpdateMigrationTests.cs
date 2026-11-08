@@ -16,10 +16,10 @@ public sealed class AgentUpdateMigrationTests
             using (new ControllerDatabase(path)) { }
             using var verify = Open(path);
 
-            Assert.Equal(12L, Scalar(verify, "PRAGMA user_version"));
+            Assert.Equal(13L, Scalar(verify, "PRAGMA user_version"));
             Assert.Equal("pc", Scalar(verify, "SELECT machine_id FROM machines"));
             Assert.Equal("version,channel,release_notes,package_sha256,package_path,package_size_bytes,source_commit,source_dirty,release_build,package_format,published_at_unix_ms", string.Join(',', Columns(verify, "agent_releases")));
-            Assert.Equal("operation_id,machine_id,release_version,target_version,target_package_sha256,previous_version,status,ticket_hash,ticket_expires_at_unix_ms,ticket_started_at_unix_ms,started_at_unix_ms,created_at_unix_ms,updated_at_unix_ms", string.Join(',', Columns(verify, "agent_update_operations")));
+            Assert.Equal("operation_id,machine_id,release_version,target_version,target_package_sha256,previous_version,status,ticket_hash,ticket_expires_at_unix_ms,ticket_started_at_unix_ms,started_at_unix_ms,created_at_unix_ms,updated_at_unix_ms,ticket_package_downloaded_at_unix_ms", string.Join(',', Columns(verify, "agent_update_operations")));
 
             using (var seed = verify.CreateCommand())
             {
@@ -52,7 +52,7 @@ public sealed class AgentUpdateMigrationTests
             }
 
             using (new ControllerDatabase(path)) { }
-            Assert.Equal(12L, Scalar(verify, "PRAGMA user_version"));
+            Assert.Equal(13L, Scalar(verify, "PRAGMA user_version"));
             Assert.Equal(2L, Scalar(verify, "SELECT COUNT(*) FROM agent_update_operations"));
         }
         finally

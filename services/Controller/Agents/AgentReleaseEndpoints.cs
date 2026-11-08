@@ -1,5 +1,6 @@
 using KamenRaider.Controller.Data;
 using KamenRaider.Controller.Machines;
+using KamenRaider.Contracts;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.WebUtilities;
@@ -18,6 +19,87 @@ public static class AgentReleaseEndpoints
             IsAdmin(context) ? Results.Ok(database.ListAgentReleases()) : Results.StatusCode(StatusCodes.Status403Forbidden));
 
         app.MapPost("/internal/agent-releases", PublishAsync);
+        app.MapPost("/agent/machines/{machineId}/agent-updates/{operationId}/start", StartUpdateAsync);
+        app.MapPost("/agent/machines/{machineId}/agent-updates/{operationId}/status", ReportUpdateStatusAsync);
+        app.MapGet("/agent/machines/{machineId}/agent-updates/{operationId}/package", DownloadUpdatePackageAsync);
+    }
+
+    private static IResult StartUpdateAsync(string machineId, string operationId, AgentUpdateTicketRequest? request, HttpContext context, ControllerDatabase database)
+    {
+        context.Response.Headers.CacheControl = "no-store";
+        if (request is null) return Results.BadRequest();
+        return ExecuteTicketed(() => database.StartAgentUpdate(machineId, operationId, request.Ticket, request.ReleaseVersion, request.TargetVersion, request.TargetPackageSha256));
+    }
+
+    private static IResult ReportUpdateStatusAsync(string machineId, string operationId, AgentUpdateStatusReportRequest? request, HttpContext context, ControllerDatabase database)
+    {
+        context.Response.Headers.CacheControl = "no-store";
+        if (request is null) return Results.BadRequest();
+        return ExecuteTicketed(() => database.ReportAgentUpdateStatus(machineId, operationId, request.Ticket,
+            request.ReleaseVersion, request.TargetVersion, request.TargetPackageSha256, request.Status));
+    }
+
+    private static async Task<IResult> DownloadUpdatePackageAsync(string machineId, string operationId, HttpContext context, ControllerDatabase database, AgentReleaseStore store, CancellationToken cancellationToken)
+    {
+        context.Response.Headers.CacheControl = "no-store";
+        context.Response.Headers.Pragma = "no-cache";
+        context.Response.Headers["X-Content-Type-Options"] = "nosniff";
+        var ticket = context.Request.Headers["X-Agent-Update-Ticket"].ToString();
+        var releaseVersion = context.Request.Headers["X-Agent-Update-Release-Version"].ToString();
+        var targetVersion = context.Request.Headers["X-Agent-Update-Target-Version"].ToString();
+        var packageHash = context.Request.Headers["X-Agent-Update-Package-SHA256"].ToString();
+
+        try
+        {
+            var operation = database.ConsumeAgentUpdatePackageDownload(machineId, operationId, ticket, releaseVersion, targetVersion, packageHash);
+            using var package = store.OpenReadByHash(operation.TargetPackageSha256);
+            if (!string.Equals(package.Sha256, operation.TargetPackageSha256, StringComparison.OrdinalIgnoreCase))
+                return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+
+            context.Response.StatusCode = StatusCodes.Status200OK;
+            context.Response.ContentType = "application/zip";
+            context.Response.ContentLength = package.Length;
+            context.Response.Headers.ContentDisposition = "attachment; filename=\"AgentPackage.zip\"";
+            await package.Content.CopyToAsync(context.Response.Body, 64 * 1024, cancellationToken);
+            return Results.Empty;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return Results.StatusCode(StatusCodes.Status401Unauthorized);
+        }
+        catch (KeyNotFoundException)
+        {
+            return Results.StatusCode(StatusCodes.Status404NotFound);
+        }
+        catch (InvalidOperationException)
+        {
+            return Results.StatusCode(StatusCodes.Status409Conflict);
+        }
+        catch (ArgumentException)
+        {
+            return Results.StatusCode(StatusCodes.Status400BadRequest);
+        }
+        catch (FileNotFoundException)
+        {
+            return Results.StatusCode(StatusCodes.Status404NotFound);
+        }
+        catch (IOException)
+        {
+            return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+        }
+        catch (InvalidDataException)
+        {
+            return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+        }
+    }
+
+    private static IResult ExecuteTicketed<T>(Func<T> action)
+    {
+        try { return Results.Ok(action()); }
+        catch (UnauthorizedAccessException) { return Results.StatusCode(StatusCodes.Status401Unauthorized); }
+        catch (KeyNotFoundException) { return Results.StatusCode(StatusCodes.Status404NotFound); }
+        catch (ArgumentException) { return Results.BadRequest(); }
+        catch (InvalidOperationException) { return Results.Conflict(); }
     }
 
     private static async Task<IResult> PublishAsync(HttpContext context, ControllerDatabase database, AgentReleaseStore store, CancellationToken cancellationToken)
