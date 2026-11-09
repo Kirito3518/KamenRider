@@ -13,10 +13,15 @@ export function AgentUpdateControl({ machine, onUpdated }: { machine: Machine; o
   const [releases, setReleases] = useState<AgentRelease[] | null>(null);
   const [selected, setSelected] = useState("");
   const [command, setCommand] = useState<CommandResult | null>(null);
+  const [pendingOperationId, setPendingOperationId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [clock, setClock] = useState(0);
-  const awaitingSnapshot = Boolean(command?.operationId && (command.operationId !== machine.agentUpdateOperationId || !machine.agentUpdateStatus));
+  // A matching snapshot acknowledges this reservation once; later operations stay authoritative.
+  const matchingSnapshot = Boolean(pendingOperationId && pendingOperationId === machine.agentUpdateOperationId && machine.agentUpdateStatus);
+  if (matchingSnapshot) setPendingOperationId(null);
+  if (!pendingOperationId && command && machine.agentUpdateOperationId && command.operationId !== machine.agentUpdateOperationId) setCommand(null);
+  const awaitingSnapshot = Boolean(pendingOperationId && !matchingSnapshot);
   const status = awaitingSnapshot ? "awaitingInstaller" : machine.agentUpdateStatus;
   const targetVersion = awaitingSnapshot ? command?.targetVersion : machine.agentUpdateTargetVersion;
   const locked = Boolean(status && !terminal.has(status));
@@ -70,7 +75,7 @@ export function AgentUpdateControl({ machine, onUpdated }: { machine: Machine; o
       if (!result.available || !result.command || !result.operationId || !result.expiresAtUtc || !Number.isFinite(Date.parse(result.expiresAtUtc))) {
         setMessage(result.reason || "ยังไม่สามารถสร้างคำสั่งอัปเดตได้"); return;
       }
-      setClock(Date.now()); setCommand(result); setOpen(false); await refreshMachine();
+      setClock(Date.now()); setCommand(result); setPendingOperationId(result.operationId); setOpen(false); await refreshMachine();
     } catch { setMessage("สร้างคำสั่งไม่สำเร็จ สถานะเครื่องหรือ lease อาจเปลี่ยนแล้ว กรุณารีเฟรชและตรวจสอบอีกครั้ง"); await refreshMachine(); }
     finally { setBusy(false); }
   }

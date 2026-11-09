@@ -224,6 +224,29 @@ describe("Per-machine update", () => {
     expect(fetchSpy).toHaveBeenCalledTimes(2);
   });
 
+  it.each(["installing", "failed"])("follows a later operation in %s after observing the issued operation complete", async (status) => {
+    const { rerender } = render(<AgentUpdateControl machine={machine} />);
+    fireEvent.click(screen.getByRole("button", { name: "Update Agent" }));
+    await screen.findByRole("option", { name: "2.0.0 · stable" });
+    fireEvent.change(screen.getByLabelText("เลือก release สำหรับ pc-1"), { target: { value: "2.0.0" } });
+    fireEvent.click(screen.getByRole("button", { name: "สร้างคำสั่งอัปเดต" }));
+    await screen.findByLabelText("คำสั่งอัปเดต Agent สำหรับ pc-1");
+    rerender(<AgentUpdateControl machine={{ ...machine, agentUpdateStatus: "completed", agentUpdateOperationId: "op-1", agentVersion: "2.0.0", agentUpdateTargetVersion: "2.0.0" }} />);
+    expect(screen.getByText(/สถานะอัปเดต: อัปเดตสำเร็จและยืนยันแล้ว/)).toBeDefined();
+    const laterOperation = { ...machine, agentVersion: "2.0.0", agentUpdateStatus: status, agentUpdateOperationId: "op-2", agentUpdateTargetVersion: "3.0.0" };
+    rerender(<AgentUpdateControl machine={laterOperation} />);
+    expect(screen.getByText(`สถานะอัปเดต: ${updateStatusLabels[status]} · เป้าหมาย 3.0.0`)).toBeDefined();
+    expect(screen.queryByLabelText("คำสั่งอัปเดต Agent สำหรับ pc-1")).toBeNull();
+    const recovery = screen.getByRole("button", { name: "กู้คืนการอัปเดต" }) as HTMLButtonElement;
+    expect(recovery.disabled).toBe(false);
+    rerender(<AgentUpdateControl machine={{ ...laterOperation }} />);
+    expect(screen.getByText(`สถานะอัปเดต: ${updateStatusLabels[status]} · เป้าหมาย 3.0.0`)).toBeDefined();
+    fetchSpy.mockResolvedValueOnce(json({ available: true, command: "op-2 recovery command", operationId: "op-2", targetVersion: "3.0.0", expiresAtUtc: "2026-11-08T12:10:00.000Z" }));
+    fireEvent.click(recovery);
+    expect(await screen.findByLabelText("คำสั่งอัปเดต Agent สำหรับ pc-1")).toHaveProperty("value", "op-2 recovery command");
+    expect(JSON.parse(String(fetchSpy.mock.calls.at(-1)?.[1]?.body))).toEqual({ operationId: "op-2" });
+  });
+
   it("recovers the existing failed operation using its operation ID", async () => {
     render(<AgentUpdateControl machine={{ ...machine, agentUpdateStatus: "failed", agentUpdateOperationId: "op-1", agentUpdateTargetVersion: "2.0.0" }} />);
     expect(screen.getByText(/ล้มเหลว/)).toBeDefined();
