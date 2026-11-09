@@ -2,6 +2,9 @@ using System.Buffers.Binary;
 using System.Diagnostics;
 using System.IO.Compression;
 using System.Reflection;
+using System.Reflection.Metadata;
+using System.Reflection.Metadata.Ecma335;
+using System.Reflection.PortableExecutable;
 using System.Text;
 
 namespace Controller.Tests.Fixtures;
@@ -14,6 +17,22 @@ internal static class AgentPackageCorpus
     internal static readonly string[] Scripts = ["Install-AgentPackage.ps1", "Install-Service.ps1", "Install-TightVncServer.ps1", "Prepare-SunshineStreamGate.ps1", "PrivateInstallFiles.ps1", "ServiceInstallTransaction.ps1", "Update-AgentPackage.ps1", "Update-Agent.ps1"];
     private static readonly Lazy<Dictionary<string, (byte[] Exe, byte[] Dll)>> Published = new(Publish);
     internal static byte[] Utf8(string value) => Encoding.UTF8.GetBytes(value);
+
+    internal static string OwnedTempPath(string path, string prefix)
+    {
+        var resolved = Path.GetFullPath(path);
+        var temp = Path.GetFullPath(Path.GetTempPath()).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        if (!resolved.StartsWith(temp, StringComparison.OrdinalIgnoreCase)
+            || !Path.GetFileName(resolved).StartsWith(prefix, StringComparison.Ordinal))
+            throw new InvalidOperationException("Refusing to change a path outside the owned temporary tree.");
+        return resolved;
+    }
+
+    internal static void DeleteOwnedTemp(string path, string prefix)
+    {
+        var resolved = OwnedTempPath(path, prefix);
+        if (Directory.Exists(resolved)) Directory.Delete(resolved, true);
+    }
 
     internal static List<(string Name, byte[] Bytes)> Entries(string runtime = "win-x64")
     {
@@ -125,6 +144,44 @@ internal static class AgentPackageCorpus
         return result;
     }
 
+    internal static byte[] DeflateStoredBlock(string variant)
+    {
+        var bytes = Valid();
+        var end = bytes.Length - 22;
+        var centralStart = (int)BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(end + 16));
+        var central = centralStart;
+        while (true)
+        {
+            var nameLength = BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(central + 28));
+            var extraLength = BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(central + 30));
+            var commentLength = BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(central + 32));
+            if (Encoding.ASCII.GetString(bytes, central + 46, nameLength) == "Update-Agent.ps1") break;
+            central += 46 + nameLength + extraLength + commentLength;
+        }
+        var local = (int)BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(central + 42));
+        var start = local + 30 + BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(local + 26))
+            + BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(local + 28));
+        var length = (int)BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(central + 24));
+        if (BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(central + 10)) != 0 || start + length != centralStart || length > ushort.MaxValue)
+            throw new InvalidOperationException("Expected final stored fixture entry.");
+        var block = new byte[length + 5];
+        block[0] = variant == "reserved-block" ? (byte)7 : (byte)1;
+        BinaryPrimitives.WriteUInt16LittleEndian(block.AsSpan(1), (ushort)length);
+        BinaryPrimitives.WriteUInt16LittleEndian(block.AsSpan(3), (ushort)~length);
+        if (variant == "bad-complement") block[3] ^= 1;
+        Array.Copy(bytes, start, block, 5, length);
+        var result = new byte[bytes.Length + 5];
+        Array.Copy(bytes, 0, result, 0, start);
+        Array.Copy(block, 0, result, start, block.Length);
+        Array.Copy(bytes, centralStart, result, centralStart + 5, bytes.Length - centralStart);
+        BinaryPrimitives.WriteUInt16LittleEndian(result.AsSpan(local + 8), 8);
+        BinaryPrimitives.WriteUInt32LittleEndian(result.AsSpan(local + 18), (uint)block.Length);
+        BinaryPrimitives.WriteUInt16LittleEndian(result.AsSpan(central + 5 + 10), 8);
+        BinaryPrimitives.WriteUInt32LittleEndian(result.AsSpan(central + 5 + 20), (uint)block.Length);
+        BinaryPrimitives.WriteUInt32LittleEndian(result.AsSpan(end + 5 + 16), (uint)(centralStart + 5));
+        return result;
+    }
+
     internal static byte[] Descriptor(bool corrupt)
     {
         var bytes = Build(Entries(), CompressionLevel.Optimal, true);
@@ -142,26 +199,81 @@ internal static class AgentPackageCorpus
         return bytes;
     }
 
+    internal static byte[] DescriptorVariant(string variant)
+    {
+        var bytes = Build(Entries(), CompressionLevel.Optimal, true);
+        var end = bytes.Length - 22;
+        var central = (int)BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(end + 16));
+        var local = (int)BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(central + 42));
+        var start = local + 30 + BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(local + 26))
+            + BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(local + 28));
+        var size = (int)BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(central + 20));
+        var descriptor = start + size;
+        if (BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(descriptor)) != 0x08074b50)
+            throw new InvalidOperationException("Expected signed descriptor.");
+        if (variant.StartsWith("unsigned", StringComparison.Ordinal))
+        {
+            var shortened = new byte[bytes.Length - 4];
+            Array.Copy(bytes, 0, shortened, 0, descriptor);
+            Array.Copy(bytes, descriptor + 4, shortened, descriptor, bytes.Length - descriptor - 4);
+            bytes = shortened;
+            end -= 4;
+            central -= 4;
+            BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(end + 16), (uint)central);
+            var entry = central;
+            while (entry < end)
+            {
+                var oldLocal = BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(entry + 42));
+                if (oldLocal > local) BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(entry + 42), oldLocal - 4);
+                entry += 46 + BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(entry + 28))
+                    + BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(entry + 30))
+                    + BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(entry + 32));
+            }
+            if (variant == "unsigned-crc") bytes[descriptor] ^= 1;
+            return bytes;
+        }
+        switch (variant)
+        {
+            case "signed-crc": bytes[descriptor + 4] ^= 1; break;
+            case "signed-compressed": bytes[descriptor + 8] ^= 1; break;
+            case "signed-expanded": bytes[descriptor + 12] ^= 1; break;
+            case "local-crc": bytes[local + 14] ^= 1; break;
+            case "local-compressed": bytes[local + 18] ^= 1; break;
+            case "local-expanded": bytes[local + 22] ^= 1; break;
+            default: throw new ArgumentOutOfRangeException(nameof(variant));
+        }
+        return bytes;
+    }
+
     internal static byte[] CentralExtra(ushort id, byte[] value)
+        => CentralExtras((id, value));
+
+    internal static byte[] CentralExtras(params (ushort Id, byte[] Value)[] extras)
     {
         var bytes = Valid();
         var end = bytes.Length - 22;
         var central = (int)BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(end + 16));
         var nameLength = BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(central + 28));
         var at = central + 46 + nameLength;
-        var result = new byte[bytes.Length + 4 + value.Length];
+        var extraLength = extras.Sum(e => 4 + e.Value.Length);
+        var result = new byte[bytes.Length + extraLength];
         Array.Copy(bytes, 0, result, 0, at);
-        BinaryPrimitives.WriteUInt16LittleEndian(result.AsSpan(at), id);
-        BinaryPrimitives.WriteUInt16LittleEndian(result.AsSpan(at + 2), (ushort)value.Length);
-        value.CopyTo(result, at + 4);
-        Array.Copy(bytes, at, result, at + 4 + value.Length, bytes.Length - at);
-        BinaryPrimitives.WriteUInt16LittleEndian(result.AsSpan(central + 30), (ushort)(4 + value.Length));
-        var size = BinaryPrimitives.ReadUInt32LittleEndian(result.AsSpan(end + 4 + value.Length + 12));
-        BinaryPrimitives.WriteUInt32LittleEndian(result.AsSpan(end + 4 + value.Length + 12), size + (uint)(4 + value.Length));
+        var cursor = at;
+        foreach (var (id, value) in extras)
+        {
+            BinaryPrimitives.WriteUInt16LittleEndian(result.AsSpan(cursor), id);
+            BinaryPrimitives.WriteUInt16LittleEndian(result.AsSpan(cursor + 2), (ushort)value.Length);
+            value.CopyTo(result, cursor + 4);
+            cursor += 4 + value.Length;
+        }
+        Array.Copy(bytes, at, result, cursor, bytes.Length - at);
+        BinaryPrimitives.WriteUInt16LittleEndian(result.AsSpan(central + 30), (ushort)extraLength);
+        var size = BinaryPrimitives.ReadUInt32LittleEndian(result.AsSpan(end + extraLength + 12));
+        BinaryPrimitives.WriteUInt32LittleEndian(result.AsSpan(end + extraLength + 12), size + (uint)extraLength);
         return result;
     }
 
-    internal static byte[] ContradictoryCrossTimestamp()
+    internal static byte[] ContradictoryCrossTimestamp(long ntfsModified = 116444736010000000L)
     {
         var bytes = CentralExtra(0x5455, [1, 0, 0, 0, 0]);
         var oldEnd = bytes.Length - 22;
@@ -174,7 +286,7 @@ internal static class AgentPackageCorpus
         BinaryPrimitives.WriteUInt16LittleEndian(result.AsSpan(at + 2), 32);
         BinaryPrimitives.WriteUInt16LittleEndian(result.AsSpan(at + 8), 1);
         BinaryPrimitives.WriteUInt16LittleEndian(result.AsSpan(at + 10), 24);
-        BinaryPrimitives.WriteInt64LittleEndian(result.AsSpan(at + 12), 116444736010000000L);
+        BinaryPrimitives.WriteInt64LittleEndian(result.AsSpan(at + 12), ntfsModified);
         BinaryPrimitives.WriteInt64LittleEndian(result.AsSpan(at + 20), 116444736000000000L);
         BinaryPrimitives.WriteInt64LittleEndian(result.AsSpan(at + 28), 116444736000000000L);
         Array.Copy(bytes, at, result, at + 36, bytes.Length - at);
@@ -276,7 +388,90 @@ internal static class AgentPackageCorpus
             assembly[offset + 3 + key.Length + 1] = (byte)'2';
             return assembly;
         }
-        finally { Directory.Delete(root, true); }
+        finally { DeleteOwnedTemp(root, "kr-duplicate-metadata-"); }
+    }
+
+    internal static byte[] DuplicateInformationalVersionAssembly()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "kr-duplicate-version-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            File.WriteAllText(Path.Combine(root, "Fixture.csproj"), """
+                <Project Sdk="Microsoft.NET.Sdk">
+                  <PropertyGroup><TargetFramework>net10.0</TargetFramework><AssemblyName>Agent</AssemblyName><GenerateAssemblyInfo>false</GenerateAssemblyInfo></PropertyGroup>
+                </Project>
+                """);
+            File.WriteAllText(Path.Combine(root, "Fixture.cs"), """
+                using System.Reflection;
+                [assembly: AssemblyInformationalVersion("2.3.4")]
+                [assembly: AssemblyFileVersion("2.3.4")]
+                [assembly: AssemblyMetadata("AgentUpdateChallengeProtocol", "2")]
+                """);
+            var start = new ProcessStartInfo("dotnet") { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
+            foreach (var arg in new[] { "build", Path.Combine(root, "Fixture.csproj"), "-c", "Release", "-o", Path.Combine(root, "output") }) start.ArgumentList.Add(arg);
+            using var process = Process.Start(start)!;
+            var stdout = process.StandardOutput.ReadToEndAsync();
+            var stderr = process.StandardError.ReadToEndAsync();
+            process.WaitForExit();
+            if (process.ExitCode != 0) throw new InvalidOperationException(stdout.Result + stderr.Result);
+            var assembly = File.ReadAllBytes(Path.Combine(root, "output", "Agent.dll"));
+            DuplicateVersionMetadataRow(assembly);
+            return assembly;
+        }
+        finally { DeleteOwnedTemp(root, "kr-duplicate-version-"); }
+    }
+
+    private static void DuplicateVersionMetadataRow(byte[] assembly)
+    {
+        int metadataStart, informationalRow = 0, fileVersionRow = 0;
+        using (var pe = new PEReader(new MemoryStream(assembly)))
+        {
+            metadataStart = pe.PEHeaders.MetadataStartOffset;
+            var metadata = pe.GetMetadataReader();
+            foreach (var handle in metadata.GetAssemblyDefinition().GetCustomAttributes())
+            {
+                var constructor = metadata.GetCustomAttribute(handle).Constructor;
+                if (constructor.Kind != HandleKind.MemberReference) continue;
+                var parent = metadata.GetMemberReference((MemberReferenceHandle)constructor).Parent;
+                if (parent.Kind != HandleKind.TypeReference) continue;
+                var name = metadata.GetString(metadata.GetTypeReference((TypeReferenceHandle)parent).Name);
+                if (name == "AssemblyInformationalVersionAttribute") informationalRow = MetadataTokens.GetRowNumber(handle);
+                if (name == "AssemblyFileVersionAttribute") fileVersionRow = MetadataTokens.GetRowNumber(handle);
+            }
+        }
+        if (informationalRow == 0 || fileVersionRow == 0) throw new InvalidOperationException("Fixture metadata attributes are missing.");
+        var span = assembly.AsSpan();
+        var cursor = metadataStart + 16 + checked((int)BinaryPrimitives.ReadUInt32LittleEndian(span[(metadataStart + 12)..]));
+        cursor = (cursor + 3) & ~3;
+        var streams = BinaryPrimitives.ReadUInt16LittleEndian(span[(cursor + 2)..]);
+        cursor += 4;
+        var tables = 0;
+        for (var i = 0; i < streams; i++)
+        {
+            var offset = BinaryPrimitives.ReadUInt32LittleEndian(span[cursor..]);
+            var nameStart = cursor + 8;
+            var end = nameStart;
+            while (span[end] != 0) end++;
+            var name = Encoding.ASCII.GetString(span[nameStart..end]);
+            if (name is "#~" or "#-") tables = checked(metadataStart + (int)offset);
+            cursor = (end + 4) & ~3;
+        }
+        if (tables == 0 || (span[tables + 6] & 7) != 0) throw new InvalidOperationException("Fixture metadata heaps are unexpectedly large.");
+        var valid = BinaryPrimitives.ReadUInt64LittleEndian(span[(tables + 8)..]);
+        var rows = new uint[64];
+        cursor = tables + 24;
+        for (var table = 0; table < 64; table++)
+            if ((valid & (1UL << table)) != 0)
+            {
+                rows[table] = BinaryPrimitives.ReadUInt32LittleEndian(span[cursor..]);
+                if (rows[table] >= 2048) throw new InvalidOperationException("Fixture metadata tables are unexpectedly large.");
+                cursor += 4;
+            }
+        int[] rowSizes = [10, 6, 14, 2, 6, 2, 14, 2, 6, 4, 6, 6];
+        for (var table = 0; table < rowSizes.Length; table++) cursor += checked((int)rows[table] * rowSizes[table]);
+        if ((uint)informationalRow > rows[12] || (uint)fileVersionRow > rows[12]) throw new InvalidOperationException("Invalid fixture metadata row.");
+        span.Slice(cursor + (informationalRow - 1) * 6, 6).CopyTo(span.Slice(cursor + (fileVersionRow - 1) * 6, 6));
     }
 
     private static Dictionary<string, (byte[], byte[])> Publish()
@@ -302,6 +497,6 @@ internal static class AgentPackageCorpus
             }
             return result;
         }
-        finally { if (Directory.Exists(outputRoot)) Directory.Delete(outputRoot, true); }
+        finally { DeleteOwnedTemp(outputRoot, "kr-package-fixture-"); }
     }
 }

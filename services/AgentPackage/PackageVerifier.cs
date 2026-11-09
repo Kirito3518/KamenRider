@@ -368,7 +368,9 @@ public static class PackageVerifier
     {
         var memory = (MemoryStream)stream;
         if (!memory.TryGetBuffer(out var bytes)) throw new InvalidOperationException();
-        StrictUtf8.GetCharCount(bytes.AsSpan(0, checked((int)memory.Length)));
+        var data = bytes.AsSpan(0, checked((int)memory.Length));
+        if (data.Length >= 3 && data[0] == 0xef && data[1] == 0xbb && data[2] == 0xbf) throw new DecoderFallbackException();
+        StrictUtf8.GetCharCount(data);
     }
 
     private static void NoDuplicateProperties(JsonElement element)
@@ -444,7 +446,9 @@ public static class PackageVerifier
         {
             using var pe = new PEReader(data, PEStreamOptions.LeaveOpen);
             var headers = pe.PEHeaders;
-            if (headers.PEHeader is null || (headers.CoffHeader.Characteristics & Characteristics.Dll) != 0) throw RuntimeError();
+            if (headers.PEHeader is null || headers.PEHeader.Magic != PEMagic.PE32Plus
+                || (headers.CoffHeader.Characteristics & Characteristics.ExecutableImage) == 0
+                || (headers.CoffHeader.Characteristics & Characteristics.Dll) != 0 || pe.HasMetadata) throw RuntimeError();
             return headers.CoffHeader.Machine switch { Machine.Amd64 => "win-x64", Machine.Arm64 => "win-arm64", _ => throw RuntimeError() };
         }
         catch (PackageValidationException) { throw; }

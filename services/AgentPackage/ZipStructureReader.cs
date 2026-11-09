@@ -176,7 +176,8 @@ internal static class ZipStructureReader
     }
 
     private static bool TimesAgree(uint? unix, long? ntfs)
-        => !unix.HasValue || !ntfs.HasValue || (ntfs.Value - 116444736000000000L) / 10000000L == unix.Value;
+        => !unix.HasValue || !ntfs.HasValue || ntfs.Value >= 116444736000000000L
+            && (ntfs.Value - 116444736000000000L) / 10000000L == unix.Value;
 
     private static uint NameCrc(ReadOnlySpan<byte> bytes)
     {
