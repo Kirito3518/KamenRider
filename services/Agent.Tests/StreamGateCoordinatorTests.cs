@@ -25,6 +25,7 @@ public class StreamGateCoordinatorTests
         public bool Blocked = true;
         public Exception? FailNextAllow;
         public Exception? FailNextBlock;
+        public Exception? AlwaysFailBlock;
         public Action? AfterVerify;
         public ManualResetEventSlim? AllowEntered;
         public ManualResetEventSlim? ContinueAllow;
@@ -34,6 +35,8 @@ public class StreamGateCoordinatorTests
         {
             cancellationToken.ThrowIfCancellationRequested();
             events.Add(blocked ? "firewall:block" : "firewall:allow");
+            if (blocked && AlwaysFailBlock is { } permanentBlockError)
+                return Task.FromException(permanentBlockError);
             if (blocked && FailNextBlock is { } blockError)
             {
                 FailNextBlock = null;
@@ -271,6 +274,112 @@ public class StreamGateCoordinatorTests
         Assert.Equal(freshGrant, f.Gate.CurrentGrant);
         Assert.False(f.Ingress.Blocked);
         Assert.True(f.Sunshine.Running);
+    }
+
+    [Fact]
+    public async Task FinishingOneOfTwoClosersCannotAdmitAGrantWhileTheOtherStillRuns()
+    {
+        var f = new Fixture();
+        using var firstEntered = new ManualResetEventSlim();
+        using var continueFirst = new ManualResetEventSlim();
+        using var secondEntered = new ManualResetEventSlim();
+        using var continueSecond = new ManualResetEventSlim();
+        f.Ingress.AfterVerify = () =>
+        {
+            f.Ingress.AfterVerify = () =>
+            {
+                f.Ingress.AfterVerify = null;
+                secondEntered.Set();
+                if (!continueSecond.Wait(TimeSpan.FromSeconds(5)))
+                    throw new TimeoutException("The test did not release the second close.");
+            };
+            firstEntered.Set();
+            if (!continueFirst.Wait(TimeSpan.FromSeconds(5)))
+                throw new TimeoutException("The test did not release the first close.");
+        };
+
+        var first = Task.Run(() => f.Gate.BlockAsync(default));
+        Task second = Task.CompletedTask;
+        try
+        {
+            Assert.True(firstEntered.Wait(TimeSpan.FromSeconds(5)));
+            second = f.Gate.BlockAsync(default);
+            Assert.False(second.IsCompleted);
+            continueFirst.Set();
+            await first;
+            Assert.True(secondEntered.Wait(TimeSpan.FromSeconds(5)));
+
+            var allow = f.Gate.AllowAsync(f.Grant(), default);
+            Assert.True(allow.IsCompleted, "Finishing the first closer must not retire another active closer's admission fence.");
+            await Assert.ThrowsAsync<InvalidOperationException>(() => allow);
+        }
+        finally
+        {
+            continueFirst.Set();
+            continueSecond.Set();
+            await first;
+            await second;
+        }
+
+        Assert.True(f.Ingress.Blocked);
+        Assert.False(f.Sunshine.Running);
+        Assert.Null(f.Gate.CurrentGrant);
+        Assert.DoesNotContain("firewall:allow", f.Events);
+        await f.Gate.AllowAsync(f.Grant(), default);
+        Assert.False(f.Ingress.Blocked);
+        Assert.True(f.Sunshine.Running);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task PermanentCloseFailureDoesNotPoisonGrantAdmissionAfterTheFirewallRecovers(bool contended)
+    {
+        var f = new Fixture();
+        using var allowEntered = new ManualResetEventSlim();
+        using var continueAllow = new ManualResetEventSlim();
+        Task opening = Task.CompletedTask;
+        Task closing = Task.CompletedTask;
+        try
+        {
+            if (contended)
+            {
+                f.Ingress.AllowEntered = allowEntered;
+                f.Ingress.ContinueAllow = continueAllow;
+                opening = Task.Run(() => f.Gate.AllowAsync(f.Grant(), default));
+                Assert.True(allowEntered.Wait(TimeSpan.FromSeconds(5)));
+            }
+            f.Ingress.AlwaysFailBlock = new IOException("Firewall closure is unavailable throughout this attempt.");
+            closing = f.Gate.BlockAsync(default);
+            if (contended)
+            {
+                Assert.False(closing.IsCompleted);
+                var rejected = f.Gate.AllowAsync(f.Grant(revision: 2, deadline: 121000, expirySeconds: 120), default);
+                Assert.True(rejected.IsCompleted);
+                await Assert.ThrowsAsync<InvalidOperationException>(() => rejected);
+                continueAllow.Set();
+                Assert.NotNull(await Record.ExceptionAsync(() => opening));
+            }
+            await Assert.ThrowsAsync<AggregateException>(() => closing);
+            Assert.False(f.Sunshine.Running);
+            Assert.Null(f.Gate.CurrentGrant);
+        }
+        finally
+        {
+            continueAllow.Set();
+            await Record.ExceptionAsync(() => opening);
+            await Record.ExceptionAsync(() => closing);
+            f.Ingress.AlwaysFailBlock = null;
+            f.Ingress.AllowEntered = null;
+            f.Ingress.ContinueAllow = null;
+        }
+
+        var freshGrant = f.Grant(revision: 2, deadline: 121000, expirySeconds: 120);
+        await f.Gate.AllowAsync(freshGrant, default);
+        Assert.Equal(freshGrant, f.Gate.CurrentGrant);
+        Assert.False(f.Ingress.Blocked);
+        Assert.True(f.Sunshine.Running);
+        Assert.True(f.Events.LastIndexOf("firewall:block") < f.Events.LastIndexOf("sunshine:start"));
     }
 
     [Fact]
