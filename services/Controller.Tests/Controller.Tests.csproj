@@ -24,6 +24,7 @@
     <Compile Remove="Fixtures\LegacyAgentMetadataFixture\**\*.cs" />
     <Compile Remove="Fixtures\AgentVersionTwo\**\*.cs" />
     <Compile Remove="Fixtures\AgentVersionThree\**\*.cs" />
+    <Compile Remove="Fixtures\AgentPackageProtocolTwo\**\*.cs" />
   </ItemGroup>
 
   <ItemGroup>
@@ -34,6 +35,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\AgentPackage\AgentPackage.csproj" />
     <ProjectReference Include="..\Agent\Agent.csproj" />
     <ProjectReference Include="Fixtures\AgentMetadataFixture\AgentMetadataFixture.csproj" />
     <ProjectReference Include="Fixtures\LegacyAgentMetadataFixture\LegacyAgentMetadataFixture.csproj" />
