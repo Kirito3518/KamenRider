@@ -7,6 +7,7 @@ import { join } from "node:path";
 const port = 3002;
 const scenarios = [
   { name: "configured", expected: "available", vncSource: "192.168.1.10", full: true, overrides: { AGENT_VNC_ALLOWED_SOURCE_IP: "192.168.1.10" } },
+  { name: "loopback-http-update-rejected", expected: "unavailable", updateExpected: "unavailable", updateOnly: true, overrides: { AGENT_CONTROLLER_URL: "http://127.0.0.1:7443" } },
   { name: "configured-vnc-source", expected: "available", vncSource: "192.168.1.10", overrides: { AGENT_VNC_ALLOWED_SOURCE_IP: "192.168.1.10" } },
   { name: "loopback-controller-without-vnc-source", expected: "unavailable", overrides: { AGENT_VNC_ALLOWED_SOURCE_IP: "" } },
   { name: "loopback-vnc-source-rejected", expected: "unavailable", overrides: { AGENT_VNC_ALLOWED_SOURCE_IP: "127.0.0.1" } },
@@ -45,6 +46,7 @@ for (const scenario of scenarios) {
     TEST_AUTH_DB: database,
     TEST_AUTH_URL: base,
     TEST_AGENT_INSTALL_EXPECTED: scenario.expected,
+    TEST_AGENT_UPDATE_EXPECTED: scenario.updateExpected || "available",
     TEST_AGENT_INSTALL_VNC_SOURCE_EXPECTED: scenario.vncSource || "",
     AGENT_INSTALL_ENABLED: "true",
     AGENT_INSTALL_BASE_URL: base,
@@ -94,7 +96,9 @@ for (const scenario of scenarios) {
     }
     if (!ready) throw new Error(`Test server did not become ready for ${scenario.name}`);
 
-    const testArgs = scenario.full
+    const testArgs = scenario.updateOnly
+      ? ["--test", "--test-name-pattern=agent (install command|update)", "tests/machines.test.mjs"]
+      : scenario.full
       ? ["--test", "tests/machines.test.mjs"]
       : ["--test", "--test-name-pattern=agent install command", "tests/machines.test.mjs"];
     const tests = spawn(process.execPath, testArgs, { env, stdio: "inherit" });

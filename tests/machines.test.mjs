@@ -557,10 +557,20 @@ test("agent update release and command routes enforce Admin origin and forward e
     assert.ok(uploadRequest.rawBody.includes("AgentPackage.zip"));
     assert.ok(uploadRequest.rawBody.includes("package bytes"));
 
+    const beforeCommand = requests.length;
     const command = await call("/admin/machines/pc/agent-update-command", { releaseVersion: "2.0.0" }, adminCookie);
     assert.equal(command.status, 200);
     assert.equal(command.headers.get("cache-control"), "no-store");
     const commandResult = await command.json();
+    if (process.env.TEST_AGENT_UPDATE_EXPECTED === "unavailable") {
+      assert.equal(commandResult.available, false);
+      assert.match(commandResult.reason, /HTTPS/);
+      assert.equal(requests.length, beforeCommand, "invalid URL must fail before reserving a maintenance lock");
+      const recovery = await call("/admin/machines/pc/agent-update-command", { operationId: "operation-1" }, adminCookie);
+      assert.equal((await recovery.json()).available, false);
+      assert.equal(requests.length, beforeCommand, "invalid URL must not rotate a recovery ticket");
+      return;
+    }
     assert.match(commandResult.command, /-OperationId 'operation-1'/);
     assert.match(commandResult.command, /-UpdateTicket 'U{43}'/);
     assert.match(commandResult.command, /-PackageSha256 'B{64}'/);

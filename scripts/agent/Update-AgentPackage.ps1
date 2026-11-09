@@ -40,7 +40,7 @@ function Test-AgentUpdatePackageManifest {
     if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { throw 'Agent package manifest is missing.' }
     try { $manifest = [IO.File]::ReadAllText($manifestPath) | ConvertFrom-Json -ErrorAction Stop } catch { throw 'Agent package manifest is invalid JSON.' }
     if ($manifest.packageFormatVersion -ne 1 -or $manifest.agentInformationalVersion -cne $TargetVersion -or
-        $manifest.sourceCommit -notmatch '\A[0-9a-f]{12}\z' -or $manifest.sourceDirty -ne $false -or $manifest.releaseBuild -ne $true) {
+        $manifest.sourceCommit -cnotmatch '\A[0-9a-f]{12}\z' -or $manifest.sourceDirty -ne $false -or $manifest.releaseBuild -ne $true -or $manifest.agentUpdateChallengeProtocol -ne 1) {
         throw 'Agent package manifest does not identify the requested clean release.'
     }
     return $manifest
@@ -232,7 +232,13 @@ function Invoke-AgentUpdateTransaction {
             if (-not (Test-Path -LiteralPath (Join-Path $plan.BackupDirectory $required) -PathType Leaf)) { throw 'Protected rollback backup is incomplete.' }
         }
         if ((Get-AgentUpdatePackageVersion -AgentDirectory $plan.BackupDirectory) -ceq $TargetVersion) { throw 'Protected rollback backup does not identify a previous Agent version.' }
-        $resumeUpdate = (Test-Path -LiteralPath $install -PathType Container) -and -not (Test-Path -LiteralPath $plan.RestoreDirectory) -and (Test-AgentUpdateTreesEquivalent -First $install -Second $plan.BackupDirectory)
+        $verifiedMarker = Join-Path $plan.RestoreDirectory 'rollback-verified.txt'
+        $verifiedRestore = (Test-Path -LiteralPath $verifiedMarker -PathType Leaf) -and
+            @(Get-ChildItem -LiteralPath $plan.RestoreDirectory -Force).Count -eq 1 -and
+            [IO.File]::ReadAllText($verifiedMarker) -ceq 'services-started'
+        $resumeUpdate = (Test-Path -LiteralPath $install -PathType Container) -and
+            ((-not (Test-Path -LiteralPath $plan.RestoreDirectory)) -or $verifiedRestore) -and
+            (Test-AgentUpdateTreesEquivalent -First $install -Second $plan.BackupDirectory)
         if (-not $resumeUpdate) {
             & $ServiceApi.StopAgent
             & $ServiceApi.StopGuard
@@ -240,8 +246,10 @@ function Invoke-AgentUpdateTransaction {
             if (Test-Path -LiteralPath $plan.StageDirectory) { Remove-Item -LiteralPath $plan.StageDirectory -Recurse -Force }
             if (Test-Path -LiteralPath $plan.PriorDirectory) { Remove-Item -LiteralPath $plan.PriorDirectory -Recurse -Force }
             Invoke-AgentUpdateServiceStart -ServiceApi $ServiceApi
+            [IO.File]::WriteAllText($verifiedMarker, 'services-started')
             return [pscustomobject]@{ Outcome = 'rolledBack'; InstallDirectory = $install; BackupDirectory = $plan.BackupDirectory; Message = 'Interrupted Agent swap restored from its protected backup.' }
         }
+        if ($verifiedRestore) { Remove-Item -LiteralPath $verifiedMarker -Force; Remove-Item -LiteralPath $plan.RestoreDirectory -Force }
         if (Test-Path -LiteralPath $plan.StageDirectory) { Remove-Item -LiteralPath $plan.StageDirectory -Recurse -Force }
         if (Test-Path -LiteralPath $plan.PriorDirectory) { Remove-Item -LiteralPath $plan.PriorDirectory -Recurse -Force }
     }
@@ -298,6 +306,7 @@ function Invoke-AgentUpdateTransaction {
                     if (Test-Path -LiteralPath $prior) { Remove-Item -LiteralPath $prior -Recurse -Force }
                 }
                 Invoke-AgentUpdateServiceStart -ServiceApi $ServiceApi
+                if ($swapStarted) { [IO.File]::WriteAllText((Join-Path $plan.RestoreDirectory 'rollback-verified.txt'), 'services-started') }
                 $rollbackSucceeded = $true
             } catch { $failure += ' Rollback error: ' + $_.Exception.Message }
         }

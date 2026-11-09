@@ -13,8 +13,11 @@ public sealed partial class ControllerDatabase : IDisposable
     private readonly object gate=new();
     private readonly EnrollmentPolicy policy;
     private readonly TimeProvider clock;
+    private readonly string agentReleaseRoot;
+    private readonly byte[] agentUpdateEpoch = RandomNumberGenerator.GetBytes(32);
     public ControllerDatabase(string path, EnrollmentPolicy? policy = null, TimeProvider? clock = null) {
         this.policy = policy ?? new(); this.clock = clock ?? TimeProvider.System;
+        agentReleaseRoot=Path.Combine(Path.GetDirectoryName(Path.GetFullPath(path))!,"agent-releases");
         if (this.policy.MaxPending <= 0 || this.policy.NewPerMinute <= 0) throw new ArgumentException("Positive enrollment limits required");
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
         connection=new SqliteConnection(new SqliteConnectionStringBuilder {DataSource=path, ForeignKeys=true, Pooling=false}.ToString()); connection.Open();

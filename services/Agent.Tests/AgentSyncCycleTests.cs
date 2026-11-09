@@ -14,6 +14,27 @@ using KamenRaider.Contracts;
 namespace Agent.Tests;
 
 public class AgentSyncCycleTests {
+    [Fact] public async Task EchoesControllerUpdateChallengeOnlyInTheNextSignedHeartbeat() {
+        using var f=new Fixture();
+        using var transport=new ChallengeTransport();
+        using var identity=DeviceIdentity.LoadOrCreate(Path.Combine(f.Directory,"identity"));
+        using var http=new HttpClient(transport);
+        var cycle=new AgentSyncCycle(new SyncClient(http,identity),new("https://controller.test"),f.Clock,f.Configuration,new LeaseCommandDispatcher(f.Enforcer));
+
+        await cycle.RunAsync("boot","192.0.2.1","001122334455",Readiness.NotReady,default);
+        await cycle.RunAsync("boot","192.0.2.1","001122334455",Readiness.NotReady,default);
+
+        Assert.False(transport.Requests[0].TryGetProperty("agentUpdateChallenge",out var first) && first.ValueKind != JsonValueKind.Null);
+        Assert.Equal("post-outcome-challenge",transport.Requests[1].GetProperty("agentUpdateChallenge").GetString());
+    }
+
+    private sealed class ChallengeTransport:HttpMessageHandler {
+        public List<JsonElement> Requests=[];
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,CancellationToken ct) {
+            using var body=JsonDocument.Parse(await request.Content!.ReadAsStringAsync(ct)); Requests.Add(body.RootElement.Clone());
+            return new(HttpStatusCode.OK){Content=JsonContent.Create(new {serverTimeUtc=DateTimeOffset.UtcNow,configuration=new {revision=1,moonlightPort=5000,sunshinePort=6000},commands=Array.Empty<object>(),agentUpdateChallenge="post-outcome-challenge"})};
+        }
+    }
     [Fact] public async Task PrepareMachineWithoutProviderFailsInsteadOfBeingIgnored() {
         using var f=new Fixture();var dispatcher=new LeaseCommandDispatcher(f.Enforcer);
         var command=new CommandEnvelope("prepare","PrepareMachine","rental",1,"boot",f.Clock.Now.AddMinutes(3),JsonSerializer.SerializeToElement(new{}));

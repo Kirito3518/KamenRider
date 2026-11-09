@@ -8,4 +8,7 @@
     <InformationalVersion>2.3.4</InformationalVersion>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
   </PropertyGroup>
+  <ItemGroup>
+    <AssemblyMetadata Include="AgentUpdateChallengeProtocol" Value="1" />
+  </ItemGroup>
 </Project>

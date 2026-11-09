@@ -71,7 +71,7 @@ try {
         [IO.File]::WriteAllText((Join-Path $data 'enrollment-receipt.json'),'{"MachineId":"00112233445566778899aabbccddeeff"}')
         [IO.File]::WriteAllText((Join-Path $package 'Agent\Agent.exe'),'new-agent')
         [IO.File]::WriteAllText((Join-Path $package 'Agent\Agent.deps.json'),'{"libraries":{"Agent/2.3.4":{"type":"project"}}}')
-        [IO.File]::WriteAllText((Join-Path $package 'AgentPackage.manifest.json'),'{"packageFormatVersion":1,"agentInformationalVersion":"2.3.4","sourceCommit":"0123456789ab","sourceDirty":false,"releaseBuild":true}')
+        [IO.File]::WriteAllText((Join-Path $package 'AgentPackage.manifest.json'),'{"packageFormatVersion":1,"agentInformationalVersion":"2.3.4","sourceCommit":"0123456789ab","sourceDirty":false,"releaseBuild":true,"agentUpdateChallengeProtocol":1}')
         foreach ($name in @('Install-AgentPackage.ps1','Install-Service.ps1','Install-TightVncServer.ps1','Prepare-SunshineStreamGate.ps1','PrivateInstallFiles.ps1','ServiceInstallTransaction.ps1')) { Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination (Join-Path $package $name) }
         Copy-Item -LiteralPath $script:publicUpdater -Destination (Join-Path $package 'Update-Agent.ps1')
         $wrapper = @'

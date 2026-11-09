@@ -70,8 +70,8 @@ export async function POST(request: Request, { params }: { params: Promise<{ mac
     const thumbprint = process.env.AGENT_TRUST_ROOT_THUMBPRINT?.toUpperCase();
     if (process.env.AGENT_INSTALL_ENABLED !== "true" || !base || !controller || !/^[A-F0-9]{40}$/.test(thumbprint || ""))
       return { available: false, reason: "Agent update URLs or trusted root are not configured" };
-    if (controller.protocol !== "https:" && !(controller.protocol === "http:" && loopback(controller.hostname)))
-      return { available: false, reason: "Controller URL must use HTTPS or a loopback development URL" };
+    if (controller.protocol !== "https:")
+      return { available: false, reason: "Controller URL must use HTTPS" };
 
     let script: Buffer;
     try {

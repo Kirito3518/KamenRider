@@ -31,6 +31,9 @@ $rejected=$false
 try {& $build -ReleaseVersion 'not-a-version' -Plan} catch {$rejected=$true}
 if(-not $rejected){throw 'Invalid explicit release versions must be rejected.'}
 $rejected=$false
+try {& $build -ReleaseVersion '1.0.0+g0123456789ab.dirty.20261109120000' -Plan} catch {$rejected=$true}
+if(-not $rejected){throw 'Dirty version tokens cannot be consumed by the updater and must be rejected for releases.'}
+$rejected=$false
 try {& $build -ReleaseVersion '2.3.4' -OutputDirectory ([IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\public\releases')) ) -Plan} catch {$rejected=$true}
 if(-not $rejected){throw 'Explicit release output under public/ must be rejected.'}
 $publish=Join-Path $PSScriptRoot 'Publish-Services.ps1'

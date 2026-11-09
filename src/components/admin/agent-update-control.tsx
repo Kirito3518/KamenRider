@@ -26,7 +26,7 @@ export function AgentUpdateControl({ machine, onUpdated }: { machine: Machine; o
   const targetVersion = awaitingSnapshot ? command?.targetVersion : machine.agentUpdateTargetVersion;
   const locked = Boolean(status && !terminal.has(status));
   const leaseClear = machine.allocationHeld === false;
-  const canStart = leaseClear && !locked && machine.approvalStatus === "approved" && Boolean(machine.agentVersion) && isAgentOnline(machine, clock);
+  const canStart = leaseClear && !locked && Boolean(machine.agentVersion) && isAgentOnline(machine, clock);
   const canRecover = leaseClear && Boolean(status && recoverable.has(status) && machine.agentUpdateOperationId);
   const expires = command?.expiresAtUtc ? Date.parse(command.expiresAtUtc) : NaN;
   const expired = !Number.isFinite(expires) || clock >= expires;
@@ -92,8 +92,8 @@ export function AgentUpdateControl({ machine, onUpdated }: { machine: Machine; o
     <p className="text-sm">สถานะอัปเดต: {status ? updateStatusLabels[status] || status : "ยังไม่มีการอัปเดต"}{targetVersion ? ` · เป้าหมาย ${targetVersion}` : ""}</p>
     <p className="text-sm text-muted-foreground">ผลอัปเดตแยกจากการอนุมัติและความพร้อมให้เช่า</p>
     {!leaseClear ? <p className="text-sm">{machine.allocationHeld ? "เครื่องมี lease อยู่ จึงอัปเดตไม่ได้" : "ไม่ทราบสถานะ lease กรุณารีเฟรชข้อมูลเครื่อง"}</p> : null}
-    {leaseClear && !locked && machine.approvalStatus !== "approved" ? <p className="text-sm">ต้องอนุมัติเครื่องก่อนอัปเดต</p> : null}
-    {leaseClear && !locked && machine.approvalStatus === "approved" && (!machine.agentVersion || !isAgentOnline(machine, clock)) ? <p className="text-sm">ต้องมี heartbeat ล่าสุดพร้อมเวอร์ชัน Agent ภายใน 20 วินาที</p> : null}
+    {leaseClear && !locked && (!machine.agentVersion || !isAgentOnline(machine, clock)) ? <p className="text-sm">ต้องมี heartbeat ล่าสุดพร้อมเวอร์ชัน Agent ภายใน 20 วินาที</p> : null}
+    {status === "rollingBack" ? <p className="text-sm">หาก Agent รุ่นเดิมไม่รองรับการยืนยันหลัง rollback เครื่องจะยังถูกล็อก ใช้กู้คืนการอัปเดตเดิมเพื่อติดตั้งเป้าหมายเดิมที่รองรับการยืนยัน หากเป้าหมายเดิมเป็น release เก่าที่ไม่รองรับ ให้หยุดและวางแผนกู้คืนกับผู้ดูแล</p> : null}
     <div className="flex flex-wrap gap-2">
       <button type="button" className="rounded border px-3 py-2 text-sm disabled:opacity-50" disabled={!canStart || busy || Boolean(command && !expired && !terminal.has(status || ""))} onClick={() => void chooseRelease()}>Update Agent</button>
       {status && recoverable.has(status) ? <button type="button" className="rounded border px-3 py-2 text-sm disabled:opacity-50" disabled={!canRecover || busy} onClick={() => void requestCommand({ operationId: machine.agentUpdateOperationId! })}>กู้คืนการอัปเดต</button> : null}

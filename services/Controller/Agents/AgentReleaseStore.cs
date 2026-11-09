@@ -36,9 +36,12 @@ public sealed class AgentReleaseStore
         "Prepare-SunshineStreamGate.ps1",
         "PrivateInstallFiles.ps1",
         "ServiceInstallTransaction.ps1",
+        "Update-AgentPackage.ps1",
+        "Update-Agent.ps1",
     ];
-    private static readonly Regex SupportedVersion = new(@"\A(?:\d+\.\d+\.\d+|1\.0\.0\+g[0-9a-f]{12,40}(?:\.dirty\.\d{14})?)\z", RegexOptions.CultureInvariant | RegexOptions.Compiled);
-    private static readonly Regex SourceCommit = new(@"\A[0-9a-f]{12,40}\z", RegexOptions.CultureInvariant | RegexOptions.Compiled);
+    private static readonly HashSet<string> AllowedRootEntries = new(RequiredFiles.Where(file => !file.StartsWith("Agent/", StringComparison.Ordinal)).Append("Agent").Append("AgentPackage.manifest.json"), StringComparer.OrdinalIgnoreCase);
+    private static readonly Regex SupportedVersion = new(@"\A(?:\d+\.\d+\.\d+|1\.0\.0\+g[0-9a-f]{12,40})\z", RegexOptions.CultureInvariant | RegexOptions.Compiled);
+    private static readonly Regex SourceCommit = new(@"\A[0-9a-f]{12}\z", RegexOptions.CultureInvariant | RegexOptions.Compiled);
     private readonly string artifactRoot;
 
     public AgentReleaseStore(string artifactRoot)
@@ -168,6 +171,15 @@ public sealed class AgentReleaseStore
         }
     }
 
+    internal void ValidateRetainedForUpdate(string path, long size, string version, string expectedHash)
+    {
+        if (version.Length > 64 || !SupportedVersion.IsMatch(version))
+            throw new AgentReleaseValidationException("Invalid Agent release version");
+        var (actualHash, _) = ValidatePackage(path, size, version);
+        if (!string.Equals(actualHash, expectedHash, StringComparison.OrdinalIgnoreCase))
+            throw new AgentReleaseValidationException("Stored Agent package does not match its content address");
+    }
+
     private (string Sha256, AgentPackageManifest Manifest) ValidatePackage(string path, long compressedSize, string version)
     {
         if (compressedSize <= 0 || compressedSize > MaximumCompressedBytes)
@@ -189,6 +201,8 @@ public sealed class AgentReleaseStore
         {
             var isDirectory = entry.FullName.EndsWith("/", StringComparison.Ordinal);
             var normalized = ValidateEntryPath(entry.FullName, isDirectory);
+            if (!AllowedRootEntries.Contains(normalized.Split('/')[0]))
+                throw new AgentReleaseValidationException("Agent package contains an unexpected root entry");
             if (!paths.TryAdd(normalized, isDirectory))
                 throw new AgentReleaseValidationException("Agent package contains duplicate ZIP entry paths");
             RejectPathCollisions(paths, pathsWithDescendants, normalized, isDirectory);
@@ -237,6 +251,8 @@ public sealed class AgentReleaseStore
         var manifest = ReadManifest(manifestEntry);
         if (manifest.PackageFormatVersion != PackageFormatVersion)
             throw new AgentReleaseValidationException("Unsupported Agent package format version");
+        if (manifest.AgentUpdateChallengeProtocol != 1)
+            throw new AgentReleaseValidationException("Agent package does not support update confirmation; publish a compatible release");
         if (!string.Equals(manifest.AgentInformationalVersion, version, StringComparison.Ordinal))
             throw new AgentReleaseValidationException("Release version does not match the Agent informational version in the package manifest");
         ValidateAgentDependencyVersion(paths, archive, version);
@@ -303,12 +319,26 @@ public sealed class AgentReleaseStore
                 throw new AgentReleaseValidationException("Agent/Agent.dll does not contain assembly metadata");
 
             string? informationalVersion = null;
+            string? challengeProtocol = null;
             var assembly = metadata.GetAssemblyDefinition();
             foreach (var attributeHandle in assembly.GetCustomAttributes())
             {
                 var attribute = metadata.GetCustomAttribute(attributeHandle);
-                if (!IsAssemblyInformationalVersionAttribute(metadata, attribute.Constructor))
+                if (IsAssemblyAttribute(metadata, attribute.Constructor, "AssemblyMetadataAttribute"))
+                {
+                    var data = metadata.GetBlobReader(attribute.Value);
+                    if (data.ReadUInt16() != 1) throw new AgentReleaseValidationException("Agent/Agent.dll has malformed capability metadata");
+                    var key = data.ReadSerializedString();
+                    var capabilityValue = data.ReadSerializedString();
+                    if (data.ReadUInt16() != 0 || data.RemainingBytes != 0) throw new AgentReleaseValidationException("Agent/Agent.dll has malformed capability metadata");
+                    if (key == "AgentUpdateChallengeProtocol")
+                    {
+                        if (challengeProtocol is not null) throw new AgentReleaseValidationException("Agent/Agent.dll has duplicate update capability metadata");
+                        challengeProtocol = capabilityValue ?? "";
+                    }
                     continue;
+                }
+                if (!IsAssemblyAttribute(metadata, attribute.Constructor, "AssemblyInformationalVersionAttribute")) continue;
                 if (informationalVersion is not null)
                     throw new AgentReleaseValidationException("Agent/Agent.dll has duplicate informational version attributes");
 
@@ -323,6 +353,8 @@ public sealed class AgentReleaseStore
 
             if (!string.Equals(informationalVersion, version, StringComparison.Ordinal))
                 throw new AgentReleaseValidationException("Release version does not match Agent/Agent.dll AssemblyInformationalVersion");
+            if (challengeProtocol != "1")
+                throw new AgentReleaseValidationException("Agent/Agent.dll does not support update confirmation; publish a compatible release");
         }
         catch (AgentReleaseValidationException)
         {
@@ -338,7 +370,7 @@ public sealed class AgentReleaseStore
         }
     }
 
-    private static bool IsAssemblyInformationalVersionAttribute(MetadataReader metadata, EntityHandle constructor)
+    private static bool IsAssemblyAttribute(MetadataReader metadata, EntityHandle constructor, string attributeName)
     {
         EntityHandle typeHandle = constructor.Kind switch
         {
@@ -349,7 +381,7 @@ public sealed class AgentReleaseStore
         if (typeHandle.Kind != HandleKind.TypeReference) return false;
         var type = metadata.GetTypeReference((TypeReferenceHandle)typeHandle);
         if (!string.Equals(metadata.GetString(type.Namespace), "System.Reflection", StringComparison.Ordinal)
-            || !string.Equals(metadata.GetString(type.Name), "AssemblyInformationalVersionAttribute", StringComparison.Ordinal)
+            || !string.Equals(metadata.GetString(type.Name), attributeName, StringComparison.Ordinal)
             || type.ResolutionScope.Kind != HandleKind.AssemblyReference)
             return false;
         var assemblyName = metadata.GetString(metadata.GetAssemblyReference((AssemblyReferenceHandle)type.ResolutionScope).Name);
@@ -413,7 +445,7 @@ public sealed class AgentReleaseStore
         foreach (var property in document.RootElement.EnumerateObject())
             if (!propertyNames.Add(property.Name))
                 throw new AgentReleaseValidationException("Agent package manifest contains duplicate fields");
-        var expected = new HashSet<string>(["packageFormatVersion", "agentInformationalVersion", "sourceCommit", "sourceDirty", "releaseBuild"], StringComparer.Ordinal);
+        var expected = new HashSet<string>(["packageFormatVersion", "agentInformationalVersion", "sourceCommit", "sourceDirty", "releaseBuild", "agentUpdateChallengeProtocol"], StringComparer.Ordinal);
         if (!propertyNames.SetEquals(expected))
             throw new AgentReleaseValidationException("Agent package manifest has unexpected or missing fields");
         var manifest = JsonSerializer.Deserialize<AgentPackageManifest>(document.RootElement.GetRawText(), new JsonSerializerOptions(JsonSerializerDefaults.Web));
@@ -459,7 +491,7 @@ public sealed class AgentReleaseStore
         catch (UnauthorizedAccessException) { }
     }
 
-    private sealed record AgentPackageManifest(int PackageFormatVersion, string AgentInformationalVersion, string SourceCommit, bool SourceDirty, bool ReleaseBuild);
+    private sealed record AgentPackageManifest(int PackageFormatVersion, string AgentInformationalVersion, string SourceCommit, bool SourceDirty, bool ReleaseBuild, int AgentUpdateChallengeProtocol);
 
     public sealed class StagedAgentPackage : IDisposable
     {

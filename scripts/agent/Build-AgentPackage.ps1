@@ -16,7 +16,7 @@ $statusLines=@(& git -C $repo status --porcelain --untracked-files=all)
 if($LASTEXITCODE -ne 0){throw 'Git working-tree status is required to version the Agent package.'}
 $agentVersion="1.0.0+g$revision"
 if($statusLines.Count -gt 0){$agentVersion+='.dirty.'+[DateTime]::UtcNow.ToString('yyyyMMddHHmmss',[Globalization.CultureInfo]::InvariantCulture)}
-if($ReleaseVersion -and ($ReleaseVersion.Length -gt 64 -or $ReleaseVersion -notmatch '\A(?:\d+\.\d+\.\d+|1\.0\.0\+g[0-9a-f]{12,40}(?:\.dirty\.\d{14})?)\z')){throw 'ReleaseVersion must be a supported informational version.'}
+if($ReleaseVersion -and ($ReleaseVersion.Length -gt 64 -or $ReleaseVersion -notmatch '\A(?:\d+\.\d+\.\d+|1\.0\.0\+g[0-9a-f]{12,40})\z')){throw 'ReleaseVersion must be a supported informational version.'}
 $releaseBuild= -not [string]::IsNullOrWhiteSpace($ReleaseVersion)
 if(-not $OutputDirectory){$OutputDirectory=if($releaseBuild){Join-Path $repo 'agent-release-artifacts'}else{Join-Path $repo 'public/agent'}}
 if(-not [IO.Path]::IsPathRooted($OutputDirectory)){throw 'OutputDirectory must be absolute.'}
@@ -28,7 +28,7 @@ $archive=Join-Path $OutputDirectory 'AgentPackage.zip'
 $hashFile=Join-Path $OutputDirectory 'AgentPackage.sha256'
 $manifestPath='AgentPackage.manifest.json'
 $agentVersion=if($releaseBuild){$ReleaseVersion}else{$agentVersion}
-$manifest=[pscustomobject]@{packageFormatVersion=1;agentInformationalVersion=$agentVersion;sourceCommit=$revision;sourceDirty=($statusLines.Count -gt 0);releaseBuild=$releaseBuild}
+$manifest=[pscustomobject]@{packageFormatVersion=1;agentInformationalVersion=$agentVersion;sourceCommit=$revision;sourceDirty=($statusLines.Count -gt 0);releaseBuild=$releaseBuild;agentUpdateChallengeProtocol=1}
 $scriptNames=@('Install-AgentPackage.ps1','Install-Service.ps1','Install-TightVncServer.ps1','Prepare-SunshineStreamGate.ps1','PrivateInstallFiles.ps1','ServiceInstallTransaction.ps1')
 if($releaseBuild){$scriptNames+=@('Update-AgentPackage.ps1','Update-Agent.ps1')}
 $entries=@('Agent')+$scriptNames+$manifestPath

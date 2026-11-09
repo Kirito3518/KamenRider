@@ -499,7 +499,7 @@ function Test-AgentUpdatePackageArchive {
         $manifestEntry = $zip.GetEntry('AgentPackage.manifest.json')
         $reader = [IO.StreamReader]::new($manifestEntry.Open())
         try { $manifest = $reader.ReadToEnd() | ConvertFrom-Json -ErrorAction Stop } finally { $reader.Dispose() }
-        if ($manifest.packageFormatVersion -ne 1 -or $manifest.agentInformationalVersion -cne $TargetVersion -or $manifest.sourceCommit -notmatch '\A[0-9a-f]{12}\z' -or $manifest.sourceDirty -ne $false -or $manifest.releaseBuild -ne $true) { throw 'Agent package manifest does not identify the requested clean release.' }
+        if ($manifest.packageFormatVersion -ne 1 -or $manifest.agentInformationalVersion -cne $TargetVersion -or $manifest.sourceCommit -cnotmatch '\A[0-9a-f]{12}\z' -or $manifest.sourceDirty -ne $false -or $manifest.releaseBuild -ne $true -or $manifest.agentUpdateChallengeProtocol -ne 1) { throw 'Agent package manifest does not identify the requested clean release with update confirmation support.' }
         return [pscustomobject]@{ EntryCount = $zip.Entries.Count; ExpandedBytes = $expanded; Manifest = $manifest }
     } finally { $zip.Dispose(); $ArchiveStream.Position = 0; if ($ownsStream) { $ArchiveStream.Dispose() } }
 }
@@ -689,8 +689,8 @@ function Invoke-AgentUpdateMain {
         $result = Invoke-AgentUpdateWorkflow -Request $normalized -LocalState $state -Actions $actions
     } finally { $lock.Dispose() }
     Write-Output $result.Result.Message
-    if ($result.Status -eq 'awaitingHeartbeat') { Write-Output "Agent $($normalized.TargetVersion) is running. Controller maintenance remains locked until its heartbeat confirms the version. The rollback copy is retained." }
-    elseif ($result.Status -eq 'rollingBack') { Write-Warning 'Agent binaries were restored. Controller maintenance remains locked until a heartbeat confirms the previous version.' }
+    if ($result.Status -eq 'awaitingHeartbeat') { Write-Output "Agent $($normalized.TargetVersion) is running. Controller maintenance remains locked until a later signed heartbeat echoes the current Controller update challenge with that version. The rollback copy is retained." }
+    elseif ($result.Status -eq 'rollingBack') { Write-Warning 'Agent binaries were restored. Controller maintenance remains locked until a later signed heartbeat echoes the current update challenge with the previous version. Older Agents may require same-operation recovery to install the compatible target.' }
     else { Write-Warning 'Agent update failed or its outcome is uncertain. The machine remains locked; use the Admin recovery action after reviewing local state.' }
     try { Start-Process -FilePath $normalized.AdminReturnUrl } catch { Write-Warning 'The update finished, but the Admin machines page could not be opened automatically.' }
 }

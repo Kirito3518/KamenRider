@@ -151,6 +151,20 @@ describe("Per-machine update", () => {
   });
   afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks(); Reflect.deleteProperty(navigator, "clipboard"); });
 
+  it("permits a pending machine update while preserving the rental gate", () => {
+    render(<AgentUpdateControl machine={{ ...machine, approvalStatus: "pending", canRent: false }} />);
+    expect((screen.getByRole("button", { name: "Update Agent" }) as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.getByText(/แยกจากการอนุมัติและความพร้อมให้เช่า/)).toBeDefined();
+  });
+
+  it("explains recovery when the rolled-back Agent cannot confirm the outcome", () => {
+    render(<AgentUpdateControl machine={{ ...machine, agentUpdateStatus: "rollingBack", agentUpdateOperationId: "op-1" }} />);
+    expect(screen.getByText(/Agent รุ่นเดิม.*ยืนยัน/)).toBeDefined();
+    expect((screen.getByRole("button", { name: "กู้คืนการอัปเดต" }) as HTMLButtonElement).disabled).toBe(false);
+    expect((screen.getByRole("button", { name: "Update Agent" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByText(/เป้าหมายเดิม.*รองรับ/)).toBeDefined();
+  });
+
   it("disables a held lease but permits an unready machine without one", () => {
     const { rerender } = render(<AgentUpdateControl machine={{ ...machine, allocationHeld: true }} />);
     expect((screen.getByRole("button", { name: "Update Agent" }) as HTMLButtonElement).disabled).toBe(true);

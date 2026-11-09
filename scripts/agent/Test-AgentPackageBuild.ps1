@@ -25,7 +25,7 @@ try {
   if(-not $defaultManifestEntry){throw 'Enrollment package is missing its manifest.'}
   $defaultManifestReader=[IO.StreamReader]::new($defaultManifestEntry.Open())
   try {$defaultManifest=$defaultManifestReader.ReadToEnd() | ConvertFrom-Json} finally {$defaultManifestReader.Dispose()}
-  if($defaultManifest.packageFormatVersion -ne 1 -or $defaultManifest.agentInformationalVersion -ne $result.AgentVersion -or $defaultManifest.sourceCommit -notmatch '\A[0-9a-f]{12}\z' -or $defaultManifest.sourceDirty -ne $expectedSourceDirty -or $defaultManifest.releaseBuild){throw 'Enrollment package manifest values are invalid.'}
+  if($defaultManifest.agentUpdateChallengeProtocol -ne 1 -or $defaultManifest.packageFormatVersion -ne 1 -or $defaultManifest.agentInformationalVersion -ne $result.AgentVersion -or $defaultManifest.sourceCommit -notmatch '\A[0-9a-f]{12}\z' -or $defaultManifest.sourceDirty -ne $expectedSourceDirty -or $defaultManifest.releaseBuild){throw 'Enrollment package manifest values are invalid.'}
   if(@($entries | Where-Object {$_ -match '(?i)(^|/)tightvnc[^/]*\.msi$'}).Count -ne 0){throw 'The separately licensed TightVNC MSI must not be bundled with the KamenRaider Agent package.'}
   if('Agent/appsettings.json' -in $entries){throw 'Package must not include the default appsettings.json; the installer publishes the protected configuration.'}
  } finally {$zip.Dispose()}
@@ -44,6 +44,8 @@ param([Parameter(Mandatory)][string]$AssemblyPath)
 $assembly=[Reflection.Assembly]::LoadFrom($AssemblyPath)
 $attribute=$assembly.GetCustomAttributes([Reflection.AssemblyInformationalVersionAttribute],$false) | Select-Object -First 1
 if(-not $attribute){throw 'Agent assembly has no informational version.'}
+$capability=@($assembly.GetCustomAttributes([Reflection.AssemblyMetadataAttribute],$false) | Where-Object {$_.Key -ceq 'AgentUpdateChallengeProtocol'})
+if($capability.Count -ne 1 -or $capability[0].Value -cne '1'){throw 'Agent assembly lacks update challenge support.'}
 Write-Output $attribute.InformationalVersion
 '@
   [IO.File]::WriteAllText($versionProbe,$versionProbeSource,[Text.Encoding]::UTF8)
@@ -66,7 +68,7 @@ Write-Output $attribute.InformationalVersion
   if(-not $manifestEntry){throw 'Release archive is missing its manifest.'}
   $manifestReader=[IO.StreamReader]::new($manifestEntry.Open())
   try {$manifest=$manifestReader.ReadToEnd() | ConvertFrom-Json} finally {$manifestReader.Dispose()}
-  if($manifest.packageFormatVersion -ne 1 -or $manifest.agentInformationalVersion -ne '2.3.4' -or $manifest.sourceCommit -notmatch '\A[0-9a-f]{12}\z' -or $manifest.sourceDirty -ne $expectedSourceDirty -or -not $manifest.releaseBuild){throw 'Release manifest values are invalid.'}
+  if($manifest.agentUpdateChallengeProtocol -ne 1 -or $manifest.packageFormatVersion -ne 1 -or $manifest.agentInformationalVersion -ne '2.3.4' -or $manifest.sourceCommit -notmatch '\A[0-9a-f]{12}\z' -or $manifest.sourceDirty -ne $expectedSourceDirty -or -not $manifest.releaseBuild){throw 'Release manifest values are invalid.'}
   if($manifestEntry.Name -cne 'AgentPackage.manifest.json'){throw 'Manifest path must be stable and case-sensitive.'}
   foreach($requiredUpdateScript in @('Update-AgentPackage.ps1','Update-Agent.ps1')){if(-not $releaseZip.GetEntry($requiredUpdateScript)){throw "Release archive is missing $requiredUpdateScript."}}
  } finally {$releaseZip.Dispose()}
@@ -79,6 +81,8 @@ param([Parameter(Mandatory)][string]$AssemblyPath)
 $assembly=[Reflection.Assembly]::LoadFrom($AssemblyPath)
 $attribute=$assembly.GetCustomAttributes([Reflection.AssemblyInformationalVersionAttribute],$false) | Select-Object -First 1
 if(-not $attribute){throw 'Agent assembly has no informational version.'}
+$capability=@($assembly.GetCustomAttributes([Reflection.AssemblyMetadataAttribute],$false) | Where-Object {$_.Key -ceq 'AgentUpdateChallengeProtocol'})
+if($capability.Count -ne 1 -or $capability[0].Value -cne '1'){throw 'Agent assembly lacks update challenge support.'}
 Write-Output $attribute.InformationalVersion
 '@
   [IO.File]::WriteAllText($versionProbe,$versionProbeSource,[Text.Encoding]::UTF8)

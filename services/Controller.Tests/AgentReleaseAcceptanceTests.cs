@@ -21,6 +21,21 @@ namespace Controller.Tests;
 public sealed class AgentReleaseAcceptanceTests
 {
     [Theory]
+    [InlineData("awaitingHeartbeat", "2.3.4")]
+    [InlineData("rollingBack", "1.2.3")]
+    public async Task SignedHeartbeatPreparedBeforeOutcomeCannotConfirmIt(string outcome, string version)
+    {
+        await using var fixture = await AcceptanceFixture.CreateAsync();
+        var ticket = await fixture.PublishAndReserveAsync();
+        await fixture.StartAndDownloadAsync(ticket);
+        using var delayed = await fixture.PrepareHeartbeatAsync(version);
+        await fixture.ReportAsync(ticket, outcome);
+
+        using var response = await fixture.SendPreparedHeartbeatAsync(delayed);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        await fixture.AssertLockedAsync(ticket, outcome);
+    }
+    [Theory]
     [InlineData("awaitingHeartbeat", "2.3.4", "completed")]
     [InlineData("rollingBack", "1.2.3", "rolledBack")]
     public async Task PublishedReleaseRemainsLockedUntilPostReportHeartbeatAndIndependentRentalGatesPass(
@@ -216,8 +231,12 @@ public sealed class AgentReleaseAcceptanceTests
             Assert.Equal("pending", (await MachineAsync()).ApprovalStatus);
             await AssertRentalRejectedAsync();
             using var pendingUpdate = await Admin.PostAsJsonAsync($"/internal/machines/{MachineId}/agent-updates", new AgentUpdateReservationRequest(release.Version));
-            Assert.Equal(HttpStatusCode.Conflict, pendingUpdate.StatusCode);
-            Assert.Null((await MachineAsync()).AgentUpdateOperationId);
+            Assert.Equal(HttpStatusCode.OK, pendingUpdate.StatusCode);
+            Assert.Equal("pending", (await MachineAsync()).ApprovalStatus);
+            await AssertRentalRejectedAsync();
+            Clock.Now = Clock.Now.AddMinutes(10);
+            await HeartbeatAsync("1.2.3");
+            Assert.Equal("expired", (await MachineAsync()).AgentUpdateStatus);
 
             await ConfigureAsync();
             using var approved = await Admin.PostAsJsonAsync($"/internal/machines/{MachineId}/approve",
@@ -271,24 +290,45 @@ public sealed class AgentReleaseAcceptanceTests
 
         public async Task HeartbeatAsync(string version, string readiness = "ready", long? appliedRevision = null)
         {
-            using var response = await SendSignedAsync("/agent/sync", new SyncRequest("acceptance-boot", "192.0.2.40", "001122334455",
-                appliedRevision ?? (await MachineAsync()).ConfigRevision, readiness, []) { AgentVersion = version });
+            var request = new SyncRequest("acceptance-boot", "192.0.2.40", "001122334455",
+                appliedRevision ?? (await MachineAsync()).ConfigRevision, readiness, []) { AgentVersion = version };
+            using var response = await SendSignedAsync("/agent/sync", request);
             Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            var result = await response.Content.ReadFromJsonAsync<SyncResponse>();
+            if (result?.AgentUpdateChallenge is { } challenge)
+            {
+                using var confirmation = await SendSignedAsync("/agent/sync", request with { AgentUpdateChallenge = challenge });
+                Assert.Equal(HttpStatusCode.OK, confirmation.StatusCode);
+            }
         }
 
+        public async Task<HttpRequestMessage> PrepareHeartbeatAsync(string version)
+        {
+            var body = new SyncRequest("acceptance-boot", "192.0.2.40", "001122334455", (await MachineAsync()).ConfigRevision, "ready", []) { AgentVersion = version };
+            return PrepareSigned("/agent/sync", body);
+        }
+
+        public Task<HttpResponseMessage> SendPreparedHeartbeatAsync(HttpRequestMessage request) => agent.SendAsync(request);
+
         private async Task<HttpResponseMessage> SendSignedAsync<T>(string path, T body, string? enrollmentTicket = null)
+        {
+            using var request = PrepareSigned(path, body, enrollmentTicket);
+            return await agent.SendAsync(request);
+        }
+
+        private HttpRequestMessage PrepareSigned<T>(string path, T body, string? enrollmentTicket = null)
         {
             var json = JsonSerializer.Serialize(body, new JsonSerializerOptions(JsonSerializerDefaults.Web));
             var timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
             var nonce = Guid.NewGuid().ToString("N");
-            using var request = new HttpRequestMessage(HttpMethod.Post, path) { Content = new StringContent(json, Encoding.UTF8, "application/json") };
+            var request = new HttpRequestMessage(HttpMethod.Post, path) { Content = new StringContent(json, Encoding.UTF8, "application/json") };
             request.Headers.Add("X-Agent-Id", MachineId);
             request.Headers.Add("X-Agent-Timestamp", timestamp.ToString());
             request.Headers.Add("X-Agent-Nonce", nonce);
             request.Headers.Add("X-Agent-Signature", Convert.ToBase64String(key.SignData(
                 Encoding.UTF8.GetBytes($"{MachineId}\nPOST\n{path}\n{timestamp}\n{nonce}\n{Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(json)))}"), HashAlgorithmName.SHA256)));
             if (enrollmentTicket is not null) request.Headers.Add("X-Enrollment-Ticket", enrollmentTicket);
-            return await agent.SendAsync(request);
+            return request;
         }
 
         public async Task ReportAsync(AgentUpdateTicketResponse ticket, string status)
@@ -349,7 +389,7 @@ public sealed class AgentReleaseAcceptanceTests
                 Add("Agent/Agent.deps.json", "{\"libraries\":{\"Agent/2.3.4\":{\"type\":\"project\"}}}");
                 foreach (var file in new[] { "Install-AgentPackage.ps1", "Install-Service.ps1", "Install-TightVncServer.ps1", "Prepare-SunshineStreamGate.ps1", "PrivateInstallFiles.ps1", "ServiceInstallTransaction.ps1", "Update-AgentPackage.ps1", "Update-Agent.ps1" })
                     Add(file, "# inert acceptance fixture; never executed");
-                Add("AgentPackage.manifest.json", "{\"packageFormatVersion\":1,\"agentInformationalVersion\":\"2.3.4\",\"sourceCommit\":\"0123456789ab\",\"sourceDirty\":false,\"releaseBuild\":true}");
+                Add("AgentPackage.manifest.json", "{\"packageFormatVersion\":1,\"agentInformationalVersion\":\"2.3.4\",\"sourceCommit\":\"0123456789ab\",\"sourceDirty\":false,\"releaseBuild\":true,\"agentUpdateChallengeProtocol\":1}");
                 void Add(string name, string text)
                 {
                     using var writer = new StreamWriter(zip.CreateEntry(name).Open(), new UTF8Encoding(false));

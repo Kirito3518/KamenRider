@@ -118,7 +118,36 @@ public static class ControllerDatabaseMaintenance
         if (File.Exists(destination)) throw new IOException("Backup destination already exists; choose a new backup path.");
 
         using var operationLock = ControllerDatabaseFileLocks.Acquire(source, ".maintenance.lock", "Another database maintenance operation is already running.");
-        return WriteVerifiedBackup(source, destination, overwriteDestination: false);
+        var staged = NewTemporaryPath(destination);
+        var artifactDestination = destination + ".agent-releases";
+        var stagedArtifacts = artifactDestination + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        if (Directory.Exists(artifactDestination) || File.Exists(artifactDestination)) throw new IOException("Backup artifact destination already exists.");
+        var artifactsPublished = false;
+        List<ControllerReleaseArtifacts.Artifact> artifacts = [];
+        try
+        {
+            _ = WriteVerifiedBackup(source, staged, overwriteDestination: false);
+            artifacts = ControllerReleaseArtifacts.Read(staged);
+            if (artifacts.Count > 0)
+            {
+                ControllerReleaseArtifacts.Copy(artifacts, Path.Combine(Path.GetDirectoryName(source)!, "agent-releases"), stagedArtifacts, requireOriginalPath: true);
+                Directory.Move(stagedArtifacts, artifactDestination);
+                artifactsPublished = true;
+            }
+            File.Move(staged, destination);
+            return destination;
+        }
+        catch
+        {
+            if (artifactsPublished) ControllerReleaseArtifacts.RemoveCreated(artifacts, artifactDestination);
+            throw;
+        }
+        finally
+        {
+            ControllerReleaseArtifacts.RemoveCreated(artifacts, stagedArtifacts);
+            DeleteSqliteSidecars(staged);
+            if (File.Exists(staged)) File.Delete(staged);
+        }
     }
 
     public static string? Restore(string backupPath, string databasePath)
@@ -132,28 +161,38 @@ public static class ControllerDatabaseMaintenance
         using (ControllerDatabaseFileLocks.Acquire(destination, ".active.lock", "Stop the Controller before restoring its database.")) { }
 
         var staged = NewTemporaryPath(destination);
+        var installedArtifacts = new List<string>();
+        var restorePublished = false;
         try
         {
             try { CopyDatabase(source, staged); }
             catch (SqliteException exception) { throw new InvalidDataException("The backup file could not be read.", exception); }
             ValidateDatabase(staged);
+            var artifacts = ControllerReleaseArtifacts.Read(staged);
+            var artifactRoot = Path.Combine(Path.GetDirectoryName(destination)!, "agent-releases");
+            ControllerReleaseArtifacts.ValidateCopy(artifacts, source + ".agent-releases", artifactRoot, requireOriginalPath: false);
+            ControllerReleaseArtifacts.RebasePaths(staged, artifacts, artifactRoot);
+            ValidateDatabase(staged);
 
             string? recoveryPath = null;
+            var recoveryDatabaseValidated = false;
             if (File.Exists(destination))
             {
                 recoveryPath = NewRecoveryPath(destination);
                 PreserveRawDatabaseFiles(destination, recoveryPath);
                 var verifiedRecoveryStage = NewTemporaryPath(recoveryPath);
-                var recoveryDatabaseValidated = false;
                 try
                 {
-                    _ = WriteVerifiedBackup(destination, verifiedRecoveryStage);
-                    Publish(verifiedRecoveryStage, recoveryPath);
-                    DeleteSqliteSidecars(recoveryPath);
-                    recoveryDatabaseValidated = true;
-                }
-                catch (InvalidDataException)
-                {
+                    try { _ = WriteVerifiedBackup(destination, verifiedRecoveryStage); }
+                    catch (InvalidDataException) { /* Preserve the raw corrupt database and its sidecars. */ }
+                    if (File.Exists(verifiedRecoveryStage))
+                    {
+                        var recoveryArtifacts = ControllerReleaseArtifacts.Read(verifiedRecoveryStage);
+                        ControllerReleaseArtifacts.Copy(recoveryArtifacts, artifactRoot, recoveryPath + ".agent-releases", requireOriginalPath: true);
+                        Publish(verifiedRecoveryStage, recoveryPath);
+                        DeleteSqliteSidecars(recoveryPath);
+                        recoveryDatabaseValidated = true;
+                    }
                 }
                 finally
                 {
@@ -161,15 +200,21 @@ public static class ControllerDatabaseMaintenance
                     if (File.Exists(verifiedRecoveryStage)) File.Delete(verifiedRecoveryStage);
                 }
 
+            }
+
+            ControllerReleaseArtifacts.Copy(artifacts, source + ".agent-releases", artifactRoot, requireOriginalPath: false, installedArtifacts);
+            if (File.Exists(destination))
+            {
                 if (recoveryDatabaseValidated) CheckpointWal(destination);
                 DeleteSqliteSidecars(destination);
             }
-
             Publish(staged, destination);
+            restorePublished = true;
             return recoveryPath;
         }
         finally
         {
+            if (!restorePublished) foreach (var installed in installedArtifacts) if (File.Exists(installed)) File.Delete(installed);
             DeleteSqliteSidecars(staged);
             if (File.Exists(staged)) File.Delete(staged);
         }

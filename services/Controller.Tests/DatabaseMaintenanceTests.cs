@@ -8,6 +8,209 @@ namespace Controller.Tests;
 public class DatabaseMaintenanceTests
 {
     [Fact]
+    public void PreRestoreRecoverySnapshotRetainsItsOwnArtifactsAndCanBeRestoredOnACleanHost()
+    {
+        var root = NewRoot();
+        try
+        {
+            var source = Path.Combine(root, "live", "controller.db");
+            var backup = Path.Combine(root, "backup.db");
+            var destination = Path.Combine(root, "destination", "controller.db");
+            var recovered = Path.Combine(root, "recovered", "controller.db");
+            var incoming = AddReleaseArtifact(source, "2.0.0", "incoming release");
+            var previous = AddReleaseArtifact(destination, "3.0.0", "previous protected release");
+            ControllerDatabaseMaintenance.Backup(source, backup);
+
+            var recovery = ControllerDatabaseMaintenance.Restore(backup, destination);
+            Assert.NotNull(recovery);
+            ControllerDatabaseMaintenance.Restore(recovery!, recovered);
+
+            Assert.Equal("previous protected release", File.ReadAllText(ArtifactPath(recovered, previous)));
+            Assert.Equal("incoming release", File.ReadAllText(ArtifactPath(destination, incoming)));
+            Assert.Equal("previous protected release", File.ReadAllText(ArtifactPath(destination, previous)));
+            using var database = new ControllerDatabase(recovered);
+            Assert.Equal("3.0.0", Assert.Single(database.ListAgentReleases()).Version);
+        }
+        finally { DeleteRoot(root); }
+    }
+
+    [Fact]
+    public void RestoreRejectsRedirectedArtifactDirectoriesWithoutWritingIntoTheTarget()
+    {
+        var root = NewRoot();
+        var link = Path.Combine(root, "destination", "agent-releases");
+        try
+        {
+            var source = Path.Combine(root, "live", "controller.db");
+            var backup = Path.Combine(root, "backup.db");
+            var destination = Path.Combine(root, "destination", "controller.db");
+            AddReleaseArtifact(source, "2.0.0", "release");
+            ControllerDatabaseMaintenance.Backup(source, backup);
+            using (var database = new ControllerDatabase(destination)) AddMachine(database, "preserved-machine");
+            var protectedDirectory = Path.Combine(root, "protected");
+            Directory.CreateDirectory(protectedDirectory);
+            File.WriteAllText(Path.Combine(protectedDirectory, "keep.txt"), "protected");
+            using (var junction = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("cmd.exe")
+            {
+                Arguments = $"/c mklink /J \"{link}\" \"{protectedDirectory}\"",
+                UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true,
+            })!) { junction.WaitForExit(); Assert.Equal(0, junction.ExitCode); }
+            var original = File.ReadAllBytes(destination);
+
+            Assert.Throws<InvalidDataException>(() => ControllerDatabaseMaintenance.Restore(backup, destination));
+
+            Assert.Equal(original, File.ReadAllBytes(destination));
+            Assert.Equal("keep.txt", Assert.Single(Directory.GetFileSystemEntries(protectedDirectory)).Split(Path.DirectorySeparatorChar).Last());
+        }
+        finally { if (Directory.Exists(link)) Directory.Delete(link); DeleteRoot(root); }
+    }
+
+    [Theory]
+    [InlineData("missing")]
+    [InlineData("corrupt")]
+    [InlineData("conflict")]
+    [InlineData("directory")]
+    public void RestoreRejectsArtifactFailuresBeforeChangingDatabaseOrOtherArtifacts(string failure)
+    {
+        var root = NewRoot();
+        try
+        {
+            var source = Path.Combine(root, "live", "controller.db");
+            var backup = Path.Combine(root, "backup", "controller.db");
+            var destination = Path.Combine(root, "destination", "controller.db");
+            var first = AddReleaseArtifact(source, "2.0.0", "first release bytes");
+            var second = AddReleaseArtifact(source, "3.0.0", "second release bytes");
+            ControllerDatabaseMaintenance.Backup(source, backup);
+            using (var database = new ControllerDatabase(destination)) AddMachine(database, "preserved-machine");
+            var original = File.ReadAllBytes(destination);
+            var sidecar = Path.Combine(backup + ".agent-releases", "sha256", second[..2].ToLowerInvariant(), second.ToLowerInvariant() + ".zip");
+            var conflict = ArtifactPath(destination, second);
+            if (failure == "missing") File.Delete(sidecar);
+            if (failure == "corrupt") File.WriteAllText(sidecar, "corrupt");
+            if (failure == "conflict") { Directory.CreateDirectory(Path.GetDirectoryName(conflict)!); File.WriteAllText(conflict, "protected existing bytes"); }
+            if (failure == "directory") Directory.CreateDirectory(conflict);
+
+            Assert.Throws<InvalidDataException>(() => ControllerDatabaseMaintenance.Restore(backup, destination));
+
+            Assert.Equal(original, File.ReadAllBytes(destination));
+            Assert.False(File.Exists(ArtifactPath(destination, first)));
+            Assert.False(Directory.Exists(Path.GetDirectoryName(ArtifactPath(destination, first))));
+            Assert.Empty(Directory.GetFiles(Path.GetDirectoryName(destination)!, "*.pre-restore-*"));
+            if (failure == "conflict") Assert.Equal("protected existing bytes", File.ReadAllText(conflict));
+        }
+        finally { DeleteRoot(root); }
+    }
+
+    [Fact]
+    public void LegacyDatabaseOnlyBackupWithReleasesRequiresAnExplicitVerifiedArtifactSidecar()
+    {
+        var root = NewRoot();
+        try
+        {
+            var source = Path.Combine(root, "live", "controller.db");
+            var legacy = Path.Combine(root, "legacy.db");
+            var destination = Path.Combine(root, "destination", "controller.db");
+            var hash = AddReleaseArtifact(source, "2.0.0", "legacy immutable release");
+            File.Copy(source, legacy);
+            Assert.Throws<InvalidDataException>(() => ControllerDatabaseMaintenance.Restore(legacy, destination));
+            Assert.False(File.Exists(destination));
+            var sidecar = Path.Combine(legacy + ".agent-releases", "sha256", hash[..2].ToLowerInvariant(), hash.ToLowerInvariant() + ".zip");
+            Directory.CreateDirectory(Path.GetDirectoryName(sidecar)!);
+            File.Copy(ArtifactPath(source, hash), sidecar);
+
+            ControllerDatabaseMaintenance.Restore(legacy, destination);
+
+            Assert.Equal(File.ReadAllBytes(ArtifactPath(source, hash)), File.ReadAllBytes(ArtifactPath(destination, hash)));
+        }
+        finally { DeleteRoot(root); }
+    }
+
+    [Fact]
+    public void ExistingBackupArtifactDirectoryIsNeverRemovedOrOverwritten()
+    {
+        var root = NewRoot();
+        try
+        {
+            var source = Path.Combine(root, "live", "controller.db");
+            var backup = Path.Combine(root, "backup.db");
+            var hash = AddReleaseArtifact(source, "2.0.0", "release bytes");
+            var protectedPath = Path.Combine(backup + ".agent-releases", "sha256", hash[..2].ToLowerInvariant(), hash.ToLowerInvariant() + ".zip");
+            Directory.CreateDirectory(Path.GetDirectoryName(protectedPath)!);
+            File.WriteAllText(protectedPath, "protected backup");
+
+            Assert.Throws<IOException>(() => ControllerDatabaseMaintenance.Backup(source, backup));
+
+            Assert.Equal("protected backup", File.ReadAllText(protectedPath));
+            Assert.False(File.Exists(backup));
+        }
+        finally { DeleteRoot(root); }
+    }
+
+    private static string AddReleaseArtifact(string databasePath, string version, string content)
+    {
+        var bytes = System.Text.Encoding.UTF8.GetBytes(content);
+        var hash = Convert.ToHexString(SHA256.HashData(bytes));
+        var artifact = ArtifactPath(databasePath, hash);
+        Directory.CreateDirectory(Path.GetDirectoryName(artifact)!);
+        File.WriteAllBytes(artifact, bytes);
+        using var database = new ControllerDatabase(databasePath);
+        database.PublishAgentRelease(new(version, "stable", "release", hash, artifact, bytes.Length, "0123456789ab", false, true));
+        return hash;
+    }
+
+    [Fact]
+    public void BackupAndCleanHostRestoreIncludeVerifiedReleaseArtifacts()
+    {
+        var root = NewRoot();
+        try
+        {
+            var source = Path.Combine(root, "live", "controller.db");
+            var backup = Path.Combine(root, "backup", "controller.db");
+            var restored = Path.Combine(root, "restored", "controller.db");
+            var bytes = System.Text.Encoding.UTF8.GetBytes("immutable release bytes");
+            var hash = Convert.ToHexString(SHA256.HashData(bytes));
+            var sourceArtifact = ArtifactPath(source, hash);
+            Directory.CreateDirectory(Path.GetDirectoryName(sourceArtifact)!);
+            File.WriteAllBytes(sourceArtifact, bytes);
+            using (var database = new ControllerDatabase(source))
+                database.PublishAgentRelease(new("2.0.0", "stable", "release", hash, sourceArtifact, bytes.Length, "0123456789ab", false, true));
+
+            ControllerDatabaseMaintenance.Backup(source, backup);
+            ControllerDatabaseMaintenance.Restore(backup, restored);
+
+            Assert.Equal(bytes, File.ReadAllBytes(ArtifactPath(restored, hash)));
+            using var databaseAfterRestore = new ControllerDatabase(restored);
+            Assert.Equal(hash, Assert.Single(databaseAfterRestore.ListAgentReleases()).PackageSha256);
+        }
+        finally { DeleteRoot(root); }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void BackupRejectsMissingOrCorruptReferencedReleaseWithoutPublishing(bool corrupt)
+    {
+        var root = NewRoot();
+        try
+        {
+            var source = Path.Combine(root, "live", "controller.db");
+            var backup = Path.Combine(root, "backup", "controller.db");
+            var bytes = System.Text.Encoding.UTF8.GetBytes("immutable release bytes");
+            var hash = Convert.ToHexString(SHA256.HashData(bytes));
+            var artifact = ArtifactPath(source, hash);
+            Directory.CreateDirectory(Path.GetDirectoryName(artifact)!);
+            if (corrupt) File.WriteAllText(artifact, "corrupt");
+            using (var database = new ControllerDatabase(source))
+                database.PublishAgentRelease(new("2.0.0", "stable", "release", hash, artifact, bytes.Length, "0123456789ab", false, true));
+
+            Assert.ThrowsAny<Exception>(() => ControllerDatabaseMaintenance.Backup(source, backup));
+            Assert.False(File.Exists(backup));
+        }
+        finally { DeleteRoot(root); }
+    }
+
+    private static string ArtifactPath(string database, string hash) => Path.Combine(Path.GetDirectoryName(database)!, "agent-releases", "sha256", hash[..2].ToLowerInvariant(), hash.ToLowerInvariant() + ".zip");
+    [Fact]
     public void BackupRejectsVersionTwelveDatabaseMissingAgentUpdateOperations()
     {
         var root = NewRoot();

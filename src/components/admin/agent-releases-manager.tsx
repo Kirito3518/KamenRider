@@ -152,7 +152,7 @@ export function AgentReleasesManager() {
       <div><h2 className="text-lg font-semibold">Release ที่เผยแพร่แล้ว</h2><p className="text-sm text-muted-foreground">SHA-256 คำนวณและตรวจสอบโดย Controller เมื่อเผยแพร่ · release เดิมไม่สามารถเขียนทับได้</p></div>
       {!releases ? <p role="status" className="text-sm">{releaseError || "กำลังโหลด release…"}</p> : !releases.length ? <p className="text-sm text-muted-foreground">ยังไม่มี release ที่เผยแพร่</p> : <ul className="divide-y rounded-lg border">
         {releases.map((release) => <li key={release.version} className="space-y-1 p-3 text-sm">
-          <div className="flex flex-wrap items-center gap-2"><strong>{release.version}</strong><span className="rounded border px-1.5 py-0.5 text-xs">{release.channel}</span><time className="text-xs text-muted-foreground" dateTime={release.publishedAtUtc}>{new Date(release.publishedAtUtc).toLocaleString()}</time></div>
+          <div className="flex flex-wrap items-center gap-2"><strong className="min-w-0 break-all">{release.version}</strong><span className="rounded border px-1.5 py-0.5 text-xs">{release.channel}</span><time className="text-xs text-muted-foreground" dateTime={release.publishedAtUtc}>{new Date(release.publishedAtUtc).toLocaleString()}</time></div>
           <p className="whitespace-pre-wrap break-words">{release.releaseNotes}</p><p className="break-all font-mono text-xs text-muted-foreground">SHA-256: {release.packageSha256.slice(0, 12)}…</p>
         </li>)}
       </ul>}
@@ -171,5 +171,5 @@ export function AgentReleasesManager() {
 }
 
 function Summary({ title, value, icon }: { title: string; value: string; icon: React.ReactNode }) {
-  return <section className="rounded-xl border bg-card p-4"><div className="flex items-center justify-between gap-2 text-sm text-muted-foreground"><span>{title}</span>{icon}</div><p className="mt-3 text-xl font-semibold">{value}</p></section>;
+  return <section className="min-w-0 rounded-xl border bg-card p-4"><div className="flex items-center justify-between gap-2 text-sm text-muted-foreground"><span>{title}</span>{icon}</div><p className="mt-3 break-all text-xl font-semibold">{value}</p></section>;
 }

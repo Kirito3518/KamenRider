@@ -26,7 +26,7 @@ function New-AgentUpdateFixture {
     [IO.File]::WriteAllText((Join-Path $package 'Agent\Agent.exe'), 'new-agent')
     $deps = [pscustomobject]@{ libraries = [pscustomobject]@{ 'Agent/2.3.4' = [pscustomobject]@{ type = 'project' } } }
     [IO.File]::WriteAllText((Join-Path $package 'Agent\Agent.deps.json'), (ConvertTo-Json $deps -Depth 5))
-    $manifest = [pscustomobject]@{ packageFormatVersion=1; agentInformationalVersion='2.3.4'; sourceCommit='0123456789ab'; sourceDirty=$false; releaseBuild=$true }
+    $manifest = [pscustomobject]@{ packageFormatVersion=1; agentInformationalVersion='2.3.4'; sourceCommit='0123456789ab'; sourceDirty=$false; releaseBuild=$true; agentUpdateChallengeProtocol=1 }
     [IO.File]::WriteAllText((Join-Path $package 'AgentPackage.manifest.json'), (ConvertTo-Json $manifest -Depth 4))
     foreach ($name in @('Install-AgentPackage.ps1','Install-Service.ps1','Install-TightVncServer.ps1','Prepare-SunshineStreamGate.ps1','PrivateInstallFiles.ps1','ServiceInstallTransaction.ps1','Update-AgentPackage.ps1')) { Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination (Join-Path $package $name) }
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot '..\..\public\agent\Update-Agent.ps1') -Destination (Join-Path $package 'Update-Agent.ps1')
@@ -77,6 +77,10 @@ try {
     Assert-AgentUpdateTest ($result.Outcome -eq 'rolledBack') 'Agent start failure must roll back.'
     Assert-AgentUpdateTest ([IO.File]::ReadAllText((Join-Path $fixture.Install 'Agent.exe')) -eq 'old-agent') 'Rollback did not restore old Agent binary.'
     Assert-AgentUpdateTest (Test-Path -LiteralPath $result.BackupDirectory -PathType Container) 'Rollback backup must be retained for verification.'
+    $result = Invoke-AgentUpdateTransaction -InstallDirectory $fixture.Install -DataDirectory $fixture.Data -PackageRoot $fixture.Package -OperationId $fixture.OperationId -TargetVersion $fixture.Version -ServiceSid $serviceSid -ServiceApi $api
+    Assert-AgentUpdateTest ($result.Outcome -eq 'applied') 'After a verified rollback, recovery must be able to retry the target under the same operation.'
+    Assert-AgentUpdateTest ([IO.File]::ReadAllText((Join-Path $fixture.Install 'Agent.exe')) -eq 'new-agent') 'Recovery retry did not install the challenge-capable target.'
+    Assert-AgentUpdateTest ([IO.File]::ReadAllText((Join-Path $result.BackupDirectory 'Agent.exe')) -eq 'old-agent') 'Recovery retry must preserve the original rollback backup.'
 
     $fixture = New-AgentUpdateFixture -Root (Join-Path $root 'rollback-stop-failure')
     $api = New-AgentUpdateFakeServiceApi -FailAgentStart
@@ -105,6 +109,10 @@ try {
     Assert-AgentUpdateTest ($result.Outcome -eq 'rolledBack') 'Interrupted swap must recover the original install.'
     Assert-AgentUpdateTest ([IO.File]::ReadAllText((Join-Path $fixture.Install 'Agent.exe')) -eq 'old-agent') 'Interrupted swap recovery lost old Agent binary.'
     Assert-AgentUpdateTest ($api.State.Calls -contains 'start-guard' -and $api.State.Calls -contains 'start-agent') 'Interrupted recovery must restore files and restart the managed services.'
+    $retry = Invoke-AgentUpdateTransaction -InstallDirectory $fixture.Install -DataDirectory $fixture.Data -PackageRoot $fixture.Package -OperationId $fixture.OperationId -TargetVersion $fixture.Version -ServiceSid $serviceSid -ServiceApi $api
+    Assert-AgentUpdateTest ($retry.Outcome -eq 'applied') 'A later recovery of a verified rollback must be able to install the capable target Agent.'
+    Assert-AgentUpdateTest ([IO.File]::ReadAllText((Join-Path $fixture.Install 'Agent.exe')) -eq 'new-agent') 'Recovery after a legacy rollback must install the selected target.'
+    Assert-AgentUpdateTest ([IO.File]::ReadAllText((Join-Path $plan.BackupDirectory 'Agent.exe')) -eq 'old-agent') 'Recovery must preserve the original rollback backup.'
 
     if (-not $RecoveryCase -or $RecoveryCase -eq 'pre-backup') {
         $fixture = New-AgentUpdateFixture -Root (Join-Path $root 'partial-stage')

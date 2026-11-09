@@ -2,12 +2,14 @@ using KamenRaider.Contracts;
 using Microsoft.Data.Sqlite;
 using System.Security.Cryptography;
 using System.Text;
+using KamenRaider.Controller.Agents;
 
 namespace KamenRaider.Controller.Data;
 
 public sealed partial class ControllerDatabase
 {
     private static readonly string[] ActiveAgentUpdateStatuses = ["awaitingInstaller", "installing", "awaitingHeartbeat", "rollingBack", "failed"];
+    private readonly Dictionary<string, string> agentUpdateReportEpochs = new(StringComparer.Ordinal);
 
     public AgentReleaseDto PublishAgentRelease(AgentReleasePublication release)
     {
@@ -67,7 +69,6 @@ public sealed partial class ControllerDatabase
             using var tx = connection.BeginTransaction();
             ExpireUnstartedAgentUpdates(tx, nowMs);
 
-            string approvalStatus;
             DateTimeOffset lastSeen;
             string previousVersion;
             using (var machine = Command("SELECT m.approval_status,h.last_seen,h.agent_version FROM machines m LEFT JOIN machine_heartbeats h ON h.machine_id=m.machine_id WHERE m.machine_id=$id", ("$id", machineId)))
@@ -75,12 +76,10 @@ public sealed partial class ControllerDatabase
                 machine.Transaction = tx;
                 using var row = machine.ExecuteReader();
                 if (!row.Read()) throw new KeyNotFoundException();
-                approvalStatus = row.GetString(0);
                 if (row.IsDBNull(1) || row.IsDBNull(2)) throw new InvalidOperationException("A fresh Agent version heartbeat is required");
                 lastSeen = DateTimeOffset.Parse(row.GetString(1));
                 previousVersion = row.GetString(2);
             }
-            if (approvalStatus != "approved") throw new InvalidOperationException("Machine must be approved before updating");
             if (lastSeen > now || now - lastSeen > TimeSpan.FromSeconds(20)) throw new InvalidOperationException("A fresh Agent version heartbeat is required");
 
             using (var allocation = Command("SELECT EXISTS(SELECT 1 FROM leases WHERE machine_id=$id AND allocation_held=1)", ("$id", machineId)))
@@ -96,16 +95,22 @@ public sealed partial class ControllerDatabase
 
             string targetVersion;
             string packageHash;
-            using (var release = Command("SELECT version,package_sha256 FROM agent_releases WHERE version=$version", ("$version", releaseVersion)))
+            string packagePath;
+            long packageSize;
+            using (var release = Command("SELECT version,package_sha256,package_path,package_size_bytes FROM agent_releases WHERE version=$version", ("$version", releaseVersion)))
             {
                 release.Transaction = tx;
                 using var row = release.ExecuteReader();
                 if (!row.Read()) throw new KeyNotFoundException();
                 targetVersion = row.GetString(0);
                 packageHash = row.GetString(1);
+                packagePath = row.GetString(2);
+                packageSize = row.GetInt64(3);
             }
             if (string.Equals(previousVersion, targetVersion, StringComparison.Ordinal))
                 throw new InvalidOperationException("Agent is already running the requested version");
+
+            using var artifact = OpenUpdateArtifact(packagePath, packageHash, packageSize, targetVersion);
 
             var ticket = NewAgentUpdateTicket(out var ticketHash);
             var operationId = Guid.NewGuid().ToString("N");
@@ -120,6 +125,28 @@ public sealed partial class ControllerDatabase
             }
             tx.Commit();
             return new(operationId, machineId, ticket, expires, releaseVersion, targetVersion, packageHash);
+        }
+    }
+
+    private FileStream OpenUpdateArtifact(string path, string hash, long size, string version)
+    {
+        try
+        {
+            var canonical = CanonicalAgentUpdateHash(hash);
+            var expected = ControllerReleaseArtifacts.PathFor(agentReleaseRoot, canonical);
+            if (!Path.IsPathFullyQualified(path) || !string.Equals(Path.GetFullPath(path), expected, StringComparison.OrdinalIgnoreCase) || size is <= 0 or > 100L * 1024 * 1024)
+                throw new InvalidDataException();
+            var verified = ControllerReleaseArtifacts.OpenVerified(expected, canonical, size);
+            try
+            {
+                new AgentReleaseStore(agentReleaseRoot).ValidateRetainedForUpdate(expected, size, version, canonical);
+                return verified;
+            }
+            catch { verified.Dispose(); throw; }
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidDataException or IOException or UnauthorizedAccessException or AgentReleaseValidationException or AgentReleaseTooLargeException or System.Text.Json.JsonException or NotSupportedException or BadImageFormatException)
+        {
+            throw new InvalidOperationException("The selected release is unavailable, corrupt, or lacks update confirmation support; publish a compatible release.");
         }
     }
 
@@ -268,6 +295,7 @@ public sealed partial class ControllerDatabase
                 throw new InvalidOperationException("Update operation cannot accept a status report");
             if (currentStatus == status)
             {
+                agentUpdateReportEpochs[machineId] = Guid.NewGuid().ToString("N");
                 var unchanged = FindAgentUpdateOperation(tx, operationId);
                 tx.Commit();
                 return unchanged;
@@ -287,6 +315,7 @@ public sealed partial class ControllerDatabase
                 if (update.ExecuteNonQuery() != 1) throw new UnauthorizedAccessException("Update ticket changed during status reporting");
             }
             var result = FindAgentUpdateOperation(tx, operationId);
+            agentUpdateReportEpochs[machineId] = Guid.NewGuid().ToString("N");
             tx.Commit();
             return result;
         }
@@ -319,9 +348,22 @@ public sealed partial class ControllerDatabase
         }
     }
 
-    private void ResolveAgentUpdateFromHeartbeat(SqliteTransaction tx, string machineId, string? reportedVersion, long nowMs)
+    private string? AgentUpdateChallenge(SqliteTransaction tx, string machineId)
     {
-        if (reportedVersion is null) return;
+        using var operation = Command("SELECT operation_id,ticket_hash,status FROM agent_update_operations WHERE machine_id=$machine AND status IN ('awaitingHeartbeat','rollingBack') AND ticket_started_at_unix_ms IS NOT NULL", ("$machine", machineId));
+        operation.Transaction = tx;
+        using var row = operation.ExecuteReader();
+        if (!row.Read()) return null;
+        // Each report invalidates earlier proofs; the process secret also fences Controller restarts.
+        var binding = Encoding.UTF8.GetBytes($"{row.GetString(0)}\n{row.GetString(1)}\n{row.GetString(2)}\n{agentUpdateReportEpochs.GetValueOrDefault(machineId)}");
+        return Convert.ToBase64String(HMACSHA256.HashData(agentUpdateEpoch, binding)).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+    }
+
+    private void ResolveAgentUpdateFromHeartbeat(SqliteTransaction tx, string machineId, string? reportedVersion, string? suppliedChallenge, long nowMs)
+    {
+        var expectedChallenge = AgentUpdateChallenge(tx, machineId);
+        if (reportedVersion is null || expectedChallenge is null || suppliedChallenge is null ||
+            !CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(expectedChallenge), Encoding.UTF8.GetBytes(suppliedChallenge))) return;
         using var resolve = Command("UPDATE agent_update_operations SET status=CASE WHEN status='awaitingHeartbeat' THEN 'completed' ELSE 'rolledBack' END,updated_at_unix_ms=$now WHERE machine_id=$machine AND started_at_unix_ms IS NOT NULL AND ((status='awaitingHeartbeat' AND target_version=$version) OR (status='rollingBack' AND previous_version=$version))",
             ("$version", reportedVersion), ("$now", nowMs), ("$machine", machineId));
         resolve.Transaction = tx;

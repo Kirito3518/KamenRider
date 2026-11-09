@@ -9,7 +9,7 @@ public sealed class LeaseFixture : IDisposable {
         public DateTimeOffset Now = DateTimeOffset.Parse("2026-10-29T00:00:00Z");
         public override DateTimeOffset GetUtcNow() => Now;
     }
-    public string Path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), Guid.NewGuid()+".db");
+    public string Path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "kr-lease-fixture-" + Guid.NewGuid().ToString("N"), "controller.db");
     public Clock Time = new();
     public ControllerDatabase Db;
     public LeaseService Leases => new(Db);
@@ -36,7 +36,7 @@ public sealed class LeaseFixture : IDisposable {
         return (await Leases.GetLeaseAsync(lease.Id,default))!;
     }
     public void Reopen() { Db.Dispose(); Db=new(Path,clock:Time); }
-    public void Dispose() { Db.Dispose(); File.Delete(Path); }
+    public void Dispose() { Db.Dispose(); var directory=System.IO.Path.GetDirectoryName(Path)!; if(Directory.Exists(directory))Directory.Delete(directory,true); }
 }
 public class LeaseTests {
     [Theory]

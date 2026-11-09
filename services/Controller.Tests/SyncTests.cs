@@ -26,10 +26,10 @@ public class SyncTests {
  Assert.Equal(5000,response.Configuration.MoonlightPort);Assert.Empty(response.Commands);
  var machine=Assert.Single(db.List());Assert.Equal("ready",machine.Readiness);Assert.False(machine.CanRent);Assert.Equal("boot",machine.BootId);Assert.Equal("1.2.3",machine.AgentVersion);
  db.Sync("pc",new("boot","192.0.2.2","001122334455",1,"ready",[]));
- Assert.Equal("1.2.3",Assert.Single(db.List()).AgentVersion);
+ Assert.Null(Assert.Single(db.List()).AgentVersion);
  clock.Now=clock.Now.AddSeconds(21);Assert.Equal("unreachable",Assert.Single(db.List()).Readiness);
  }
- using(var db=new ControllerDatabase(path,clock:clock)){var machine=Assert.Single(db.List());Assert.Equal("unreachable",machine.Readiness);Assert.Equal("1.2.3",machine.AgentVersion);}
+ using(var db=new ControllerDatabase(path,clock:clock)){var machine=Assert.Single(db.List());Assert.Equal("unreachable",machine.Readiness);Assert.Null(machine.AgentVersion);}
  File.Delete(path);
  }
 
