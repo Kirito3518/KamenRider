@@ -136,10 +136,10 @@
 - Consumes: Controller release list, machine versions/update statuses, Admin upload/command routes.
 - Produces: screenshot-inspired summary cards, alerts, release history, stable/beta upload/publish form, and explicit per-machine command-copy flow.
 
-- [ ] **Step 1: Add failing UI tests** for summary counts, stable/beta labels, warnings, upload validation, per-machine update lock state, and copyable command flow.
-- [ ] **Step 2: Implement the dashboard** with accessible status text, bounded polling, release history, and upload controls; require the uploaded package manifest version to match the displayed release version; show SHA-256 status without exposing credentials/tickets before an Admin explicitly requests a command.
-- [ ] **Step 3: Add the separate per-machine Update Agent button**; disable while a lease is held, show awaiting-installer/installing/awaiting-heartbeat/rolling-back/failed/rolled-back results, and offer recovery for a failed/interrupted locked operation.
-- [ ] **Step 4: Verify relevant Next.js 16.4 docs and run focused UI/API tests plus TypeScript/build checks**, then commit `feat(admin): add Agent release dashboard`.
+- [x] **Step 1: Add failing UI tests** for summary counts, stable/beta labels, warnings, upload validation, per-machine update lock state, and copyable command flow.
+- [x] **Step 2: Implement the dashboard** with accessible status text, bounded polling, release history, and upload controls; require the uploaded package manifest version to match the displayed release version; show SHA-256 status without exposing credentials/tickets before an Admin explicitly requests a command.
+- [x] **Step 3: Add the separate per-machine Update Agent button**; disable while a lease is held, show awaiting-installer/installing/awaiting-heartbeat/rolling-back/failed/rolled-back results, and offer recovery for a failed/interrupted locked operation.
+- [x] **Step 4: Verify relevant Next.js 16.4 docs and run focused UI/API tests plus TypeScript/build checks**, then commit `feat(admin): add Agent release dashboard`.
 
 ### Task 6: Reconcile operational acceptance and documentation
 
