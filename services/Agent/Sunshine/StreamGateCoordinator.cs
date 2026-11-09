@@ -37,6 +37,7 @@ public sealed class StreamGateCoordinator(
     private StreamLeaseGrant? openingGrant;
     private long gateGeneration;
     private long blockRequestGeneration;
+    private int closeRequestsInProgress;
     private bool grantHistoryLoaded;
     private StreamLeaseGrant? currentGrant;
     private bool closedVerified;
@@ -50,6 +51,7 @@ public sealed class StreamGateCoordinator(
     {
         // Closing the stream is a containment action; cancellation must not skip it.
         _ = cancellationToken;
+        Interlocked.Increment(ref closeRequestsInProgress);
         Interlocked.Increment(ref blockRequestGeneration);
         try
         {
@@ -72,16 +74,21 @@ public sealed class StreamGateCoordinator(
         finally
         {
             Interlocked.Increment(ref blockRequestGeneration);
+            Interlocked.Decrement(ref closeRequestsInProgress);
         }
     }
 
     public async Task AllowAsync(StreamLeaseGrant grant, CancellationToken cancellationToken)
     {
         var expectedBlockRequestGeneration = Volatile.Read(ref blockRequestGeneration);
+        // Do not queue a new grant ahead of a closer's drain or semaphore-release cleanup.
+        if (Volatile.Read(ref closeRequestsInProgress) != 0)
+            throw new InvalidOperationException("The stream gate is closing and cannot accept a grant request.");
         await lifecycle.WaitAsync(cancellationToken);
         try
         {
-            if (Volatile.Read(ref blockRequestGeneration) != expectedBlockRequestGeneration)
+            if (Volatile.Read(ref closeRequestsInProgress) != 0 ||
+                Volatile.Read(ref blockRequestGeneration) != expectedBlockRequestGeneration)
                 throw new InvalidOperationException("The stream gate was blocked while the grant request was waiting.");
 
             EnsureGrantHistoryLoaded();
@@ -463,42 +470,50 @@ public sealed class StreamGateCoordinator(
 
     private async Task CloseAndDrainContendedOperationAsync()
     {
-        Interlocked.Increment(ref blockRequestGeneration);
-        Interlocked.Increment(ref gateGeneration);
-        Volatile.Write(ref currentGrant, null);
-        Volatile.Write(ref openingGrant, null);
-
-        Exception? immediateCloseError = null;
+        Interlocked.Increment(ref closeRequestsInProgress);
         try
         {
-            await BlockCoreAsync();
-        }
-        catch (Exception ex)
-        {
-            immediateCloseError = ex;
-        }
+            Interlocked.Increment(ref blockRequestGeneration);
+            Interlocked.Increment(ref gateGeneration);
+            Volatile.Write(ref currentGrant, null);
+            Volatile.Write(ref openingGrant, null);
 
-        // Containment happens immediately above; wait for the interrupted operation to
-        // unwind before reporting closure so a delayed firewall allow cannot win afterward.
-        await lifecycle.WaitAsync(CancellationToken.None);
-        try
-        {
-            ClearMaintenanceState();
+            Exception? immediateCloseError = null;
             try
             {
-                await EnsureClosedAsync();
+                await BlockCoreAsync();
             }
-            catch (Exception finalCloseError) when (immediateCloseError is not null)
+            catch (Exception ex)
             {
-                throw new AggregateException(
-                    "The immediate stream close failed and the gate could not be verified closed after the in-flight operation drained.",
-                    immediateCloseError,
-                    finalCloseError);
+                immediateCloseError = ex;
+            }
+
+            // Containment happens immediately above; wait for the interrupted operation to
+            // unwind before reporting closure so a delayed firewall allow cannot win afterward.
+            await lifecycle.WaitAsync(CancellationToken.None);
+            try
+            {
+                ClearMaintenanceState();
+                try
+                {
+                    await EnsureClosedAsync();
+                }
+                catch (Exception finalCloseError) when (immediateCloseError is not null)
+                {
+                    throw new AggregateException(
+                        "The immediate stream close failed and the gate could not be verified closed after the in-flight operation drained.",
+                        immediateCloseError,
+                        finalCloseError);
+                }
+            }
+            finally
+            {
+                lifecycle.Release();
             }
         }
         finally
         {
-            lifecycle.Release();
+            Interlocked.Decrement(ref closeRequestsInProgress);
         }
     }
 

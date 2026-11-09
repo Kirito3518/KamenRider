@@ -183,6 +183,97 @@ public class StreamGateCoordinatorTests
     }
 
     [Fact]
+    public async Task AllowIsRejectedBeforeWaitingForAnExplicitCloseToFinish()
+    {
+        var f = new Fixture();
+        using var verificationEntered = new ManualResetEventSlim();
+        using var continueVerification = new ManualResetEventSlim();
+        f.Ingress.AfterVerify = () =>
+        {
+            f.Ingress.AfterVerify = null;
+            verificationEntered.Set();
+            if (!continueVerification.Wait(TimeSpan.FromSeconds(5)))
+                throw new TimeoutException("The test did not release the close verification.");
+        };
+
+        var block = Task.Run(() => f.Gate.BlockAsync(default));
+        Task allow = Task.CompletedTask;
+        try
+        {
+            Assert.True(verificationEntered.Wait(TimeSpan.FromSeconds(5)));
+            allow = f.Gate.AllowAsync(f.Grant(), default);
+            Assert.True(allow.IsCompleted, "A request admitted during closure must be rejected before it can queue behind the closer.");
+            await Assert.ThrowsAsync<InvalidOperationException>(() => allow);
+        }
+        finally
+        {
+            continueVerification.Set();
+            await block;
+            await Record.ExceptionAsync(() => allow);
+        }
+
+        Assert.True(f.Ingress.Blocked);
+        Assert.False(f.Sunshine.Running);
+        Assert.Null(f.Gate.CurrentGrant);
+        Assert.DoesNotContain("firewall:allow", f.Events);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AllowCannotQueueAheadOfAContendedCloseWhileItDrainsAnOpeningGrant(bool expiry)
+    {
+        var f = new Fixture();
+        using var allowEntered = new ManualResetEventSlim();
+        using var continueAllow = new ManualResetEventSlim();
+        using var verificationEntered = new ManualResetEventSlim();
+        using var continueVerification = new ManualResetEventSlim();
+        f.Ingress.AllowEntered = allowEntered;
+        f.Ingress.ContinueAllow = continueAllow;
+        var opening = Task.Run(() => f.Gate.AllowAsync(f.Grant(), default));
+        Task closing = Task.CompletedTask;
+        Task nextAllow = Task.CompletedTask;
+        try
+        {
+            Assert.True(allowEntered.Wait(TimeSpan.FromSeconds(5)));
+            f.Ingress.AfterVerify = () =>
+            {
+                f.Ingress.AfterVerify = null;
+                verificationEntered.Set();
+                if (!continueVerification.Wait(TimeSpan.FromSeconds(5)))
+                    throw new TimeoutException("The test did not release the contended close verification.");
+            };
+            if (expiry) f.Clock.AdvanceTo(61000);
+            closing = Task.Run(() => expiry ? f.Gate.EnforceAsync(default) : f.Gate.BlockAsync(default));
+            Assert.True(verificationEntered.Wait(TimeSpan.FromSeconds(5)));
+
+            nextAllow = f.Gate.AllowAsync(f.Grant(revision: 2, deadline: 121000, expirySeconds: 120), default);
+            Assert.True(nextAllow.IsCompleted, "A new allow must not queue ahead of the closer's lifecycle drain.");
+            await Assert.ThrowsAsync<InvalidOperationException>(() => nextAllow);
+        }
+        finally
+        {
+            continueVerification.Set();
+            continueAllow.Set();
+            await Record.ExceptionAsync(() => opening);
+            await closing;
+            await Record.ExceptionAsync(() => nextAllow);
+        }
+
+        Assert.True(f.Ingress.Blocked);
+        Assert.False(f.Sunshine.Running);
+        Assert.Null(f.Gate.CurrentGrant);
+
+        f.Ingress.AllowEntered = null;
+        f.Ingress.ContinueAllow = null;
+        var freshGrant = f.Grant(revision: 2, deadline: 121000, expirySeconds: 120);
+        await f.Gate.AllowAsync(freshGrant, default);
+        Assert.Equal(freshGrant, f.Gate.CurrentGrant);
+        Assert.False(f.Ingress.Blocked);
+        Assert.True(f.Sunshine.Running);
+    }
+
+    [Fact]
     public async Task AllowStartsSunshineWhileBlockedAndRemovesBlockOnlyAfterStart()
     {
         var f = new Fixture();
