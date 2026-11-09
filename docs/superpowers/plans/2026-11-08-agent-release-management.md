@@ -148,7 +148,7 @@
 - Modify: `docs/agent-acceptance.md`
 - Test: Controller integration tests and Admin route/UI tests
 
-- [ ] **Step 1: Add an end-to-end software scenario** for publish → reserve update with no lease → reject concurrent lease → apply/rollback → heartbeat confirmation → readiness gate.
-- [ ] **Step 2: Run relevant .NET, PowerShell 5.1/7, auth, machine UI, TypeScript, lint, and production build validations.** Use isolated output directories while Controller is live.
-- [ ] **Step 3: Record tested software behavior and explicitly separate untested Windows service, firewall, Sunshine, VNC, external network, cold-boot, and hardware acceptance. Do not inspect or change Reboot Restore Rx.**
-- [ ] **Step 4: Commit `docs: record Agent release update acceptance`.
+- [x] **Step 1: Add an end-to-end software scenario** for publish → reserve update with no lease → reject concurrent lease → apply/rollback → heartbeat confirmation → readiness gate.
+- [x] **Step 2: Run relevant .NET, PowerShell 5.1/7, auth, machine UI, TypeScript, lint, and production build validations.** Use isolated output directories while Controller is live.
+- [x] **Step 3: Record tested software behavior and explicitly separate untested Windows service, firewall, Sunshine, VNC, external network, cold-boot, and hardware acceptance. Do not inspect or change Reboot Restore Rx.**
+- [x] **Step 4: Commit `docs: record Agent release update acceptance`.
