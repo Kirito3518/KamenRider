@@ -13,6 +13,7 @@ public record MachineDto(string MachineId, string ApprovalStatus, string Display
     public string? VncLocalIp {get;init;}
     public int ActiveAdminVncSessions {get;init;}
     public bool CanRent {get;init;}
+    public bool AllocationHeld {get;init;}
     public ReadinessDiagnostic[]? ReadinessDiagnostics {get;init;}
     public string? AgentUpdateOperationId { get; init; }
     public string? AgentUpdateTargetVersion { get; init; }

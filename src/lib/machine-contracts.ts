@@ -32,11 +32,15 @@ export type Machine = {
   appliedConfigRevision: number | null;
   readiness: string;
   canRent: boolean;
+  allocationHeld?: boolean;
   lastSeenAt: string | null;
   agentVersion: string | null;
   publicKeyFingerprint?: string;
   activeAdminVncSessions: number;
   readinessDiagnostics?: ReadinessDiagnostic[] | null;
+  agentUpdateOperationId?: string | null;
+  agentUpdateTargetVersion?: string | null;
+  agentUpdateStatus?: string | null;
 };
 export type AgentReachability = "reachable" | "unreachable" | "unknown";
 export type AgentHeartbeat = {

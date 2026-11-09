@@ -1,6 +1,7 @@
 "use client";
 import { useCallback, useEffect, useRef, useState, type ChangeEventHandler } from "react";
 import { AdminVncViewerButton } from "@/components/admin/admin-vnc-viewer";
+import { AgentUpdateControl } from "@/components/admin/agent-update-control";
 import type {
   Lease,
   Machine,
@@ -302,6 +303,7 @@ export function MachinesManager() {
           <p role="status">
             เซสชันผู้ดูแลที่กำลังดู VNC: {m.activeAdminVncSessions ?? 0}
           </p>
+          <AgentUpdateControl machine={m} onUpdated={() => void load()} />
           <p className="break-all font-mono text-sm">
             Fingerprint: {m.publicKeyFingerprint || "ยังไม่มีข้อมูลยืนยัน"}
           </p>

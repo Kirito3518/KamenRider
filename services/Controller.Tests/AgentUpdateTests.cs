@@ -16,6 +16,25 @@ namespace Controller.Tests;
 public sealed class AgentUpdateTests
 {
     [Fact]
+    public async Task MachineListDistinguishesHeldLeaseFromUnreadyMachine()
+    {
+        using var fixture = new LeaseFixture();
+        var revision = Assert.Single(fixture.Db.List()).ConfigRevision;
+        fixture.Db.Sync("pc", new SyncRequest("boot", "192.0.2.1", "001122334455", revision, "notReady", []));
+        await using var host = await StartHost(fixture.Db);
+
+        using var unready = JsonDocument.Parse(await host.Client.GetStringAsync("/internal/machines"));
+        var unreadyMachine = unready.RootElement[0];
+        Assert.False(unreadyMachine.GetProperty("canRent").GetBoolean());
+        Assert.False(unreadyMachine.GetProperty("allocationHeld").GetBoolean());
+
+        fixture.Sync();
+        await fixture.Create();
+        using var allocated = JsonDocument.Parse(await host.Client.GetStringAsync("/internal/machines"));
+        Assert.True(allocated.RootElement[0].GetProperty("allocationHeld").GetBoolean());
+    }
+
+    [Fact]
     public async Task ReservationRejectsTheInstalledVersionWithoutLockingMachine()
     {
         using var fixture = new LeaseFixture();

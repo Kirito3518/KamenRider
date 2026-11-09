@@ -99,6 +99,18 @@ describe("MachinesManager install command interactions", () => {
     fireEvent.click(screen.getByRole("button", { name: "ขอคำสั่งติดตั้ง" }));
   }
 
+  it("offers an update on an approved, unready machine when its lease is clear", async () => {
+    machinesResponse = [{
+      machineId: "update-pc", approvalStatus: "approved", displayName: "Update PC", localIp: "192.168.1.12", vncLocalIp: null,
+      hourlyPriceMinorUnits: 100, moonlightPort: 47989, sunshinePort: 47990, configRevision: 1, appliedConfigRevision: 1,
+      readiness: "notReady", canRent: false, allocationHeld: false, lastSeenAt: TEST_NOW, agentVersion: "1.0.0", activeAdminVncSessions: 0,
+    }];
+    render(<MachinesManager />);
+    await screen.findByText("update-pc · approved");
+    await waitFor(() => expect((screen.getByRole("button", { name: "Update Agent" }) as HTMLButtonElement).disabled).toBe(false));
+    expectNetworkIsolation(0);
+  });
+
   it("does not request an install command until the Admin clicks the install button", () => {
     render(<MachinesManager />);
 
