@@ -111,6 +111,45 @@ describe("MachinesManager install command interactions", () => {
     expectNetworkIsolation(0);
   });
 
+  it("keeps the post-command machine snapshot when an older scheduled poll finishes later", async () => {
+    const intervalSpy = vi.spyOn(window, "setInterval");
+    const original = {
+      machineId: "update-pc", approvalStatus: "approved", displayName: "Update PC", localIp: "192.168.1.12", vncLocalIp: null,
+      hourlyPriceMinorUnits: 100, moonlightPort: 47989, sunshinePort: 47990, configRevision: 1, appliedConfigRevision: 1,
+      readiness: "notReady", canRent: false, allocationHeld: false, lastSeenAt: TEST_NOW, agentVersion: "1.0.0", activeAdminVncSessions: 0,
+      agentUpdateStatus: "completed", agentUpdateOperationId: "previous-operation",
+    };
+    let resolveOldPoll!: (response: Response) => void;
+    const oldPoll = new Promise<Response>((resolve) => { resolveOldPoll = resolve; });
+    let machineReads = 0;
+    fetchSpy.mockImplementation(async (input: RequestInfo | URL) => {
+      if (String(input) === MACHINES_URL) {
+        machineReads++;
+        if (machineReads === 2) return oldPoll;
+        return jsonResponse([{ ...original, ...(machineReads > 2 ? { agentVersion: "2.0.0", agentUpdateOperationId: "new-operation" } : {}) }]);
+      }
+      if (String(input) === "/api/admin/agent-releases") return jsonResponse([{ version: "2.0.0", channel: "stable" }]);
+      if (String(input) === "/api/admin/machines/update-pc/agent-update-command") return jsonResponse({
+        available: true, command: "new update command", operationId: "new-operation", targetVersion: "2.0.0", expiresAtUtc: FIRST_EXPIRY,
+      });
+      throw new Error(`Unexpected request ${input}`);
+    });
+    render(<MachinesManager />);
+    await screen.findByText("update-pc · approved");
+    await waitFor(() => expect((screen.getByRole("button", { name: "Update Agent" }) as HTMLButtonElement).disabled).toBe(false));
+    const poll = intervalSpy.mock.calls.find(([, delay]) => delay === 5000)![0] as () => void;
+    act(() => { poll(); });
+    fireEvent.click(screen.getByRole("button", { name: "Update Agent" }));
+    await screen.findByRole("option", { name: "2.0.0 · stable" });
+    fireEvent.change(screen.getByLabelText("เลือก release สำหรับ update-pc"), { target: { value: "2.0.0" } });
+    fireEvent.click(screen.getByRole("button", { name: "สร้างคำสั่งอัปเดต" }));
+    await screen.findByText(/Agent: 2.0.0/);
+    await act(async () => { resolveOldPoll(jsonResponse([original])); });
+    expect(screen.getByText(/Agent: 2.0.0/)).toBeDefined();
+    expect(screen.queryByText(/Agent: 1.0.0/)).toBeNull();
+    expect(screen.getByLabelText("คำสั่งอัปเดต Agent สำหรับ update-pc")).toHaveProperty("value", "new update command");
+  });
+
   it("does not request an install command until the Admin clicks the install button", () => {
     render(<MachinesManager />);
 

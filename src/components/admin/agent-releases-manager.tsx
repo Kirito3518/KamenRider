@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { AlertTriangle, Box, CheckCircle2, Radio, Tag } from "lucide-react";
 import { isAgentOnline, updateStatusLabels, type AgentRelease } from "@/lib/agent-releases";
 import type { Machine } from "@/lib/machine-contracts";
@@ -17,8 +17,10 @@ export function AgentReleasesManager() {
   const [uploadStatus, setUploadStatus] = useState("");
   const [uploading, setUploading] = useState(false);
   const [now, setNow] = useState(0);
+  const latestLoad = useRef(0);
 
   const load = useCallback(async (signal?: AbortSignal) => {
+    const run = ++latestLoad.current;
     const get = async <T,>(url: string): Promise<T> => {
       const response = await fetch(url, { cache: "no-store", signal });
       if (!response.ok) throw new Error();
@@ -27,7 +29,7 @@ export function AgentReleasesManager() {
     const [machineResult, releaseResult] = await Promise.allSettled([
       get<Machine[]>("/api/admin/machines"), get<AgentRelease[]>("/api/admin/agent-releases"),
     ]);
-    if (signal?.aborted) return;
+    if (signal?.aborted || run !== latestLoad.current) return;
     setNow(Date.now());
     if (machineResult.status === "fulfilled") { setMachines(machineResult.value); setMachineError(""); }
     else setMachineError("โหลดข้อมูลเครื่องไม่ได้ ข้อมูลที่แสดงอาจไม่ล่าสุด");
@@ -36,6 +38,7 @@ export function AgentReleasesManager() {
   }, []);
 
   useEffect(() => {
+    const loads = latestLoad;
     const controller = new AbortController();
     let busy = false;
     const refresh = async () => {
@@ -45,7 +48,7 @@ export function AgentReleasesManager() {
     };
     void refresh();
     const timer = window.setInterval(() => { if (document.visibilityState === "visible") void refresh(); }, 10_000);
-    return () => { controller.abort(); window.clearInterval(timer); };
+    return () => { loads.current++; controller.abort(); window.clearInterval(timer); };
   }, [load]);
 
   async function publish(event: FormEvent<HTMLFormElement>) {

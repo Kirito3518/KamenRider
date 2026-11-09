@@ -78,39 +78,32 @@ export function MachinesManager() {
   const [trialLease, setTrialLease] = useState<Lease | null>(null);
   const [loadStatus, setLoadStatus] = useState("กำลังโหลด…");
   const [message, setMessage] = useState("");
-  async function load() {
+  const latestLoad = useRef(0);
+  const load = useCallback(async (signal?: AbortSignal) => {
+    const run = ++latestLoad.current;
     try {
-      const nextMachines: Machine[] = await request(
-        "/api/admin/machines",
-        undefined,
-        "GET",
-      );
+      const response = await fetch("/api/admin/machines", { cache: "no-store", signal });
+      if (!response.ok) throw new Error("โหลดเครื่องไม่ได้");
+      const nextMachines: Machine[] = await response.json();
+      if (signal?.aborted || run !== latestLoad.current) return;
       setMachines(nextMachines);
       setVncTargetDrafts((current) =>
         mergeVncTargetDrafts(current, nextMachines),
       );
       setLoadStatus("");
     } catch (e) {
-      setLoadStatus(String(e));
+      if (!signal?.aborted && run === latestLoad.current) setLoadStatus(String(e));
     }
-  }
+  }, []);
   useEffect(() => {
-    let active = true;
+    const loads = latestLoad;
+    const controller = new AbortController();
     let busy = false;
     async function refresh() {
       if (busy) return;
       busy = true;
       try {
-        const r = await fetch("/api/admin/machines", { cache: "no-store" });
-        if (!r.ok) throw new Error("โหลดเครื่องไม่ได้");
-        const data: Machine[] = await r.json();
-        if (active) {
-          setMachines(data);
-          setVncTargetDrafts((current) => mergeVncTargetDrafts(current, data));
-          setLoadStatus("");
-        }
-      } catch (e) {
-        if (active) setLoadStatus(String(e));
+        await load(controller.signal);
       } finally {
         busy = false;
       }
@@ -120,10 +113,11 @@ export function MachinesManager() {
       if (document.visibilityState === "visible") void refresh();
     }, 5000);
     return () => {
-      active = false;
+      loads.current++;
+      controller.abort();
       window.clearInterval(timer);
     };
-  }, []);
+  }, [load]);
   const refreshInstallCommand = useCallback(async () => {
     setIsRefreshingInstallCommand(true);
     setInstallStatus("กำลังขอคำสั่งติดตั้ง…");
@@ -277,7 +271,7 @@ export function MachinesManager() {
       <p>
         ระบบทดลอง ไม่มีการหักยอดเงิน ความพร้อมจริงยังต้องผ่านการตรวจสอบ Agent
       </p>
-      <button className="rounded border p-2" onClick={load}>
+      <button className="rounded border p-2" onClick={() => void load()}>
         รีเฟรช
       </button>
       <p role="status">{message || loadStatus}</p>
@@ -303,7 +297,7 @@ export function MachinesManager() {
           <p role="status">
             เซสชันผู้ดูแลที่กำลังดู VNC: {m.activeAdminVncSessions ?? 0}
           </p>
-          <AgentUpdateControl machine={m} onUpdated={() => void load()} />
+          <AgentUpdateControl machine={m} onUpdated={() => load()} />
           <p className="break-all font-mono text-sm">
             Fingerprint: {m.publicKeyFingerprint || "ยังไม่มีข้อมูลยืนยัน"}
           </p>

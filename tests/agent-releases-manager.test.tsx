@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentReleasesManager } from "@/components/admin/agent-releases-manager";
 import { AgentUpdateControl } from "@/components/admin/agent-update-control";
@@ -99,6 +99,42 @@ describe("Agent releases dashboard", () => {
     expect(screen.getByLabelText("เวอร์ชัน release")).toHaveProperty("value", "3.0.0");
     expect(fetchSpy.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
   });
+
+  it("keeps the post-publication snapshot when an older scheduled poll finishes later", async () => {
+    const intervalSpy = vi.spyOn(window, "setInterval");
+    let resolveOldMachines!: (response: Response) => void;
+    let resolveOldReleases!: (response: Response) => void;
+    const oldMachines = new Promise<Response>((resolve) => { resolveOldMachines = resolve; });
+    const oldReleases = new Promise<Response>((resolve) => { resolveOldReleases = resolve; });
+    let polling = false;
+    let published = false;
+    fetchSpy.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === "POST") { published = true; return json(release("3.0.0", "stable")); }
+      if (published) return String(input) === "/api/admin/machines"
+        ? json([{ ...machine, agentVersion: "3.0.0" }]) : json([release("3.0.0", "stable")]);
+      if (polling) return String(input) === "/api/admin/machines" ? oldMachines : oldReleases;
+      return String(input) === "/api/admin/machines" ? json([machine]) : json([release("2.0.0", "stable")]);
+    });
+    render(<AgentReleasesManager />);
+    await screen.findByText("Notes 2.0.0");
+    polling = true;
+    const poll = intervalSpy.mock.calls.find(([, delay]) => delay === 10_000)![0] as () => void;
+    act(() => { poll(); });
+    fireEvent.change(screen.getByLabelText("เวอร์ชัน release"), { target: { value: "3.0.0" } });
+    fireEvent.change(screen.getByLabelText("Release notes"), { target: { value: "New release" } });
+    fireEvent.change(screen.getByLabelText("AgentPackage.zip"), { target: { files: [new File(["zip"], "AgentPackage.zip")] } });
+    fireEvent.submit(screen.getByRole("button", { name: "เผยแพร่ release" }).closest("form")!);
+    await screen.findByText("Notes 3.0.0");
+    await act(async () => {
+      resolveOldMachines(json([machine, { ...machine, machineId: "pc-old", lastSeenAt: null }]));
+      resolveOldReleases(json([release("2.0.0", "stable")]));
+    });
+    expect(screen.getByText("Notes 3.0.0")).toBeDefined();
+    expect(screen.queryByText("Notes 2.0.0")).toBeNull();
+    expect(screen.getByText("stable ล่าสุดที่เผยแพร่").closest("section")?.textContent).toContain("3.0.0");
+    expect(screen.getByText("ใช้ stable ล่าสุด").closest("section")?.textContent).toContain("1 / 1");
+    expect(screen.getByLabelText("3.0.0: 1 เครื่อง")).toBeDefined();
+  });
 });
 
 describe("Per-machine update", () => {
@@ -147,6 +183,47 @@ describe("Per-machine update", () => {
     await waitFor(() => expect(clipboard).toHaveBeenCalledWith("full command including ticket"));
   });
 
+  it.each(["completed", "rolledBack", "expired"])("retains a fresh command after %s until a matching snapshot, including delayed and failed refresh", async (status) => {
+    let finishRefresh!: () => void;
+    const onUpdated = vi.fn(() => new Promise<void>((resolve) => { finishRefresh = resolve; }));
+    const previous = { ...machine, agentUpdateStatus: status, agentUpdateOperationId: "previous-operation", agentUpdateTargetVersion: "1.0.0" };
+    const { rerender } = render(<AgentUpdateControl machine={previous} onUpdated={onUpdated} />);
+    fireEvent.click(screen.getByRole("button", { name: "Update Agent" }));
+    await screen.findByRole("option", { name: "2.0.0 · stable" });
+    fireEvent.change(screen.getByLabelText("เลือก release สำหรับ pc-1"), { target: { value: "2.0.0" } });
+    fireEvent.click(screen.getByRole("button", { name: "สร้างคำสั่งอัปเดต" }));
+    const commandField = await screen.findByLabelText("คำสั่งอัปเดต Agent สำหรับ pc-1");
+    const updateButton = screen.getByRole("button", { name: "Update Agent" }) as HTMLButtonElement;
+    expect(updateButton.disabled).toBe(true);
+    fireEvent.click(updateButton);
+    expect(commandField).toHaveProperty("value", "full command including ticket");
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    // The parent catches a failed refresh, so its promise settles without new machine props.
+    await act(async () => { finishRefresh(); });
+    expect(updateButton.disabled).toBe(true);
+    rerender(<AgentUpdateControl machine={{ ...previous }} onUpdated={onUpdated} />);
+    expect(updateButton.disabled).toBe(true);
+    expect(screen.getByLabelText("คำสั่งอัปเดต Agent สำหรับ pc-1")).toHaveProperty("value", "full command including ticket");
+    expect(screen.getByText(/สถานะอัปเดต: รอเรียกใช้ตัวติดตั้ง.*เป้าหมาย 2.0.0/)).toBeDefined();
+    fireEvent.click(screen.getByRole("button", { name: "คัดลอกคำสั่งอัปเดต" }));
+    await waitFor(() => expect(clipboard).toHaveBeenCalledWith("full command including ticket"));
+    rerender(<AgentUpdateControl machine={{ ...machine, agentUpdateStatus: "completed", agentUpdateOperationId: "op-1", agentVersion: "2.0.0" }} onUpdated={onUpdated} />);
+    expect(updateButton.disabled).toBe(false);
+  });
+
+  it("keeps the issued command and local lock when the refresh callback rejects", async () => {
+    const onUpdated = vi.fn().mockRejectedValue(new Error("Fixture refresh failed"));
+    render(<AgentUpdateControl machine={{ ...machine, agentUpdateStatus: "completed", agentUpdateOperationId: "old-operation" }} onUpdated={onUpdated} />);
+    fireEvent.click(screen.getByRole("button", { name: "Update Agent" }));
+    await screen.findByRole("option", { name: "2.0.0 · stable" });
+    fireEvent.change(screen.getByLabelText("เลือก release สำหรับ pc-1"), { target: { value: "2.0.0" } });
+    fireEvent.click(screen.getByRole("button", { name: "สร้างคำสั่งอัปเดต" }));
+    await screen.findByText(/โหลดสถานะเครื่องล่าสุดไม่ได้/);
+    expect(screen.getByLabelText("คำสั่งอัปเดต Agent สำหรับ pc-1")).toHaveProperty("value", "full command including ticket");
+    expect((screen.getByRole("button", { name: "Update Agent" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+
   it("recovers the existing failed operation using its operation ID", async () => {
     render(<AgentUpdateControl machine={{ ...machine, agentUpdateStatus: "failed", agentUpdateOperationId: "op-1", agentUpdateTargetVersion: "2.0.0" }} />);
     expect(screen.getByText(/ล้มเหลว/)).toBeDefined();
@@ -159,9 +236,11 @@ describe("Per-machine update", () => {
     render(<AgentUpdateControl machine={{ ...machine, agentUpdateStatus: "installing", agentUpdateOperationId: "op-1" }} />);
     fireEvent.click(screen.getByRole("button", { name: "กู้คืนการอัปเดต" }));
     await screen.findByLabelText("คำสั่งอัปเดต Agent สำหรับ pc-1");
-    vi.setSystemTime(new Date("2026-11-08T12:10:00.000Z"));
-    fireEvent.focus(window);
-    expect((screen.getByRole("button", { name: "คัดลอกคำสั่งอัปเดต" }) as HTMLButtonElement).disabled).toBe(true);
+    act(() => {
+      vi.setSystemTime(new Date("2026-11-08T12:10:00.000Z"));
+      fireEvent.focus(window);
+    });
+    await waitFor(() => expect((screen.getByRole("button", { name: "คัดลอกคำสั่งอัปเดต" }) as HTMLButtonElement).disabled).toBe(true));
     expect(fetchSpy).toHaveBeenCalledTimes(1);
   });
 

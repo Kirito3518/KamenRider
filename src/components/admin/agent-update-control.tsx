@@ -8,7 +8,7 @@ type CommandResult = { available: boolean; command?: string; expiresAtUtc?: stri
 const terminal = new Set(["completed", "rolledBack", "expired"]);
 const recoverable = new Set(["installing", "awaitingHeartbeat", "rollingBack", "failed"]);
 
-export function AgentUpdateControl({ machine, onUpdated }: { machine: Machine; onUpdated?: () => void }) {
+export function AgentUpdateControl({ machine, onUpdated }: { machine: Machine; onUpdated?: () => void | Promise<void> }) {
   const [open, setOpen] = useState(false);
   const [releases, setReleases] = useState<AgentRelease[] | null>(null);
   const [selected, setSelected] = useState("");
@@ -16,7 +16,9 @@ export function AgentUpdateControl({ machine, onUpdated }: { machine: Machine; o
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [clock, setClock] = useState(0);
-  const status = machine.agentUpdateStatus;
+  const awaitingSnapshot = Boolean(command?.operationId && (command.operationId !== machine.agentUpdateOperationId || !machine.agentUpdateStatus));
+  const status = awaitingSnapshot ? "awaitingInstaller" : machine.agentUpdateStatus;
+  const targetVersion = awaitingSnapshot ? command?.targetVersion : machine.agentUpdateTargetVersion;
   const locked = Boolean(status && !terminal.has(status));
   const leaseClear = machine.allocationHeld === false;
   const canStart = leaseClear && !locked && machine.approvalStatus === "approved" && Boolean(machine.agentVersion) && isAgentOnline(machine, clock);
@@ -42,6 +44,7 @@ export function AgentUpdateControl({ machine, onUpdated }: { machine: Machine; o
   }, [command?.expiresAtUtc]);
 
   async function chooseRelease() {
+    if (!canStart || busy) return;
     setOpen(true); setBusy(true); setMessage(""); setCommand(null); setSelected("");
     try {
       const response = await fetch("/api/admin/agent-releases", { cache: "no-store" });
@@ -49,6 +52,11 @@ export function AgentUpdateControl({ machine, onUpdated }: { machine: Machine; o
       setReleases(await response.json() as AgentRelease[]);
     } catch { setMessage("โหลดรายการ release ไม่ได้ กรุณาลองใหม่"); }
     finally { setBusy(false); }
+  }
+
+  async function refreshMachine() {
+    try { await onUpdated?.(); }
+    catch { setMessage("โหลดสถานะเครื่องล่าสุดไม่ได้ กรุณารีเฟรชอีกครั้ง"); }
   }
 
   async function requestCommand(body: { releaseVersion: string } | { operationId: string }) {
@@ -59,11 +67,11 @@ export function AgentUpdateControl({ machine, onUpdated }: { machine: Machine; o
       });
       if (!response.ok) throw new Error();
       const result = await response.json() as CommandResult;
-      if (!result.available || !result.command || !result.expiresAtUtc || !Number.isFinite(Date.parse(result.expiresAtUtc))) {
+      if (!result.available || !result.command || !result.operationId || !result.expiresAtUtc || !Number.isFinite(Date.parse(result.expiresAtUtc))) {
         setMessage(result.reason || "ยังไม่สามารถสร้างคำสั่งอัปเดตได้"); return;
       }
-      setClock(Date.now()); setCommand(result); setOpen(false); onUpdated?.();
-    } catch { setMessage("สร้างคำสั่งไม่สำเร็จ สถานะเครื่องหรือ lease อาจเปลี่ยนแล้ว กรุณารีเฟรชและตรวจสอบอีกครั้ง"); onUpdated?.(); }
+      setClock(Date.now()); setCommand(result); setOpen(false); await refreshMachine();
+    } catch { setMessage("สร้างคำสั่งไม่สำเร็จ สถานะเครื่องหรือ lease อาจเปลี่ยนแล้ว กรุณารีเฟรชและตรวจสอบอีกครั้ง"); await refreshMachine(); }
     finally { setBusy(false); }
   }
 
@@ -76,7 +84,7 @@ export function AgentUpdateControl({ machine, onUpdated }: { machine: Machine; o
   const choices = releases?.filter((release) => release.version !== machine.agentVersion) ?? [];
   return <section className="space-y-2 rounded border p-3" aria-label={`อัปเดต Agent ${machine.machineId}`}>
     <h3 className="font-semibold">Update Agent</h3>
-    <p className="text-sm">สถานะอัปเดต: {status ? updateStatusLabels[status] || status : "ยังไม่มีการอัปเดต"}{machine.agentUpdateTargetVersion ? ` · เป้าหมาย ${machine.agentUpdateTargetVersion}` : ""}</p>
+    <p className="text-sm">สถานะอัปเดต: {status ? updateStatusLabels[status] || status : "ยังไม่มีการอัปเดต"}{targetVersion ? ` · เป้าหมาย ${targetVersion}` : ""}</p>
     <p className="text-sm text-muted-foreground">ผลอัปเดตแยกจากการอนุมัติและความพร้อมให้เช่า</p>
     {!leaseClear ? <p className="text-sm">{machine.allocationHeld ? "เครื่องมี lease อยู่ จึงอัปเดตไม่ได้" : "ไม่ทราบสถานะ lease กรุณารีเฟรชข้อมูลเครื่อง"}</p> : null}
     {leaseClear && !locked && machine.approvalStatus !== "approved" ? <p className="text-sm">ต้องอนุมัติเครื่องก่อนอัปเดต</p> : null}
