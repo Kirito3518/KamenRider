@@ -275,6 +275,331 @@ public class DatabaseMaintenanceTests
         finally { DeleteRoot(root); }
     }
 
+    [Theory]
+    [InlineData(12)]
+    [InlineData(13)]
+    public void LegacyReleaseAndOperationSurviveBackupRestoreAndMigration(int version)
+    {
+        var root = NewRoot();
+        try
+        {
+            var source = Path.Combine(root, "legacy", "controller.db");
+            var backup = Path.Combine(root, "backup", "controller.db");
+            var destination = Path.Combine(root, "restored", "controller.db");
+            var hash = CreateLegacyReleaseWithOperation(source, version, "failed", false);
+            ControllerDatabaseMaintenance.Backup(source, backup);
+            ControllerDatabaseMaintenance.Restore(backup, destination);
+            using (var database = new ControllerDatabase(destination))
+            {
+                var machine = Assert.Single(database.List());
+                Assert.Equal("legacy-op", machine.AgentUpdateOperationId);
+                Assert.Equal("failed", machine.AgentUpdateStatus);
+                Assert.Equal("approved", machine.ApprovalStatus);
+                Assert.Equal("ready", machine.Readiness);
+                Assert.False(machine.CanRent);
+                Assert.Throws<InvalidOperationException>(() => database.CreateTrialLease("user", "legacy-pc", 60, "rent"));
+            }
+            Assert.Equal(File.ReadAllBytes(ArtifactPath(source, hash)), File.ReadAllBytes(ArtifactPath(destination, hash)));
+            using var connection = OpenDatabase(destination);
+            using var command = connection.CreateCommand();
+            command.CommandText = "SELECT o.operation_id,o.target_version,o.target_package_sha256,o.previous_version,o.ticket_hash,o.ticket_expires_at_unix_ms,o.ticket_started_at_unix_ms,o.started_at_unix_ms,o.created_at_unix_ms,o.updated_at_unix_ms,o.ticket_package_downloaded_at_unix_ms,o.ticket_generation,o.ticket_purpose,c.held,c.inherited,c.current_head_operation_id,r.package_path FROM agent_update_operations o JOIN agent_maintenance_chains c ON c.chain_id=o.chain_id JOIN agent_releases r ON r.version=o.release_version";
+            using var row = command.ExecuteReader();
+            Assert.True(row.Read());
+            Assert.Equal("legacy-op", row.GetString(0));
+            Assert.Equal("2.3.4", row.GetString(1));
+            Assert.Equal(hash, row.GetString(2));
+            Assert.Equal("1.2.3", row.GetString(3));
+            Assert.Equal("legacy-ticket", row.GetString(4));
+            Assert.Equal(900, row.GetInt64(5));
+            Assert.Equal(20, row.GetInt64(6));
+            Assert.Equal(30, row.GetInt64(7));
+            Assert.Equal(10, row.GetInt64(8));
+            Assert.Equal(40, row.GetInt64(9));
+            if (version == 13) Assert.Equal(35, row.GetInt64(10)); else Assert.True(row.IsDBNull(10));
+            Assert.Equal(0, row.GetInt64(11));
+            Assert.Equal("legacy", row.GetString(12));
+            Assert.Equal(1, row.GetInt64(13));
+            Assert.Equal(1, row.GetInt64(14));
+            Assert.Equal("legacy-op", row.GetString(15));
+            Assert.Equal(ArtifactPath(destination, hash), row.GetString(16));
+            Assert.False(row.Read());
+        }
+        finally { DeleteRoot(root); }
+    }
+
+    [Fact]
+    public void InheritedHeldChainSurvivesVersionFourteenBackupAndRestore()
+    {
+        var root = NewRoot();
+        try
+        {
+            var source = Path.Combine(root, "source", "controller.db");
+            var backup = Path.Combine(root, "backup", "controller.db");
+            var destination = Path.Combine(root, "restored", "controller.db");
+            var hash = CreateLegacyReleaseWithOperation(source, 13, "failed", false);
+            using (new ControllerDatabase(source)) { }
+            ControllerDatabaseMaintenance.Backup(source, backup);
+            ControllerDatabaseMaintenance.Restore(backup, destination);
+            using var restored = new ControllerDatabase(destination);
+            var machine = Assert.Single(restored.List());
+            Assert.Equal("legacy-op", machine.AgentUpdateOperationId);
+            Assert.Equal("failed", machine.AgentUpdateStatus);
+            Assert.Equal("approved", machine.ApprovalStatus);
+            Assert.Equal("ready", machine.Readiness);
+            Assert.False(machine.CanRent);
+            Assert.Throws<InvalidOperationException>(() => restored.CreateTrialLease("user", "legacy-pc", 60, "rent"));
+            Assert.Equal(File.ReadAllBytes(ArtifactPath(source, hash)), File.ReadAllBytes(ArtifactPath(destination, hash)));
+        }
+        finally { DeleteRoot(root); }
+    }
+
+    [Theory]
+    [InlineData("awaitingInstaller", false, false)]
+    [InlineData("installing", true, false)]
+    [InlineData("awaitingHeartbeat", true, false)]
+    [InlineData("rollingBack", true, false)]
+    [InlineData("failed", true, false)]
+    [InlineData("expired", true, false)]
+    [InlineData("expired", true, true)]
+    public void RestoreRejectsClosedChainWithNonterminalOrStartedExpiredHead(string status, bool started, bool held)
+    {
+        var root = NewRoot();
+        try
+        {
+            var source = Path.Combine(root, "source", "controller.db");
+            var destination = Path.Combine(root, "destination", "controller.db");
+            var hash = AddReleaseArtifact(source, "2.3.4", "legacy release bytes");
+            using (var database = new ControllerDatabase(source)) AddMachine(database, "source-machine");
+            using (var connection = OpenDatabase(source))
+            using (var tx = connection.BeginTransaction())
+            using (var command = connection.CreateCommand())
+            {
+                command.Transaction = tx;
+                command.CommandText = "INSERT INTO agent_maintenance_chains VALUES('chain','source-machine','operation',1,$held,1,1,1); INSERT INTO agent_update_operations(operation_id,machine_id,chain_id,release_version,target_version,target_package_sha256,status,ticket_hash,ticket_generation,ticket_purpose,ticket_expires_at_unix_ms,started_at_unix_ms,created_at_unix_ms,updated_at_unix_ms) VALUES('operation','source-machine','chain','2.3.4','2.3.4',$hash,$status,'ticket',0,'legacy',1,$started,1,1)";
+                command.Parameters.AddWithValue("$hash", hash);
+                command.Parameters.AddWithValue("$status", status);
+                command.Parameters.AddWithValue("$held", held ? 1 : 0);
+                command.Parameters.AddWithValue("$started", started ? 1 : DBNull.Value);
+                command.ExecuteNonQuery();
+                tx.Commit();
+            }
+            var startError = Record.Exception(() => { using var database = new ControllerDatabase(source); });
+            Assert.IsType<InvalidDataException>(startError);
+            CopyArtifactToSidecar(source, hash);
+            AssertSnapshotRejectedWithoutReplacement(source, destination, Path.Combine(root, "bad-backup.db"));
+        }
+        finally { DeleteRoot(root); }
+    }
+
+    [Fact]
+    public void RestoreRejectsExpiredHeadWhenEarlierChainWorkStarted()
+    {
+        var root = NewRoot();
+        try
+        {
+            var source = Path.Combine(root, "source", "controller.db");
+            var destination = Path.Combine(root, "destination", "controller.db");
+            var hash = AddReleaseArtifact(source, "2.3.4", "legacy release bytes");
+            using (var database = new ControllerDatabase(source)) AddMachine(database, "source-machine");
+            using (var connection = OpenDatabase(source))
+            using (var tx = connection.BeginTransaction())
+            using (var command = connection.CreateCommand())
+            {
+                command.Transaction = tx;
+                command.CommandText = "INSERT INTO agent_maintenance_chains VALUES('chain','source-machine','head',2,0,0,1,1); INSERT INTO agent_update_operations(operation_id,machine_id,chain_id,release_version,target_version,target_package_sha256,status,ticket_hash,ticket_generation,ticket_purpose,ticket_expires_at_unix_ms,started_at_unix_ms,created_at_unix_ms,updated_at_unix_ms) VALUES('previous','source-machine','chain','2.3.4','2.3.4',$hash,'completed','previous-ticket',1,'apply',1,1,1,1); INSERT INTO agent_update_operations(operation_id,machine_id,chain_id,parent_operation_id,release_version,target_version,target_package_sha256,status,ticket_hash,ticket_generation,ticket_purpose,ticket_expires_at_unix_ms,created_at_unix_ms,updated_at_unix_ms) VALUES('head','source-machine','chain','previous','2.3.4','2.3.4',$hash,'expired','head-ticket',2,'apply',1,1,1)";
+                command.Parameters.AddWithValue("$hash", hash);
+                command.ExecuteNonQuery();
+                tx.Commit();
+            }
+            CopyArtifactToSidecar(source, hash);
+            AssertSnapshotRejectedWithoutReplacement(source, destination, Path.Combine(root, "bad-backup.db"));
+        }
+        finally { DeleteRoot(root); }
+    }
+
+    [Theory]
+    [InlineData(12, "awaitingInstaller")]
+    [InlineData(12, "installing")]
+    [InlineData(12, "awaitingHeartbeat")]
+    [InlineData(12, "rollingBack")]
+    [InlineData(12, "failed")]
+    [InlineData(13, "awaitingInstaller")]
+    [InlineData(13, "installing")]
+    [InlineData(13, "awaitingHeartbeat")]
+    [InlineData(13, "rollingBack")]
+    [InlineData(13, "failed")]
+    public void LegacyLeaseAndNonterminalUpdateConflictIsRejectedBeforeRestore(int version, string status)
+    {
+        var root = NewRoot();
+        try
+        {
+            var source = Path.Combine(root, "legacy", "controller.db");
+            var destination = Path.Combine(root, "destination", "controller.db");
+            var hash = CreateLegacyReleaseWithOperation(source, version, status, true);
+            CopyArtifactToSidecar(source, hash);
+            AssertSnapshotRejectedWithoutReplacement(source, destination, Path.Combine(root, "bad-backup.db"));
+        }
+        finally { DeleteRoot(root); }
+    }
+
+    [Theory]
+    [InlineData(12, "completed")]
+    [InlineData(12, "rolledBack")]
+    [InlineData(12, "expired")]
+    [InlineData(13, "completed")]
+    [InlineData(13, "rolledBack")]
+    [InlineData(13, "expired")]
+    public void LegacyTerminalUpdateMayCoexistWithHeldLease(int version, string status)
+    {
+        var root = NewRoot();
+        try
+        {
+            var source = Path.Combine(root, "source", "controller.db");
+            var backup = Path.Combine(root, "backup", "controller.db");
+            var destination = Path.Combine(root, "destination", "controller.db");
+            var hash = CreateLegacyReleaseWithOperation(source, version, status, true);
+            ControllerDatabaseMaintenance.Backup(source, backup);
+            ControllerDatabaseMaintenance.Restore(backup, destination);
+            using var database = new ControllerDatabase(destination);
+            var machine = Assert.Single(database.List());
+            Assert.Equal(status, machine.AgentUpdateStatus);
+            Assert.True(machine.AllocationHeld);
+            Assert.False(machine.CanRent);
+            Assert.Equal(File.ReadAllBytes(ArtifactPath(source, hash)), File.ReadAllBytes(ArtifactPath(destination, hash)));
+        }
+        finally { DeleteRoot(root); }
+    }
+
+    [Theory]
+    [InlineData(12)]
+    [InlineData(13)]
+    public void ConflictingLegacyDatabaseCannotStartOrPartiallyMigrate(int version)
+    {
+        var root = NewRoot();
+        try
+        {
+            var path = Path.Combine(root, "legacy", "controller.db");
+            CreateLegacyReleaseWithOperation(path, version, "failed", true);
+            var error = Record.Exception(() => { using var database = new ControllerDatabase(path); });
+            Assert.IsType<InvalidDataException>(error);
+            using var connection = OpenDatabase(path);
+            using var command = connection.CreateCommand();
+            command.CommandText = "PRAGMA user_version";
+            Assert.Equal(version, Convert.ToInt32(command.ExecuteScalar()));
+            command.CommandText = "SELECT COUNT(*) FROM leases WHERE allocation_held=1";
+            Assert.Equal(1L, command.ExecuteScalar());
+            command.CommandText = "SELECT status FROM agent_update_operations WHERE operation_id='legacy-op'";
+            Assert.Equal("failed", command.ExecuteScalar());
+        }
+        finally { DeleteRoot(root); }
+    }
+
+    [Theory]
+    [InlineData("nonhead")]
+    [InlineData("future-generation")]
+    public void RestoreRejectsContradictoryHeldChainRelationships(string mutation)
+    {
+        var root = NewRoot();
+        try
+        {
+            var source = Path.Combine(root, "source", "controller.db");
+            var destination = Path.Combine(root, "destination", "controller.db");
+            var hash = AddReleaseArtifact(source, "2.3.4", "legacy release bytes");
+            using (var database = new ControllerDatabase(source)) AddMachine(database, "source-machine");
+            using (var connection = OpenDatabase(source))
+            using (var tx = connection.BeginTransaction())
+            using (var command = connection.CreateCommand())
+            {
+                command.Transaction = tx;
+                command.CommandText = "INSERT INTO agent_maintenance_chains VALUES('chain','source-machine','head',1,1,0,1,1); INSERT INTO agent_update_operations(operation_id,machine_id,chain_id,release_version,target_version,target_package_sha256,status,ticket_hash,ticket_generation,ticket_purpose,ticket_expires_at_unix_ms,created_at_unix_ms,updated_at_unix_ms) VALUES('head','source-machine','chain','2.3.4','2.3.4',$hash,'awaitingInstaller','head-ticket',$generation,'apply',9999999999999,1,1)";
+                command.Parameters.AddWithValue("$hash", hash);
+                command.Parameters.AddWithValue("$generation", mutation == "future-generation" ? 2 : 1);
+                command.ExecuteNonQuery();
+                if (mutation == "nonhead")
+                {
+                    command.CommandText = "INSERT INTO agent_update_operations(operation_id,machine_id,chain_id,release_version,target_version,target_package_sha256,status,ticket_hash,ticket_generation,ticket_purpose,ticket_expires_at_unix_ms,created_at_unix_ms,updated_at_unix_ms) VALUES('orphan-active','source-machine','chain','2.3.4','2.3.4',$hash,'failed','other-ticket',1,'apply',1,1,1)";
+                    command.ExecuteNonQuery();
+                }
+                tx.Commit();
+            }
+            CopyArtifactToSidecar(source, hash);
+            AssertSnapshotRejectedWithoutReplacement(source, destination, Path.Combine(root, "bad-backup.db"));
+        }
+        finally { DeleteRoot(root); }
+    }
+
+    [Fact]
+    public void RevokedOlderGenerationTicketDoesNotInvalidateHeldChainSnapshot()
+    {
+        var root = NewRoot();
+        try
+        {
+            var source = Path.Combine(root, "source", "controller.db");
+            var backup = Path.Combine(root, "backup", "controller.db");
+            var destination = Path.Combine(root, "destination", "controller.db");
+            var hash = AddReleaseArtifact(source, "2.3.4", "legacy release bytes");
+            using (var database = new ControllerDatabase(source)) AddMachine(database, "source-machine");
+            using (var connection = OpenDatabase(source))
+            using (var tx = connection.BeginTransaction())
+            using (var command = connection.CreateCommand())
+            {
+                command.Transaction = tx;
+                command.CommandText = "INSERT INTO agent_maintenance_chains VALUES('chain','source-machine','head',2,1,0,1,1); INSERT INTO agent_update_operations(operation_id,machine_id,chain_id,release_version,target_version,target_package_sha256,status,ticket_hash,ticket_generation,ticket_purpose,ticket_expires_at_unix_ms,created_at_unix_ms,updated_at_unix_ms) VALUES('head','source-machine','chain','2.3.4','2.3.4',$hash,'awaitingInstaller','old-ticket',1,'apply',9999999999999,1,1)";
+                command.Parameters.AddWithValue("$hash", hash);
+                command.ExecuteNonQuery();
+                tx.Commit();
+            }
+            ControllerDatabaseMaintenance.Backup(source, backup);
+            ControllerDatabaseMaintenance.Restore(backup, destination);
+            using var restored = new ControllerDatabase(destination);
+            var machine = Assert.Single(restored.List());
+            Assert.Equal("head", machine.AgentUpdateOperationId);
+            Assert.False(machine.CanRent);
+        }
+        finally { DeleteRoot(root); }
+    }
+
+    [Theory]
+    [InlineData("status")]
+    [InlineData("glob")]
+    public void SchemaComparisonRejectsAlteredSqlLiteralsInBackupAndRestore(string mutation)
+    {
+        var root = NewRoot();
+        try
+        {
+            var source = Path.Combine(root, "source", "controller.db");
+            var destination = Path.Combine(root, "destination", "controller.db");
+            using (var database = new ControllerDatabase(source)) AddMachine(database, "source-machine");
+            using (var connection = OpenDatabase(source))
+            using (var command = connection.CreateCommand())
+            {
+                if (mutation == "status")
+                {
+                    command.CommandText = "SELECT sql FROM sqlite_schema WHERE name='agent_update_superseded_insert_guard'";
+                    var definition = (string)command.ExecuteScalar()!;
+                    Assert.Contains("'superseded'", definition);
+                    command.CommandText = "DROP TRIGGER agent_update_superseded_insert_guard";
+                    command.ExecuteNonQuery();
+                    command.CommandText = definition.Replace("'superseded'", "'SUPERSEDED'", StringComparison.Ordinal);
+                    command.ExecuteNonQuery();
+                }
+                else
+                {
+                    command.CommandText = "SELECT sql FROM sqlite_schema WHERE name='agent_update_operations'";
+                    var definition = (string)command.ExecuteScalar()!;
+                    Assert.Contains("*[^0-9a-fA-F]*", definition);
+                    command.CommandText = "PRAGMA writable_schema=ON; UPDATE sqlite_schema SET sql=$sql WHERE type='table' AND name='agent_update_operations'; PRAGMA writable_schema=OFF";
+                    command.Parameters.AddWithValue("$sql", definition.Replace("*[^0-9a-fA-F]*", "*^0-9a-fA-F*", StringComparison.Ordinal));
+                    command.ExecuteNonQuery();
+                }
+            }
+            var startupError = Record.Exception(() => { using var database = new ControllerDatabase(source); });
+            Assert.IsType<InvalidDataException>(startupError);
+            AssertSnapshotRejectedWithoutReplacement(source, destination, Path.Combine(root, "bad-backup.db"));
+        }
+        finally { DeleteRoot(root); }
+    }
+
     [Fact]
     public void BackupRejectsMissingMaintenanceCloseGuard()
     {
@@ -855,6 +1180,69 @@ public class DatabaseMaintenanceTests
     {
         using var key = ECDsa.Create();
         database.EnrollWithTicket(new EnrollmentRequest(machineId, Convert.ToBase64String(key.ExportSubjectPublicKeyInfo()), "192.0.2.1", "001122334455", 5000, 47989));
+    }
+
+    private static SqliteConnection OpenDatabase(string path)
+    {
+        var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = path, ForeignKeys = true, Pooling = false }.ToString());
+        connection.Open();
+        return connection;
+    }
+
+    private static string CreateLegacyReleaseWithOperation(string path, int version, string status, bool withHeldLease)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        CreateLegacyReleaseDatabase(path, version);
+        var bytes = System.Text.Encoding.UTF8.GetBytes("legacy retained artifact");
+        var hash = Convert.ToHexString(SHA256.HashData(bytes));
+        var artifact = ArtifactPath(path, hash);
+        Directory.CreateDirectory(Path.GetDirectoryName(artifact)!);
+        File.WriteAllBytes(artifact, bytes);
+        using var connection = OpenDatabase(path);
+        using var tx = connection.BeginTransaction();
+        using var command = connection.CreateCommand();
+        command.Transaction = tx;
+        command.CommandText = "UPDATE machines SET approval_status='approved' WHERE machine_id='legacy-pc'; INSERT INTO machine_heartbeats(machine_id,last_seen,boot_id,readiness,agent_version) VALUES('legacy-pc',$now,'boot','ready','1.2.3'); INSERT INTO machine_config_acks(machine_id,applied_revision) VALUES('legacy-pc',1); INSERT INTO agent_releases(version,channel,release_notes,package_sha256,package_path,package_size_bytes,source_commit,source_dirty,release_build,package_format,published_at_unix_ms) VALUES('2.3.4','stable','notes',$hash,$path,$size,'commit',0,1,'AgentPackage.zip',1); INSERT INTO agent_update_operations(operation_id,machine_id,release_version,target_version,target_package_sha256,previous_version,status,ticket_hash,ticket_expires_at_unix_ms,ticket_started_at_unix_ms,started_at_unix_ms,created_at_unix_ms,updated_at_unix_ms) VALUES('legacy-op','legacy-pc','2.3.4','2.3.4',$hash,'1.2.3',$status,'legacy-ticket',900,$ticketStarted,$started,10,40)";
+        command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O"));
+        command.Parameters.AddWithValue("$hash", hash);
+        command.Parameters.AddWithValue("$path", artifact);
+        command.Parameters.AddWithValue("$size", bytes.Length);
+        command.Parameters.AddWithValue("$status", status);
+        command.Parameters.AddWithValue("$ticketStarted", status is "awaitingInstaller" or "expired" ? DBNull.Value : 20);
+        command.Parameters.AddWithValue("$started", status is "awaitingInstaller" or "expired" ? DBNull.Value : 30);
+        command.ExecuteNonQuery();
+        if (version == 13 && status is not ("awaitingInstaller" or "expired"))
+        {
+            command.CommandText = "UPDATE agent_update_operations SET ticket_package_downloaded_at_unix_ms=35 WHERE operation_id='legacy-op'";
+            command.ExecuteNonQuery();
+        }
+        if (withHeldLease)
+        {
+            command.CommandText = "INSERT INTO leases(id,user_id,machine_id,state,duration_seconds,preparation_deadline,allocation_held) VALUES('held-lease','user','legacy-pc','preparing',60,999999,1)";
+            command.ExecuteNonQuery();
+        }
+        tx.Commit();
+        return hash;
+    }
+
+    private static void CopyArtifactToSidecar(string snapshot, string hash)
+    {
+        var sidecar = Path.Combine(snapshot + ".agent-releases", "sha256", hash[..2].ToLowerInvariant(), hash.ToLowerInvariant() + ".zip");
+        Directory.CreateDirectory(Path.GetDirectoryName(sidecar)!);
+        File.Copy(ArtifactPath(snapshot, hash), sidecar);
+    }
+
+    private static void AssertSnapshotRejectedWithoutReplacement(string source, string destination, string backup)
+    {
+        using (var database = new ControllerDatabase(destination)) AddMachine(database, "preserved-machine");
+        var original = File.ReadAllBytes(destination);
+        var backupError = Record.Exception(() => ControllerDatabaseMaintenance.Backup(source, backup));
+        var restoreError = Record.Exception(() => ControllerDatabaseMaintenance.Restore(source, destination));
+        Assert.IsType<InvalidDataException>(backupError);
+        Assert.IsType<InvalidDataException>(restoreError);
+        Assert.False(File.Exists(backup));
+        Assert.Equal(original, File.ReadAllBytes(destination));
+        Assert.Empty(Directory.GetFiles(Path.GetDirectoryName(destination)!, "*.pre-restore-*"));
     }
 
     private static void ReplaceHeartbeatTable(string databasePath, string createStatement)

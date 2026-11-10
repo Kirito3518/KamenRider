@@ -311,7 +311,10 @@ public static class ControllerDatabaseMaintenance
                         ValidateColumns(connection, table, requiredColumns[table], requiredPrimaryKeys[table]);
                 }
                 if (userVersion < 14)
+                {
                     ValidateIndex(connection, "agent_update_operations", "agent_update_one_active_per_machine", ["machine_id"], "status NOT IN ('completed','rolledBack','expired')", required: true);
+                    ValidateLegacyMaintenanceState(connection);
+                }
             }
             if (userVersion >= 13 && userVersion < 14)
                 ValidateColumns(connection, "agent_update_operations", [
@@ -374,9 +377,10 @@ public static class ControllerDatabaseMaintenance
         return result;
     });
 
-    private static void ValidateMaintenanceChainSchema(SqliteConnection connection)
+    internal static void ValidateMaintenanceChainSchema(SqliteConnection connection, SqliteTransaction? transaction = null)
     {
         using var command = connection.CreateCommand();
+        command.Transaction = transaction;
         command.CommandText = "SELECT sql FROM sqlite_schema WHERE name=$name";
         var parameter = command.Parameters.Add("$name", SqliteType.Text);
         foreach (var (name, expected) in maintenanceSchema.Value)
@@ -385,10 +389,36 @@ public static class ControllerDatabaseMaintenance
             if (command.ExecuteScalar() is not string actual || NormalizeSql(actual) != expected)
                 throw new InvalidDataException($"Controller database has an invalid maintenance-chain definition '{name}'.");
         }
+        ValidateMaintenanceState(connection, transaction);
+    }
+
+    private static void ValidateLegacyMaintenanceState(SqliteConnection connection)
+    {
         using var conflict = connection.CreateCommand();
-        conflict.CommandText = "SELECT EXISTS(SELECT 1 FROM agent_maintenance_chains c JOIN leases l ON l.machine_id=c.machine_id WHERE c.held=1 AND l.allocation_held=1)";
+        conflict.CommandText = "SELECT EXISTS(SELECT 1 FROM agent_update_operations o JOIN leases l ON l.machine_id=o.machine_id WHERE l.allocation_held=1 AND o.status NOT IN ('completed','rolledBack','expired'))";
         if (Convert.ToInt64(conflict.ExecuteScalar(), CultureInfo.InvariantCulture) != 0)
-            throw new InvalidDataException("Controller database contains a held lease and maintenance chain for the same machine.");
+            throw new InvalidDataException("Controller database contains a held lease and a nonterminal Agent update for the same machine.");
+    }
+
+    internal static void ValidateMaintenanceState(SqliteConnection connection, SqliteTransaction? transaction = null)
+    {
+        using var conflict = connection.CreateCommand();
+        conflict.Transaction = transaction;
+        conflict.CommandText = """
+            SELECT EXISTS(
+                SELECT 1 FROM agent_maintenance_chains c
+                LEFT JOIN agent_update_operations h ON h.operation_id=c.current_head_operation_id AND h.chain_id=c.chain_id AND h.machine_id=c.machine_id
+                WHERE h.operation_id IS NULL OR h.status='superseded' OR h.ticket_generation < 0 OR h.ticket_generation > c.generation
+                   OR (c.held=0 AND h.status NOT IN ('completed','rolledBack','expired'))
+                   OR (h.status='expired' AND EXISTS(SELECT 1 FROM agent_update_operations started WHERE started.chain_id=c.chain_id AND started.started_at_unix_ms IS NOT NULL))
+                   OR (c.held=1 AND EXISTS(SELECT 1 FROM leases l WHERE l.machine_id=c.machine_id AND l.allocation_held=1))
+                   OR EXISTS(SELECT 1 FROM agent_update_operations o WHERE o.chain_id=c.chain_id AND o.operation_id<>c.current_head_operation_id AND o.status NOT IN ('completed','rolledBack','expired','superseded'))
+            ) OR EXISTS(
+                SELECT 1 FROM agent_update_operations o LEFT JOIN agent_maintenance_chains c ON c.chain_id=o.chain_id AND c.machine_id=o.machine_id WHERE c.chain_id IS NULL
+            )
+            """;
+        if (Convert.ToInt64(conflict.ExecuteScalar(), CultureInfo.InvariantCulture) != 0)
+            throw new InvalidDataException("Controller database contains an inconsistent Agent maintenance chain or a conflicting held lease.");
     }
 
     private static void ValidateColumns(SqliteConnection connection, string table, RequiredColumn[] expectedColumns, string[] expectedPrimaryKey)
@@ -518,8 +548,28 @@ public static class ControllerDatabaseMaintenance
             throw new InvalidDataException($"Controller database index '{name}' has an invalid filter.");
     }
 
-    private static string NormalizeSql(string sql) => string.Concat(sql.Where(character =>
-        !char.IsWhiteSpace(character) && character != '"' && character != '`' && character != '[' && character != ']')).ToLowerInvariant();
+    private static string NormalizeSql(string sql)
+    {
+        var result = new System.Text.StringBuilder(sql.Length);
+        var literal = false;
+        for (var i = 0; i < sql.Length; i++)
+        {
+            var character = sql[i];
+            if (literal)
+            {
+                result.Append(character);
+                if (character == '\'')
+                {
+                    if (i + 1 < sql.Length && sql[i + 1] == '\'') result.Append(sql[++i]);
+                    else literal = false;
+                }
+            }
+            else if (character == '\'') { literal = true; result.Append(character); }
+            else if (!char.IsWhiteSpace(character) && character != '"' && character != '`' && character != '[' && character != ']')
+                result.Append(char.ToLowerInvariant(character));
+        }
+        return result.ToString();
+    }
 
     private static void CheckpointWal(string path)
     {
