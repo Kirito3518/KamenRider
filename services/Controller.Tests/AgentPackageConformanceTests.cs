@@ -14,6 +14,10 @@ namespace Controller.Tests;
 public sealed class AgentPackageConformanceTests
 {
     private static readonly Lazy<string> Cli = new(BuildCli);
+    private delegate void InspectDeflate(ReadOnlySpan<byte> data, int expectedLength);
+    private static readonly Lazy<InspectDeflate> Inspector = new(() =>
+        typeof(PackageVerifier).Assembly.GetType("KamenRaider.AgentPackage.DeflateInspector", throwOnError: true)!
+            .GetMethod("Verify", BindingFlags.NonPublic | BindingFlags.Static)!.CreateDelegate<InspectDeflate>());
 
     [Theory]
     [InlineData("win-x64")]
@@ -285,6 +289,37 @@ public sealed class AgentPackageConformanceTests
     [InlineData("reserved-block", "structure")]
     public void DeflateStoredBlocksRequireCorrectStructure(string variant, string? category)
         => AssertArchive(AgentPackageCorpus.DeflateStoredBlock(variant), category, category is null ? "win-x64" : null);
+
+    // These raw DEFLATE vectors isolate the named tree and code faults.
+    [Theory]
+    [InlineData("oversubscribed code-length tree", "05009200")]
+    [InlineData("incomplete code-length tree", "05000200")]
+    [InlineData("repeat exceeds total code lengths", "050080e4ff1f")]
+    [InlineData("repeat before first code length", "05000224")]
+    [InlineData("missing end-of-block code", "050080e47f1b")]
+    [InlineData("incomplete literal tree", "0580010500000080febf0e")]
+    [InlineData("oversubscribed literal tree", "05c0010500000000a0fa7f3a")]
+    [InlineData("incomplete distance tree", "05c1010900000080a0ffaf2d")]
+    [InlineData("oversubscribed distance tree", "05c2010500000000a0ffafab00")]
+    [InlineData("reserved fixed literal/length symbol 286", "1b03")]
+    [InlineData("reserved fixed distance symbol 30", "73043e")]
+    [InlineData("reserved fixed distance symbol 31", "73047e")]
+    [InlineData("back-reference exceeds output history", "730442")]
+    public void InvalidHuffmanTreesAndCodesAreRejected(string _, string hex)
+    {
+        var payload = Convert.FromHexString(hex);
+        var error = Assert.Throws<PackageValidationException>(() => Inspector.Value(payload, 15));
+        Assert.Equal("structure", error.Category);
+        AssertArchive(AgentPackageCorpus.DeflatePayload(payload), "structure");
+    }
+
+    [Fact]
+    public void ValidSingleEndCodeAndEmptyDistanceTreeAreAccepted()
+    {
+        var payload = Convert.FromHexString("05c0010500000000a0ffaf03");
+        Inspector.Value(payload, 0);
+        AssertArchive(AgentPackageCorpus.DeflatePayload(payload, emptyOriginal: true), null, "win-x64");
+    }
 
     [Fact]
     public void HistoricalProtocolOneAssemblyIsNotPublishable()
@@ -794,11 +829,13 @@ public sealed class AgentPackageConformanceTests
     [Theory]
     [InlineData(false, 0x00000010u)]
     [InlineData(false, 0x00000008u)]
+    [InlineData(false, 0x00000040u)]
     [InlineData(false, 0x00000400u)]
     [InlineData(false, 0x40000000u)]
     [InlineData(false, 0xa0000000u)]
     [InlineData(false, 0x20000000u)]
     [InlineData(true, 0x80000000u)]
+    [InlineData(true, 0x00000040u)]
     [InlineData(true, 0xa0000000u)]
     public void RejectsContradictoryAndSpecialFileAttributes(bool directory, uint attributes)
     {
@@ -1181,6 +1218,26 @@ public sealed class AgentPackageConformanceTests
             Invoke("ValidateExtracted", root, inventory);
         }
         finally { AgentPackageCorpus.DeleteOwnedTemp(basePath, "kr-package-long-"); }
+    }
+
+    [Fact]
+    public void DriveRootIsRejectedOrRemainsFullyQualifiedAfterNormalization()
+    {
+        var expected = PackageVerifier.ValidateArchive(new MemoryStream(AgentPackageCorpus.Valid()), AgentPackageCorpus.Version);
+        var driveRoot = Path.GetPathRoot(Path.GetTempPath())!;
+        Assert.True(Path.IsPathFullyQualified(driveRoot));
+        var method = typeof(PackageVerifier).GetMethod("CheckRoot", BindingFlags.NonPublic | BindingFlags.Static);
+        Assert.NotNull(method);
+        string? normalized = null;
+        var error = Record.Exception(() => normalized = (string)method.Invoke(null, [driveRoot, expected])!);
+        if (error is TargetInvocationException { InnerException: PackageValidationException validation })
+            Assert.Equal("inventory", validation.Category);
+        else
+        {
+            Assert.Null(error);
+            Assert.True(Path.IsPathFullyQualified(normalized!), $"Normalized root must remain absolute: {normalized}");
+            Assert.Equal(Path.GetFullPath(driveRoot), Path.GetFullPath(normalized!), ignoreCase: true);
+        }
     }
 
     [Fact]

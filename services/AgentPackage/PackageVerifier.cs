@@ -250,7 +250,7 @@ public static class PackageVerifier
         var dos = entry.Attributes & 0xffff;
         if (unixType is not (0 or 0x8000 or 0x4000)
             || unixType == 0x8000 && directory || unixType == 0x4000 && !directory
-            || (dos & 0x10) != 0 && !directory || (dos & (0x08 | 0x400)) != 0) throw StructureError();
+            || (dos & 0x10) != 0 && !directory || (dos & (0x08 | 0x40 | 0x400)) != 0) throw StructureError();
     }
 
     private static string CopyEntry(byte[] bytes, ZipStructureReader.Entry entry, Stream? output)
@@ -468,7 +468,7 @@ public static class PackageVerifier
         try
         {
             if (!OperatingSystem.IsWindows() || !Path.IsPathFullyQualified(root)) throw InventoryError();
-            root = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(root));
             if (!Directory.Exists(root) || root.Length + 1 + expected.Nodes.Max(n => n.Path.Length) > 247) throw InventoryError();
             return root;
         }

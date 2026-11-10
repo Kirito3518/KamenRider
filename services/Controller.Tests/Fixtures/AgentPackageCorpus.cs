@@ -182,6 +182,43 @@ internal static class AgentPackageCorpus
         return result;
     }
 
+    internal static byte[] DeflatePayload(byte[] payload, bool emptyOriginal = false)
+    {
+        var entries = Entries();
+        if (emptyOriginal) entries[^1] = ("Update-Agent.ps1", []);
+        var bytes = Build(entries);
+        var end = bytes.Length - 22;
+        var centralStart = (int)BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(end + 16));
+        var central = centralStart;
+        while (true)
+        {
+            var nameLength = BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(central + 28));
+            var extraLength = BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(central + 30));
+            var commentLength = BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(central + 32));
+            if (Encoding.ASCII.GetString(bytes, central + 46, nameLength) == "Update-Agent.ps1") break;
+            central += 46 + nameLength + extraLength + commentLength;
+        }
+        var local = (int)BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(central + 42));
+        var start = local + 30 + BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(local + 26))
+            + BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(local + 28));
+        var oldLength = (int)BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(central + 20));
+        if (BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(central + 10)) != 0 || start + oldLength != centralStart)
+            throw new InvalidOperationException("Expected final stored fixture entry.");
+        var delta = payload.Length - oldLength;
+        var result = new byte[bytes.Length + delta];
+        Array.Copy(bytes, 0, result, 0, start);
+        Array.Copy(payload, 0, result, start, payload.Length);
+        Array.Copy(bytes, centralStart, result, centralStart + delta, bytes.Length - centralStart);
+        BinaryPrimitives.WriteUInt16LittleEndian(result.AsSpan(local + 4), 20);
+        BinaryPrimitives.WriteUInt16LittleEndian(result.AsSpan(local + 8), 8);
+        BinaryPrimitives.WriteUInt32LittleEndian(result.AsSpan(local + 18), (uint)payload.Length);
+        BinaryPrimitives.WriteUInt16LittleEndian(result.AsSpan(central + delta + 6), 20);
+        BinaryPrimitives.WriteUInt16LittleEndian(result.AsSpan(central + delta + 10), 8);
+        BinaryPrimitives.WriteUInt32LittleEndian(result.AsSpan(central + delta + 20), (uint)payload.Length);
+        BinaryPrimitives.WriteUInt32LittleEndian(result.AsSpan(end + delta + 16), (uint)(centralStart + delta));
+        return result;
+    }
+
     internal static byte[] Descriptor(bool corrupt)
     {
         var bytes = Build(Entries(), CompressionLevel.Optimal, true);
