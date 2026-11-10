@@ -4,6 +4,7 @@ namespace KamenRaider.Contracts;
 public record SyncRequest(string BootId,string LocalIp,string MacAddress,long AppliedConfigRevision,string Readiness,CommandResult[] CommandResults,PairingOffer? PendingPairing=null) {
     public string? AgentVersion { get; init; }
     public string? AgentUpdateChallenge { get; init; }
+    public int? SyncProofProtocol { get; init; }
     public ReadinessDiagnostic[]? ReadinessDiagnostics { get; init; }
 }
 public record ReadinessDiagnostic(string CheckId,string Status);
@@ -28,3 +29,4 @@ public record ConfigurationDto(long Revision,int MoonlightPort,int SunshinePort)
 public record SyncResponse(DateTimeOffset ServerTimeUtc,ConfigurationDto Configuration,CommandEnvelope[] Commands,ActiveLeaseConfirmation? ActiveLease=null) {
     public string? AgentUpdateChallenge { get; init; }
 }
+public record SyncChallengeRequired(string AgentUpdateChallenge);

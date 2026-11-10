@@ -1,5 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using KamenRaider.Agent.Configuration;
 using KamenRaider.Agent.Identity;
@@ -14,6 +16,153 @@ using KamenRaider.Contracts;
 namespace Agent.Tests;
 
 public class AgentSyncCycleTests {
+    [Fact] public async Task ChallengeRetriesImmediatelyWithoutAcknowledgingOrChangingLeaseState() {
+        using var f=new Fixture();await f.Configuration.ApplyAsync(new(1,5000,6000),default);
+        var dispatcher=new LeaseCommandDispatcher(f.Enforcer);
+        await dispatcher.AcceptAsync(new(f.Clock.Now,new(1,5000,6000),[f.Command()]),f.Clock.UptimeMilliseconds,default);
+        var confirmation=new ActiveLeaseConfirmation("rental",1,"boot",f.Clock.Now.AddSeconds(60));
+        await f.Enforcer.ConfirmAsync(confirmation,default);
+        var snapshot=f.Enforcer.Current;var blocks=f.Gate.BlockCalls;var allows=f.Gate.AllowCalls;
+        var extension=f.Command(2,120,"extension");
+        using var identity=DeviceIdentity.LoadOrCreate(Path.Combine(f.Directory,"identity"));
+        using var transport=new ScriptedTransport((attempt,request)=> {
+            if(attempt==1){f.Clock.Advance(20);return new((HttpStatusCode)428){Content=JsonContent.Create(new {
+                agentUpdateChallenge=" opaque+/=token ",serverTimeUtc=f.Clock.Now.AddSeconds(30),
+                configuration=new {revision=2,moonlightPort=5001,sunshinePort=6001},commands=new[]{extension},activeLease=(object?)null
+            })};}
+            Assert.Equal(2,attempt);Assert.Equal(" opaque+/=token ",request.AgentUpdateChallenge);
+            Assert.Equal(snapshot,f.Enforcer.Current);Assert.True(f.Enforcer.CanStream);
+            Assert.Equal(blocks,f.Gate.BlockCalls);Assert.Equal(allows,f.Gate.AllowCalls);
+            Assert.Equal(1,f.Configuration.Current!.Revision);
+            Assert.Equal(new CommandResult("cmd","applied",1),Assert.Single(dispatcher.PendingResults));
+            return new(HttpStatusCode.OK){Content=JsonContent.Create(new SyncResponse(f.Clock.Now,new(1,5000,6000),[extension],new("rental",2,"boot",f.Clock.Now.AddSeconds(100))))};
+        },identity);
+        using var http=new HttpClient(transport);
+        var cycle=new AgentSyncCycle(new SyncClient(http,identity),new("https://controller.test"),f.Clock,f.Configuration,dispatcher);
+
+        await cycle.RunAsync("boot","192.0.2.1","001122334455",Readiness.Ready,default);
+
+        Assert.Equal(2,transport.Requests.Count);
+        Assert.Null(transport.Requests[0].AgentUpdateChallenge);
+        Assert.All(transport.Requests,r=>Assert.Equal(new CommandResult("cmd","applied",1),Assert.Single(r.CommandResults)));
+        Assert.Equal(new CommandResult("extension","applied",2),Assert.Single(dispatcher.PendingResults));
+        Assert.Equal(2,f.Enforcer.Current!.Revision);Assert.Equal(121000,f.Enforcer.Current.DeadlineUptimeMilliseconds);Assert.True(f.Enforcer.CanStream);
+        Assert.Equal(blocks+1,f.Gate.BlockCalls);Assert.Equal(allows+1,f.Gate.AllowCalls);
+    }
+
+    public static IEnumerable<object[]> InvalidChallenges() {
+        yield return ["{}",typeof(HttpRequestException)];
+        yield return ["{\"challenge\":\"wrong-field\"}",typeof(HttpRequestException)];
+        yield return ["{\"agentUpdateChallenge\":null}",typeof(HttpRequestException)];
+        yield return ["{\"agentUpdateChallenge\":\"\"}",typeof(HttpRequestException)];
+        yield return ["{\"agentUpdateChallenge\":\"  \"}",typeof(HttpRequestException)];
+        yield return ["{\"agentUpdateChallenge\":42}",typeof(JsonException)];
+        yield return ["{",typeof(JsonException)];
+        yield return ["{\"agentUpdateChallenge\":\""+new string('x',129)+"\"}",typeof(HttpRequestException)];
+        yield return ["{\"agentUpdateChallenge\":\"token\",\"padding\":\""+new string('x',4096)+"\"}",typeof(HttpRequestException)];
+    }
+
+    [Theory][MemberData(nameof(InvalidChallenges))]
+    public async Task InvalidChallengeFailsWithoutAcknowledgingAndRetainsLastValidToken(string body,Type errorType) {
+        using var f=new Fixture();await f.Configuration.ApplyAsync(new(1,5000,6000),default);
+        var dispatcher=new LeaseCommandDispatcher(f.Enforcer);
+        await dispatcher.AcceptAsync(new(f.Clock.Now,new(1,5000,6000),[f.Command()]),f.Clock.UptimeMilliseconds,default);
+        var confirmation=new ActiveLeaseConfirmation("rental",1,"boot",f.Clock.Now.AddSeconds(60));await f.Enforcer.ConfirmAsync(confirmation,default);
+        var snapshot=f.Enforcer.Current;var blocks=f.Gate.BlockCalls;var allows=f.Gate.AllowCalls;
+        using var transport=new ScriptedTransport((attempt,request)=>attempt switch {
+            1=>new((HttpStatusCode)428){Content=JsonContent.Create(new {agentUpdateChallenge="retained-token"})},
+            2=>new((HttpStatusCode)428){Content=new StringContent(body,System.Text.Encoding.UTF8,"application/json")},
+            _=>new(HttpStatusCode.OK){Content=JsonContent.Create(new SyncResponse(f.Clock.Now,new(1,5000,6000),[],confirmation))}
+        });
+        using var identity=DeviceIdentity.LoadOrCreate(Path.Combine(f.Directory,"identity"));using var http=new HttpClient(transport);
+        var cycle=new AgentSyncCycle(new SyncClient(http,identity),new("https://controller.test"),f.Clock,f.Configuration,dispatcher);
+
+        var error=await Record.ExceptionAsync(()=>cycle.RunAsync("boot","192.0.2.1","001122334455",Readiness.Ready,default));
+
+        Assert.IsType(errorType,error);Assert.Equal(2,transport.Requests.Count);
+        Assert.Equal(snapshot,f.Enforcer.Current);Assert.True(f.Enforcer.CanStream);
+        Assert.Equal(blocks,f.Gate.BlockCalls);Assert.Equal(allows,f.Gate.AllowCalls);Assert.Equal(1,f.Configuration.Current!.Revision);
+        Assert.Equal(new CommandResult("cmd","applied",1),Assert.Single(dispatcher.PendingResults));
+        await cycle.RunAsync("boot","192.0.2.1","001122334455",Readiness.Ready,default);
+        Assert.Equal("retained-token",transport.Requests[2].AgentUpdateChallenge);
+        Assert.Empty(dispatcher.PendingResults);Assert.True(f.Enforcer.CanStream);
+    }
+
+    [Theory][InlineData(201)][InlineData(500)]
+    public async Task OtherStatusesDoNotAcknowledge(int status) {
+        using var f=new Fixture();await f.Configuration.ApplyAsync(new(1,5000,6000),default);
+        var dispatcher=new LeaseCommandDispatcher(f.Enforcer);
+        await dispatcher.AcceptAsync(new(f.Clock.Now,new(1,5000,6000),[f.Command()]),f.Clock.UptimeMilliseconds,default);
+        var confirmation=new ActiveLeaseConfirmation("rental",1,"boot",f.Clock.Now.AddSeconds(60));await f.Enforcer.ConfirmAsync(confirmation,default);
+        var snapshot=f.Enforcer.Current;var blocks=f.Gate.BlockCalls;
+        using var transport=new ScriptedTransport((_,_)=>new((HttpStatusCode)status){Content=JsonContent.Create(new SyncResponse(f.Clock.Now,new(2,5001,6001),[],null))});
+        using var identity=DeviceIdentity.LoadOrCreate(Path.Combine(f.Directory,"identity"));using var http=new HttpClient(transport);
+        var cycle=new AgentSyncCycle(new SyncClient(http,identity),new("https://controller.test"),f.Clock,f.Configuration,dispatcher);
+
+        await Assert.ThrowsAsync<HttpRequestException>(()=>cycle.RunAsync("boot","192.0.2.1","001122334455",Readiness.Ready,default));
+
+        Assert.Equal(snapshot,f.Enforcer.Current);Assert.True(f.Enforcer.CanStream);Assert.Equal(blocks,f.Gate.BlockCalls);
+        Assert.Equal(1,f.Configuration.Current!.Revision);Assert.Equal(new CommandResult("cmd","applied",1),Assert.Single(dispatcher.PendingResults));
+    }
+
+    [Fact] public async Task CancellationStopsRepeatedChallengesWithoutAcknowledging() {
+        using var f=new Fixture();await f.Configuration.ApplyAsync(new(1,5000,6000),default);
+        var dispatcher=new LeaseCommandDispatcher(f.Enforcer);
+        await dispatcher.AcceptAsync(new(f.Clock.Now,new(1,5000,6000),[f.Command()]),f.Clock.UptimeMilliseconds,default);
+        await f.Enforcer.ConfirmAsync(new("rental",1,"boot",f.Clock.Now.AddSeconds(60)),default);
+        var snapshot=f.Enforcer.Current;var blocks=f.Gate.BlockCalls;
+        using var cancellation=new CancellationTokenSource();
+        using var transport=new ScriptedTransport((attempt,_)=> {
+            if(attempt==2)cancellation.Cancel();
+            return new((HttpStatusCode)428){Content=JsonContent.Create(new {agentUpdateChallenge="token-"+attempt})};
+        });
+        using var identity=DeviceIdentity.LoadOrCreate(Path.Combine(f.Directory,"identity"));using var http=new HttpClient(transport);
+        var cycle=new AgentSyncCycle(new SyncClient(http,identity),new("https://controller.test"),f.Clock,f.Configuration,dispatcher);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(()=>cycle.RunAsync("boot","192.0.2.1","001122334455",Readiness.Ready,cancellation.Token));
+
+        Assert.Equal(2,transport.Requests.Count);Assert.Equal(snapshot,f.Enforcer.Current);Assert.True(f.Enforcer.CanStream);
+        Assert.Equal(blocks,f.Gate.BlockCalls);Assert.Equal(new CommandResult("cmd","applied",1),Assert.Single(dispatcher.PendingResults));
+    }
+
+    [Theory][InlineData(Readiness.Ready)][InlineData(Readiness.NotReady)]
+    public async Task RepeatedChallengesBackOffAndRetainNewestToken(Readiness readiness) {
+        using var f=new Fixture();await f.Configuration.ApplyAsync(new(1,5000,6000),default);
+        var dispatcher=new LeaseCommandDispatcher(f.Enforcer);
+        await dispatcher.AcceptAsync(new(f.Clock.Now,new(1,5000,6000),[f.Command()]),f.Clock.UptimeMilliseconds,default);
+        var confirmation=new ActiveLeaseConfirmation("rental",1,"boot",f.Clock.Now.AddSeconds(60));await f.Enforcer.ConfirmAsync(confirmation,default);
+        var snapshot=f.Enforcer.Current;var blocks=f.Gate.BlockCalls;
+        using var transport=new ScriptedTransport((attempt,_)=>attempt<=2
+            ?new((HttpStatusCode)428){Content=JsonContent.Create(new {agentUpdateChallenge="token-"+attempt})}
+            :new(HttpStatusCode.OK){Content=JsonContent.Create(new SyncResponse(f.Clock.Now,new(1,5000,6000),[],confirmation))});
+        using var identity=DeviceIdentity.LoadOrCreate(Path.Combine(f.Directory,"identity"));using var http=new HttpClient(transport);
+        var cycle=new AgentSyncCycle(new SyncClient(http,identity),new("https://controller.test"),f.Clock,f.Configuration,dispatcher);
+
+        await Assert.ThrowsAsync<HttpRequestException>(()=>cycle.RunAsync("boot","192.0.2.1","001122334455",readiness,default));
+
+        Assert.Equal(2,transport.Requests.Count);Assert.Equal("token-1",transport.Requests[1].AgentUpdateChallenge);
+        Assert.Equal(snapshot,f.Enforcer.Current);Assert.True(f.Enforcer.CanStream);Assert.Equal(blocks,f.Gate.BlockCalls);
+        Assert.Equal(new CommandResult("cmd","applied",1),Assert.Single(dispatcher.PendingResults));
+        await cycle.RunAsync("boot","192.0.2.1","001122334455",readiness,default);
+        Assert.Equal("token-2",transport.Requests[2].AgentUpdateChallenge);
+        if(readiness==Readiness.Ready){Assert.Empty(dispatcher.PendingResults);Assert.True(f.Enforcer.CanStream);}
+        else {Assert.Single(dispatcher.PendingResults);Assert.False(f.Enforcer.CanStream);}
+    }
+
+    [Fact] public async Task SyntheticChallengeOnlySuccessShowsTheOldClientAcknowledgmentHazard() {
+        using var f=new Fixture();await f.Configuration.ApplyAsync(new(1,5000,6000),default);
+        var dispatcher=new LeaseCommandDispatcher(f.Enforcer);
+        await dispatcher.AcceptAsync(new(f.Clock.Now,new(1,5000,6000),[f.Command()]),f.Clock.UptimeMilliseconds,default);
+        await f.Enforcer.ConfirmAsync(new("rental",1,"boot",f.Clock.Now.AddSeconds(60)),default);
+        using var transport=new Transport((_,_)=>new(f.Clock.Now,new(1,5000,6000),[],null){AgentUpdateChallenge="synthetic"});
+        using var identity=DeviceIdentity.LoadOrCreate(Path.Combine(f.Directory,"identity"));using var http=new HttpClient(transport);
+        var cycle=new AgentSyncCycle(new SyncClient(http,identity),new("https://controller.test"),f.Clock,f.Configuration,dispatcher);
+
+        await cycle.RunAsync("boot","192.0.2.1","001122334455",Readiness.Ready,default);
+
+        Assert.Empty(dispatcher.PendingResults);Assert.False(f.Enforcer.CanStream);
+    }
+
     [Fact] public async Task EchoesControllerUpdateChallengeOnlyInTheNextSignedHeartbeat() {
         using var f=new Fixture();
         using var transport=new ChallengeTransport();
@@ -168,8 +317,8 @@ public class AgentSyncCycleTests {
         public string ConfigDirectory=>Path.Combine(Directory,"config");
         public Clock Clock=new();
         public AppliedConfiguration Configuration;
-        public LeaseEnforcer Enforcer;
-        public Fixture(){System.IO.Directory.CreateDirectory(ConfigDirectory);Configuration=new(ConfigDirectory);Enforcer=new(new LeaseStore(Path.Combine(Directory,"leases")),Clock,Clock,new Gate(),new Power());}
+        public Gate Gate=new();public LeaseEnforcer Enforcer;
+        public Fixture(){System.IO.Directory.CreateDirectory(ConfigDirectory);Configuration=new(ConfigDirectory);Enforcer=new(new LeaseStore(Path.Combine(Directory,"leases")),Clock,Clock,Gate,new Power());}
         public CommandEnvelope Command(long revision=1,int expiry=60,string id="cmd")=>new(id,"ApplyLease","rental",revision,"boot",Clock.Now.AddMinutes(3),JsonSerializer.SerializeToElement(new{startsAtUtc=DateTimeOffset.Parse("2026-10-29T00:00:00Z"),expiresAtUtc=DateTimeOffset.Parse("2026-10-29T00:00:00Z").AddSeconds(expiry)}));
         public void Dispose(){if(System.IO.Directory.Exists(Directory))System.IO.Directory.Delete(Directory,true);}
     }
@@ -180,7 +329,7 @@ public class AgentSyncCycleTests {
         public override DateTimeOffset GetUtcNow()=>Now;
         public void Advance(int seconds){Now=Now.AddSeconds(seconds);UptimeMilliseconds+=seconds*1000;}
     }
-    private sealed class Gate:IStreamGate {public Task BlockAsync(CancellationToken ct)=>Task.CompletedTask;public Task AllowAsync(StreamLeaseGrant grant,CancellationToken ct)=>Task.CompletedTask;}
+    private sealed class Gate:IStreamGate {public int BlockCalls,AllowCalls;public Task BlockAsync(CancellationToken ct){BlockCalls++;return Task.CompletedTask;}public Task AllowAsync(StreamLeaseGrant grant,CancellationToken ct){AllowCalls++;return Task.CompletedTask;}}
     private sealed class Power:IShutdown {public Task RequestImmediateShutdownAsync(CancellationToken ct)=>Task.CompletedTask;}
     private sealed class TestMachinePreparation(bool result):IMachinePreparation {public int Calls;public Task<bool> PrepareAsync(CommandEnvelope command,CancellationToken cancellationToken){Calls++;return Task.FromResult(result);}}
     private sealed class PairingFence:IPairingFence {public Task<bool> VerifyOpenForLeaseAsync(PairingScope scope,CancellationToken ct)=>Task.FromResult(true);public async Task<bool> RunFencedCleanupAsync(Func<CancellationToken,Task> clear,CancellationToken ct){await clear(ct);return true;}}
@@ -195,6 +344,21 @@ public class AgentSyncCycleTests {
             var heartbeat=(await request.Content!.ReadFromJsonAsync<SyncRequest>(ct))!;Requests.Add(heartbeat);
             var response=reply(Requests.Count,heartbeat);
             return response is null?new(HttpStatusCode.ServiceUnavailable):new(HttpStatusCode.OK){Content=JsonContent.Create(response)};
+        }
+    }
+    private sealed class ScriptedTransport(Func<int,SyncRequest,HttpResponseMessage> reply,DeviceIdentity? identity=null):HttpMessageHandler {
+        public List<SyncRequest> Requests=[];
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,CancellationToken ct){
+            var body=await request.Content!.ReadAsStringAsync(ct);
+            if(identity is not null){
+                using var json=JsonDocument.Parse(body);Assert.Equal(2,json.RootElement.GetProperty("syncProofProtocol").GetInt32());
+                var timestamp=request.Headers.GetValues("X-Agent-Timestamp").Single();var nonce=request.Headers.GetValues("X-Agent-Nonce").Single();
+                using var key=ECDsa.Create();key.ImportSubjectPublicKeyInfo(Convert.FromBase64String(identity.PublicKey),out _);
+                var signed=$"{identity.MachineId}\nPOST\n/agent/sync\n{timestamp}\n{nonce}\n{Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(body)))}";
+                Assert.True(key.VerifyData(Encoding.UTF8.GetBytes(signed),Convert.FromBase64String(request.Headers.GetValues("X-Agent-Signature").Single()),HashAlgorithmName.SHA256));
+            }
+            var heartbeat=JsonSerializer.Deserialize<SyncRequest>(body,new JsonSerializerOptions(JsonSerializerDefaults.Web))!;Requests.Add(heartbeat);
+            return reply(Requests.Count,heartbeat);
         }
     }
 }
