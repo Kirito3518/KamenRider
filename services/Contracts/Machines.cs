@@ -23,8 +23,12 @@ public record MachineDto(string MachineId, string ApprovalStatus, string Display
 public record MachineIdentityConfirmation(string Fingerprint);
 public record AgentReleasePublication(string Version, string Channel, string ReleaseNotes, string PackageSha256, string PackagePath, long PackageSizeBytes, string SourceCommit, bool SourceDirty, bool ReleaseBuild);
 public record AgentReleaseDto(string Version, string Channel, string ReleaseNotes, string PackageSha256, long PackageSizeBytes, string SourceCommit, bool SourceDirty, DateTimeOffset PublishedAtUtc);
-public record AgentUpdateReservationRequest(string ReleaseVersion);
+public record AgentUpdateReservationRequest(string ReleaseVersion, string? RequestId = null);
 public record AgentUpdateTicketResponse(string OperationId, string MachineId, string Ticket, DateTimeOffset ExpiresAtUtc, string ReleaseVersion, string TargetVersion, string TargetPackageSha256);
-public record AgentUpdateOperationDto(string OperationId, string MachineId, string ReleaseVersion, string TargetVersion, string TargetPackageSha256, string PreviousVersion, string Status, DateTimeOffset CreatedAtUtc, DateTimeOffset UpdatedAtUtc);
+public record AgentUpdateOperationDto(string OperationId, string MachineId, string ChainId, string CurrentHeadOperationId,
+    long Generation, bool Held, string? ParentOperationId, string ReleaseVersion, string TargetVersion,
+    string TargetPackageSha256, string? TargetRuntime, int? TargetProtocol, string? LegacyReportedPreviousVersion,
+    string? SourceVersion, string? SourceEvidenceDigest, string? BackupOwnerOperationId, string? BackupDigest,
+    string Status, DateTimeOffset CreatedAtUtc, DateTimeOffset UpdatedAtUtc);
 public record AgentUpdateTicketRequest(string Ticket, string ReleaseVersion, string TargetVersion, string TargetPackageSha256);
 public record AgentUpdateStatusReportRequest(string Ticket, string ReleaseVersion, string TargetVersion, string TargetPackageSha256, string Status);

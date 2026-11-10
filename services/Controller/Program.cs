@@ -21,6 +21,7 @@ public sealed class ControllerOptions
     public string AgentUrl { get; set; } = "";
     public string DatabasePath { get; set; } = "";
     public string ServiceCredential { get; set; } = "";
+    public bool AgentReleaseRemediationEnabled { get; set; }
     public bool IsValid() => Uri.TryCreate(InternalUrl, UriKind.Absolute, out var local)
         && local.Scheme == "http" && IPAddress.TryParse(local.Host, out var ip) && IPAddress.IsLoopback(ip)
         && Uri.TryCreate(AgentUrl, UriKind.Absolute, out var agent) && agent.Scheme == "https"
@@ -56,7 +57,8 @@ public static class ControllerHost
         }
         builder.Services.AddSingleton<ControllerDatabase>(sp => new ControllerDatabase(
             sp.GetRequiredService<IOptions<ControllerOptions>>().Value.DatabasePath,
-            clock: sp.GetRequiredService<TimeProvider>()));
+            clock: sp.GetRequiredService<TimeProvider>(),
+            agentReleaseRemediationEnabled: sp.GetRequiredService<IOptions<ControllerOptions>>().Value.AgentReleaseRemediationEnabled));
         builder.Services.AddSingleton<AgentReleaseStore>(sp => {
             var databasePath = sp.GetRequiredService<IOptions<ControllerOptions>>().Value.DatabasePath;
             var databaseDirectory = Path.GetDirectoryName(Path.GetFullPath(databasePath))!;

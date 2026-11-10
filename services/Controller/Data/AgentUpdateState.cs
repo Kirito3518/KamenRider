@@ -3,13 +3,13 @@ using Microsoft.Data.Sqlite;
 using System.Security.Cryptography;
 using System.Text;
 using KamenRaider.Controller.Agents;
+using KamenRaider.AgentPackage;
+using System.Text.Json;
 
 namespace KamenRaider.Controller.Data;
 
 public sealed partial class ControllerDatabase
 {
-    private static readonly string[] ActiveAgentUpdateStatuses = ["awaitingInstaller", "installing", "awaitingHeartbeat", "rollingBack", "failed"];
-    private readonly Dictionary<string, string> agentUpdateReportEpochs = new(StringComparer.Ordinal);
 
     public AgentReleaseDto PublishAgentRelease(AgentReleasePublication release)
     {
@@ -58,10 +58,13 @@ public sealed partial class ControllerDatabase
         }
     }
 
-    public AgentUpdateTicketResponse ReserveAgentUpdate(string machineId, string releaseVersion)
+    public AgentUpdateTicketResponse ReserveAgentUpdate(string machineId, string releaseVersion, string actorId, string requestId)
     {
+        if (!agentReleaseRemediationEnabled) throw new InvalidOperationException("Agent release remediation is disabled");
         Identifier(machineId);
         Identifier(releaseVersion);
+        Identifier(actorId);
+        Identifier(requestId);
         lock (gate)
         {
             var now = clock.GetUtcNow();
@@ -69,25 +72,24 @@ public sealed partial class ControllerDatabase
             using var tx = connection.BeginTransaction();
             ExpireUnstartedAgentUpdates(tx, nowMs);
 
-            DateTimeOffset lastSeen;
-            string previousVersion;
-            using (var machine = Command("SELECT m.approval_status,h.last_seen,h.agent_version FROM machines m LEFT JOIN machine_heartbeats h ON h.machine_id=m.machine_id WHERE m.machine_id=$id", ("$id", machineId)))
+            using (var prior = Command("SELECT 1 FROM agent_update_audit WHERE actor_id=$actor AND request_id=$request", ("$actor", actorId), ("$request", requestId)))
+            {
+                prior.Transaction = tx;
+                if (prior.ExecuteScalar() is not null) throw new InvalidOperationException("Reservation request was already used");
+            }
+
+            using (var machine = Command("SELECT 1 FROM machines WHERE machine_id=$id", ("$id", machineId)))
             {
                 machine.Transaction = tx;
-                using var row = machine.ExecuteReader();
-                if (!row.Read()) throw new KeyNotFoundException();
-                if (row.IsDBNull(1) || row.IsDBNull(2)) throw new InvalidOperationException("A fresh Agent version heartbeat is required");
-                lastSeen = DateTimeOffset.Parse(row.GetString(1));
-                previousVersion = row.GetString(2);
+                if (machine.ExecuteScalar() is null) throw new KeyNotFoundException();
             }
-            if (lastSeen > now || now - lastSeen > TimeSpan.FromSeconds(20)) throw new InvalidOperationException("A fresh Agent version heartbeat is required");
 
             using (var allocation = Command("SELECT EXISTS(SELECT 1 FROM leases WHERE machine_id=$id AND allocation_held=1)", ("$id", machineId)))
             {
                 allocation.Transaction = tx;
                 if (Convert.ToInt64(allocation.ExecuteScalar()) != 0) throw new InvalidOperationException("Machine has a held lease");
             }
-            using (var active = Command("SELECT EXISTS(SELECT 1 FROM agent_update_operations WHERE machine_id=$id AND status NOT IN ('completed','rolledBack','expired'))", ("$id", machineId)))
+            using (var active = Command("SELECT EXISTS(SELECT 1 FROM agent_maintenance_chains WHERE machine_id=$id AND held=1)", ("$id", machineId)))
             {
                 active.Transaction = tx;
                 if (Convert.ToInt64(active.ExecuteScalar()) != 0) throw new InvalidOperationException("Machine already has an active Agent update");
@@ -107,17 +109,17 @@ public sealed partial class ControllerDatabase
                 packagePath = row.GetString(2);
                 packageSize = row.GetInt64(3);
             }
-            if (string.Equals(previousVersion, targetVersion, StringComparison.Ordinal))
-                throw new InvalidOperationException("Agent is already running the requested version");
-
-            using var artifact = OpenUpdateArtifact(packagePath, packageHash, packageSize, targetVersion);
+            using var artifact = OpenUpdateArtifact(packagePath, packageHash, packageSize, targetVersion, out var inventory);
 
             var ticket = NewAgentUpdateTicket(out var ticketHash);
             var operationId = Guid.NewGuid().ToString("N");
+            var chainId = Guid.NewGuid().ToString("N");
             var expires = now.AddMinutes(10);
-            using (var insert = Command("INSERT INTO agent_update_operations(operation_id,machine_id,release_version,target_version,target_package_sha256,previous_version,status,ticket_hash,ticket_expires_at_unix_ms,created_at_unix_ms,updated_at_unix_ms) VALUES($operation,$machine,$release,$target,$hash,$previous,'awaitingInstaller',$ticket,$expires,$now,$now)",
+            using (var insert = Command("INSERT INTO agent_maintenance_chains(chain_id,machine_id,current_head_operation_id,generation,held,inherited,created_at_unix_ms,updated_at_unix_ms) VALUES($chain,$machine,$operation,1,1,0,$now,$now); INSERT INTO agent_update_operations(operation_id,machine_id,chain_id,release_version,target_version,target_package_sha256,target_runtime,target_protocol,status,ticket_hash,ticket_generation,ticket_purpose,ticket_expires_at_unix_ms,created_at_unix_ms,updated_at_unix_ms) VALUES($operation,$machine,$chain,$release,$target,$hash,$runtime,2,'awaitingInstaller',$ticket,1,'apply',$expires,$now,$now); INSERT INTO agent_update_audit(audit_id,chain_id,operation_id,actor_id,request_id,event_type,new_binding_json,created_at_unix_ms) VALUES($audit,$chain,$operation,$actor,$request,'reserved',$binding,$now)",
                 ("$operation", operationId), ("$machine", machineId), ("$release", releaseVersion), ("$target", targetVersion),
-                ("$hash", packageHash), ("$previous", previousVersion), ("$ticket", ticketHash),
+                ("$chain", chainId), ("$hash", packageHash), ("$runtime", inventory.TargetRuntime), ("$ticket", ticketHash),
+                ("$audit", Guid.NewGuid().ToString("N")), ("$actor", actorId), ("$request", requestId),
+                ("$binding", JsonSerializer.Serialize(new { releaseVersion, targetVersion, packageHash, inventory.TargetRuntime, inventory.InventoryDigest })),
                 ("$expires", expires.ToUnixTimeMilliseconds()), ("$now", nowMs)))
             {
                 insert.Transaction = tx;
@@ -128,7 +130,7 @@ public sealed partial class ControllerDatabase
         }
     }
 
-    private FileStream OpenUpdateArtifact(string path, string hash, long size, string version)
+    private FileStream OpenUpdateArtifact(string path, string hash, long size, string version, out PackageInventory inventory)
     {
         try
         {
@@ -139,12 +141,13 @@ public sealed partial class ControllerDatabase
             var verified = ControllerReleaseArtifacts.OpenVerified(expected, canonical, size);
             try
             {
-                new AgentReleaseStore(agentReleaseRoot).ValidateRetainedForUpdate(expected, size, version, canonical);
+                inventory = PackageVerifier.ValidateArchive(verified, version);
+                if (!string.Equals(inventory.ArchiveHash, canonical, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException();
                 return verified;
             }
             catch { verified.Dispose(); throw; }
         }
-        catch (Exception ex) when (ex is ArgumentException or InvalidDataException or IOException or UnauthorizedAccessException or AgentReleaseValidationException or AgentReleaseTooLargeException or System.Text.Json.JsonException or NotSupportedException or BadImageFormatException)
+        catch (Exception ex) when (ex is ArgumentException or InvalidDataException or IOException or UnauthorizedAccessException or PackageValidationException or NotSupportedException or BadImageFormatException)
         {
             throw new InvalidOperationException("The selected release is unavailable, corrupt, or lacks update confirmation support; publish a compatible release.");
         }
@@ -154,41 +157,7 @@ public sealed partial class ControllerDatabase
     {
         Identifier(machineId);
         Identifier(operationId);
-        lock (gate)
-        {
-            var now = clock.GetUtcNow();
-            using var tx = connection.BeginTransaction();
-            string status;
-            long? startedAt;
-            string releaseVersion;
-            string targetVersion;
-            string packageHash;
-            using (var operation = Command("SELECT machine_id,status,started_at_unix_ms,release_version,target_version,target_package_sha256 FROM agent_update_operations WHERE operation_id=$id", ("$id", operationId)))
-            {
-                operation.Transaction = tx;
-                using var row = operation.ExecuteReader();
-                if (!row.Read() || row.GetString(0) != machineId) throw new KeyNotFoundException();
-                status = row.GetString(1);
-                startedAt = row.IsDBNull(2) ? null : row.GetInt64(2);
-                releaseVersion = row.GetString(3);
-                targetVersion = row.GetString(4);
-                packageHash = row.GetString(5);
-            }
-            if (startedAt is null || !ActiveAgentUpdateStatuses.Contains(status, StringComparer.Ordinal))
-                throw new InvalidOperationException("Only a started active operation can be recovered");
-
-            var ticket = NewAgentUpdateTicket(out var ticketHash);
-            var expires = now.AddMinutes(10);
-            using (var renew = Command("UPDATE agent_update_operations SET ticket_hash=$ticket,ticket_expires_at_unix_ms=$expires,ticket_started_at_unix_ms=NULL,ticket_package_downloaded_at_unix_ms=NULL,updated_at_unix_ms=$now WHERE operation_id=$id AND machine_id=$machine AND status NOT IN ('completed','rolledBack','expired')",
-                ("$ticket", ticketHash), ("$expires", expires.ToUnixTimeMilliseconds()), ("$now", now.ToUnixTimeMilliseconds()),
-                ("$id", operationId), ("$machine", machineId)))
-            {
-                renew.Transaction = tx;
-                if (renew.ExecuteNonQuery() != 1) throw new InvalidOperationException("Update operation changed during recovery");
-            }
-            tx.Commit();
-            return new(operationId, machineId, ticket, expires, releaseVersion, targetVersion, packageHash);
-        }
+        throw new InvalidOperationException("Recovery command issuance requires the audited successor protocol");
     }
 
     public AgentUpdateOperationDto StartAgentUpdate(string machineId, string ticket)
@@ -211,7 +180,7 @@ public sealed partial class ControllerDatabase
             using var tx = connection.BeginTransaction();
             long expiresAt;
             long? ticketStartedAt;
-            using (var operation = Command("SELECT ticket_expires_at_unix_ms,ticket_started_at_unix_ms FROM agent_update_operations WHERE operation_id=$operation AND ticket_hash=$ticket AND machine_id=$machine AND release_version=$release AND target_version=$target AND upper(target_package_sha256)=upper($hash) AND status NOT IN ('completed','rolledBack','expired')",
+            using (var operation = Command("SELECT ticket_expires_at_unix_ms,ticket_started_at_unix_ms FROM agent_update_operations WHERE operation_id=$operation AND ticket_hash=$ticket AND machine_id=$machine AND release_version=$release AND target_version=$target AND upper(target_package_sha256)=upper($hash) AND status='awaitingInstaller' AND EXISTS(SELECT 1 FROM agent_maintenance_chains c WHERE c.chain_id=agent_update_operations.chain_id AND c.current_head_operation_id=agent_update_operations.operation_id AND c.held=1 AND c.generation=agent_update_operations.ticket_generation AND agent_update_operations.ticket_purpose='apply')",
                 ("$operation", operationId), ("$ticket", ticketHash), ("$machine", machineId), ("$release", releaseVersion), ("$target", targetVersion), ("$hash", expectedHash)))
             {
                 operation.Transaction = tx;
@@ -221,7 +190,7 @@ public sealed partial class ControllerDatabase
                 ticketStartedAt = row.IsDBNull(1) ? null : row.GetInt64(1);
             }
             if (ticketStartedAt is not null || expiresAt <= nowMs) throw new UnauthorizedAccessException("Update ticket is expired or already used");
-            using (var start = Command("UPDATE agent_update_operations SET status='installing',ticket_started_at_unix_ms=$now,started_at_unix_ms=COALESCE(started_at_unix_ms,$now),updated_at_unix_ms=$now WHERE operation_id=$id AND machine_id=$machine AND ticket_hash=$ticket AND release_version=$release AND target_version=$target AND upper(target_package_sha256)=upper($hash) AND ticket_started_at_unix_ms IS NULL AND ticket_expires_at_unix_ms > $now AND status NOT IN ('completed','rolledBack','expired')",
+            using (var start = Command("UPDATE agent_update_operations SET status='installing',ticket_started_at_unix_ms=$now,started_at_unix_ms=COALESCE(started_at_unix_ms,$now),updated_at_unix_ms=$now WHERE operation_id=$id AND machine_id=$machine AND ticket_hash=$ticket AND release_version=$release AND target_version=$target AND upper(target_package_sha256)=upper($hash) AND ticket_started_at_unix_ms IS NULL AND ticket_expires_at_unix_ms > $now AND status='awaitingInstaller' AND EXISTS(SELECT 1 FROM agent_maintenance_chains c WHERE c.chain_id=agent_update_operations.chain_id AND c.current_head_operation_id=agent_update_operations.operation_id AND c.held=1 AND c.generation=agent_update_operations.ticket_generation AND agent_update_operations.ticket_purpose='apply')",
                 ("$now", nowMs), ("$id", operationId), ("$machine", machineId), ("$ticket", ticketHash), ("$release", releaseVersion), ("$target", targetVersion), ("$hash", expectedHash)))
             {
                 start.Transaction = tx;
@@ -245,13 +214,13 @@ public sealed partial class ControllerDatabase
         {
             var nowMs = clock.GetUtcNow().ToUnixTimeMilliseconds();
             using var tx = connection.BeginTransaction();
-            using (var operation = Command("SELECT 1 FROM agent_update_operations WHERE operation_id=$operation AND machine_id=$machine AND ticket_hash=$ticket AND release_version=$release AND target_version=$target AND upper(target_package_sha256)=upper($hash) AND ticket_started_at_unix_ms IS NOT NULL AND ticket_package_downloaded_at_unix_ms IS NULL AND status IN ('installing','awaitingHeartbeat','rollingBack')",
+            using (var operation = Command("SELECT 1 FROM agent_update_operations WHERE operation_id=$operation AND machine_id=$machine AND ticket_hash=$ticket AND release_version=$release AND target_version=$target AND upper(target_package_sha256)=upper($hash) AND ticket_started_at_unix_ms IS NOT NULL AND ticket_package_downloaded_at_unix_ms IS NULL AND status IN ('installing','awaitingHeartbeat','rollingBack') AND EXISTS(SELECT 1 FROM agent_maintenance_chains c WHERE c.chain_id=agent_update_operations.chain_id AND c.current_head_operation_id=agent_update_operations.operation_id AND c.held=1 AND c.generation=agent_update_operations.ticket_generation AND agent_update_operations.ticket_purpose='apply')",
                 ("$operation", operationId), ("$machine", machineId), ("$ticket", ticketHash), ("$release", releaseVersion), ("$target", targetVersion), ("$hash", expectedHash)))
             {
                 operation.Transaction = tx;
                 if (operation.ExecuteScalar() is null) throw new UnauthorizedAccessException("Update ticket is invalid or has no package download remaining");
             }
-            using (var consume = Command("UPDATE agent_update_operations SET ticket_package_downloaded_at_unix_ms=$now,updated_at_unix_ms=$now WHERE operation_id=$operation AND machine_id=$machine AND ticket_hash=$ticket AND release_version=$release AND target_version=$target AND upper(target_package_sha256)=upper($hash) AND ticket_package_downloaded_at_unix_ms IS NULL AND ticket_started_at_unix_ms IS NOT NULL AND status IN ('installing','awaitingHeartbeat','rollingBack')",
+            using (var consume = Command("UPDATE agent_update_operations SET ticket_package_downloaded_at_unix_ms=$now,updated_at_unix_ms=$now WHERE operation_id=$operation AND machine_id=$machine AND ticket_hash=$ticket AND release_version=$release AND target_version=$target AND upper(target_package_sha256)=upper($hash) AND ticket_package_downloaded_at_unix_ms IS NULL AND ticket_started_at_unix_ms IS NOT NULL AND status IN ('installing','awaitingHeartbeat','rollingBack') AND EXISTS(SELECT 1 FROM agent_maintenance_chains c WHERE c.chain_id=agent_update_operations.chain_id AND c.current_head_operation_id=agent_update_operations.operation_id AND c.held=1 AND c.generation=agent_update_operations.ticket_generation AND agent_update_operations.ticket_purpose='apply')",
                 ("$now", nowMs), ("$operation", operationId), ("$machine", machineId), ("$ticket", ticketHash), ("$release", releaseVersion), ("$target", targetVersion), ("$hash", expectedHash)))
             {
                 consume.Transaction = tx;
@@ -283,7 +252,7 @@ public sealed partial class ControllerDatabase
             var nowMs = clock.GetUtcNow().ToUnixTimeMilliseconds();
             using var tx = connection.BeginTransaction();
             string currentStatus;
-            using (var operation = Command("SELECT status FROM agent_update_operations WHERE operation_id=$operation AND ticket_hash=$ticket AND machine_id=$machine AND release_version=$release AND target_version=$target AND upper(target_package_sha256)=upper($hash) AND ticket_started_at_unix_ms IS NOT NULL AND status NOT IN ('completed','rolledBack','expired')",
+            using (var operation = Command("SELECT status FROM agent_update_operations WHERE operation_id=$operation AND ticket_hash=$ticket AND machine_id=$machine AND release_version=$release AND target_version=$target AND upper(target_package_sha256)=upper($hash) AND ticket_started_at_unix_ms IS NOT NULL AND status IN ('installing','awaitingHeartbeat','rollingBack','failed') AND EXISTS(SELECT 1 FROM agent_maintenance_chains c WHERE c.chain_id=agent_update_operations.chain_id AND c.current_head_operation_id=agent_update_operations.operation_id AND c.held=1 AND c.generation=agent_update_operations.ticket_generation AND agent_update_operations.ticket_purpose='apply')",
                 ("$operation", operationId), ("$ticket", ticketHash), ("$machine", machineId), ("$release", releaseVersion), ("$target", targetVersion), ("$hash", expectedHash)))
             {
                 operation.Transaction = tx;
@@ -295,7 +264,6 @@ public sealed partial class ControllerDatabase
                 throw new InvalidOperationException("Update operation cannot accept a status report");
             if (currentStatus == status)
             {
-                agentUpdateReportEpochs[machineId] = Guid.NewGuid().ToString("N");
                 var unchanged = FindAgentUpdateOperation(tx, operationId);
                 tx.Commit();
                 return unchanged;
@@ -308,14 +276,13 @@ public sealed partial class ControllerDatabase
                 _ => false,
             };
             if (!transitionAllowed) throw new InvalidOperationException("Update status cannot move backwards");
-            using (var update = Command("UPDATE agent_update_operations SET status=$status,updated_at_unix_ms=$now WHERE operation_id=$id AND machine_id=$machine AND ticket_hash=$ticket AND release_version=$release AND target_version=$target AND upper(target_package_sha256)=upper($hash)",
+            using (var update = Command("UPDATE agent_update_operations SET status=$status,updated_at_unix_ms=$now WHERE operation_id=$id AND machine_id=$machine AND ticket_hash=$ticket AND release_version=$release AND target_version=$target AND upper(target_package_sha256)=upper($hash) AND EXISTS(SELECT 1 FROM agent_maintenance_chains c WHERE c.chain_id=agent_update_operations.chain_id AND c.current_head_operation_id=agent_update_operations.operation_id AND c.held=1 AND c.generation=agent_update_operations.ticket_generation AND agent_update_operations.ticket_purpose='apply')",
                 ("$status", status), ("$now", nowMs), ("$id", operationId), ("$machine", machineId), ("$ticket", ticketHash), ("$release", releaseVersion), ("$target", targetVersion), ("$hash", expectedHash)))
             {
                 update.Transaction = tx;
                 if (update.ExecuteNonQuery() != 1) throw new UnauthorizedAccessException("Update ticket changed during status reporting");
             }
             var result = FindAgentUpdateOperation(tx, operationId);
-            agentUpdateReportEpochs[machineId] = Guid.NewGuid().ToString("N");
             tx.Commit();
             return result;
         }
@@ -327,7 +294,7 @@ public sealed partial class ControllerDatabase
         var ticketHash = AgentUpdateTicketHash(ticket) ?? throw new UnauthorizedAccessException("Update ticket is invalid");
         lock (gate)
         {
-            using var operation = Command("SELECT operation_id,release_version,target_version,target_package_sha256 FROM agent_update_operations WHERE ticket_hash=$ticket AND machine_id=$machine AND status NOT IN ('completed','rolledBack','expired')", ("$ticket", ticketHash), ("$machine", machineId));
+            using var operation = Command("SELECT operation_id,release_version,target_version,target_package_sha256 FROM agent_update_operations WHERE ticket_hash=$ticket AND machine_id=$machine AND EXISTS(SELECT 1 FROM agent_maintenance_chains c WHERE c.chain_id=agent_update_operations.chain_id AND c.current_head_operation_id=agent_update_operations.operation_id AND c.held=1 AND c.generation=agent_update_operations.ticket_generation AND agent_update_operations.ticket_purpose='apply')", ("$ticket", ticketHash), ("$machine", machineId));
             using var row = operation.ExecuteReader();
             if (!row.Read()) throw new UnauthorizedAccessException("Update ticket is invalid");
             return (row.GetString(0), row.GetString(1), row.GetString(2), row.GetString(3));
@@ -348,31 +315,9 @@ public sealed partial class ControllerDatabase
         }
     }
 
-    private string? AgentUpdateChallenge(SqliteTransaction tx, string machineId)
-    {
-        using var operation = Command("SELECT operation_id,ticket_hash,status FROM agent_update_operations WHERE machine_id=$machine AND status IN ('awaitingHeartbeat','rollingBack') AND ticket_started_at_unix_ms IS NOT NULL", ("$machine", machineId));
-        operation.Transaction = tx;
-        using var row = operation.ExecuteReader();
-        if (!row.Read()) return null;
-        // Each report invalidates earlier proofs; the process secret also fences Controller restarts.
-        var binding = Encoding.UTF8.GetBytes($"{row.GetString(0)}\n{row.GetString(1)}\n{row.GetString(2)}\n{agentUpdateReportEpochs.GetValueOrDefault(machineId)}");
-        return Convert.ToBase64String(HMACSHA256.HashData(agentUpdateEpoch, binding)).TrimEnd('=').Replace('+', '-').Replace('/', '_');
-    }
-
-    private void ResolveAgentUpdateFromHeartbeat(SqliteTransaction tx, string machineId, string? reportedVersion, string? suppliedChallenge, long nowMs)
-    {
-        var expectedChallenge = AgentUpdateChallenge(tx, machineId);
-        if (reportedVersion is null || expectedChallenge is null || suppliedChallenge is null ||
-            !CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(expectedChallenge), Encoding.UTF8.GetBytes(suppliedChallenge))) return;
-        using var resolve = Command("UPDATE agent_update_operations SET status=CASE WHEN status='awaitingHeartbeat' THEN 'completed' ELSE 'rolledBack' END,updated_at_unix_ms=$now WHERE machine_id=$machine AND started_at_unix_ms IS NOT NULL AND ((status='awaitingHeartbeat' AND target_version=$version) OR (status='rollingBack' AND previous_version=$version))",
-            ("$version", reportedVersion), ("$now", nowMs), ("$machine", machineId));
-        resolve.Transaction = tx;
-        resolve.ExecuteNonQuery();
-    }
-
     private void ExpireUnstartedAgentUpdates(SqliteTransaction tx, long nowMs)
     {
-        using var expire = Command("UPDATE agent_update_operations SET status='expired',updated_at_unix_ms=$now WHERE status='awaitingInstaller' AND started_at_unix_ms IS NULL AND ticket_expires_at_unix_ms <= $now", ("$now", nowMs));
+        using var expire = Command("UPDATE agent_update_operations SET status='expired',updated_at_unix_ms=$now WHERE status='awaitingInstaller' AND started_at_unix_ms IS NULL AND parent_operation_id IS NULL AND ticket_expires_at_unix_ms <= $now AND EXISTS(SELECT 1 FROM agent_maintenance_chains c WHERE c.chain_id=agent_update_operations.chain_id AND c.current_head_operation_id=agent_update_operations.operation_id AND c.held=1 AND c.inherited=0 AND c.generation=agent_update_operations.ticket_generation AND NOT EXISTS(SELECT 1 FROM agent_update_operations prior WHERE prior.chain_id=c.chain_id AND prior.started_at_unix_ms IS NOT NULL)); UPDATE agent_maintenance_chains SET held=0,updated_at_unix_ms=$now WHERE held=1 AND inherited=0 AND EXISTS(SELECT 1 FROM agent_update_operations o WHERE o.operation_id=agent_maintenance_chains.current_head_operation_id AND o.status='expired' AND o.parent_operation_id IS NULL AND o.started_at_unix_ms IS NULL AND o.ticket_generation=agent_maintenance_chains.generation) AND NOT EXISTS(SELECT 1 FROM agent_update_operations prior WHERE prior.chain_id=agent_maintenance_chains.chain_id AND prior.started_at_unix_ms IS NOT NULL)", ("$now", nowMs));
         expire.Transaction = tx;
         expire.ExecuteNonQuery();
     }
@@ -392,11 +337,15 @@ public sealed partial class ControllerDatabase
 
     private AgentUpdateOperationDto FindAgentUpdateOperation(SqliteTransaction tx, string operationId)
     {
-        using var operation = Command("SELECT operation_id,machine_id,release_version,target_version,target_package_sha256,previous_version,status,created_at_unix_ms,updated_at_unix_ms FROM agent_update_operations WHERE operation_id=$id", ("$id", operationId));
+        using var operation = Command("SELECT o.operation_id,o.machine_id,o.chain_id,c.current_head_operation_id,c.generation,c.held,o.parent_operation_id,o.release_version,o.target_version,o.target_package_sha256,o.target_runtime,o.target_protocol,o.previous_version,o.source_version,o.source_evidence_digest,o.backup_owner_operation_id,o.backup_digest,o.status,o.created_at_unix_ms,o.updated_at_unix_ms FROM agent_update_operations o JOIN agent_maintenance_chains c ON c.chain_id=o.chain_id WHERE o.operation_id=$id", ("$id", operationId));
         operation.Transaction = tx;
         using var row = operation.ExecuteReader();
         if (!row.Read()) throw new KeyNotFoundException();
-        return new(row.GetString(0), row.GetString(1), row.GetString(2), row.GetString(3), row.GetString(4), row.GetString(5),
-            row.GetString(6), DateTimeOffset.FromUnixTimeMilliseconds(row.GetInt64(7)), DateTimeOffset.FromUnixTimeMilliseconds(row.GetInt64(8)));
+        return new(row.GetString(0), row.GetString(1), row.GetString(2), row.GetString(3), row.GetInt64(4), row.GetInt32(5)!=0,
+            row.IsDBNull(6)?null:row.GetString(6), row.GetString(7), row.GetString(8), row.GetString(9),
+            row.IsDBNull(10)?null:row.GetString(10), row.IsDBNull(11)?null:row.GetInt32(11), row.IsDBNull(12)?null:row.GetString(12),
+            row.IsDBNull(13)?null:row.GetString(13), row.IsDBNull(14)?null:row.GetString(14), row.IsDBNull(15)?null:row.GetString(15),
+            row.IsDBNull(16)?null:row.GetString(16), row.GetString(17), DateTimeOffset.FromUnixTimeMilliseconds(row.GetInt64(18)),
+            DateTimeOffset.FromUnixTimeMilliseconds(row.GetInt64(19)));
     }
 }

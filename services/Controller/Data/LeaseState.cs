@@ -45,7 +45,7 @@ public sealed partial class ControllerDatabase {
             var prior=PriorRequest(tx,scope,idempotencyKey,fp);
             if(prior is not null) {var existing=FindLease(tx,prior)!.Dto;tx.Commit();return existing;}
             string? currentBoot;
-            using(var eligibility=LeaseCommand(tx,"SELECT m.approval_status,m.revision,h.last_seen,h.readiness,EXISTS(SELECT 1 FROM leases l WHERE l.machine_id=m.machine_id AND l.allocation_held=1),a.applied_revision,EXISTS(SELECT 1 FROM agent_update_operations o WHERE o.machine_id=m.machine_id AND o.status NOT IN ('completed','rolledBack','expired')),h.boot_id FROM machines m LEFT JOIN machine_heartbeats h ON h.machine_id=m.machine_id LEFT JOIN machine_config_acks a ON a.machine_id=m.machine_id WHERE m.machine_id=$id",("$id",machineId))) {
+            using(var eligibility=LeaseCommand(tx,"SELECT m.approval_status,m.revision,h.last_seen,h.readiness,EXISTS(SELECT 1 FROM leases l WHERE l.machine_id=m.machine_id AND l.allocation_held=1),a.applied_revision,EXISTS(SELECT 1 FROM agent_maintenance_chains c WHERE c.machine_id=m.machine_id AND c.held=1),h.boot_id FROM machines m LEFT JOIN machine_heartbeats h ON h.machine_id=m.machine_id LEFT JOIN machine_config_acks a ON a.machine_id=m.machine_id WHERE m.machine_id=$id",("$id",machineId))) {
                 using var row=eligibility.ExecuteReader();
                 if(!row.Read())throw new InvalidOperationException("Machine is not currently rentable");
                 currentBoot=row.IsDBNull(7)?null:row.GetString(7);

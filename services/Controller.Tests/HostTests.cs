@@ -66,7 +66,7 @@ public class HostTests
                 RedirectStandardError = true,
                 UseShellExecute = false
             };
-            foreach (var argument in new[] { "build", project, "--artifacts-path", artifactsPath, "--verbosity", "quiet", "-p:DatabasePath=" + path })
+            foreach (var argument in new[] { "build", project, "--disable-build-servers", "--artifacts-path", artifactsPath, "--verbosity", "quiet", "-p:DatabasePath=" + path })
                 startInfo.ArgumentList.Add(argument);
             using var build = ContainedProcess.Start(startInfo);
             var result = await ChildProcess.RunAsync(build, TimeSpan.FromSeconds(60));

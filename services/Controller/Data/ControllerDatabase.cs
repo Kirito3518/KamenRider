@@ -14,21 +14,23 @@ public sealed partial class ControllerDatabase : IDisposable
     private readonly EnrollmentPolicy policy;
     private readonly TimeProvider clock;
     private readonly string agentReleaseRoot;
-    private readonly byte[] agentUpdateEpoch = RandomNumberGenerator.GetBytes(32);
-    public ControllerDatabase(string path, EnrollmentPolicy? policy = null, TimeProvider? clock = null) {
+    private readonly bool agentReleaseRemediationEnabled;
+    public ControllerDatabase(string path, EnrollmentPolicy? policy = null, TimeProvider? clock = null, bool agentReleaseRemediationEnabled = false) {
         this.policy = policy ?? new(); this.clock = clock ?? TimeProvider.System;
+        this.agentReleaseRemediationEnabled = agentReleaseRemediationEnabled;
         agentReleaseRoot=Path.Combine(Path.GetDirectoryName(Path.GetFullPath(path))!,"agent-releases");
         if (this.policy.MaxPending <= 0 || this.policy.NewPerMinute <= 0) throw new ArgumentException("Positive enrollment limits required");
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
         connection=new SqliteConnection(new SqliteConnectionStringBuilder {DataSource=path, ForeignKeys=true, Pooling=false}.ToString()); connection.Open();
         using var transaction=connection.BeginTransaction();
-        foreach (var name in new[] { "001-machines.sql", "002-leases-commands.sql", "003-pairing.sql", "004-boot-challenges.sql", "005-config-acks.sql", "006-enrollment-tickets.sql", "007-admin-vnc-sessions.sql", "008-vnc-approved-target.sql", "009-agent-version.sql", "010-completed-leases.sql", "011-readiness-diagnostics.sql", "012-agent-releases.sql", "013-agent-update-downloads.sql" }) {
+        foreach (var name in new[] { "001-machines.sql", "002-leases-commands.sql", "003-pairing.sql", "004-boot-challenges.sql", "005-config-acks.sql", "006-enrollment-tickets.sql", "007-admin-vnc-sessions.sql", "008-vnc-approved-target.sql", "009-agent-version.sql", "010-completed-leases.sql", "011-readiness-diagnostics.sql", "012-agent-releases.sql", "013-agent-update-downloads.sql", "014-agent-maintenance-chains.sql" }) {
             if(name=="003-pairing.sql"){using var version=connection.CreateCommand();version.Transaction=transaction;version.CommandText="PRAGMA user_version";if((long)version.ExecuteScalar()!>=3)continue;}
             if(name=="004-boot-challenges.sql"){using var version=connection.CreateCommand();version.Transaction=transaction;version.CommandText="PRAGMA user_version";if((long)version.ExecuteScalar()!>=4)continue;}
             if(name=="010-completed-leases.sql"){using var version=connection.CreateCommand();version.Transaction=transaction;version.CommandText="PRAGMA user_version";if((long)version.ExecuteScalar()!>=10)continue;}
             if(name=="011-readiness-diagnostics.sql"){using var version=connection.CreateCommand();version.Transaction=transaction;version.CommandText="PRAGMA user_version";if((long)version.ExecuteScalar()!>=11)continue;}
             if(name=="012-agent-releases.sql"){using var version=connection.CreateCommand();version.Transaction=transaction;version.CommandText="PRAGMA user_version";if((long)version.ExecuteScalar()!>=12)continue;}
             if(name=="013-agent-update-downloads.sql"){using var version=connection.CreateCommand();version.Transaction=transaction;version.CommandText="PRAGMA user_version";if((long)version.ExecuteScalar()!>=13)continue;}
+            if(name=="014-agent-maintenance-chains.sql"){using var version=connection.CreateCommand();version.Transaction=transaction;version.CommandText="PRAGMA user_version";if((long)version.ExecuteScalar()!>=14)continue;}
             if(name=="008-vnc-approved-target.sql") {
                 using var columns=connection.CreateCommand();columns.Transaction=transaction;columns.CommandText="PRAGMA table_info(machines)";using var rows=columns.ExecuteReader();
                 var hasVncLocalIp=false;while(rows.Read())if(rows.GetString(1)=="vnc_local_ip")hasVncLocalIp=true;
@@ -178,10 +180,14 @@ public sealed partial class ControllerDatabase : IDisposable
         var canRent=approvalStatus=="approved" && readiness=="ready" && !allocationHeld && !maintenanceLocked && appliedRevision==revision;
         return (readiness,canRent);
     }
-    public MachineDto[] List() {lock(gate) {
+    public MachineDto[] List() => List(null);
+    private MachineDto[] List(SqliteTransaction? existingTransaction) {lock(gate) {
         // Read heartbeat, configuration acknowledgment and allocation from the same SQLite snapshot.
         var now=clock.GetUtcNow();
-        using var cmd=Command("SELECT m.machine_id,m.approval_status,m.display_name,m.hourly_price,m.local_ip,m.mac_address,m.moonlight_port,m.sunshine_port,m.revision,m.approved_by,m.approved_at,h.last_seen,h.boot_id,h.readiness,EXISTS(SELECT 1 FROM leases l WHERE l.machine_id=m.machine_id AND l.allocation_held=1),a.applied_revision,m.vnc_local_ip,h.agent_version,(SELECT COUNT(*) FROM admin_vnc_sessions v WHERE v.machine_id=m.machine_id AND v.used_at_unix_ms IS NOT NULL AND v.ended_at_unix_ms IS NULL AND v.used_at_unix_ms > $activeVncSince),d.diagnostics_json,EXISTS(SELECT 1 FROM agent_update_operations o WHERE o.machine_id=m.machine_id AND o.status NOT IN ('completed','rolledBack','expired') AND NOT(o.status='awaitingInstaller' AND o.started_at_unix_ms IS NULL AND o.ticket_expires_at_unix_ms <= $agentUpdateNow)),(SELECT o.operation_id FROM agent_update_operations o WHERE o.machine_id=m.machine_id ORDER BY o.created_at_unix_ms DESC LIMIT 1),(SELECT o.target_version FROM agent_update_operations o WHERE o.machine_id=m.machine_id ORDER BY o.created_at_unix_ms DESC LIMIT 1),(SELECT CASE WHEN o.status='awaitingInstaller' AND o.started_at_unix_ms IS NULL AND o.ticket_expires_at_unix_ms <= $agentUpdateNow THEN 'expired' ELSE o.status END FROM agent_update_operations o WHERE o.machine_id=m.machine_id ORDER BY o.created_at_unix_ms DESC LIMIT 1) FROM machines m LEFT JOIN machine_heartbeats h ON h.machine_id=m.machine_id LEFT JOIN machine_config_acks a ON a.machine_id=m.machine_id LEFT JOIN machine_readiness_diagnostics d ON d.machine_id=m.machine_id ORDER BY m.machine_id",("$activeVncSince",now.AddHours(-1).ToUnixTimeMilliseconds()),("$agentUpdateNow",now.ToUnixTimeMilliseconds()));
+        if(existingTransaction is null) {using var tx=connection.BeginTransaction();ExpireUnstartedAgentUpdates(tx,now.ToUnixTimeMilliseconds());tx.Commit();}
+        else ExpireUnstartedAgentUpdates(existingTransaction,now.ToUnixTimeMilliseconds());
+        using var cmd=Command("SELECT m.machine_id,m.approval_status,m.display_name,m.hourly_price,m.local_ip,m.mac_address,m.moonlight_port,m.sunshine_port,m.revision,m.approved_by,m.approved_at,h.last_seen,h.boot_id,h.readiness,EXISTS(SELECT 1 FROM leases l WHERE l.machine_id=m.machine_id AND l.allocation_held=1),a.applied_revision,m.vnc_local_ip,h.agent_version,(SELECT COUNT(*) FROM admin_vnc_sessions v WHERE v.machine_id=m.machine_id AND v.used_at_unix_ms IS NOT NULL AND v.ended_at_unix_ms IS NULL AND v.used_at_unix_ms > $activeVncSince),d.diagnostics_json,COALESCE(c.held,0),o.operation_id,o.target_version,o.status FROM machines m LEFT JOIN machine_heartbeats h ON h.machine_id=m.machine_id LEFT JOIN machine_config_acks a ON a.machine_id=m.machine_id LEFT JOIN machine_readiness_diagnostics d ON d.machine_id=m.machine_id LEFT JOIN agent_maintenance_chains c ON c.chain_id=(SELECT c1.chain_id FROM agent_maintenance_chains c1 WHERE c1.machine_id=m.machine_id ORDER BY c1.held DESC,c1.rowid DESC LIMIT 1) LEFT JOIN agent_update_operations o ON o.operation_id=c.current_head_operation_id ORDER BY m.machine_id",("$activeVncSince",now.AddHours(-1).ToUnixTimeMilliseconds()));
+        cmd.Transaction=existingTransaction;
         using var r=cmd.ExecuteReader(); var rows=new List<MachineDto>();
         while(r.Read()) {
             DateTimeOffset? seen=r.IsDBNull(11)?null:DateTimeOffset.Parse(r.GetString(11));

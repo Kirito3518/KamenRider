@@ -234,7 +234,7 @@ public class DatabaseMaintenanceTests
     }
 
     [Fact]
-    public void BackupRejectsVersionTwelveDatabaseWithoutActiveUpdateUniqueness()
+    public void BackupRejectsDatabaseWithoutHeldChainUniqueness()
     {
         var root = NewRoot();
         var databasePath = Path.Combine(root, "controller.db");
@@ -246,12 +246,53 @@ public class DatabaseMaintenanceTests
             {
                 connection.Open();
                 using var command = connection.CreateCommand();
-                command.CommandText = "DROP INDEX agent_update_one_active_per_machine; CREATE UNIQUE INDEX agent_update_one_active_per_machine ON agent_update_operations(machine_id);";
+                command.CommandText = "DROP INDEX agent_maintenance_one_held_per_machine; CREATE UNIQUE INDEX agent_maintenance_one_held_per_machine ON agent_maintenance_chains(machine_id) WHERE held=0;";
                 command.ExecuteNonQuery();
             }
 
             Assert.Throws<InvalidDataException>(() => ControllerDatabaseMaintenance.Backup(databasePath, backupPath));
             Assert.False(File.Exists(backupPath));
+        }
+        finally { DeleteRoot(root); }
+    }
+
+    [Theory]
+    [InlineData(12)]
+    [InlineData(13)]
+    public void LegacyReleaseDatabasesCanBeBackedUpAndMigrated(int version)
+    {
+        var root = NewRoot();
+        var source = Path.Combine(root, "legacy.db");
+        var backup = Path.Combine(root, "backup.db");
+        try
+        {
+            CreateLegacyReleaseDatabase(source, version);
+            ControllerDatabaseMaintenance.Backup(source, backup);
+            using var upgraded = new ControllerDatabase(backup);
+            Assert.Equal("legacy-pc", Assert.Single(upgraded.List()).MachineId);
+            ControllerDatabaseMaintenance.Backup(backup, Path.Combine(root, "upgraded-backup.db"));
+        }
+        finally { DeleteRoot(root); }
+    }
+
+    [Fact]
+    public void BackupRejectsMissingMaintenanceCloseGuard()
+    {
+        var root = NewRoot();
+        var source = Path.Combine(root, "source.db");
+        var backup = Path.Combine(root, "backup.db");
+        try
+        {
+            using (var database = new ControllerDatabase(source)) AddMachine(database, "source-machine");
+            using (var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = source, Pooling = false }.ToString()))
+            {
+                connection.Open();
+                using var command = connection.CreateCommand();
+                command.CommandText = "DROP TRIGGER agent_maintenance_close_guard";
+                command.ExecuteNonQuery();
+            }
+            Assert.Throws<InvalidDataException>(() => ControllerDatabaseMaintenance.Backup(source, backup));
+            Assert.False(File.Exists(backup));
         }
         finally { DeleteRoot(root); }
     }
@@ -845,6 +886,31 @@ public class DatabaseMaintenanceTests
             version.CommandText = "PRAGMA user_version=2";
             version.ExecuteNonQuery();
         }
+        transaction.Commit();
+    }
+
+    private static void CreateLegacyReleaseDatabase(string databasePath, int version)
+    {
+        using var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = databasePath, ForeignKeys = true, Pooling = false }.ToString());
+        connection.Open();
+        using var transaction = connection.BeginTransaction();
+        var assembly = typeof(ControllerDatabase).Assembly;
+        foreach (var name in assembly.GetManifestResourceNames()
+            .Where(name => name.StartsWith("KamenRaider.Controller.Data.Migrations.", StringComparison.Ordinal)
+                && int.TryParse(name.AsSpan("KamenRaider.Controller.Data.Migrations.".Length, 3), out var number) && number <= version)
+            .Order(StringComparer.Ordinal))
+        {
+            using var resource = assembly.GetManifestResourceStream(name)!;
+            using var reader = new StreamReader(resource);
+            using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = reader.ReadToEnd();
+            command.ExecuteNonQuery();
+        }
+        using var seed = connection.CreateCommand();
+        seed.Transaction = transaction;
+        seed.CommandText = "INSERT INTO machines(machine_id,public_key,local_ip,mac_address,moonlight_port,sunshine_port) VALUES('legacy-pc','a2V5','10.0.0.2','001122334455',1,2)";
+        seed.ExecuteNonQuery();
         transaction.Commit();
     }
 

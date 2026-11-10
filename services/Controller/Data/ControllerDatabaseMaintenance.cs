@@ -307,11 +307,13 @@ public static class ControllerDatabaseMaintenance
                 {
                     if (!tables.Contains(table))
                         throw new InvalidDataException($"The database is missing the version 12 {table} table.");
-                    ValidateColumns(connection, table, requiredColumns[table], requiredPrimaryKeys[table]);
+                    if (table != "agent_update_operations" || userVersion < 14)
+                        ValidateColumns(connection, table, requiredColumns[table], requiredPrimaryKeys[table]);
                 }
-                ValidateIndex(connection, "agent_update_operations", "agent_update_one_active_per_machine", ["machine_id"], "status NOT IN ('completed','rolledBack','expired')", required: true);
+                if (userVersion < 14)
+                    ValidateIndex(connection, "agent_update_operations", "agent_update_one_active_per_machine", ["machine_id"], "status NOT IN ('completed','rolledBack','expired')", required: true);
             }
-            if (userVersion >= 13)
+            if (userVersion >= 13 && userVersion < 14)
                 ValidateColumns(connection, "agent_update_operations", [
                     new("operation_id", "TEXT"), new("machine_id", "TEXT", true), new("release_version", "TEXT", true),
                     new("target_version", "TEXT", true), new("target_package_sha256", "TEXT", true), new("previous_version", "TEXT", true),
@@ -320,6 +322,7 @@ public static class ControllerDatabaseMaintenance
                     new("created_at_unix_ms", "INTEGER", true), new("updated_at_unix_ms", "INTEGER", true),
                     new("ticket_package_downloaded_at_unix_ms", "INTEGER")
                 ], ["operation_id"]);
+            if (userVersion >= 14) ValidateMaintenanceChainSchema(connection);
             // These uniqueness constraints enforce allocation and command-revision invariants.
             ValidateIndex(connection, "leases", "leases_machine_allocation", ["machine_id"], "allocation_held=1", required: true);
             var hasCommandRevisionIndex = HasIndex(connection, "command_outbox", "lease_command_revision");
@@ -333,6 +336,59 @@ public static class ControllerDatabaseMaintenance
         {
             throw new InvalidDataException("The file is not a valid Controller database.", exception);
         }
+    }
+
+    private static readonly Lazy<IReadOnlyDictionary<string, string>> maintenanceSchema = new(() =>
+    {
+        using var reference = new SqliteConnection("Data Source=:memory:;Foreign Keys=True");
+        reference.Open();
+        using var transaction = reference.BeginTransaction();
+        var assembly = typeof(ControllerDatabase).Assembly;
+        foreach (var resourceName in assembly.GetManifestResourceNames()
+            .Where(name => name.StartsWith("KamenRaider.Controller.Data.Migrations.", StringComparison.Ordinal)
+                && int.TryParse(name.AsSpan("KamenRaider.Controller.Data.Migrations.".Length, 3), out var version) && version <= 14)
+            .Order(StringComparer.Ordinal))
+        {
+            using var resource = assembly.GetManifestResourceStream(resourceName)!;
+            using var reader = new StreamReader(resource);
+            using var migration = reference.CreateCommand();
+            migration.Transaction = transaction;
+            migration.CommandText = reader.ReadToEnd();
+            migration.ExecuteNonQuery();
+        }
+        transaction.Commit();
+        var names = new[] { "agent_maintenance_chains", "agent_update_operations", "agent_update_audit",
+            "agent_maintenance_one_held_per_machine", "agent_update_unstarted_expiry", "agent_update_audit_immutable_update",
+            "agent_update_audit_immutable_delete", "agent_update_operation_identity_immutable", "agent_update_operation_provenance_immutable",
+            "agent_update_start_immutable", "agent_update_superseded_insert_guard",
+            "agent_maintenance_chain_identity_immutable", "agent_maintenance_generation_guard", "agent_maintenance_close_guard", "agent_update_supersession_guard" };
+        var result = new Dictionary<string, string>(StringComparer.Ordinal);
+        using var command = reference.CreateCommand();
+        command.CommandText = "SELECT sql FROM sqlite_schema WHERE name=$name";
+        var parameter = command.Parameters.Add("$name", SqliteType.Text);
+        foreach (var name in names)
+        {
+            parameter.Value = name;
+            result.Add(name, NormalizeSql((string)command.ExecuteScalar()!));
+        }
+        return result;
+    });
+
+    private static void ValidateMaintenanceChainSchema(SqliteConnection connection)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT sql FROM sqlite_schema WHERE name=$name";
+        var parameter = command.Parameters.Add("$name", SqliteType.Text);
+        foreach (var (name, expected) in maintenanceSchema.Value)
+        {
+            parameter.Value = name;
+            if (command.ExecuteScalar() is not string actual || NormalizeSql(actual) != expected)
+                throw new InvalidDataException($"Controller database has an invalid maintenance-chain definition '{name}'.");
+        }
+        using var conflict = connection.CreateCommand();
+        conflict.CommandText = "SELECT EXISTS(SELECT 1 FROM agent_maintenance_chains c JOIN leases l ON l.machine_id=c.machine_id WHERE c.held=1 AND l.allocation_held=1)";
+        if (Convert.ToInt64(conflict.ExecuteScalar(), CultureInfo.InvariantCulture) != 0)
+            throw new InvalidDataException("Controller database contains a held lease and maintenance chain for the same machine.");
     }
 
     private static void ValidateColumns(SqliteConnection connection, string table, RequiredColumn[] expectedColumns, string[] expectedPrimaryKey)

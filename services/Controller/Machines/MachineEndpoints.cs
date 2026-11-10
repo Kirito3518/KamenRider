@@ -12,7 +12,7 @@ public static class MachineEndpoints
         app.MapGet("/internal/machines",(ControllerDatabase db)=>db.List());
         app.MapPost("/internal/agent-enrollment-tickets",(ControllerDatabase db)=>Results.Ok(db.CreateEnrollmentTicket()));
         app.MapPost("/internal/machines/{id}/agent-updates",(string id,AgentUpdateReservationRequest request,HttpContext context,ControllerDatabase db)=>
-            IsAdmin(context)?Execute(()=>db.ReserveAgentUpdate(id,request.ReleaseVersion)):Results.StatusCode(StatusCodes.Status403Forbidden));
+            IsAdmin(context)?Execute(()=>db.ReserveAgentUpdate(id,request.ReleaseVersion,context.Request.Headers["X-Authenticated-Actor-Id"].ToString(),request.RequestId ?? context.TraceIdentifier)):Results.StatusCode(StatusCodes.Status403Forbidden));
         app.MapPost("/internal/machines/{id}/agent-updates/{operationId}/recovery-ticket",(string id,string operationId,HttpContext context,ControllerDatabase db)=>
             IsAdmin(context)?Execute(()=>db.RenewAgentUpdateTicket(id,operationId)):Results.StatusCode(StatusCodes.Status403Forbidden));
         app.MapPatch("/internal/machines/{id}",(string id,MachineUpdate update,long expectedRevision,ControllerDatabase db)=>Execute(()=>db.Update(id,update,expectedRevision)));

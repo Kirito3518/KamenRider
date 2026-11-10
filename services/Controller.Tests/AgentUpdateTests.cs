@@ -10,73 +10,253 @@ using Microsoft.Extensions.DependencyInjection;
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
+using Controller.Tests.Fixtures;
 
 namespace Controller.Tests;
 
 public sealed class AgentUpdateTests
 {
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public void ProofFromAnotherOutcomeOrOperationCannotConfirmTheCurrentOutcome(bool nextOperation)
+    [Fact]
+    public void ReservationIsDisabledByDefault()
     {
         using var fixture = new LeaseFixture();
         AddRelease(fixture.Path, "2.0.0");
-        AddRelease(fixture.Path, "3.0.0");
         fixture.SyncVersion("1.0.0");
-        var update = fixture.Db.ReserveAgentUpdate("pc", "2.0.0");
-        fixture.Db.StartAgentUpdate("pc", update.Ticket);
-        fixture.Db.ReportAgentUpdateStatus("pc", update.Ticket, "awaitingHeartbeat");
-        var request = new SyncRequest("boot", "192.0.2.1", "001122334455", 3, "ready", []) { AgentVersion = "0.9.0" };
-        var oldProof = fixture.Db.Sync("pc", request).AgentUpdateChallenge;
-        Assert.NotNull(oldProof);
-        if (nextOperation)
+
+        Assert.Throws<InvalidOperationException>(() => fixture.Db.ReserveAgentUpdate("pc", "2.0.0", "admin", Guid.NewGuid().ToString("N")));
+        Assert.True(Assert.Single(fixture.Db.List()).CanRent);
+    }
+
+    [Fact]
+    public void RetainedProtocolTwoPackageCanBeReservedWithoutAReportedSourceVersion()
+    {
+        using var fixture = new LeaseFixture(agentReleaseRemediationEnabled: true);
+        var bytes = AgentPackageCorpus.Valid();
+        var hash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes));
+        AddRelease(fixture.Path, AgentPackageCorpus.Version, hash, bytes.Length);
+        var path = ControllerReleasePath(fixture.Path, hash);
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        File.WriteAllBytes(path, bytes);
+
+        var error = Record.Exception(() => fixture.Db.ReserveAgentUpdate("pc", AgentPackageCorpus.Version, "admin", Guid.NewGuid().ToString("N")));
+
+        Assert.Null(error);
+        Assert.False(Assert.Single(fixture.Db.List()).CanRent);
+    }
+
+    [Theory]
+    [InlineData("start")]
+    [InlineData("download")]
+    [InlineData("report")]
+    public void GenerationAdvanceRevokesEveryTicketPurpose(string action)
+    {
+        using var fixture = new LeaseFixture(agentReleaseRemediationEnabled: true);
+        AddRelease(fixture.Path, "2.0.0");
+        var update = fixture.Db.ReserveAgentUpdate("pc", "2.0.0", "admin", "generation-test");
+        if (action != "start") fixture.Db.StartAgentUpdate("pc", update.Ticket);
+        using (var connection = Open(fixture.Path))
+        using (var command = connection.CreateCommand())
         {
-            fixture.Db.Sync("pc", request with { AgentVersion = "2.0.0", AgentUpdateChallenge = oldProof });
-            update = fixture.Db.ReserveAgentUpdate("pc", "3.0.0");
-            fixture.Db.StartAgentUpdate("pc", update.Ticket);
+            command.CommandText = "UPDATE agent_maintenance_chains SET generation=generation+1 WHERE current_head_operation_id=$id";
+            command.Parameters.AddWithValue("$id", update.OperationId);
+            Assert.Equal(1, command.ExecuteNonQuery());
         }
-        fixture.Db.ReportAgentUpdateStatus("pc", update.Ticket, "rollingBack");
-        var previous = nextOperation ? "2.0.0" : "1.0.0";
+        if (action == "start") Assert.Throws<UnauthorizedAccessException>(() => fixture.Db.StartAgentUpdate("pc", update.Ticket));
+        else if (action == "download") Assert.Throws<UnauthorizedAccessException>(() => fixture.Db.ConsumeAgentUpdatePackageDownload("pc", update.OperationId, update.Ticket, update.ReleaseVersion, update.TargetVersion, update.TargetPackageSha256));
+        else Assert.Throws<UnauthorizedAccessException>(() => fixture.Db.ReportAgentUpdateStatus("pc", update.Ticket, "failed"));
+        Assert.False(Assert.Single(fixture.Db.List()).CanRent);
+    }
 
-        var response = fixture.Db.Sync("pc", request with { AgentVersion = previous, AgentUpdateChallenge = oldProof });
+    [Fact]
+    public void ChainCannotMoveItsHeadToAnUnrelatedOperation()
+    {
+        using var fixture = new LeaseFixture(agentReleaseRemediationEnabled: true);
+        AddRelease(fixture.Path, "2.0.0");
+        var update = fixture.Db.ReserveAgentUpdate("pc", "2.0.0", "admin", "head-guard");
+        using var connection = Open(fixture.Path);
+        using var tx = connection.BeginTransaction();
+        using var command = connection.CreateCommand();
+        command.Transaction = tx;
+        command.CommandText = "INSERT INTO agent_update_operations(operation_id,machine_id,chain_id,release_version,target_version,target_package_sha256,target_runtime,target_protocol,status,ticket_hash,ticket_generation,ticket_purpose,ticket_expires_at_unix_ms,created_at_unix_ms,updated_at_unix_ms) SELECT 'unrelated',machine_id,chain_id,release_version,target_version,target_package_sha256,target_runtime,target_protocol,'awaitingInstaller','other-ticket',2,'apply',ticket_expires_at_unix_ms,created_at_unix_ms,updated_at_unix_ms FROM agent_update_operations WHERE operation_id=$id";
+        command.Parameters.AddWithValue("$id", update.OperationId);
+        Assert.Equal(1, command.ExecuteNonQuery());
+        command.CommandText = "UPDATE agent_maintenance_chains SET current_head_operation_id='unrelated',generation=2 WHERE current_head_operation_id=$id";
+        Assert.Throws<SqliteException>(() => command.ExecuteNonQuery());
+    }
 
-        Assert.Equal("rollingBack", OperationStatus(fixture.Path, update.OperationId));
-        fixture.Db.Sync("pc", request with { AgentVersion = previous, AgentUpdateChallenge = response.AgentUpdateChallenge });
-        Assert.Equal("rolledBack", OperationStatus(fixture.Path, update.OperationId));
+    [Fact]
+    public void SuccessorHandoffKeepsHoldVisibleAndRevokesOldHeadTicket()
+    {
+        using var fixture = new LeaseFixture(agentReleaseRemediationEnabled: true);
+        AddRelease(fixture.Path, "2.0.0");
+        var ticket = fixture.Db.ReserveAgentUpdate("pc", "2.0.0", "trusted-admin", "handoff-request");
+        var started = fixture.Db.StartAgentUpdate("pc", ticket.Ticket);
+        Assert.Equal(started.OperationId, started.CurrentHeadOperationId);
+        Assert.Equal(1, started.Generation);
+        Assert.Equal("win-x64", started.TargetRuntime);
+        Assert.Equal(2, started.TargetProtocol);
+        Assert.Null(started.SourceVersion);
+        Assert.Null(started.BackupDigest);
+        Assert.Null(started.LegacyReportedPreviousVersion);
+
+        using (var connection = Open(fixture.Path))
+        using (var tx = connection.BeginTransaction())
+        using (var command = connection.CreateCommand())
+        {
+            command.Transaction = tx;
+            command.Parameters.AddWithValue("$id", ticket.OperationId);
+            command.CommandText = "INSERT INTO agent_update_operations(operation_id,machine_id,chain_id,parent_operation_id,release_version,target_version,target_package_sha256,target_runtime,target_protocol,status,ticket_hash,ticket_generation,ticket_purpose,ticket_expires_at_unix_ms,created_at_unix_ms,updated_at_unix_ms) SELECT 'successor',machine_id,chain_id,operation_id,release_version,target_version,target_package_sha256,target_runtime,target_protocol,'awaitingInstaller','successor-ticket',2,'apply',ticket_expires_at_unix_ms,created_at_unix_ms,updated_at_unix_ms FROM agent_update_operations WHERE operation_id=$id; UPDATE agent_maintenance_chains SET current_head_operation_id='successor',generation=2 WHERE current_head_operation_id=$id; UPDATE agent_update_operations SET status='superseded' WHERE operation_id=$id";
+            command.ExecuteNonQuery();
+            using (var observer = Open(fixture.Path))
+            using (var read = observer.CreateCommand())
+            {
+                read.CommandText = "SELECT current_head_operation_id || ':' || held FROM agent_maintenance_chains WHERE held=1";
+                Assert.Equal(ticket.OperationId + ":1", read.ExecuteScalar());
+            }
+            tx.Commit();
+        }
+
+        Assert.Equal("successor", Assert.Single(fixture.Db.List()).AgentUpdateOperationId);
+        Assert.False(Assert.Single(fixture.Db.List()).CanRent);
+        Assert.Throws<UnauthorizedAccessException>(() => fixture.Db.ConsumeAgentUpdatePackageDownload("pc", ticket.OperationId, ticket.Ticket, ticket.ReleaseVersion, ticket.TargetVersion, ticket.TargetPackageSha256));
+        Assert.Throws<UnauthorizedAccessException>(() => fixture.Db.ReportAgentUpdateStatus("pc", ticket.OperationId, ticket.Ticket, ticket.ReleaseVersion, ticket.TargetVersion, ticket.TargetPackageSha256, "failed"));
+        using var auditConnection = Open(fixture.Path);
+        using var audit = auditConnection.CreateCommand();
+        audit.CommandText = "SELECT actor_id || ':' || request_id FROM agent_update_audit";
+        Assert.Equal("trusted-admin:handoff-request", audit.ExecuteScalar());
+    }
+
+    [Fact]
+    public void SourceEvidenceRequiresARealSha256Digest()
+    {
+        using var fixture = new LeaseFixture(agentReleaseRemediationEnabled: true);
+        AddRelease(fixture.Path, "2.0.0");
+        var ticket = fixture.Db.ReserveAgentUpdate("pc", "2.0.0", "admin", "source-digest");
+        using var connection = Open(fixture.Path);
+        using var command = connection.CreateCommand();
+        command.CommandText = "UPDATE agent_update_operations SET source_version='1.0.0',source_evidence_digest='not-a-sha256' WHERE operation_id=$id";
+        command.Parameters.AddWithValue("$id", ticket.OperationId);
+        Assert.Throws<SqliteException>(() => command.ExecuteNonQuery());
+    }
+
+    [Fact]
+    public void ExpiredChainCannotBeReopened()
+    {
+        using var fixture = new LeaseFixture(agentReleaseRemediationEnabled: true);
+        AddRelease(fixture.Path, "2.0.0");
+        var ticket = fixture.Db.ReserveAgentUpdate("pc", "2.0.0", "admin", "reopen-chain");
+        fixture.Time.Now = fixture.Time.Now.AddMinutes(10);
+        fixture.Db.List();
+        using var connection = Open(fixture.Path);
+        using var command = connection.CreateCommand();
+        command.CommandText = "UPDATE agent_maintenance_chains SET held=1 WHERE current_head_operation_id=$id";
+        command.Parameters.AddWithValue("$id", ticket.OperationId);
+        Assert.Throws<SqliteException>(() => command.ExecuteNonQuery());
+    }
+
+    [Fact]
+    public void StartedWorkCannotBeMadeExpirableByClearingItsStartTime()
+    {
+        using var fixture = new LeaseFixture(agentReleaseRemediationEnabled: true);
+        AddRelease(fixture.Path, "2.0.0");
+        var ticket = fixture.Db.ReserveAgentUpdate("pc", "2.0.0", "admin", "start-immutable");
+        fixture.Db.StartAgentUpdate("pc", ticket.Ticket);
+        using var connection = Open(fixture.Path);
+        using var command = connection.CreateCommand();
+        command.CommandText = "UPDATE agent_update_operations SET started_at_unix_ms=NULL WHERE operation_id=$id";
+        command.Parameters.AddWithValue("$id", ticket.OperationId);
+        Assert.Throws<SqliteException>(() => command.ExecuteNonQuery());
+    }
+
+    [Fact]
+    public void SupersededHistoryCannotBeInsertedWithoutAHandoff()
+    {
+        using var fixture = new LeaseFixture(agentReleaseRemediationEnabled: true);
+        AddRelease(fixture.Path, "2.0.0");
+        var ticket = fixture.Db.ReserveAgentUpdate("pc", "2.0.0", "admin", "superseded-history");
+        using var connection = Open(fixture.Path);
+        using var command = connection.CreateCommand();
+        command.CommandText = "INSERT INTO agent_update_operations(operation_id,machine_id,chain_id,release_version,target_version,target_package_sha256,target_runtime,target_protocol,status,ticket_hash,ticket_generation,ticket_purpose,ticket_expires_at_unix_ms,created_at_unix_ms,updated_at_unix_ms) SELECT 'fake-history',machine_id,chain_id,release_version,target_version,target_package_sha256,target_runtime,target_protocol,'superseded','unused-ticket',1,'apply',ticket_expires_at_unix_ms,created_at_unix_ms,updated_at_unix_ms FROM agent_update_operations WHERE operation_id=$id";
+        command.Parameters.AddWithValue("$id", ticket.OperationId);
+        Assert.Throws<SqliteException>(() => command.ExecuteNonQuery());
+    }
+
+    [Fact]
+    public void BoundProvenanceAndAuditCannotBeChanged()
+    {
+        using var fixture = new LeaseFixture(agentReleaseRemediationEnabled: true);
+        AddRelease(fixture.Path, "2.0.0");
+        var ticket = fixture.Db.ReserveAgentUpdate("pc", "2.0.0", "admin", "immutable");
+        using var connection = Open(fixture.Path);
+        using var command = connection.CreateCommand();
+        command.Parameters.AddWithValue("$id", ticket.OperationId);
+        command.Parameters.AddWithValue("$digest", new string('a', 64));
+        command.CommandText = "UPDATE agent_update_operations SET source_version='1.0.0',source_evidence_digest=$digest,backup_owner_operation_id=$id,backup_digest=$digest WHERE operation_id=$id";
+        Assert.Equal(1, command.ExecuteNonQuery());
+        command.CommandText = "UPDATE agent_update_operations SET source_version='other' WHERE operation_id=$id";
+        Assert.Throws<SqliteException>(() => command.ExecuteNonQuery());
+        command.CommandText = "UPDATE agent_update_operations SET backup_digest=upper(backup_digest) WHERE operation_id=$id";
+        Assert.Throws<SqliteException>(() => command.ExecuteNonQuery());
+        command.CommandText = "UPDATE agent_update_operations SET target_version='other' WHERE operation_id=$id";
+        Assert.Throws<SqliteException>(() => command.ExecuteNonQuery());
+        command.CommandText = "DELETE FROM agent_update_audit WHERE operation_id=$id";
+        Assert.Throws<SqliteException>(() => command.ExecuteNonQuery());
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void MatchingHashDoesNotMakeInvalidProtocolOrCrcEligible(bool badCrc)
+    {
+        using var fixture = new LeaseFixture(agentReleaseRemediationEnabled: true);
+        var bytes = badCrc ? AgentPackageCorpus.CrcTamper() : AgentPackageCorpus.Replace("AgentPackage.manifest.json", AgentPackageCorpus.Manifest.Replace("\"agentUpdateChallengeProtocol\":2", "\"agentUpdateChallengeProtocol\":1"));
+        var hash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes));
+        AddRelease(fixture.Path, AgentPackageCorpus.Version, hash, bytes.Length);
+        var path = ControllerReleasePath(fixture.Path, hash);
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        File.WriteAllBytes(path, bytes);
+        Assert.Throws<InvalidOperationException>(() => fixture.Db.ReserveAgentUpdate("pc", AgentPackageCorpus.Version, "admin", "bad-package"));
+        Assert.True(Assert.Single(fixture.Db.List()).CanRent);
+    }
+
+    [Fact]
+    public async Task ReservationAuditUsesAuthenticatedActorAndExplicitRequestId()
+    {
+        using var fixture = new LeaseFixture(agentReleaseRemediationEnabled: true);
+        AddRelease(fixture.Path, "2.0.0");
+        await using var host = await StartHost(fixture.Db);
+        using var response = await host.Client.PostAsJsonAsync("/internal/machines/pc/agent-updates", new { releaseVersion = "2.0.0", requestId = "explicit-request", actorId = "forged" });
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        using var connection = Open(fixture.Path);
+        using var audit = connection.CreateCommand();
+        audit.CommandText = "SELECT actor_id || ':' || request_id FROM agent_update_audit";
+        Assert.Equal("admin:explicit-request", audit.ExecuteScalar());
     }
 
     [Theory]
     [InlineData("awaitingHeartbeat", "2.0.0")]
     [InlineData("rollingBack", "1.0.0")]
-    public void RepeatedOutcomeReportInvalidatesEarlierConfirmation(string status, string version)
+    public void LegacyHeartbeatEchoCannotConfirmAnOutcome(string status, string version)
     {
-        using var fixture = new LeaseFixture();
+        using var fixture = new LeaseFixture(agentReleaseRemediationEnabled: true);
         AddRelease(fixture.Path, "2.0.0");
-        fixture.SyncVersion("1.0.0");
-        var update = fixture.Db.ReserveAgentUpdate("pc", "2.0.0");
+        var update = fixture.Db.ReserveAgentUpdate("pc", "2.0.0", "admin", "legacy-proof");
         fixture.Db.StartAgentUpdate("pc", update.Ticket);
         fixture.Db.ReportAgentUpdateStatus("pc", update.Ticket, status);
-        var request = new SyncRequest("boot", "192.0.2.1", "001122334455", 3, "ready", []) { AgentVersion = "0.9.0" };
-        var firstChallenge = fixture.Db.Sync("pc", request).AgentUpdateChallenge;
-        Assert.NotNull(firstChallenge);
-        fixture.Db.ReportAgentUpdateStatus("pc", update.Ticket, status);
-
-        var response = fixture.Db.Sync("pc", request with { AgentVersion = version, AgentUpdateChallenge = firstChallenge });
-
+        var request = new SyncRequest("boot", "192.0.2.1", "001122334455", 3, "ready", []) { AgentVersion = version, AgentUpdateChallenge = "old-proof" };
+        var response = fixture.Db.Sync("pc", request);
+        Assert.Null(response.AgentUpdateChallenge);
         Assert.Equal(status, OperationStatus(fixture.Path, update.OperationId));
-        Assert.NotEqual(firstChallenge, response.AgentUpdateChallenge);
-        fixture.Db.Sync("pc", request with { AgentVersion = version, AgentUpdateChallenge = response.AgentUpdateChallenge });
-        Assert.Equal(status == "rollingBack" ? "rolledBack" : "completed", OperationStatus(fixture.Path, update.OperationId));
+        Assert.False(Assert.Single(fixture.Db.List()).CanRent);
     }
 
     [Fact]
     public void ADelayedHeartbeatWithoutPostOutcomeProofCannotResolveAnUpdate()
     {
-        using var fixture = new LeaseFixture();
+        using var fixture = new LeaseFixture(agentReleaseRemediationEnabled: true);
         AddRelease(fixture.Path, "2.0.0");
         fixture.SyncVersion("1.0.0");
-        var update = fixture.Db.ReserveAgentUpdate("pc", "2.0.0");
+        var update = fixture.Db.ReserveAgentUpdate("pc", "2.0.0", "admin", Guid.NewGuid().ToString("N"));
         fixture.Db.StartAgentUpdate("pc", update.Ticket);
         var delayed = new SyncRequest("boot", "192.0.2.1", "001122334455", 3, "ready", []) { AgentVersion = "1.0.0" };
         fixture.Db.ReportAgentUpdateStatus("pc", update.Ticket, "rollingBack");
@@ -87,54 +267,36 @@ public sealed class AgentUpdateTests
         Assert.False(Assert.Single(fixture.Db.List()).CanRent);
     }
 
-    [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public void OldConfirmationCannotResolveAfterControllerRestartOrRecoveryTicketRotation(bool restart)
+    [Fact]
+    public void RestartCannotReleaseAStartedChain()
     {
-        using var fixture = new LeaseFixture();
+        using var fixture = new LeaseFixture(agentReleaseRemediationEnabled: true);
         AddRelease(fixture.Path, "2.0.0");
-        fixture.SyncVersion("1.0.0");
-        var update = fixture.Db.ReserveAgentUpdate("pc", "2.0.0");
+        var update = fixture.Db.ReserveAgentUpdate("pc", "2.0.0", "admin", "restart");
         fixture.Db.StartAgentUpdate("pc", update.Ticket);
         fixture.Db.ReportAgentUpdateStatus("pc", update.Ticket, "rollingBack");
-        var response = fixture.SyncVersion("0.9.0");
-        var json = JsonSerializer.SerializeToElement(response, new JsonSerializerOptions(JsonSerializerDefaults.Web));
-        var staleChallenge = json.TryGetProperty("agentUpdateChallenge", out var challenge) ? challenge.GetString() : "no-challenge";
-        if (restart) fixture.Reopen();
-        else
-        {
-            var recovery = fixture.Db.RenewAgentUpdateTicket("pc", update.OperationId);
-            fixture.Db.StartAgentUpdate("pc", recovery.Ticket);
-            fixture.Db.ReportAgentUpdateStatus("pc", recovery.Ticket, "rollingBack");
-        }
-        var request = JsonSerializer.Deserialize<SyncRequest>(JsonSerializer.Serialize(new {
-            bootId = "boot", localIp = "192.0.2.1", macAddress = "001122334455", appliedConfigRevision = 3,
-            readiness = "ready", commandResults = Array.Empty<object>(), agentVersion = "1.0.0", agentUpdateChallenge = staleChallenge,
-        }), new JsonSerializerOptions(JsonSerializerDefaults.Web))!;
-
-        fixture.Db.Sync("pc", request);
-
+        fixture.Time.Now = fixture.Time.Now.AddHours(1);
+        fixture.Reopen();
+        fixture.SyncVersion("1.0.0");
         Assert.Equal("rollingBack", OperationStatus(fixture.Path, update.OperationId));
         Assert.False(Assert.Single(fixture.Db.List()).CanRent);
     }
 
     [Fact]
-    public void LatestUnversionedHeartbeatCannotRefreshAnOlderVersionForReservation()
+    public void UnversionedHeartbeatDoesNotPreventProvisionalReservation()
     {
-        using var fixture = new LeaseFixture();
+        using var fixture = new LeaseFixture(agentReleaseRemediationEnabled: true);
         AddRelease(fixture.Path, "2.0.0");
         fixture.SyncVersion("1.0.0");
         fixture.Sync();
-
-        Assert.Throws<InvalidOperationException>(() => fixture.Db.ReserveAgentUpdate("pc", "2.0.0"));
-        Assert.Null(Assert.Single(fixture.Db.List()).AgentUpdateOperationId);
+        var update = fixture.Db.ReserveAgentUpdate("pc", "2.0.0", "admin", "unversioned");
+        Assert.Equal(update.OperationId, Assert.Single(fixture.Db.List()).AgentUpdateOperationId);
     }
 
     [Fact]
     public async Task PendingMachineMayBeUpdatedButStillCannotRent()
     {
-        using var fixture = new LeaseFixture();
+        using var fixture = new LeaseFixture(agentReleaseRemediationEnabled: true);
         AddRelease(fixture.Path, "2.0.0");
         using (var connection = Open(fixture.Path))
         using (var command = connection.CreateCommand())
@@ -144,24 +306,26 @@ public sealed class AgentUpdateTests
         }
         fixture.SyncVersion("1.0.0");
 
-        var update = fixture.Db.ReserveAgentUpdate("pc", "2.0.0");
+        var update = fixture.Db.ReserveAgentUpdate("pc", "2.0.0", "admin", Guid.NewGuid().ToString("N"));
 
         var machine = Assert.Single(fixture.Db.List());
         Assert.Equal("pending", machine.ApprovalStatus);
         Assert.Equal("ready", machine.Readiness);
         Assert.Equal(update.OperationId, machine.AgentUpdateOperationId);
         Assert.False(machine.CanRent);
+        Assert.Throws<InvalidOperationException>(() => fixture.Db.RejectPending("pc", machine.PublicKeyFingerprint!));
+        Assert.Equal("pending", Assert.Single(fixture.Db.List()).ApprovalStatus);
         await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Create());
     }
 
     [Fact]
     public void MissingReleaseArtifactCannotAcquireAnUpdateLock()
     {
-        using var fixture = new LeaseFixture();
+        using var fixture = new LeaseFixture(agentReleaseRemediationEnabled: true);
         AddRelease(fixture.Path, "2.0.0", missing: true);
         fixture.SyncVersion("1.0.0");
 
-        Assert.Throws<InvalidOperationException>(() => fixture.Db.ReserveAgentUpdate("pc", "2.0.0"));
+        Assert.Throws<InvalidOperationException>(() => fixture.Db.ReserveAgentUpdate("pc", "2.0.0", "admin", Guid.NewGuid().ToString("N")));
         Assert.Null(Assert.Single(fixture.Db.List()).AgentUpdateOperationId);
         Assert.True(Assert.Single(fixture.Db.List()).CanRent);
     }
@@ -171,7 +335,7 @@ public sealed class AgentUpdateTests
     [InlineData(false, true)]
     public void LegacyPublishedArtifactWithoutChallengeCapabilityCannotAcquireAnUpdateLock(bool legacyManifest, bool legacyAssembly)
     {
-        using var fixture = new LeaseFixture();
+        using var fixture = new LeaseFixture(agentReleaseRemediationEnabled: true);
         var bytes = AgentUpdateTestPackage.Create("2.3.4", legacyAssembly, legacyManifest);
         var hash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes));
         AddRelease(fixture.Path, "2.3.4", hash, bytes.Length);
@@ -180,7 +344,7 @@ public sealed class AgentUpdateTests
         File.WriteAllBytes(path, bytes);
         fixture.SyncVersion("1.0.0");
 
-        Assert.Throws<InvalidOperationException>(() => fixture.Db.ReserveAgentUpdate("pc", "2.3.4"));
+        Assert.Throws<InvalidOperationException>(() => fixture.Db.ReserveAgentUpdate("pc", "2.3.4", "admin", Guid.NewGuid().ToString("N")));
         Assert.Null(Assert.Single(fixture.Db.List()).AgentUpdateOperationId);
         Assert.True(Assert.Single(fixture.Db.List()).CanRent);
     }
@@ -188,13 +352,13 @@ public sealed class AgentUpdateTests
     [Fact]
     public void CorruptPublishedArtifactCannotAcquireAnUpdateLock()
     {
-        using var fixture = new LeaseFixture();
+        using var fixture = new LeaseFixture(agentReleaseRemediationEnabled: true);
         AddRelease(fixture.Path, "2.0.0");
         var release = Assert.Single(fixture.Db.ListAgentReleases());
         File.WriteAllText(ControllerReleasePath(fixture.Path, release.PackageSha256), "corrupt");
         fixture.SyncVersion("1.0.0");
 
-        Assert.Throws<InvalidOperationException>(() => fixture.Db.ReserveAgentUpdate("pc", "2.0.0"));
+        Assert.Throws<InvalidOperationException>(() => fixture.Db.ReserveAgentUpdate("pc", "2.0.0", "admin", Guid.NewGuid().ToString("N")));
         Assert.Null(Assert.Single(fixture.Db.List()).AgentUpdateOperationId);
         Assert.True(Assert.Single(fixture.Db.List()).CanRent);
     }
@@ -202,7 +366,7 @@ public sealed class AgentUpdateTests
     [Fact]
     public async Task MachineListDistinguishesHeldLeaseFromUnreadyMachine()
     {
-        using var fixture = new LeaseFixture();
+        using var fixture = new LeaseFixture(agentReleaseRemediationEnabled: true);
         var revision = Assert.Single(fixture.Db.List()).ConfigRevision;
         fixture.Db.Sync("pc", new SyncRequest("boot", "192.0.2.1", "001122334455", revision, "notReady", []));
         await using var host = await StartHost(fixture.Db);
@@ -219,17 +383,17 @@ public sealed class AgentUpdateTests
     }
 
     [Fact]
-    public async Task ReservationRejectsTheInstalledVersionWithoutLockingMachine()
+    public async Task ReportedInstalledVersionIsOnlyAHintAndDoesNotBlockReservation()
     {
-        using var fixture = new LeaseFixture();
+        using var fixture = new LeaseFixture(agentReleaseRemediationEnabled: true);
         AddRelease(fixture.Path, "1.0.0");
         fixture.SyncVersion("1.0.0");
         await using var host = await StartHost(fixture.Db);
 
         using var response = await Reserve(host.Client, "pc", "1.0.0");
 
-        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
-        Assert.True(Assert.Single(fixture.Db.List()).CanRent);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.False(Assert.Single(fixture.Db.List()).CanRent);
     }
 
     [Theory]
@@ -238,10 +402,10 @@ public sealed class AgentUpdateTests
     [InlineData("rollingBack")]
     public async Task TargetHeartbeatCannotCompleteAnUnconfirmedTransaction(string status)
     {
-        using var fixture = new LeaseFixture();
+        using var fixture = new LeaseFixture(agentReleaseRemediationEnabled: true);
         AddRelease(fixture.Path, "2.0.0");
         fixture.SyncVersion("1.0.0");
-        var update = fixture.Db.ReserveAgentUpdate("pc", "2.0.0");
+        var update = fixture.Db.ReserveAgentUpdate("pc", "2.0.0", "admin", Guid.NewGuid().ToString("N"));
         fixture.Db.StartAgentUpdate("pc", update.Ticket);
         if (status != "installing") fixture.Db.ReportAgentUpdateStatus("pc", update.Ticket, status);
 
@@ -253,12 +417,12 @@ public sealed class AgentUpdateTests
     }
 
     [Fact]
-    public async Task HeartbeatMustFollowItsTransactionReportToReleaseTheLock()
+    public async Task TargetHeartbeatAfterReportCannotReleaseTheStartedChain()
     {
-        using var fixture = new LeaseFixture();
+        using var fixture = new LeaseFixture(agentReleaseRemediationEnabled: true);
         AddRelease(fixture.Path, "2.0.0");
         fixture.SyncVersion("1.0.0");
-        var update = fixture.Db.ReserveAgentUpdate("pc", "2.0.0");
+        var update = fixture.Db.ReserveAgentUpdate("pc", "2.0.0", "admin", Guid.NewGuid().ToString("N"));
         fixture.Db.StartAgentUpdate("pc", update.Ticket);
 
         fixture.SyncVersion("2.0.0");
@@ -267,17 +431,17 @@ public sealed class AgentUpdateTests
         Assert.False(Assert.Single(fixture.Db.List()).CanRent);
         await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Create("before-target-heartbeat"));
         fixture.SyncVersion("2.0.0");
-        Assert.Equal("completed", OperationStatus(fixture.Path, update.OperationId));
-        Assert.True(Assert.Single(fixture.Db.List()).CanRent);
+        Assert.Equal("awaitingHeartbeat", OperationStatus(fixture.Path, update.OperationId));
+        Assert.False(Assert.Single(fixture.Db.List()).CanRent);
     }
 
     [Fact]
-    public async Task RollbackHeartbeatMustFollowRollbackReportAndTargetCannotCompleteDuringRollback()
+    public async Task RollbackAndTargetHeartbeatsCannotReleaseTheStartedChain()
     {
-        using var fixture = new LeaseFixture();
+        using var fixture = new LeaseFixture(agentReleaseRemediationEnabled: true);
         AddRelease(fixture.Path, "2.0.0");
         fixture.SyncVersion("1.0.0");
-        var update = fixture.Db.ReserveAgentUpdate("pc", "2.0.0");
+        var update = fixture.Db.ReserveAgentUpdate("pc", "2.0.0", "admin", Guid.NewGuid().ToString("N"));
         fixture.Db.StartAgentUpdate("pc", update.Ticket);
 
         fixture.SyncVersion("1.0.0");
@@ -287,14 +451,14 @@ public sealed class AgentUpdateTests
         Assert.Equal("rollingBack", OperationStatus(fixture.Path, update.OperationId));
         await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Create("during-rollback"));
         fixture.SyncVersion("1.0.0");
-        Assert.Equal("rolledBack", OperationStatus(fixture.Path, update.OperationId));
-        Assert.True(Assert.Single(fixture.Db.List()).CanRent);
+        Assert.Equal("rollingBack", OperationStatus(fixture.Path, update.OperationId));
+        Assert.False(Assert.Single(fixture.Db.List()).CanRent);
     }
 
     [Fact]
     public async Task UpdateReservationRejectsMachineWithHeldLease()
     {
-        using var fixture = new LeaseFixture();
+        using var fixture = new LeaseFixture(agentReleaseRemediationEnabled: true);
         AddRelease(fixture.Path, "2.0.0");
         fixture.SyncVersion("1.0.0");
         await fixture.Create();
@@ -306,27 +470,27 @@ public sealed class AgentUpdateTests
     }
 
     [Fact]
-    public async Task UpdateReservationRequiresFreshHeartbeatWithKnownAgentVersion()
+    public async Task UpdateReservationDoesNotTrustHeartbeatVersionOrAge()
     {
-        using var unversioned = new LeaseFixture();
+        using var unversioned = new LeaseFixture(agentReleaseRemediationEnabled: true);
         AddRelease(unversioned.Path, "2.0.0");
         await using var unversionedHost = await StartHost(unversioned.Db);
         using var noVersion = await Reserve(unversionedHost.Client, "pc", "2.0.0");
-        Assert.Equal(HttpStatusCode.Conflict, noVersion.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, noVersion.StatusCode);
 
-        using var stale = new LeaseFixture();
+        using var stale = new LeaseFixture(agentReleaseRemediationEnabled: true);
         AddRelease(stale.Path, "2.0.0");
         stale.SyncVersion("1.0.0");
         stale.Time.Now = stale.Time.Now.AddSeconds(21);
         await using var staleHost = await StartHost(stale.Db);
         using var staleHeartbeat = await Reserve(staleHost.Client, "pc", "2.0.0");
-        Assert.Equal(HttpStatusCode.Conflict, staleHeartbeat.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, staleHeartbeat.StatusCode);
     }
 
     [Fact]
     public void ReleaseMetadataIsImmutableAndListedWithoutThePrivatePackagePath()
     {
-        using var fixture = new LeaseFixture();
+        using var fixture = new LeaseFixture(agentReleaseRemediationEnabled: true);
         var publishedAt = fixture.Time.Now;
         var release = new AgentReleasePublication("2.0.0", "stable", "release notes", new string('a', 64),
             Path.Combine(Path.GetTempPath(), "private-agent-package.zip"), 1024, "commit-id", false, true);
@@ -346,10 +510,10 @@ public sealed class AgentUpdateTests
     [Fact]
     public async Task LeaseCreationAndUpdateReservationSerializeOnTheDatabase()
     {
-        using var fixture = new LeaseFixture();
+        using var fixture = new LeaseFixture(agentReleaseRemediationEnabled: true);
         AddRelease(fixture.Path, "2.0.0");
         fixture.SyncVersion("1.0.0");
-        using var secondConnection = new ControllerDatabase(fixture.Path, clock: fixture.Time);
+        using var secondConnection = new ControllerDatabase(fixture.Path, clock: fixture.Time, agentReleaseRemediationEnabled: true);
         await using var host = await StartHost(secondConnection);
         var start = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -387,7 +551,7 @@ public sealed class AgentUpdateTests
     [Fact]
     public async Task MaintenanceLockMakesMachineUnavailableAndBlocksLeaseCreation()
     {
-        using var fixture = new LeaseFixture();
+        using var fixture = new LeaseFixture(agentReleaseRemediationEnabled: true);
         AddRelease(fixture.Path, "2.0.0");
         fixture.SyncVersion("1.0.0");
         await using var host = await StartHost(fixture.Db);
@@ -402,7 +566,7 @@ public sealed class AgentUpdateTests
     [Fact]
     public async Task ExpiredUnstartedTicketExpiresReservationAndAllowsANewOperation()
     {
-        using var fixture = new LeaseFixture();
+        using var fixture = new LeaseFixture(agentReleaseRemediationEnabled: true);
         AddRelease(fixture.Path, "2.0.0");
         AddRelease(fixture.Path, "3.0.0");
         fixture.SyncVersion("1.0.0");
@@ -427,7 +591,7 @@ public sealed class AgentUpdateTests
     [Fact]
     public async Task ExpiredUnstartedTicketReleasesTheLockForLeaseCreation()
     {
-        using var fixture = new LeaseFixture();
+        using var fixture = new LeaseFixture(agentReleaseRemediationEnabled: true);
         AddRelease(fixture.Path, "2.0.0");
         fixture.SyncVersion("1.0.0");
         await using var host = await StartHost(fixture.Db);
@@ -447,7 +611,7 @@ public sealed class AgentUpdateTests
     [Fact]
     public async Task StartedFailedOperationKeepsMaintenanceLockUntilRecovery()
     {
-        using var fixture = new LeaseFixture();
+        using var fixture = new LeaseFixture(agentReleaseRemediationEnabled: true);
         AddRelease(fixture.Path, "2.0.0");
         AddRelease(fixture.Path, "3.0.0");
         fixture.SyncVersion("1.0.0");
@@ -464,22 +628,19 @@ public sealed class AgentUpdateTests
     }
 
     [Fact]
-    public async Task RecoveryRenewsTicketForTheSameFailedOperation()
+    public async Task LegacyRecoveryTicketEndpointFailsClosedForFailedOperation()
     {
-        using var fixture = new LeaseFixture();
+        using var fixture = new LeaseFixture(agentReleaseRemediationEnabled: true);
         AddRelease(fixture.Path, "2.0.0");
         fixture.SyncVersion("1.0.0");
         await using var host = await StartHost(fixture.Db);
         using var initial = await Reserve(host.Client, "pc", "2.0.0");
         var operationId = await ReadString(initial, "operationId");
-        var firstTicket = await ReadString(initial, "ticket");
         SetStartedStatus(fixture.Path, operationId, "failed");
 
         using var recovery = await host.Client.PostAsync($"/internal/machines/pc/agent-updates/{operationId}/recovery-ticket", content: null);
 
-        Assert.Equal(HttpStatusCode.OK, recovery.StatusCode);
-        Assert.Equal(operationId, await ReadString(recovery, "operationId"));
-        Assert.NotEqual(firstTicket, await ReadString(recovery, "ticket"));
+        Assert.Equal(HttpStatusCode.Conflict, recovery.StatusCode);
         Assert.Equal("failed", OperationStatus(fixture.Path, operationId));
         Assert.False(Assert.Single(fixture.Db.List()).CanRent);
     }
@@ -487,8 +648,8 @@ public sealed class AgentUpdateTests
     [Fact]
     public async Task PublicUpdateEndpointsBindStartAndOnePackageDownloadToTheCurrentTicket()
     {
-        using var fixture = new LeaseFixture();
-        var package = AgentUpdateTestPackage.Create("2.0.0");
+        using var fixture = new LeaseFixture(agentReleaseRemediationEnabled: true);
+        var package = ProtocolTwoPackage("2.0.0");
         var packageHash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(package));
         AddRelease(fixture.Path, "2.0.0", packageHash, package.Length);
         var storeRoot = Path.Combine(Path.GetDirectoryName(fixture.Path)!, "agent-releases");
@@ -556,87 +717,26 @@ public sealed class AgentUpdateTests
     }
 
     [Fact]
-    public async Task ExpiredUpdateTicketCannotStartAndRecoveryResetsTheDownloadAllowanceForItsReplacement()
+    public async Task ExpiredTicketCannotStartAndStartedFailureCannotBeRenewed()
     {
-        using var fixture = new LeaseFixture();
-        var package = AgentUpdateTestPackage.Create("2.0.0");
-        var packageHash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(package));
-        AddRelease(fixture.Path, "2.0.0", packageHash, package.Length);
-        var storeRoot = Path.Combine(Path.GetDirectoryName(fixture.Path)!, "agent-releases");
-        var packageDirectory = Path.Combine(storeRoot, "sha256", packageHash[..2].ToLowerInvariant());
-        Directory.CreateDirectory(packageDirectory);
-        await File.WriteAllBytesAsync(Path.Combine(packageDirectory, packageHash.ToLowerInvariant() + ".zip"), package);
-        fixture.SyncVersion("1.0.0");
-        await using var host = await StartHost(fixture.Db, storeRoot);
-
-        using (var expiredReservation = await Reserve(host.Client, "pc", "2.0.0"))
-        {
-            var expiredOperationId = await ReadString(expiredReservation, "operationId");
-            var expiredTicket = await ReadString(expiredReservation, "ticket");
-            fixture.Time.Now = fixture.Time.Now.AddMinutes(10);
-            using var expiredStart = await host.Client.PostAsync($"/agent/machines/pc/agent-updates/{expiredOperationId}/start", CreateStartContent(expiredTicket, packageHash));
-            Assert.Equal(HttpStatusCode.Unauthorized, expiredStart.StatusCode);
-        }
-
-        fixture.SyncVersion("1.0.0");
-        using var reservation = await Reserve(host.Client, "pc", "2.0.0");
-        var operationId = await ReadString(reservation, "operationId");
-        var oldTicket = await ReadString(reservation, "ticket");
-        using var start = await host.Client.PostAsync($"/agent/machines/pc/agent-updates/{operationId}/start", CreateStartContent(oldTicket, packageHash));
-        Assert.Equal(HttpStatusCode.OK, start.StatusCode);
-        using var firstDownload = await host.Client.SendAsync(CreatePackageRequest("2.0.0", "2.0.0", packageHash, oldTicket, operationId));
-        Assert.Equal(HttpStatusCode.OK, firstDownload.StatusCode);
-        Assert.Equal("failed", fixture.Db.ReportAgentUpdateStatus("pc", oldTicket, "failed").Status);
-
-        using var recovery = await host.Client.PostAsync($"/internal/machines/pc/agent-updates/{operationId}/recovery-ticket", content: null);
-        Assert.Equal(HttpStatusCode.OK, recovery.StatusCode);
-        var newTicket = await ReadString(recovery, "ticket");
-        Assert.NotEqual(oldTicket, newTicket);
-        using var oldTicketDownload = await host.Client.SendAsync(CreatePackageRequest("2.0.0", "2.0.0", packageHash, oldTicket, operationId));
-        Assert.Equal(HttpStatusCode.Unauthorized, oldTicketDownload.StatusCode);
-        using var recoveredStart = await host.Client.PostAsync($"/agent/machines/pc/agent-updates/{operationId}/start", CreateStartContent(newTicket, packageHash));
-        Assert.Equal(HttpStatusCode.OK, recoveredStart.StatusCode);
-        using var recoveredDownload = await host.Client.SendAsync(CreatePackageRequest("2.0.0", "2.0.0", packageHash, newTicket, operationId));
-        Assert.Equal(HttpStatusCode.OK, recoveredDownload.StatusCode);
-    }
-
-    [Fact]
-    public async Task TargetHeartbeatCompletesOperationAndVerifiedRollbackHeartbeatResolvesRollback()
-    {
-        using var fixture = new LeaseFixture();
+        using var fixture = new LeaseFixture(agentReleaseRemediationEnabled: true);
         AddRelease(fixture.Path, "2.0.0");
-        AddRelease(fixture.Path, "3.0.0");
-        fixture.SyncVersion("1.0.0");
         await using var host = await StartHost(fixture.Db);
-
-        using (var targetReservation = await Reserve(host.Client, "pc", "2.0.0"))
-        {
-            var operationId = await ReadString(targetReservation, "operationId");
-            var ticket = await ReadString(targetReservation, "ticket");
-            Assert.Equal("installing", fixture.Db.StartAgentUpdate("pc", ticket).Status);
-            Assert.Throws<UnauthorizedAccessException>(() => fixture.Db.StartAgentUpdate("pc", ticket));
-            Assert.Equal("awaitingHeartbeat", fixture.Db.ReportAgentUpdateStatus("pc", ticket, "awaitingHeartbeat").Status);
-            Assert.False(Assert.Single(fixture.Db.List()).CanRent);
-            fixture.SyncVersion("2.0.0");
-            Assert.Equal("completed", OperationStatus(fixture.Path, operationId));
-            Assert.True(Assert.Single(fixture.Db.List()).CanRent);
-        }
-
-        using (var rollbackReservation = await Reserve(host.Client, "pc", "3.0.0"))
-        {
-            var operationId = await ReadString(rollbackReservation, "operationId");
-            var ticket = await ReadString(rollbackReservation, "ticket");
-            fixture.Db.StartAgentUpdate("pc", ticket);
-            Assert.Equal("rollingBack", fixture.Db.ReportAgentUpdateStatus("pc", ticket, "rollingBack").Status);
-            fixture.SyncVersion("0.9.0");
-            Assert.Equal("rollingBack", OperationStatus(fixture.Path, operationId));
-            Assert.False(Assert.Single(fixture.Db.List()).CanRent);
-
-            fixture.SyncVersion("2.0.0");
-
-            Assert.Equal("rolledBack", OperationStatus(fixture.Path, operationId));
-            Assert.True(Assert.Single(fixture.Db.List()).CanRent);
-        }
+        using var first = await Reserve(host.Client, "pc", "2.0.0");
+        var expiredId = await ReadString(first, "operationId");
+        var expiredTicket = await ReadString(first, "ticket");
+        var hash = Assert.Single(fixture.Db.ListAgentReleases()).PackageSha256;
+        fixture.Time.Now = fixture.Time.Now.AddMinutes(10);
+        using var expiredStart = await host.Client.PostAsync($"/agent/machines/pc/agent-updates/{expiredId}/start", CreateStartContent(expiredTicket, hash));
+        Assert.Equal(HttpStatusCode.Unauthorized, expiredStart.StatusCode);
+        using var second = await Reserve(host.Client, "pc", "2.0.0");
+        var operationId = await ReadString(second, "operationId");
+        var ticket = await ReadString(second, "ticket");
+        fixture.Db.StartAgentUpdate("pc", ticket);
+        fixture.Db.ReportAgentUpdateStatus("pc", ticket, "failed");
+        using var recovery = await host.Client.PostAsync($"/internal/machines/pc/agent-updates/{operationId}/recovery-ticket", null);
+        Assert.Equal(HttpStatusCode.Conflict, recovery.StatusCode);
+        Assert.False(Assert.Single(fixture.Db.List()).CanRent);
     }
 
     private static async Task<TestHost> StartHost(ControllerDatabase database, string? storeRoot = null)
@@ -674,7 +774,7 @@ public sealed class AgentUpdateTests
 
     private static void AddRelease(string path, string version, string? packageHash = null, long packageSize = 100, bool missing = false)
     {
-        var bytes = AgentUpdateTestPackage.Create(version);
+        var bytes = ProtocolTwoPackage(version);
         var hash = packageHash ?? Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes));
         var package = ControllerReleasePath(path, hash);
         if (packageHash is null && !missing)
@@ -691,6 +791,21 @@ public sealed class AgentUpdateTests
         command.Parameters.AddWithValue("$package", package);
         command.Parameters.AddWithValue("$size", packageSize);
         command.ExecuteNonQuery();
+    }
+
+    private static byte[] ProtocolTwoPackage(string version)
+    {
+        var oldVersion = System.Text.Encoding.UTF8.GetBytes(AgentPackageCorpus.Version);
+        var newVersion = System.Text.Encoding.UTF8.GetBytes(version);
+        if (oldVersion.Length != newVersion.Length) throw new ArgumentException("Fixture versions must have equal byte lengths");
+        var entries = AgentPackageCorpus.Entries().Select(item =>
+        {
+            var bytes = item.Bytes.ToArray();
+            for (var i = 0; i <= bytes.Length - oldVersion.Length; i++)
+                if (bytes.AsSpan(i, oldVersion.Length).SequenceEqual(oldVersion)) newVersion.CopyTo(bytes, i);
+            return (item.Name, bytes);
+        });
+        return AgentPackageCorpus.Build(entries);
     }
 
     private static string ControllerReleasePath(string database, string hash) => Path.Combine(Path.GetDirectoryName(database)!, "agent-releases", "sha256", hash[..2].ToLowerInvariant(), hash.ToLowerInvariant() + ".zip");

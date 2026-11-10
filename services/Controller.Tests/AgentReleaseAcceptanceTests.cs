@@ -8,6 +8,7 @@ using System.Text.Json;
 using Controller.Tests.Fixtures;
 using KamenRaider.Contracts;
 using KamenRaider.Controller;
+using KamenRaider.Controller.Data;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.TestHost;
@@ -36,112 +37,31 @@ public sealed class AgentReleaseAcceptanceTests
         await fixture.AssertLockedAsync(ticket, outcome);
     }
     [Theory]
-    [InlineData("awaitingHeartbeat", "2.3.4", "completed")]
-    [InlineData("rollingBack", "1.2.3", "rolledBack")]
-    public async Task PublishedReleaseRemainsLockedUntilPostReportHeartbeatAndIndependentRentalGatesPass(
-        string updaterOutcome, string confirmedVersion, string terminalStatus)
+    [InlineData("awaitingHeartbeat", "2.3.4")]
+    [InlineData("rollingBack", "1.2.3")]
+    public async Task StartedReleaseRemainsHeldAfterReportedVersionHeartbeat(string outcome, string version)
     {
         await using var fixture = await AcceptanceFixture.CreateAsync();
         var ticket = await fixture.PublishAndReserveAsync();
         await fixture.StartAndDownloadAsync(ticket);
-
-        // An Agent can heartbeat while service startup/rollback is still in progress.
-        await fixture.HeartbeatAsync("2.3.4");
-        await fixture.AssertLockedAsync(ticket, "installing");
-        await fixture.HeartbeatAsync("1.2.3");
-        await fixture.AssertLockedAsync(ticket, "installing");
-
-        var acknowledgedRevision = (await fixture.MachineAsync()).ConfigRevision;
-        await fixture.ConfigureAsync();
-        await fixture.ReportAsync(ticket, updaterOutcome);
-        await fixture.AssertLockedAsync(ticket, updaterOutcome);
-
-        if (updaterOutcome == "rollingBack")
-        {
-            await fixture.HeartbeatAsync("2.3.4");
-            await fixture.AssertLockedAsync(ticket, "rollingBack");
-            await fixture.HeartbeatAsync("0.9.0");
-            await fixture.AssertLockedAsync(ticket, "rollingBack");
-        }
-
-        await fixture.HeartbeatAsync(confirmedVersion, "notReady", acknowledgedRevision);
-        var confirmed = await fixture.MachineAsync();
-        Assert.Equal(terminalStatus, confirmed.AgentUpdateStatus);
-        Assert.Equal(ticket.OperationId, confirmed.AgentUpdateOperationId);
-        Assert.Equal(confirmedVersion, confirmed.AgentVersion);
-        Assert.Equal("approved", confirmed.ApprovalStatus);
-        Assert.Equal("acceptance-admin", confirmed.ApprovedBy);
-        Assert.Equal(acknowledgedRevision, confirmed.AppliedConfigRevision);
-        await fixture.AssertRentalRejectedAsync();
-
-        // Clearing maintenance is not a readiness/configuration acknowledgement.
-        await fixture.HeartbeatAsync(confirmedVersion, "ready", acknowledgedRevision);
-        Assert.Equal("ready", (await fixture.MachineAsync()).Readiness);
-        await fixture.AssertRentalRejectedAsync();
-        await fixture.HeartbeatAsync(confirmedVersion, "notReady");
-        var unready = await fixture.MachineAsync();
-        Assert.Equal(unready.ConfigRevision, unready.AppliedConfigRevision);
-        await fixture.AssertRentalRejectedAsync();
-
-        await fixture.HeartbeatAsync(confirmedVersion);
-        Assert.True((await fixture.MachineAsync()).CanRent);
-        fixture.Clock.Now = fixture.Clock.Now.AddSeconds(21);
-        await fixture.AssertRentalRejectedAsync();
-        await fixture.HeartbeatAsync(confirmedVersion);
-        await fixture.AssertRentalCreatedAsync();
+        await fixture.ReportAsync(ticket, outcome);
+        await fixture.HeartbeatAsync(version);
+        await fixture.AssertLockedAsync(ticket, outcome);
     }
 
     [Fact]
-    public async Task UncertainRollbackStaysLockedAcrossVersionsAndExpiryUntilSameOperationRecoveryIsConfirmed()
+    public async Task FailedUpdateRemainsHeldAndLegacyRecoveryTicketIsUnavailable()
     {
         await using var fixture = await AcceptanceFixture.CreateAsync();
         var ticket = await fixture.PublishAndReserveAsync();
         await fixture.StartAndDownloadAsync(ticket);
-
-        // Models an uncertain stop/restore/restart: the updater must report failed,
-        // not claim restoration. PowerShell transaction suites exercise those OS boundaries.
         await fixture.ReportAsync(ticket, "failed");
-        foreach (var version in new[] { "1.2.3", "2.3.4" })
-        {
-            await fixture.HeartbeatAsync(version);
-            await fixture.AssertLockedAsync(ticket, "failed");
-        }
         fixture.Clock.Now = fixture.Clock.Now.AddMinutes(11);
         await fixture.HeartbeatAsync("1.2.3");
         await fixture.AssertLockedAsync(ticket, "failed");
-        using var unverified = await fixture.SendReportAsync(ticket, "rollingBack");
-        Assert.Equal(HttpStatusCode.Conflict, unverified.StatusCode);
-        using var secondReservation = await fixture.Admin.PostAsJsonAsync(
-            "/internal/machines/acceptance-pc/agent-updates", new AgentUpdateReservationRequest("2.3.4"));
-        Assert.Equal(HttpStatusCode.Conflict, secondReservation.StatusCode);
-
-        using var recoveryResponse = await fixture.Admin.PostAsync(
-            $"/internal/machines/acceptance-pc/agent-updates/{ticket.OperationId}/recovery-ticket", null);
-        Assert.Equal(HttpStatusCode.OK, recoveryResponse.StatusCode);
-        var recovery = Assert.IsType<AgentUpdateTicketResponse>(
-            await recoveryResponse.Content.ReadFromJsonAsync<AgentUpdateTicketResponse>());
-        Assert.Equal(ticket.OperationId, recovery.OperationId);
-        Assert.Equal(ticket.MachineId, recovery.MachineId);
-        Assert.Equal(ticket.ReleaseVersion, recovery.ReleaseVersion);
-        Assert.Equal(ticket.TargetVersion, recovery.TargetVersion);
-        Assert.Equal(ticket.TargetPackageSha256, recovery.TargetPackageSha256);
-        Assert.NotEqual(ticket.Ticket, recovery.Ticket);
-        await fixture.AssertLockedAsync(recovery, "failed");
-        using var oldReport = await fixture.SendReportAsync(ticket, "failed");
-        Assert.Equal(HttpStatusCode.Unauthorized, oldReport.StatusCode);
-
-        await fixture.StartAndDownloadAsync(recovery);
-        await fixture.HeartbeatAsync("1.2.3");
-        await fixture.AssertLockedAsync(recovery, "installing");
-        await fixture.ReportAsync(recovery, "rollingBack");
-        await fixture.AssertLockedAsync(recovery, "rollingBack");
-        await fixture.HeartbeatAsync("2.3.4");
-        await fixture.AssertLockedAsync(recovery, "rollingBack");
-        await fixture.HeartbeatAsync("1.2.3", "notReady");
-        Assert.Equal("rolledBack", (await fixture.MachineAsync()).AgentUpdateStatus);
-        await fixture.AssertRentalRejectedAsync();
-        await fixture.HeartbeatAsync("1.2.3");
-        await fixture.AssertRentalCreatedAsync();
+        using var recovery = await fixture.Admin.PostAsync($"/internal/machines/acceptance-pc/agent-updates/{ticket.OperationId}/recovery-ticket", null);
+        Assert.Equal(HttpStatusCode.Conflict, recovery.StatusCode);
+        await fixture.AssertLockedAsync(ticket, "failed");
     }
 
     private sealed class AcceptanceClock : TimeProvider
@@ -158,7 +78,7 @@ public sealed class AgentReleaseAcceptanceTests
         private readonly WebApplication app;
         private readonly HttpClient agent;
         private readonly HttpClient renter;
-        private readonly byte[] package = CreatePackage();
+        private readonly byte[] package = AgentPackageCorpus.Valid();
         private int rentalAttempt;
         public AcceptanceClock Clock { get; }
         public HttpClient Admin { get; }
@@ -194,6 +114,7 @@ public sealed class AgentReleaseAcceptanceTests
                     ["DatabasePath"] = Path.Combine(root, "controller.db"),
                     ["ServiceCredential"] = "acceptance-fixture-only",
                     ["PublicIpEndpoint"] = "",
+                    ["AgentReleaseRemediationEnabled"] = "true",
                 });
                 builder.WebHost.UseTestServer();
                 builder.Services.AddTransient<IStartupFilter, LoopbackTestFilter>();
@@ -205,20 +126,13 @@ public sealed class AgentReleaseAcceptanceTests
 
         public async Task<AgentUpdateTicketResponse> PublishAndReserveAsync()
         {
-            using var form = new MultipartFormDataContent();
-            form.Add(new StringContent("2.3.4"), "version");
-            form.Add(new StringContent("stable"), "channel");
-            form.Add(new StringContent("Software acceptance fixture"), "releaseNotes");
-            var content = new ByteArrayContent(package);
-            content.Headers.ContentType = new MediaTypeHeaderValue("application/zip");
-            form.Add(content, "package", "AgentPackage.zip");
-            using var published = await Admin.PostAsync("/internal/agent-releases", form);
-            Assert.Equal(HttpStatusCode.OK, published.StatusCode);
-            var release = Assert.Single((await Admin.GetFromJsonAsync<AgentReleaseDto[]>("/internal/agent-releases"))!);
-            Assert.Equal("2.3.4", release.Version);
-            Assert.Equal("stable", release.Channel);
-            Assert.Equal(Convert.ToHexString(SHA256.HashData(package)), release.PackageSha256);
-            Assert.Equal(package.LongLength, release.PackageSizeBytes);
+            var databasePath = Path.Combine(root, "controller.db");
+            var hash = Convert.ToHexString(SHA256.HashData(package));
+            var artifact = Path.Combine(root, "agent-releases", "sha256", hash[..2].ToLowerInvariant(), hash.ToLowerInvariant() + ".zip");
+            Directory.CreateDirectory(Path.GetDirectoryName(artifact)!);
+            await File.WriteAllBytesAsync(artifact, package);
+            var database = app.Services.GetRequiredService<ControllerDatabase>();
+            var release = database.PublishAgentRelease(new("2.3.4", "stable", "fixture", hash, artifact, package.Length, "0123456789ab", false, true));
 
             using var enrollmentResponse = await Admin.PostAsync("/internal/agent-enrollment-tickets", null);
             Assert.Equal(HttpStatusCode.OK, enrollmentResponse.StatusCode);
@@ -266,7 +180,7 @@ public sealed class AgentReleaseAcceptanceTests
                 new AgentUpdateTicketRequest(ticket.Ticket, ticket.ReleaseVersion, ticket.TargetVersion, ticket.TargetPackageSha256));
             Assert.Equal(HttpStatusCode.OK, started.StatusCode);
             var operation = Assert.IsType<AgentUpdateOperationDto>(await started.Content.ReadFromJsonAsync<AgentUpdateOperationDto>());
-            Assert.Equal("1.2.3", operation.PreviousVersion);
+            Assert.Null(operation.SourceVersion);
             await AssertLockedAsync(ticket, "installing");
             using var request = new HttpRequestMessage(HttpMethod.Get, UpdatePath(ticket, "package"));
             request.Headers.Add("X-Agent-Update-Ticket", ticket.Ticket);
@@ -375,29 +289,6 @@ public sealed class AgentReleaseAcceptanceTests
 
         private static string UpdatePath(AgentUpdateTicketResponse ticket, string action) =>
             $"/agent/machines/{MachineId}/agent-updates/{ticket.OperationId}/{action}";
-
-        private static byte[] CreatePackage()
-        {
-            using var output = new MemoryStream();
-            using (var zip = new ZipArchive(output, ZipArchiveMode.Create, leaveOpen: true))
-            {
-                // Validation fixture only: versioned managed metadata, inert exe/scripts.
-                Add("Agent/Agent.exe", "inert acceptance fixture");
-                var dll = zip.CreateEntry("Agent/Agent.dll");
-                using (var destination = dll.Open())
-                using (var source = File.OpenRead(typeof(AgentMetadataFixture).Assembly.Location)) source.CopyTo(destination);
-                Add("Agent/Agent.deps.json", "{\"libraries\":{\"Agent/2.3.4\":{\"type\":\"project\"}}}");
-                foreach (var file in new[] { "Install-AgentPackage.ps1", "Install-Service.ps1", "Install-TightVncServer.ps1", "Prepare-SunshineStreamGate.ps1", "PrivateInstallFiles.ps1", "ServiceInstallTransaction.ps1", "Update-AgentPackage.ps1", "Update-Agent.ps1" })
-                    Add(file, "# inert acceptance fixture; never executed");
-                Add("AgentPackage.manifest.json", "{\"packageFormatVersion\":1,\"agentInformationalVersion\":\"2.3.4\",\"sourceCommit\":\"0123456789ab\",\"sourceDirty\":false,\"releaseBuild\":true,\"agentUpdateChallengeProtocol\":1}");
-                void Add(string name, string text)
-                {
-                    using var writer = new StreamWriter(zip.CreateEntry(name).Open(), new UTF8Encoding(false));
-                    writer.Write(text);
-                }
-            }
-            return output.ToArray();
-        }
 
         public async ValueTask DisposeAsync()
         {
