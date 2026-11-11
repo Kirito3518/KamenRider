@@ -313,7 +313,7 @@ public static class ControllerDatabaseMaintenance
                 if (userVersion < 14)
                 {
                     ValidateIndex(connection, "agent_update_operations", "agent_update_one_active_per_machine", ["machine_id"], "status NOT IN ('completed','rolledBack','expired')", required: true);
-                    ValidateLegacyMaintenanceState(connection);
+                    ValidateLegacyMaintenanceState(connection, userVersion);
                 }
             }
             if (userVersion >= 13 && userVersion < 14)
@@ -392,12 +392,14 @@ public static class ControllerDatabaseMaintenance
         ValidateMaintenanceState(connection, transaction);
     }
 
-    private static void ValidateLegacyMaintenanceState(SqliteConnection connection)
+    private static void ValidateLegacyMaintenanceState(SqliteConnection connection, long version)
     {
         using var conflict = connection.CreateCommand();
-        conflict.CommandText = "SELECT EXISTS(SELECT 1 FROM agent_update_operations o JOIN leases l ON l.machine_id=o.machine_id WHERE l.allocation_held=1 AND o.status NOT IN ('completed','rolledBack','expired'))";
+        // Ticket start and download markers also record work, even if a legacy start timestamp is missing.
+        var downloadEvidence = version >= 13 ? " OR o.ticket_package_downloaded_at_unix_ms IS NOT NULL" : "";
+        conflict.CommandText = "SELECT EXISTS(SELECT 1 FROM agent_update_operations o JOIN leases l ON l.machine_id=o.machine_id WHERE l.allocation_held=1 AND o.status NOT IN ('completed','rolledBack','expired')) OR EXISTS(SELECT 1 FROM agent_update_operations o WHERE o.status='expired' AND (o.started_at_unix_ms IS NOT NULL OR o.ticket_started_at_unix_ms IS NOT NULL" + downloadEvidence + "))";
         if (Convert.ToInt64(conflict.ExecuteScalar(), CultureInfo.InvariantCulture) != 0)
-            throw new InvalidDataException("Controller database contains a held lease and a nonterminal Agent update for the same machine.");
+            throw new InvalidDataException("Controller database contains an inconsistent legacy Agent update or a conflicting held lease.");
     }
 
     internal static void ValidateMaintenanceState(SqliteConnection connection, SqliteTransaction? transaction = null)
@@ -410,7 +412,7 @@ public static class ControllerDatabaseMaintenance
                 LEFT JOIN agent_update_operations h ON h.operation_id=c.current_head_operation_id AND h.chain_id=c.chain_id AND h.machine_id=c.machine_id
                 WHERE h.operation_id IS NULL OR h.status='superseded' OR h.ticket_generation < 0 OR h.ticket_generation > c.generation
                    OR (c.held=0 AND h.status NOT IN ('completed','rolledBack','expired'))
-                   OR (h.status='expired' AND EXISTS(SELECT 1 FROM agent_update_operations started WHERE started.chain_id=c.chain_id AND started.started_at_unix_ms IS NOT NULL))
+                   OR (h.status='expired' AND EXISTS(SELECT 1 FROM agent_update_operations started WHERE started.chain_id=c.chain_id AND (started.started_at_unix_ms IS NOT NULL OR started.ticket_started_at_unix_ms IS NOT NULL OR started.ticket_package_downloaded_at_unix_ms IS NOT NULL)))
                    OR (c.held=1 AND EXISTS(SELECT 1 FROM leases l WHERE l.machine_id=c.machine_id AND l.allocation_held=1))
                    OR EXISTS(SELECT 1 FROM agent_update_operations o WHERE o.chain_id=c.chain_id AND o.operation_id<>c.current_head_operation_id AND o.status NOT IN ('completed','rolledBack','expired','superseded'))
             ) OR EXISTS(
