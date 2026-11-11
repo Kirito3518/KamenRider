@@ -246,14 +246,14 @@ public sealed class MaintenanceSourceBindingOperation(
         if (snapshot.Operations.Count != 1 || snapshot.HeadOperationId != snapshot.Operations[0].Binding.OperationId)
             throw new InvalidOperationException("The source binding journal head is invalid.");
         var operation = snapshot.Operations[0];
-        if (operation.Phase is not ("backupPublished" or "sourceBound"))
-            throw new InvalidOperationException("Source binding requires the published backup journal phase.");
+        if (operation.Phase is not ("servicesQuiesced" or "backupPublished" or "sourceBound"))
+            throw new InvalidOperationException("Source binding requires the quiesced-service journal phase or a later recoverable phase.");
         if (!string.Equals(parameters.HelperRuntime, operation.Binding.TargetRuntime, StringComparison.Ordinal))
             throw new InvalidDataException("The native helper architecture does not match the immutable target runtime.");
 
         MaintenanceBackupResult backup;
         MaintenanceSourceBindingIntent? intent = operation.SourceBindingIntent;
-        if (operation.Phase == "backupPublished")
+        if (operation.Phase is "servicesQuiesced" or "backupPublished")
         {
             var backupResult = backupOperation.Publish(operation.Binding.OperationId);
             backup = backupResult.Backup;

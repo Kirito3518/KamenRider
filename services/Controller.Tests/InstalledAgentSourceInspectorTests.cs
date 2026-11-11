@@ -283,7 +283,6 @@ public sealed class InstalledAgentSourceInspectorTests : IDisposable
         var publisher = new MaintenanceBackupPublisher(sourceRoot, backupRoot, security, authorization);
         var backupOperation = new MaintenanceBackupOperation(sourceRoot,
             new InstalledAgentSourceInspector(sourceRoot, security), publisher, journal);
-        var backup = backupOperation.Publish("operation-1").Backup;
         var client = new SourceBindingClient(TimeProvider.System);
         var operation = new MaintenanceSourceBindingOperation(backupOperation, journal, client, identity,
             new BootIdentity("native-boot-1"));
@@ -293,6 +292,7 @@ public sealed class InstalledAgentSourceInspectorTests : IDisposable
 
         await Assert.ThrowsAsync<IOException>(() => operation.BindAsync(parameters, CancellationToken.None));
 
+        var backup = publisher.VerifyPublished("operation-1");
         var held = journal.Read()!.Operations.Single();
         Assert.Equal("backupPublished", held.Phase);
         Assert.NotNull(held.SourceBindingIntent);
