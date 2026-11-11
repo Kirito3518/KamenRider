@@ -5,6 +5,20 @@ if ($bootstrapText -match '\$IsWindows') { throw 'Bootstrap must not depend on t
 if (-not $bootstrapText.Contains('Invoke-WebRequest -UseBasicParsing')) { throw 'Bootstrap downloads must support Windows PowerShell 5.1.' }
 if ($bootstrapText -match 'GetTempPath|\$env:TEMP') { throw 'Privileged bootstrap content must not be staged under a shared temporary directory.' }
 if (-not $bootstrapText.Contains('[ScriptBlock]::Create([IO.File]::ReadAllText($installer))') -or -not $bootstrapText.Contains('-PackageRoot $expanded') -or -not $bootstrapText.Contains('-EnrollmentTicket $EnrollmentTicket')) { throw 'Bootstrap must invoke the hash-verified package installer in memory with its package root and enrollment ticket.' }
+if (-not $bootstrapText.Contains('$verifiedHash = Assert-AgentPackageHash -Path $archive -ExpectedSha256 $PackageSha256') -or
+    -not $bootstrapText.Contains('New-BootstrapPrivateDirectory $stage $serviceSid -MachineProtected')) {
+    throw 'Bootstrap must retain the verified archive digest and create its download/proof/extraction stage with a machine-protected ACL.'
+}
+$trustedSidStart = $bootstrapText.IndexOf('function Get-BootstrapTrustedSids {', [StringComparison]::Ordinal)
+$trustedSidEnd = $bootstrapText.IndexOf('function Get-BootstrapServiceSid {', $trustedSidStart, [StringComparison]::Ordinal)
+if ($trustedSidStart -lt 0 -or $trustedSidEnd -le $trustedSidStart -or
+    $bootstrapText.Substring($trustedSidStart, $trustedSidEnd - $trustedSidStart).Contains('[Security.Principal.WindowsIdentity]::GetCurrent().User')) {
+    throw 'The interactive installer SID must not make a writable install ancestor trusted for machine-protected bootstrap staging.'
+}
+if (-not $bootstrapText.Contains('if (Test-Path -LiteralPath $productDirectory) {') -or
+    -not $bootstrapText.Contains('Assert-BootstrapTrustedPath $productDirectory')) {
+    throw 'Runtime bootstrap must reject an existing untrusted product parent instead of repairing or using it.'
+}
 
 $root = Join-Path ([IO.Path]::GetTempPath()) ('kr-bootstrap-plan-' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $root | Out-Null
@@ -17,6 +31,30 @@ try {
     $returnUrl = 'http://localhost:3000/admin/machines'
     $ticket = 'A' * 43
     $thumbprint = 'A' * 40
+    $aclDefinitionStart = $bootstrapText.IndexOf('function New-BootstrapDirectorySecurity {', [StringComparison]::Ordinal)
+    $aclDefinitionEnd = $bootstrapText.IndexOf('function New-BootstrapPrivateDirectory {', $aclDefinitionStart, [StringComparison]::Ordinal)
+    if ($aclDefinitionStart -lt 0 -or $aclDefinitionEnd -le $aclDefinitionStart) { throw 'Bootstrap directory ACL builder could not be isolated for descriptor testing.' }
+    Invoke-Expression $bootstrapText.Substring($aclDefinitionStart, $aclDefinitionEnd - $aclDefinitionStart)
+    $interactiveSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+    $machineStageAcl = New-BootstrapDirectorySecurity -ServiceSid $interactiveSid -MachineProtected
+    $machineStageRules = @($machineStageAcl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
+    $stageRuleBySid = @{}
+    foreach ($rule in $machineStageRules) {
+        if ($rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow -or $rule.IsInherited -or
+            $rule.InheritanceFlags -ne [Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit' -or
+            $rule.PropagationFlags -ne [Security.AccessControl.PropagationFlags]::None) {
+            throw 'Machine bootstrap stage ACL must contain only explicit inheritable allow rules.'
+        }
+        $stageRuleBySid[$rule.IdentityReference.Value] = $rule.FileSystemRights
+    }
+    if (-not $machineStageAcl.AreAccessRulesProtected -or
+        $machineStageAcl.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne 'S-1-5-32-544' -or
+        $machineStageRules.Count -ne 3 -or
+        $stageRuleBySid['S-1-5-18'] -ne [Security.AccessControl.FileSystemRights]::FullControl -or
+        $stageRuleBySid['S-1-5-32-544'] -ne [Security.AccessControl.FileSystemRights]::FullControl -or
+        $stageRuleBySid[$interactiveSid.Value] -ne ([Security.AccessControl.FileSystemRights]::ReadAndExecute -bor [Security.AccessControl.FileSystemRights]::Synchronize)) {
+        throw 'Machine bootstrap stage ACL must exclude interactive-user write access while granting service read/execute only.'
+    }
     $plan = & $bootstrap -ControllerUrl $controllerUrl -PackageUrl $packageUrl -PackageSha256 ('B' * 64) `
         -TrustedRootThumbprint $thumbprint -EnrollmentTicket $ticket -InstallReturnUrl $returnUrl `
         -VncAllowedSourceAddress '192.168.1.10' -Plan

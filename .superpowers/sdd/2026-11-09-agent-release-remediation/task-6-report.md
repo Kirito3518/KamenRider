@@ -33,6 +33,28 @@ Work resumed in the existing main checkout at baseline `e7cabcf`. Partial implem
 
 The firewall policy command, Windows Service Control Manager adapter, helper journal filesystem store, and ACL behavior were not exercised against the live host. The tests use fakes for all firewall and service operations.
 
+## Fresh bootstrap review follow-up
+
+An early review found that runtime bootstrap discarded the return from `Assert-AgentPackageHash`, leaving `verifiedHash` unset in the provenance document, and created the download/extraction/proof stage with an explicit FullControl ACE for the interactive installer SID. Fixed both: bootstrap now retains the exact verified digest and uses a protected machine stage ACL (SYSTEM/Administrators FullControl; Agent service read/execute). The interactive SID is no longer admitted as a trusted owner for the product/ancestor path check. Plan mode still reports the intended Program Files parent without certifying a pre-existing legacy directory; runtime mode rejects an existing untrusted product parent without ACL repair.
+
+`Test-BootstrapAgentPlan.ps1` now executes the actual ACL-descriptor builder from the bootstrap source and asserts the protected owner, exact three-principal ACE set, and read/execute-only permissions when the interactive SID is used as the service SID. It also checks that runtime bootstrap validates any existing product parent. The targeted bootstrap test failed before the fixes and now passes in both shells below.
+
+`powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File scripts/agent/Test-BootstrapAgentPlan.ps1`
+
+Passed under Windows PowerShell 5.1. The test uses a temporary archive and inspects the actual machine-protected ACL descriptor; it did not create a product directory or change services.
+
+`pwsh.exe -NoLogo -NoProfile -File scripts/agent/Test-BootstrapAgentPlan.ps1`
+
+Passed under PowerShell 7.6.9 with the same protected-stage descriptor assertions.
+
+`powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File scripts/agent/Test-AgentPackageInstallPlan.ps1`
+
+Passed under Windows PowerShell 5.1; no services changed.
+
+`pwsh.exe -NoLogo -NoProfile -File scripts/agent/Test-AgentPackageInstallPlan.ps1`
+
+Passed under PowerShell 7.6.9; no services changed.
+
 ## Exact verification results
 
 `dotnet test services/Controller.Tests/Controller.Tests.csproj --configuration Release --filter "FullyQualifiedName~MaintenanceFirewallPolicyTests|FullyQualifiedName~MaintenanceJournalTests|FullyQualifiedName~MaintenanceServiceQuiescerTests|FullyQualifiedName~AgentMaintenanceContractTests" --no-restore`

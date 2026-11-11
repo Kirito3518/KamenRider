@@ -34,8 +34,7 @@ function Get-BootstrapTrustedSids {
         [Security.Principal.SecurityIdentifier]::new('S-1-5-18'),
         [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'),
         [Security.Principal.SecurityIdentifier]::new('S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'),
-        [Security.Principal.SecurityIdentifier]::new('S-1-3-0'),
-        [Security.Principal.WindowsIdentity]::GetCurrent().User
+        [Security.Principal.SecurityIdentifier]::new('S-1-3-0')
     )
 }
 
@@ -104,6 +103,24 @@ function Assert-BootstrapTrustedPath {
     }
 }
 
+function New-BootstrapDirectorySecurity {
+    param([Parameter(Mandatory)][Security.Principal.SecurityIdentifier]$ServiceSid,[switch]$MachineProtected)
+    $acl = [Security.AccessControl.DirectorySecurity]::new()
+    $acl.SetAccessRuleProtection($true, $false)
+    $systemSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-18')
+    $adminSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
+    $installerSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+    $acl.SetOwner($(if ($MachineProtected) { $adminSid } else { $installerSid }))
+    $ownerSids = if ($MachineProtected) { @($systemSid, $adminSid) } else { @($systemSid, $adminSid, $installerSid) }
+    foreach ($sid in $ownerSids) {
+        $rule = [Security.AccessControl.FileSystemAccessRule]::new($sid, [Security.AccessControl.FileSystemRights]::FullControl, [Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit', [Security.AccessControl.PropagationFlags]::None, [Security.AccessControl.AccessControlType]::Allow)
+        $acl.AddAccessRule($rule)
+    }
+    $serviceRule = [Security.AccessControl.FileSystemAccessRule]::new($ServiceSid, [Security.AccessControl.FileSystemRights]::ReadAndExecute, [Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit', [Security.AccessControl.PropagationFlags]::None, [Security.AccessControl.AccessControlType]::Allow)
+    $acl.AddAccessRule($serviceRule)
+    return $acl
+}
+
 function New-BootstrapPrivateDirectory {
     param([Parameter(Mandatory)][string]$Path,[Parameter(Mandatory)][Security.Principal.SecurityIdentifier]$ServiceSid,[switch]$MachineProtected)
     $parent = [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($Path))
@@ -126,19 +143,7 @@ namespace KamenRaider.Install {
 }
 '@
     }
-    $acl = [Security.AccessControl.DirectorySecurity]::new()
-    $acl.SetAccessRuleProtection($true, $false)
-    $systemSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-18')
-    $adminSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
-    $installerSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
-    $acl.SetOwner($(if ($MachineProtected) { $adminSid } else { $installerSid }))
-    $ownerSids = if ($MachineProtected) { @($systemSid, $adminSid) } else { @($systemSid, $adminSid, $installerSid) }
-    foreach ($sid in $ownerSids) {
-        $rule = [Security.AccessControl.FileSystemAccessRule]::new($sid, [Security.AccessControl.FileSystemRights]::FullControl, [Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit', [Security.AccessControl.PropagationFlags]::None, [Security.AccessControl.AccessControlType]::Allow)
-        $acl.AddAccessRule($rule)
-    }
-    $serviceRule = [Security.AccessControl.FileSystemAccessRule]::new($ServiceSid, [Security.AccessControl.FileSystemRights]::ReadAndExecute, [Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit', [Security.AccessControl.PropagationFlags]::None, [Security.AccessControl.AccessControlType]::Allow)
-    $acl.AddAccessRule($serviceRule)
+    $acl = New-BootstrapDirectorySecurity -ServiceSid $ServiceSid -MachineProtected:$MachineProtected
     [KamenRaider.Install.BootstrapDirectories]::CreateDirectoryWithSecurity([IO.Path]::GetFullPath($Path), $acl.GetSecurityDescriptorBinaryForm())
     Assert-BootstrapTrustedPath $Path
 }
@@ -178,7 +183,6 @@ $normalizedVncSourceAddress = ConvertTo-AllowedVncSourceAddress $VncAllowedSourc
 if ($Plan) {
     Assert-BootstrapTrustedPath $env:ProgramFiles
     $plannedStageParent = Join-Path $env:ProgramFiles 'KamenRaider'
-    if (Test-Path -LiteralPath $plannedStageParent) { Assert-BootstrapTrustedPath $plannedStageParent }
     $verifiedHash = $null
     if ($PackageArchivePath) {
         if (-not [IO.Path]::IsPathRooted($PackageArchivePath)) { throw 'PackageArchivePath must be absolute.' }
@@ -213,11 +217,11 @@ if (Test-Path -LiteralPath $productDirectory) {
 } else {
     New-BootstrapPrivateDirectory $productDirectory $serviceSid -MachineProtected
 }
-New-BootstrapPrivateDirectory $stage $serviceSid
+New-BootstrapPrivateDirectory $stage $serviceSid -MachineProtected
 try {
     $archive = Join-Path $stage 'agent.zip'
     Invoke-WebRequest -UseBasicParsing -Uri $package.AbsoluteUri -OutFile $archive -ErrorAction Stop
-    $null = Assert-AgentPackageHash -Path $archive -ExpectedSha256 $PackageSha256
+    $verifiedHash = Assert-AgentPackageHash -Path $archive -ExpectedSha256 $PackageSha256
 
     $expanded = Join-Path $stage 'package'
     Expand-Archive -LiteralPath $archive -DestinationPath $expanded -ErrorAction Stop

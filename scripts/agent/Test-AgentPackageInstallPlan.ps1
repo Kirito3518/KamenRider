@@ -42,13 +42,14 @@ try {
         throw 'Failure after fresh marker publication must attempt held state and preserve the protected install if held publication fails.'
     }
     $bootstrapSource = [IO.File]::ReadAllText((Join-Path $PSScriptRoot '..\..\public\agent\Bootstrap-Agent.ps1'))
-    $hashBoundary = $bootstrapSource.IndexOf('$null = Assert-AgentPackageHash -Path $archive', [StringComparison]::Ordinal)
+    $hashBoundary = $bootstrapSource.IndexOf('$verifiedHash = Assert-AgentPackageHash -Path $archive', [StringComparison]::Ordinal)
     $expandBoundary = $bootstrapSource.IndexOf('Expand-Archive -LiteralPath $archive', [StringComparison]::Ordinal)
     $proofBoundary = $bootstrapSource.IndexOf("'bootstrap-provenance.json'", [StringComparison]::Ordinal)
     $invokeBoundary = $bootstrapSource.IndexOf('-BootstrapProvenancePath $provenancePath', [StringComparison]::Ordinal)
     if ($hashBoundary -lt 0 -or $expandBoundary -lt $hashBoundary -or $proofBoundary -lt $expandBoundary -or $invokeBoundary -lt $proofBoundary -or
         -not $bootstrapSource.Contains('proofId = $proofId') -or -not $bootstrapSource.Contains('packageSha256 = $verifiedHash') -or
-        -not $bootstrapSource.Contains('New-BootstrapPrivateDirectory $productDirectory $serviceSid -MachineProtected')) {
+        -not $bootstrapSource.Contains('New-BootstrapPrivateDirectory $productDirectory $serviceSid -MachineProtected') -or
+        -not $bootstrapSource.Contains('New-BootstrapPrivateDirectory $stage $serviceSid -MachineProtected')) {
         throw 'Bootstrap provenance must be created only after archive hash verification and extraction, then passed to the installer.'
     }
     $proofObjectStart = $bootstrapSource.IndexOf('$provenance = [ordered]@{', [StringComparison]::Ordinal)
