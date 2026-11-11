@@ -8,6 +8,8 @@ const port = 3002;
 const scenarios = [
   { name: "configured", expected: "available", vncSource: "192.168.1.10", full: true, overrides: { AGENT_VNC_ALLOWED_SOURCE_IP: "192.168.1.10" } },
   { name: "loopback-http-update-rejected", expected: "unavailable", updateExpected: "unavailable", updateOnly: true, overrides: { AGENT_CONTROLLER_URL: "http://127.0.0.1:7443" } },
+  { name: "retained-release-unavailable", expected: "unavailable", updateExpected: "retained-release-unavailable", updateOnly: true },
+  { name: "generic-agent-update-conflict", expected: "unavailable", updateExpected: "generic-conflict", updateOnly: true },
   { name: "configured-vnc-source", expected: "available", vncSource: "192.168.1.10", overrides: { AGENT_VNC_ALLOWED_SOURCE_IP: "192.168.1.10" } },
   { name: "loopback-controller-without-vnc-source", expected: "unavailable", overrides: { AGENT_VNC_ALLOWED_SOURCE_IP: "" } },
   { name: "loopback-vnc-source-rejected", expected: "unavailable", overrides: { AGENT_VNC_ALLOWED_SOURCE_IP: "127.0.0.1" } },

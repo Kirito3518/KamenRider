@@ -291,4 +291,18 @@ describe("Per-machine update", () => {
     expect(await screen.findByText(/สถานะเครื่องหรือ lease อาจเปลี่ยน/)).toBeDefined();
     expect(screen.queryByLabelText("คำสั่งอัปเดต Agent สำหรับ pc-1")).toBeNull();
   });
+
+  it("shows a safe retained-package rejection reason in the Admin update status", async () => {
+    const reason = "Stored package does not match its published SHA-256.";
+    fetchSpy.mockImplementation(async (input: RequestInfo | URL) => String(input) === "/api/admin/agent-releases"
+      ? json([release("2.0.0", "stable")])
+      : json({ available: false, reason }));
+    render(<AgentUpdateControl machine={machine} />);
+    fireEvent.click(screen.getByRole("button", { name: "Update Agent" }));
+    await screen.findByRole("option", { name: "2.0.0 · stable" });
+    fireEvent.change(screen.getByLabelText("เลือก release สำหรับ pc-1"), { target: { value: "2.0.0" } });
+    fireEvent.click(screen.getByRole("button", { name: "สร้างคำสั่งอัปเดต" }));
+    expect(await screen.findByText(reason)).toBeDefined();
+    expect(screen.queryByLabelText("คำสั่งอัปเดต Agent สำหรับ pc-1")).toBeNull();
+  });
 });

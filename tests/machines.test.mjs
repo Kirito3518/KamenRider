@@ -473,6 +473,18 @@ test("agent update release and command routes enforce Admin origin and forward e
       return;
     }
     if (req.method === "POST" && req.url === "/internal/machines/pc/agent-updates") {
+      if (process.env.TEST_AGENT_UPDATE_EXPECTED === "generic-conflict") {
+        res.writeHead(409).end("{}");
+        return;
+      }
+      if (process.env.TEST_AGENT_UPDATE_EXPECTED === "retained-release-unavailable") {
+        res.writeHead(409).end(JSON.stringify({
+          code: "release_unavailable",
+          available: false,
+          reason: "Stored package does not match its published SHA-256.",
+        }));
+        return;
+      }
       res.end(JSON.stringify({
         operationId: "operation-1",
         machineId: "pc",
@@ -559,6 +571,12 @@ test("agent update release and command routes enforce Admin origin and forward e
 
     const beforeCommand = requests.length;
     const command = await call("/admin/machines/pc/agent-update-command", { releaseVersion: "2.0.0" }, adminCookie);
+    if (process.env.TEST_AGENT_UPDATE_EXPECTED === "generic-conflict") {
+      assert.equal(command.status, 409);
+      assert.equal((await command.json()).error, "Operation rejected");
+      assert.equal(requests.length, beforeCommand + 1, "generic conflicts retain the existing HTTP conflict behavior");
+      return;
+    }
     assert.equal(command.status, 200);
     assert.equal(command.headers.get("cache-control"), "no-store");
     const commandResult = await command.json();
@@ -569,6 +587,17 @@ test("agent update release and command routes enforce Admin origin and forward e
       const recovery = await call("/admin/machines/pc/agent-update-command", { operationId: "operation-1" }, adminCookie);
       assert.equal((await recovery.json()).available, false);
       assert.equal(requests.length, beforeCommand, "invalid URL must not rotate a recovery ticket");
+      return;
+    }
+    if (process.env.TEST_AGENT_UPDATE_EXPECTED === "retained-release-unavailable") {
+      assert.equal(commandResult.available, false);
+      assert.equal(commandResult.reason, "Stored package does not match its published SHA-256.");
+      assert.equal(requests.length, beforeCommand + 1, "only the authenticated reservation request is forwarded");
+      const unavailableRequest = requests.at(-1);
+      assert.equal(unavailableRequest.headers["x-authenticated-actor-id"], adminId);
+      assert.equal(unavailableRequest.headers["x-authenticated-actor-role"], "admin");
+      assert.equal(unavailableRequest.headers["x-service-credential"], "test-only");
+      assert.equal(commandResult.command, undefined);
       return;
     }
     assert.match(commandResult.command, /-OperationId 'operation-1'/);

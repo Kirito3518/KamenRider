@@ -215,7 +215,8 @@ public sealed class AgentUpdateTests
         var path = ControllerReleasePath(fixture.Path, hash);
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         File.WriteAllBytes(path, bytes);
-        Assert.Throws<InvalidOperationException>(() => fixture.Db.ReserveAgentUpdate("pc", AgentPackageCorpus.Version, "admin", "bad-package"));
+        var unavailable = Assert.Throws<AgentReleaseUnavailableException>(() => fixture.Db.ReserveAgentUpdate("pc", AgentPackageCorpus.Version, "admin", "bad-package"));
+        Assert.Equal(AgentReleaseUnavailableKind.InvalidArchive, unavailable.Kind);
         Assert.True(Assert.Single(fixture.Db.List()).CanRent);
     }
 
@@ -336,7 +337,8 @@ public sealed class AgentUpdateTests
         AddRelease(fixture.Path, "2.0.0", missing: true);
         fixture.SyncVersion("1.0.0");
 
-        Assert.Throws<InvalidOperationException>(() => fixture.Db.ReserveAgentUpdate("pc", "2.0.0", "admin", Guid.NewGuid().ToString("N")));
+        var unavailable = Assert.Throws<AgentReleaseUnavailableException>(() => fixture.Db.ReserveAgentUpdate("pc", "2.0.0", "admin", Guid.NewGuid().ToString("N")));
+        Assert.Equal(AgentReleaseUnavailableKind.StorageUnavailable, unavailable.Kind);
         Assert.Null(Assert.Single(fixture.Db.List()).AgentUpdateOperationId);
         Assert.True(Assert.Single(fixture.Db.List()).CanRent);
     }
@@ -355,7 +357,8 @@ public sealed class AgentUpdateTests
         File.WriteAllBytes(path, bytes);
         fixture.SyncVersion("1.0.0");
 
-        Assert.Throws<InvalidOperationException>(() => fixture.Db.ReserveAgentUpdate("pc", "2.3.4", "admin", Guid.NewGuid().ToString("N")));
+        var unavailable = Assert.Throws<AgentReleaseUnavailableException>(() => fixture.Db.ReserveAgentUpdate("pc", "2.3.4", "admin", Guid.NewGuid().ToString("N")));
+        Assert.Equal(AgentReleaseUnavailableKind.InvalidArchive, unavailable.Kind);
         Assert.Null(Assert.Single(fixture.Db.List()).AgentUpdateOperationId);
         Assert.True(Assert.Single(fixture.Db.List()).CanRent);
     }
@@ -368,21 +371,40 @@ public sealed class AgentUpdateTests
         AddRelease(fixture.Path, "2.3.4", packageBytes: bytes, targetRuntime: "unknown", challengeProtocol: 1);
 
         Assert.Equal("2.3.4", Assert.Single(fixture.Db.ListAgentReleases()).Version);
-        Assert.Throws<InvalidOperationException>(() => fixture.Db.ReserveAgentUpdate("pc", "2.3.4", "admin", "legacy-release"));
+        var unavailable = Assert.Throws<AgentReleaseUnavailableException>(() => fixture.Db.ReserveAgentUpdate("pc", "2.3.4", "admin", "legacy-release"));
+        Assert.Equal(AgentReleaseUnavailableKind.InvalidArchive, unavailable.Kind);
         Assert.Null(Assert.Single(fixture.Db.List()).AgentUpdateOperationId);
         Assert.True(Assert.Single(fixture.Db.List()).CanRent);
     }
 
     [Fact]
-    public void CorruptPublishedArtifactCannotAcquireAnUpdateLock()
+    public async Task SameSizeCorruptionReturnsSafeAdminReasonWithoutCreatingAnUpdateLock()
     {
         using var fixture = new LeaseFixture(agentReleaseRemediationEnabled: true);
         AddRelease(fixture.Path, "2.0.0");
         var release = Assert.Single(fixture.Db.ListAgentReleases());
-        File.WriteAllText(ControllerReleasePath(fixture.Path, release.PackageSha256), "corrupt");
+        var artifactPath = ControllerReleasePath(fixture.Path, release.PackageSha256);
+        var originalBytes = File.ReadAllBytes(artifactPath);
+        var corruptedBytes = (byte[])originalBytes.Clone();
+        corruptedBytes[corruptedBytes.Length / 2] ^= 0x01;
+        File.WriteAllBytes(artifactPath, corruptedBytes);
+        Assert.Equal(originalBytes.Length, new FileInfo(artifactPath).Length);
         fixture.SyncVersion("1.0.0");
+        await using var host = await StartHost(fixture.Db);
 
-        Assert.Throws<InvalidOperationException>(() => fixture.Db.ReserveAgentUpdate("pc", "2.0.0", "admin", Guid.NewGuid().ToString("N")));
+        using var response = await Reserve(host.Client, "pc", "2.0.0");
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        var body = await response.Content.ReadAsStringAsync();
+        using var json = JsonDocument.Parse(body);
+        Assert.Equal("release_unavailable", json.RootElement.GetProperty("code").GetString());
+        Assert.False(json.RootElement.GetProperty("available").GetBoolean());
+        Assert.Equal("Stored package does not match its published SHA-256.", json.RootElement.GetProperty("reason").GetString());
+        Assert.DoesNotContain("agent-releases", body, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(Path.GetDirectoryName(artifactPath)!, body, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(release.PackageSha256, Assert.Single(fixture.Db.ListAgentReleases()).PackageSha256);
+        Assert.Equal(0L, Scalar(fixture.Path, "SELECT COUNT(*) FROM agent_maintenance_chains WHERE held=1"));
+        Assert.Equal(0L, Scalar(fixture.Path, "SELECT COUNT(*) FROM agent_update_operations"));
+        Assert.Equal(0L, Scalar(fixture.Path, "SELECT COUNT(*) FROM agent_update_audit"));
         Assert.Null(Assert.Single(fixture.Db.List()).AgentUpdateOperationId);
         Assert.True(Assert.Single(fixture.Db.List()).CanRent);
     }

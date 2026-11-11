@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { machineApi, segment } from "@/lib/machine-api";
+import { ControllerError } from "@/lib/controller-client";
 
 type UpdateTicketResponse = {
   operationId: string;
@@ -81,9 +82,16 @@ export async function POST(request: Request, { params }: { params: Promise<{ mac
     }
 
     const internalPath = `/internal/machines/${segment(machineId)}/agent-updates`;
-    const issued = recovery
-      ? await call<UpdateTicketResponse>(`${internalPath}/${segment(operationId!)}/recovery-ticket`, { method: "POST" })
-      : await call<UpdateTicketResponse>(internalPath, { method: "POST", body: JSON.stringify({ releaseVersion }) });
+    let issued: UpdateTicketResponse;
+    try {
+      issued = recovery
+        ? await call<UpdateTicketResponse>(`${internalPath}/${segment(operationId!)}/recovery-ticket`, { method: "POST" })
+        : await call<UpdateTicketResponse>(internalPath, { method: "POST", body: JSON.stringify({ releaseVersion }) });
+    } catch (error) {
+      if (!recovery && error instanceof ControllerError && error.status === 409 && error.safeReleaseReason)
+        return { available: false, reason: error.safeReleaseReason };
+      throw error;
+    }
     validateIssuedTicket(issued, machineId, releaseVersion, operationId);
 
     const scriptHash = createHash("sha256").update(script).digest("hex").toUpperCase();

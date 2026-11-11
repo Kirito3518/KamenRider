@@ -119,7 +119,7 @@ public sealed partial class ControllerDatabase
             using var artifact = OpenUpdateArtifact(packagePath, packageHash, packageSize, targetVersion, out var inventory);
             if (publishedChallengeProtocol != 2 || inventory.AgentUpdateChallengeProtocol != publishedChallengeProtocol
                 || publishedRuntime is not ("win-x64" or "win-arm64") || inventory.TargetRuntime != publishedRuntime)
-                throw new InvalidOperationException("The selected release is unavailable, corrupt, or lacks update confirmation support; publish a compatible release.");
+                throw new AgentReleaseUnavailableException(AgentReleaseUnavailableKind.UnsupportedProtocolOrRuntime);
 
             var ticket = NewAgentUpdateTicket(out var ticketHash);
             var operationId = Guid.NewGuid().ToString("N");
@@ -148,6 +148,7 @@ public sealed partial class ControllerDatabase
             var expected = ControllerReleaseArtifacts.PathFor(agentReleaseRoot, canonical);
             if (!Path.IsPathFullyQualified(path) || !string.Equals(Path.GetFullPath(path), expected, StringComparison.OrdinalIgnoreCase) || size is <= 0 or > 100L * 1024 * 1024)
                 throw new InvalidDataException();
+            if (!File.Exists(expected)) throw new FileNotFoundException();
             var verified = ControllerReleaseArtifacts.OpenVerified(expected, canonical, size);
             try
             {
@@ -159,7 +160,11 @@ public sealed partial class ControllerDatabase
         }
         catch (Exception ex) when (ex is ArgumentException or InvalidDataException or IOException or UnauthorizedAccessException or PackageValidationException or NotSupportedException or BadImageFormatException)
         {
-            throw new InvalidOperationException("The selected release is unavailable, corrupt, or lacks update confirmation support; publish a compatible release.");
+            if (ex is PackageValidationException or BadImageFormatException or NotSupportedException)
+                throw new AgentReleaseUnavailableException(AgentReleaseUnavailableKind.InvalidArchive, ex);
+            if (ex is InvalidDataException or ArgumentException)
+                throw new AgentReleaseUnavailableException(AgentReleaseUnavailableKind.IntegrityMismatch, ex);
+            throw new AgentReleaseUnavailableException(AgentReleaseUnavailableKind.StorageUnavailable, ex);
         }
     }
 

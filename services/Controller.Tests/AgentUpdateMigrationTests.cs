@@ -8,6 +8,69 @@ namespace Controller.Tests;
 public sealed class AgentUpdateMigrationTests
 {
     [Fact]
+    public void VersionSixteenReleaseRowMigratesToUnknownProtocolOneAndCannotBeReserved()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"agent-release-v16-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        var path = Path.Combine(root, "controller.db");
+        try
+        {
+            CreateVersionElevenDatabase(path);
+            var package = AgentUpdateTestPackage.Create("2.3.4");
+            var hash = Convert.ToHexString(SHA256.HashData(package));
+            var artifact = Path.Combine(root, "agent-releases", "sha256", hash[..2].ToLowerInvariant(), hash.ToLowerInvariant() + ".zip");
+            Directory.CreateDirectory(Path.GetDirectoryName(artifact)!);
+            File.WriteAllBytes(artifact, package);
+
+            using (var connection = Open(path))
+            using (var transaction = connection.BeginTransaction())
+            {
+                foreach (var name in new[]
+                {
+                    "012-agent-releases.sql", "013-agent-update-downloads.sql", "014-agent-maintenance-chains.sql",
+                    "015-agent-sync-proof.sql", "016-agent-sync-challenge-rate-limit.sql",
+                })
+                {
+                    using var resource = typeof(ControllerDatabase).Assembly.GetManifestResourceStream($"KamenRaider.Controller.Data.Migrations.{name}")!;
+                    using var reader = new StreamReader(resource);
+                    using var migration = connection.CreateCommand();
+                    migration.Transaction = transaction;
+                    migration.CommandText = reader.ReadToEnd();
+                    migration.ExecuteNonQuery();
+                }
+                using var seed = connection.CreateCommand();
+                seed.Transaction = transaction;
+                seed.CommandText = "INSERT INTO agent_releases(version,channel,release_notes,package_sha256,package_path,package_size_bytes,source_commit,source_dirty,release_build,package_format,published_at_unix_ms) VALUES('2.3.4','stable','legacy row',$hash,$path,$size,'0123456789ab',0,1,'AgentPackage.zip',1); PRAGMA user_version=16";
+                seed.Parameters.AddWithValue("$hash", hash);
+                seed.Parameters.AddWithValue("$path", artifact);
+                seed.Parameters.AddWithValue("$size", package.Length);
+                seed.ExecuteNonQuery();
+                transaction.Commit();
+            }
+
+            using var database = new ControllerDatabase(path, agentReleaseRemediationEnabled: true);
+            var listed = Assert.Single(database.ListAgentReleases());
+            Assert.Equal("2.3.4", listed.Version);
+            Assert.Equal(hash, listed.PackageSha256);
+            using (var migrated = Open(path))
+            {
+                Assert.Equal(17L, Scalar(migrated, "PRAGMA user_version"));
+                Assert.Equal("unknown", Scalar(migrated, "SELECT target_runtime FROM agent_releases WHERE version='2.3.4'"));
+                Assert.Equal(1L, Scalar(migrated, "SELECT agent_update_challenge_protocol FROM agent_releases WHERE version='2.3.4'"));
+                Assert.Equal(1L, Scalar(migrated, "SELECT COUNT(*) FROM agent_releases WHERE version='2.3.4'"));
+            }
+
+            var unavailable = Assert.Throws<AgentReleaseUnavailableException>(() => database.ReserveAgentUpdate("pc", "2.3.4", "admin", "migrated-release"));
+            Assert.Equal(AgentReleaseUnavailableKind.UnsupportedProtocolOrRuntime, unavailable.Kind);
+            using var afterReservation = Open(path);
+            Assert.Equal(0L, Scalar(afterReservation, "SELECT COUNT(*) FROM agent_maintenance_chains WHERE held=1"));
+            Assert.Equal(0L, Scalar(afterReservation, "SELECT COUNT(*) FROM agent_update_operations"));
+            Assert.Equal(0L, Scalar(afterReservation, "SELECT COUNT(*) FROM agent_update_audit"));
+        }
+        finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
+    }
+
+    [Fact]
     public void StartupAndSnapshotOperationsRejectWeakenedProofSchema()
     {
         var root = Path.Combine(Path.GetTempPath(), "agent-proof-schema-" + Guid.NewGuid().ToString("N"));

@@ -1,9 +1,32 @@
 import "server-only";
 export class ControllerError extends Error {
-  constructor(public status: number) {
+  constructor(public status: number, public safeReleaseReason: string | null = null) {
     super("Controller unavailable");
   }
 }
+
+const safeReleaseReasons = new Set([
+  "Stored package does not match its published SHA-256.",
+  "Stored package failed ZIP and release metadata validation.",
+  "Release uses an unsupported update protocol or runtime.",
+  "Stored package could not be read from release storage.",
+]);
+
+async function rejectedReleaseReason(response: Response) {
+  if (response.status !== 409) return null;
+  try {
+    const body: unknown = await response.json();
+    if (typeof body !== "object" || body === null || Array.isArray(body)) return null;
+    const result = body as Record<string, unknown>;
+    if (result.code !== "release_unavailable" || result.available !== false
+      || typeof result.reason !== "string" || result.reason.length > 160 || !safeReleaseReasons.has(result.reason))
+      return null;
+    return result.reason;
+  } catch {
+    return null;
+  }
+}
+
 export async function controllerRequest<T>(
   path: string,
   init?: RequestInit,
@@ -29,12 +52,15 @@ export async function controllerRequest<T>(
         "X-Service-Credential": credential,
       },
     });
-    if (!response.ok)
+    if (!response.ok) {
+      const safeReleaseReason = await rejectedReleaseReason(response);
       throw new ControllerError(
         [400, 403, 404, 409, 413, 429].includes(response.status)
           ? response.status
           : 503,
+        safeReleaseReason,
       );
+    }
     return (await response.json()) as T;
   } catch (error) {
     if (error instanceof ControllerError) throw error;

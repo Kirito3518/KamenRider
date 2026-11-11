@@ -45,8 +45,6 @@ foreach($name in $scriptNames){
 if(-not $PSCmdlet.ShouldProcess($archive,"Publish self-contained Agent package for $Runtime")){return}
 $tempRoot=[IO.Path]::GetTempPath()
 $stage=Join-Path $tempRoot ('kr-agent-package-'+[guid]::NewGuid().ToString('N'))
-$outputTemp=$null
-$outputBackup=$null
 try {
  $publishRoot=Join-Path $stage 'publish'
  $packageRoot=Join-Path $stage 'package'
@@ -117,46 +115,12 @@ try {
   if($verification.archiveHash.ToUpperInvariant() -cne $hash){throw 'Trusted Agent package verifier returned a mismatched archive hash.'}
  }
  $null=New-Item -ItemType Directory -Path $OutputDirectory -Force
- $outputTemp=Join-Path $OutputDirectory ('.AgentPackage-'+[guid]::NewGuid().ToString('N')+'.tmp')
- $outputHashTemp=Join-Path $OutputDirectory ('.AgentPackage-'+[guid]::NewGuid().ToString('N')+'.hash.tmp')
- [IO.File]::Copy($stagedArchive,$outputTemp,$false)
- [IO.File]::WriteAllText($outputHashTemp,$hash+[Environment]::NewLine,[Text.Encoding]::ASCII)
- $archiveExisted=Test-Path -LiteralPath $archive
- $hashExisted=Test-Path -LiteralPath $hashFile
- $archivePublished=$false
- $hashPublished=$false
- try {
- if($archiveExisted){
-  $outputBackup=Join-Path $OutputDirectory ('.AgentPackage-'+[guid]::NewGuid().ToString('N')+'.bak')
-  [IO.File]::Replace($outputTemp,$archive,$outputBackup)
-  $outputTemp=$null
- }else{
-  [IO.File]::Move($outputTemp,$archive)
-  $outputTemp=$null
- }
- $archivePublished=$true
- if($hashExisted){
-  $outputHashBackup=Join-Path $OutputDirectory ('.AgentPackage-'+[guid]::NewGuid().ToString('N')+'.hash.bak')
-  [IO.File]::Replace($outputHashTemp,$hashFile,$outputHashBackup)
-  $outputHashTemp=$null
- }else{
-  [IO.File]::Move($outputHashTemp,$hashFile)
-  $outputHashTemp=$null
- }
- $hashPublished=$true
- if($outputBackup){[IO.File]::Delete($outputBackup);$outputBackup=$null}
- if($outputHashBackup){[IO.File]::Delete($outputHashBackup);$outputHashBackup=$null}
- } catch {
-  if($hashPublished){if($hashExisted -and $outputHashBackup -and (Test-Path -LiteralPath $outputHashBackup)){[IO.File]::Copy($outputHashBackup,$hashFile,$true)}elseif(-not $hashExisted -and (Test-Path -LiteralPath $hashFile)){[IO.File]::Delete($hashFile)}}
-  if($archivePublished){if($archiveExisted -and $outputBackup -and (Test-Path -LiteralPath $outputBackup)){[IO.File]::Copy($outputBackup,$archive,$true)}elseif(-not $archiveExisted -and (Test-Path -LiteralPath $archive)){[IO.File]::Delete($archive)}}
-  throw
- }
+ $publicationModule=Join-Path $PSScriptRoot 'AgentPackagePublication.psm1'
+ if(-not (Test-Path -LiteralPath $publicationModule -PathType Leaf)){throw 'Agent package publication helper is missing.'}
+ Import-Module $publicationModule -Force
+ Publish-AgentPackageFiles -StagedArchivePath $stagedArchive -ArchivePath $archive -HashFilePath $hashFile -HashValue $hash | Out-Null
  [pscustomobject]@{PackagePath=$archive;Sha256=$hash;HashFilePath=$hashFile;Runtime=$Runtime;AgentVersion=$agentVersion;ReleaseVersion=$(if($releaseBuild){$ReleaseVersion}else{$null});ReleaseBuild=$releaseBuild;ManifestPath=$manifestPath;Manifest=$manifest}
 } finally {
- if($outputTemp -and (Test-Path -LiteralPath $outputTemp)){Remove-Item -LiteralPath $outputTemp -Force}
- if($outputHashTemp -and (Test-Path -LiteralPath $outputHashTemp)){Remove-Item -LiteralPath $outputHashTemp -Force}
- if($outputBackup -and (Test-Path -LiteralPath $outputBackup)){Remove-Item -LiteralPath $outputBackup -Force}
- if($outputHashBackup -and (Test-Path -LiteralPath $outputHashBackup)){Remove-Item -LiteralPath $outputHashBackup -Force}
  $resolved=[IO.Path]::GetFullPath($stage)
  $temp=[IO.Path]::GetFullPath($tempRoot).TrimEnd('\')+'\'
  if(-not $resolved.StartsWith($temp,[StringComparison]::OrdinalIgnoreCase) -or [IO.Path]::GetFileName($resolved) -notlike 'kr-agent-package-*'){throw 'Unsafe package staging cleanup path.'}

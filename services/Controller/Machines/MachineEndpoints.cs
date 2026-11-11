@@ -39,6 +39,7 @@ public static class MachineEndpoints
         catch(FormatException){return Results.BadRequest();}
         catch(System.Security.Cryptography.CryptographicException){return Results.BadRequest();}
         catch(KeyNotFoundException){return Results.NotFound();}
+        catch(AgentReleaseUnavailableException exception){return Results.Conflict(new { code=AgentReleaseUnavailableException.ResponseCode, available=false, reason=exception.SafeReason });}
         catch(InvalidOperationException){return Results.Conflict();}
     }
 }

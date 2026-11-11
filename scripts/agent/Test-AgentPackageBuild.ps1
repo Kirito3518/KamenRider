@@ -46,6 +46,61 @@ try {
  if(-not $resolved.StartsWith($temp,[StringComparison]::OrdinalIgnoreCase) -or [IO.Path]::GetFileName($resolved) -notlike 'kr-agent-package-atomic-*'){throw 'Unsafe atomicity test cleanup path.'}
  if(Test-Path -LiteralPath $resolved){Remove-Item -LiteralPath $resolved -Recurse -Force}
 }
+foreach($mode in @('SecondBackupDelete','RollbackRestore')){
+ $modeRoot=Join-Path ([IO.Path]::GetTempPath()) ('kr-agent-package-publication-'+$mode+'-'+[guid]::NewGuid().ToString('N'))
+ New-Item -ItemType Directory -Path $modeRoot | Out-Null
+ try {
+  $archive=Join-Path $modeRoot 'AgentPackage.zip'
+  $hashFile=Join-Path $modeRoot 'AgentPackage.sha256'
+  $stagedArchive=Join-Path $modeRoot 'staged.zip'
+  [IO.File]::WriteAllText($archive,'previous archive')
+  [IO.File]::WriteAllText($hashFile,'previous hash')
+  [IO.File]::WriteAllText($stagedArchive,'new archive')
+  $modulePath=Join-Path $PSScriptRoot 'AgentPackagePublication.psm1'
+  Import-Module $modulePath -Force
+  if($mode -eq 'SecondBackupDelete'){
+   $failureInjector={param($point,$path) if($point -eq 'BeforeDeleteHashBackup'){throw 'Injected failure deleting the second backup.'}}
+   $warnings=@()
+   $newHash='A'*64
+   Publish-AgentPackageFiles -StagedArchivePath $stagedArchive -ArchivePath $archive -HashFilePath $hashFile -HashValue $newHash -FailureInjector $failureInjector -WarningVariable warnings
+   if([IO.File]::ReadAllText($archive) -ne 'new archive' -or [IO.File]::ReadAllText($hashFile).Trim() -ne $newHash){
+    throw 'A failed second backup delete changed the committed ZIP/hash pair.'
+   }
+   if(@($warnings | Where-Object {$_ -match 'backup cleanup failed'}).Count -ne 1){throw 'A failed second backup delete was not reported as a cleanup warning.'}
+   $hashBackups=@(Get-ChildItem -LiteralPath $modeRoot -Force -Filter '*.hash.bak')
+   if($hashBackups.Count -ne 1 -or [IO.File]::ReadAllText($hashBackups[0].FullName) -ne 'previous hash'){
+    throw 'A failed second backup delete did not preserve the remaining original hash backup.'
+   }
+   if(@(Get-ChildItem -LiteralPath $modeRoot -Force -Filter '*.bak').Count -ne 1){throw 'The completed publication kept an unexpected ZIP backup.'}
+  }else{
+   $state=@{BeforeCommit=$false}
+   $failureInjector={
+    param($point,$path)
+    if($point -eq 'BeforeCommit'){$state.BeforeCommit=$true;throw 'Injected pre-commit publication failure.'}
+    if($state.BeforeCommit -and $point -eq 'BeforeRestoreArchiveBackup'){throw 'Injected rollback restore failure.'}
+   }.GetNewClosure()
+   $failure=$null
+   try {Publish-AgentPackageFiles -StagedArchivePath $stagedArchive -ArchivePath $archive -HashFilePath $hashFile -HashValue ('B'*64) -FailureInjector $failureInjector}
+   catch {$failure=$_.Exception}
+   if(-not $failure){throw 'Builder accepted a publication whose rollback restore was injected to fail.'}
+   if($failure.Message -notmatch 'rollback was incomplete' -or $failure.Message -notmatch 'Recovery backup path:'){
+    throw "Builder did not report its preserved rollback recovery path. $($failure.Message)"
+   }
+   $recoveryPaths=@($failure.Message -split '\r?\n' | Where-Object {$_ -like 'Recovery backup path: *'} | ForEach-Object {$_.Substring('Recovery backup path: '.Length)})
+   if($recoveryPaths.Count -ne 2){throw "Builder did not report every surviving recovery backup. $($failure.Message)"}
+   $backupContents=@($recoveryPaths | ForEach-Object {[IO.File]::ReadAllText($_)})
+   if('previous archive' -notin $backupContents -or 'previous hash' -notin $backupContents){
+    throw 'Builder did not preserve every original output backup for manual recovery.'
+   }
+   if([IO.File]::ReadAllText($hashFile) -ne 'previous hash'){throw 'Rollback did not restore the original hash file before preserving recovery backups.'}
+  }
+ } finally {
+  $resolved=[IO.Path]::GetFullPath($modeRoot)
+  $temp=[IO.Path]::GetTempPath().TrimEnd('\')+'\'
+  if(-not $resolved.StartsWith($temp,[StringComparison]::OrdinalIgnoreCase) -or [IO.Path]::GetFileName($resolved) -notlike "kr-agent-package-publication-$mode-*"){throw 'Unsafe publication test cleanup path.'}
+  if(Test-Path -LiteralPath $resolved){Remove-Item -LiteralPath $resolved -Recurse -Force}
+ }
+}
 $sourceStatus=@(& git -C $repo status --porcelain --untracked-files=all)
 $expectedSourceDirty=$sourceStatus.Count -gt 0
 function Get-PackageExecutableMachine([string]$archivePath){
