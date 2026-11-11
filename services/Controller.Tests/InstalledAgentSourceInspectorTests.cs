@@ -230,8 +230,14 @@ public sealed class InstalledAgentSourceInspectorTests : IDisposable
 
         public void PrepareTargetInstallTree(string extractedTree, string destination, PackageInventory expected)
         {
-            CopyNodes(extractedTree, destination, expected.Nodes.Select(node =>
-                new MaintenanceBackupNode(node.Path, node.IsDirectory, node.Length, node.Sha256)));
+            PackageVerifier.ValidateExtracted(extractedTree, expected);
+            var installInventory = PackageVerifier.CreateAgentInstallInventory(expected);
+            Directory.CreateDirectory(destination);
+            foreach (var node in installInventory.Nodes.Where(node => node.IsDirectory)
+                         .OrderBy(node => node.Path.Count(character => character == '/')))
+                Directory.CreateDirectory(Local(destination, node.Path));
+            foreach (var node in installInventory.Nodes.Where(node => !node.IsDirectory))
+                File.Copy(Local(extractedTree, "Agent/" + node.Path), Local(destination, node.Path));
             events.Add("target-staged");
         }
 
@@ -312,7 +318,9 @@ public sealed class InstalledAgentSourceInspectorTests : IDisposable
         Assert.Equal("servicesStarted", setup.Journal.Read()!.Operations.Single().Phase);
         Assert.Equal(["swapIntent", "sourceMoved", "targetPlaced", "servicesStarted"],
             setup.Journal.Read()!.Operations.Single().PhaseHistory.TakeLast(4));
-        PackageVerifier.ValidateExtracted(sourceRoot, setup.ExpectedTarget);
+        PackageVerifier.ValidateExtracted(sourceRoot, PackageVerifier.CreateAgentInstallInventory(setup.ExpectedTarget));
+        Assert.True(File.Exists(Path.Combine(sourceRoot, "Agent.exe")));
+        Assert.False(File.Exists(Path.Combine(sourceRoot, "Update-AgentPackage.ps1")));
         Assert.True(Directory.Exists(Path.Combine(Path.GetDirectoryName(sourceRoot)!, ".Agent-prior-operation-1")));
         Assert.Equal(1, services.StopChecks);
         Assert.True(events.IndexOf("target-staged") < events.FindIndex(value => value.StartsWith("move:.Agent-prior-", StringComparison.Ordinal)));
@@ -340,7 +348,7 @@ public sealed class InstalledAgentSourceInspectorTests : IDisposable
 
         Assert.Equal("applied", result.Outcome);
         Assert.Equal("servicesStarted", setup.Journal.Read()!.Operations.Single().Phase);
-        PackageVerifier.ValidateExtracted(sourceRoot, setup.ExpectedTarget);
+        PackageVerifier.ValidateExtracted(sourceRoot, PackageVerifier.CreateAgentInstallInventory(setup.ExpectedTarget));
         Assert.True(Directory.Exists(prior));
     }
 

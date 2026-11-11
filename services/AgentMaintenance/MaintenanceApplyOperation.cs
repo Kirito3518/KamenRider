@@ -58,6 +58,7 @@ public sealed class MaintenanceApplyOperation(
         if (expectedTarget.Version != binding.TargetVersion || expectedTarget.TargetRuntime != binding.TargetRuntime ||
             !FixedHexEquals(expectedTarget.ArchiveHash, binding.TargetSha256))
             throw new InvalidDataException("The verified target archive does not match the immutable journal binding.");
+        var expectedInstallTree = PackageVerifier.CreateAgentInstallInventory(expectedTarget);
 
         var parent = Path.GetDirectoryName(Path.GetFullPath(installDirectory))
             ?? throw new InvalidDataException("The installed Agent path has no parent.");
@@ -79,8 +80,8 @@ public sealed class MaintenanceApplyOperation(
             fileSystem.EnsureProtectedInstallParent(installDirectory);
             if (fileSystem.DirectoryExists(targetStage))
             {
-                PackageVerifier.ValidateExtracted(targetStage, expectedTarget);
-                fileSystem.ValidateTargetInstallTree(targetStage, expectedTarget);
+                PackageVerifier.ValidateExtracted(targetStage, expectedInstallTree);
+                fileSystem.ValidateTargetInstallTree(targetStage, expectedInstallTree);
             }
             else
             {
@@ -88,8 +89,8 @@ public sealed class MaintenanceApplyOperation(
                     throw new InvalidDataException("The target stage path is a file instead of an owned directory.");
                 fileSystem.PrepareTargetInstallTree(extractedTargetDirectory, targetStage, expectedTarget);
             }
-            PackageVerifier.ValidateExtracted(targetStage, expectedTarget);
-            fileSystem.ValidateTargetInstallTree(targetStage, expectedTarget);
+            PackageVerifier.ValidateExtracted(targetStage, expectedInstallTree);
+            fileSystem.ValidateTargetInstallTree(targetStage, expectedInstallTree);
             authorization.VerifyHeldAndQuiesced(operationId);
             operation = journal.Advance(operationId, "swapIntent",
                 new MaintenanceJournalEvidence(TargetInventoryDigest: expectedTarget.InventoryDigest)).Operations.Single();
@@ -129,19 +130,19 @@ public sealed class MaintenanceApplyOperation(
                 authorization.VerifyHeldAndQuiesced(operationId);
                 if (fileSystem.DirectoryExists(installDirectory))
                 {
-                    PackageVerifier.ValidateExtracted(installDirectory, expectedTarget);
-                    fileSystem.ValidateTargetInstallTree(installDirectory, expectedTarget);
+                    PackageVerifier.ValidateExtracted(installDirectory, expectedInstallTree);
+                    fileSystem.ValidateTargetInstallTree(installDirectory, expectedInstallTree);
                 }
                 else
                 {
                     if (!fileSystem.DirectoryExists(targetStage))
                         throw new InvalidDataException("The verified target stage is missing after the source move.");
-                    PackageVerifier.ValidateExtracted(targetStage, expectedTarget);
-                    fileSystem.ValidateTargetInstallTree(targetStage, expectedTarget);
+                    PackageVerifier.ValidateExtracted(targetStage, expectedInstallTree);
+                    fileSystem.ValidateTargetInstallTree(targetStage, expectedInstallTree);
                     fileSystem.MoveDirectory(targetStage, installDirectory);
                     fileSystem.FlushParent(installDirectory);
-                    PackageVerifier.ValidateExtracted(installDirectory, expectedTarget);
-                    fileSystem.ValidateTargetInstallTree(installDirectory, expectedTarget);
+                    PackageVerifier.ValidateExtracted(installDirectory, expectedInstallTree);
+                    fileSystem.ValidateTargetInstallTree(installDirectory, expectedInstallTree);
                 }
                 operation = journal.Advance(operationId, "targetPlaced").Operations.Single();
             }
@@ -161,8 +162,8 @@ public sealed class MaintenanceApplyOperation(
 
         if (operation.Phase == "targetPlaced")
         {
-            PackageVerifier.ValidateExtracted(installDirectory, expectedTarget);
-            fileSystem.ValidateTargetInstallTree(installDirectory, expectedTarget);
+            PackageVerifier.ValidateExtracted(installDirectory, expectedInstallTree);
+            fileSystem.ValidateTargetInstallTree(installDirectory, expectedInstallTree);
             authorization.VerifyHeld(operationId);
             await services.EnsureStoppedAndVerifyQuiescedAsync(cancellationToken).ConfigureAwait(false);
             authorization.VerifyHeldAndQuiesced(operationId);

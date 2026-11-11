@@ -76,10 +76,11 @@ public sealed class WindowsMaintenanceApplyFileSystem : IMaintenanceApplyFileSys
         EnsureProtectedInstallParent(installDirectory);
         EnsureSafeTree(extractedTargetRoot);
         PackageVerifier.ValidateExtracted(extractedTargetRoot, expected);
+        var installInventory = PackageVerifier.CreateAgentInstallInventory(expected);
         EnsureAbsent(destination);
 
         CreatePrivateDirectory(destination);
-        foreach (var node in expected.Nodes.Where(node => node.IsDirectory)
+        foreach (var node in installInventory.Nodes.Where(node => node.IsDirectory)
                      .OrderBy(node => node.Path.Count(character => character == '/'))
                      .ThenBy(node => node.Path, StringComparer.Ordinal))
         {
@@ -87,15 +88,15 @@ public sealed class WindowsMaintenanceApplyFileSystem : IMaintenanceApplyFileSys
             CreatePrivateDirectory(directory);
         }
 
-        foreach (var node in expected.Nodes.Where(node => !node.IsDirectory))
+        foreach (var node in installInventory.Nodes.Where(node => !node.IsDirectory))
         {
-            var source = LocalPath(extractedTargetRoot, node.Path);
+            var source = LocalPath(extractedTargetRoot, "Agent/" + node.Path);
             var target = LocalPath(destination, node.Path);
             CopyVerifiedFile(source, target, node.Length, node.Sha256!);
         }
 
         FlushTreeDirectories(destination);
-        ValidateTargetInstallTree(destination, expected);
+        ValidateTargetInstallTree(destination, installInventory);
     }
 
     public void ValidateTargetInstallTree(string path, PackageInventory expected)

@@ -34,6 +34,30 @@ public static class PackageVerifier
     public static PackageInventory ValidateArchive(Stream archive, string requestedVersion)
         => Analyze(ReadArchive(archive), requestedVersion).Inventory;
 
+    public static PackageInventory CreateAgentInstallInventory(PackageInventory package)
+    {
+        ArgumentNullException.ThrowIfNull(package);
+        var nodes = package.Nodes
+            .Where(node => node.Path.StartsWith("Agent/", StringComparison.Ordinal))
+            .Select(node =>
+            {
+                var path = node.Path["Agent/".Length..];
+                if (path.Length == 0)
+                    throw LayoutError();
+                return new PackageNode(path, node.IsDirectory, node.Length, node.Sha256);
+            })
+            .ToArray();
+        if (nodes.Length == 0 || !nodes.Any(node => !node.IsDirectory && node.Path == "Agent.exe") ||
+            !nodes.Any(node => !node.IsDirectory && node.Path == "Agent.dll") ||
+            !nodes.Any(node => !node.IsDirectory && node.Path == "Agent.deps.json"))
+            throw LayoutError();
+
+        var totalBytes = nodes.Where(node => !node.IsDirectory).Aggregate(0L, (total, node) => checked(total + node.Length));
+        return new PackageInventory(package.ArchiveHash, package.Version, package.TargetRuntime, nodes, totalBytes,
+            InventoryDigest(nodes), package.SourceCommit, package.SourceDirty, package.ReleaseBuild,
+            package.AgentUpdateChallengeProtocol);
+    }
+
     public static PackageInventory Extract(Stream archive, string freshOwnedRoot, PackageInventory expected)
     {
         ArgumentNullException.ThrowIfNull(expected);
