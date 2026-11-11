@@ -69,6 +69,9 @@ public sealed class MaintenanceBackupPublisher
         this.authorization = authorization ?? throw new ArgumentNullException(nameof(authorization));
     }
 
+    public string SourceRoot => sourceRoot;
+    public string BackupRoot => backupRoot;
+
     public MaintenanceBackupResult Publish(string operationId)
     {
         if (operationId is null || !OperationIdPattern.IsMatch(operationId))
@@ -408,6 +411,7 @@ public sealed class WindowsMaintenanceBackupSecurity : IMaintenanceBackupSecurit
         if (!PathEquals(path, sourceRoot))
             throw new UnauthorizedAccessException("The source tree does not match the canonical Agent installation path.");
         EnsureNoReparseAncestors(path);
+        EnsureSourceAncestors(path);
         EnsureSourceDirectory(path);
     }
 
@@ -418,7 +422,7 @@ public sealed class WindowsMaintenanceBackupSecurity : IMaintenanceBackupSecurit
         if (!Directory.Exists(path) ||
             (File.GetAttributes(path) & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != FileAttributes.Directory)
             throw new UnauthorizedAccessException("The Agent source contains a missing, non-directory, or reparse path.");
-        EnsureNoUntrustedWriteAce(new DirectoryInfo(path).GetAccessControl(AccessControlSections.Access | AccessControlSections.Owner));
+        EnsureSourceAncestors(path);
     }
 
     public void EnsureBackupDirectory(string path, bool create)
@@ -456,6 +460,12 @@ public sealed class WindowsMaintenanceBackupSecurity : IMaintenanceBackupSecurit
     public Stream OpenSourceFile(string path)
     {
         EnsureWithin(path, sourceRoot);
+        EnsureNoReparseAncestors(path);
+        var parent = Path.GetDirectoryName(Path.GetFullPath(path))
+            ?? throw new UnauthorizedAccessException("The Agent source file has no parent directory.");
+        EnsureSourceAncestors(parent);
+        if (!File.Exists(path) || (File.GetAttributes(path) & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != 0)
+            throw new UnauthorizedAccessException("The Agent source file is missing or is not a regular file.");
         EnsureNoUntrustedWriteAce(new FileInfo(path).GetAccessControl(AccessControlSections.Access | AccessControlSections.Owner));
         return OpenRegularSingleLinkFile(path);
     }
@@ -538,25 +548,115 @@ public sealed class WindowsMaintenanceBackupSecurity : IMaintenanceBackupSecurit
         return new FileStream(handle, FileAccess.Read, 65536, isAsync: false);
     }
 
-    private static void EnsureNoUntrustedWriteAce(FileSystemSecurity security)
+    private void EnsureSourceAncestors(string path)
     {
+        var current = Path.GetFullPath(path);
+        var volumeRoot = Path.GetPathRoot(current)
+            ?? throw new UnauthorizedAccessException("The Agent source path has no volume root.");
+        while (!string.IsNullOrEmpty(current))
+        {
+            if (!Directory.Exists(current) || (File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
+                throw new UnauthorizedAccessException("The Agent source ancestor is missing or is a reparse point.");
+            var security = new DirectoryInfo(current).GetAccessControl(AccessControlSections.Access | AccessControlSections.Owner);
+            if (PathEquals(current, volumeRoot))
+            {
+                if (!IsSystemVolumeRootSecuritySafe(security))
+                    throw new UnauthorizedAccessException("The system volume root owner or writable access is unsafe.");
+            }
+            else EnsureNoUntrustedWriteAce(security);
+            if (PathEquals(current, volumeRoot)) break;
+            current = Path.GetDirectoryName(current)
+                ?? throw new UnauthorizedAccessException("The Agent source ancestor chain is incomplete.");
+        }
+    }
+
+    internal static bool IsSourceSecuritySafe(FileSystemSecurity security)
+    {
+        ArgumentNullException.ThrowIfNull(security);
         var system = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
         var admins = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
-        var privileged = new HashSet<SecurityIdentifier> { system, admins };
-        try { privileged.Add((SecurityIdentifier)new NTAccount("NT SERVICE\\TrustedInstaller").Translate(typeof(SecurityIdentifier))); }
-        catch (IdentityNotMappedException) { }
+        var trustedInstaller = TrustedInstallerSid();
+        var privilegedOwners = new HashSet<SecurityIdentifier> { system, admins, trustedInstaller };
+        // Creator Owner is safe only as an ACE because the actual owner is checked
+        // independently against the privileged owner set above.
+        var privilegedAces = new HashSet<SecurityIdentifier>(privilegedOwners)
+        {
+            new SecurityIdentifier(WellKnownSidType.CreatorOwnerSid, null)
+        };
         var owner = security.GetOwner(typeof(SecurityIdentifier)) as SecurityIdentifier;
-        if (owner is null || !privileged.Contains(owner))
-            throw new UnauthorizedAccessException("The Agent tree has an untrusted owner.");
-        const FileSystemRights writeRights = FileSystemRights.Write | FileSystemRights.Modify |
-            FileSystemRights.Delete | FileSystemRights.DeleteSubdirectoriesAndFiles | FileSystemRights.CreateFiles |
-            FileSystemRights.CreateDirectories | FileSystemRights.WriteData | FileSystemRights.AppendData |
-            FileSystemRights.WriteAttributes | FileSystemRights.WriteExtendedAttributes | FileSystemRights.FullControl;
+        if (owner is null || !privilegedOwners.Contains(owner)) return false;
+        const FileSystemRights writeRights = FileSystemRights.Delete | FileSystemRights.DeleteSubdirectoriesAndFiles |
+            FileSystemRights.CreateFiles | FileSystemRights.CreateDirectories | FileSystemRights.WriteData |
+            FileSystemRights.AppendData | FileSystemRights.WriteAttributes | FileSystemRights.WriteExtendedAttributes |
+            FileSystemRights.ChangePermissions | FileSystemRights.TakeOwnership;
         foreach (var rule in security.GetAccessRules(true, true, typeof(SecurityIdentifier)).Cast<FileSystemAccessRule>())
             if (rule.AccessControlType == AccessControlType.Allow &&
-                rule.IdentityReference is SecurityIdentifier sid && !privileged.Contains(sid) &&
+                rule.IdentityReference is SecurityIdentifier sid && !privilegedAces.Contains(sid) &&
                 (rule.FileSystemRights & writeRights) != 0)
-                throw new UnauthorizedAccessException("An untrusted principal can modify the installed Agent tree.");
+                return false;
+        return true;
+    }
+
+    internal static bool IsSystemVolumeRootSecuritySafe(DirectorySecurity security)
+    {
+        ArgumentNullException.ThrowIfNull(security);
+        var system = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
+        var admins = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
+        var trustedInstaller = TrustedInstallerSid();
+        var creatorOwner = new SecurityIdentifier(WellKnownSidType.CreatorOwnerSid, null);
+        var authenticatedUsers = new SecurityIdentifier("S-1-5-11");
+        var privilegedOwners = new HashSet<SecurityIdentifier> { system, admins, trustedInstaller };
+        var privilegedAces = new HashSet<SecurityIdentifier>(privilegedOwners) { creatorOwner };
+        if (security.GetOwner(typeof(SecurityIdentifier)) is not SecurityIdentifier owner || owner != trustedInstaller)
+            return false;
+
+        const FileSystemRights writeRights = FileSystemRights.Delete | FileSystemRights.DeleteSubdirectoriesAndFiles |
+            FileSystemRights.CreateFiles | FileSystemRights.CreateDirectories | FileSystemRights.WriteData |
+            FileSystemRights.AppendData | FileSystemRights.WriteAttributes | FileSystemRights.WriteExtendedAttributes |
+            FileSystemRights.ChangePermissions | FileSystemRights.TakeOwnership;
+        const int inheritOnlyReadMask = -536805376;
+        var allowedCreateDirectories = 0;
+        var allowedReadInheritance = 0;
+        foreach (var rule in security.GetAccessRules(true, true, typeof(SecurityIdentifier)).Cast<FileSystemAccessRule>())
+        {
+            if (rule.AccessControlType != AccessControlType.Allow || rule.IdentityReference is not SecurityIdentifier sid ||
+                privilegedAces.Contains(sid))
+                continue;
+
+            if (sid == authenticatedUsers)
+            {
+                if ((int)rule.FileSystemRights == inheritOnlyReadMask &&
+                    rule.InheritanceFlags == (InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit) &&
+                    rule.PropagationFlags == PropagationFlags.InheritOnly && !rule.IsInherited)
+                {
+                    allowedReadInheritance++;
+                    continue;
+                }
+
+                var rightsWithoutSynchronize = rule.FileSystemRights & ~FileSystemRights.Synchronize;
+                if (rightsWithoutSynchronize == FileSystemRights.CreateDirectories &&
+                    rule.InheritanceFlags == InheritanceFlags.None && rule.PropagationFlags == PropagationFlags.None &&
+                    !rule.IsInherited)
+                {
+                    allowedCreateDirectories++;
+                    continue;
+                }
+            }
+
+            if ((rule.FileSystemRights & writeRights) != 0)
+                return false;
+        }
+
+        return allowedCreateDirectories == 1 && allowedReadInheritance == 1;
+    }
+
+    private static SecurityIdentifier TrustedInstallerSid() =>
+        new("S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464");
+
+    private static void EnsureNoUntrustedWriteAce(FileSystemSecurity security)
+    {
+        if (!IsSourceSecuritySafe(security))
+            throw new UnauthorizedAccessException("An untrusted principal can alter the installed Agent tree or its ACL.");
     }
 
     private static bool IsPrivateSecurity(FileSystemSecurity security, bool isDirectory)

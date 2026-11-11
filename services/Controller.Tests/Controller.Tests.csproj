@@ -25,12 +25,17 @@
     <Compile Remove="Fixtures\AgentVersionTwo\**\*.cs" />
     <Compile Remove="Fixtures\AgentVersionThree\**\*.cs" />
     <Compile Remove="Fixtures\AgentPackageProtocolTwo\**\*.cs" />
+    <Compile Remove="Fixtures\LegacyInstalledAgent\**\*.cs" />
   </ItemGroup>
 
   <ItemGroup>
     <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
       <_Parameter1>ControllerProjectPath</_Parameter1>
       <_Parameter2>$(MSBuildProjectDirectory)\..\Controller\Controller.csproj</_Parameter2>
+    </AssemblyAttribute>
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>LegacyInstalledAgentOutputPath</_Parameter1>
+      <_Parameter2>$(MSBuildProjectDirectory)\Fixtures\LegacyInstalledAgent\bin\$(Configuration)\net10.0\win-x64</_Parameter2>
     </AssemblyAttribute>
   </ItemGroup>
 
@@ -40,6 +45,7 @@
     <ProjectReference Include="..\Agent\Agent.csproj" />
     <ProjectReference Include="Fixtures\AgentMetadataFixture\AgentMetadataFixture.csproj" />
     <ProjectReference Include="Fixtures\LegacyAgentMetadataFixture\LegacyAgentMetadataFixture.csproj" />
+    <ProjectReference Include="Fixtures\LegacyInstalledAgent\LegacyInstalledAgent.csproj" ReferenceOutputAssembly="false" />
     <ProjectReference Include="Fixtures\AgentVersionTwo\AgentVersionTwo.csproj" />
     <ProjectReference Include="Fixtures\AgentVersionThree\AgentVersionThree.csproj" />
     <ProjectReference Include="..\Controller\Controller.csproj" />

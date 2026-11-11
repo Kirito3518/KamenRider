@@ -1,6 +1,18 @@
 using KamenRaider.AgentMaintenance;
+using System.Runtime.Versioning;
+using System.Security.AccessControl;
+using System.Security.Principal;
 
 namespace Controller.Tests;
+
+public sealed class WindowsAclPredicateFactAttribute : FactAttribute
+{
+    public WindowsAclPredicateFactAttribute()
+    {
+        if (!OperatingSystem.IsWindows())
+            Skip = "The source ACL predicate consumes Windows security descriptors.";
+    }
+}
 
 public sealed class MaintenanceBackupPublisherTests : IDisposable
 {
@@ -145,6 +157,155 @@ public sealed class MaintenanceBackupPublisherTests : IDisposable
         {
             Directory.Delete(path, recursive: true);
         }
+    }
+
+    [WindowsAclPredicateFact]
+    [SupportedOSPlatform("windows")]
+    public void ProductionSourceAclPredicateAllowsOnlyPrivilegedOwnersAndRejectsWriteDacAndWriteOwner()
+    {
+        var system = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
+        var admins = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
+        var users = new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null);
+        var interactiveUser = WindowsIdentity.GetCurrent().User!;
+
+        Assert.True(WindowsMaintenanceBackupSecurity.IsSourceSecuritySafe(SourceAcl(system, users, FileSystemRights.ReadAndExecute)));
+        Assert.True(WindowsMaintenanceBackupSecurity.IsSourceSecuritySafe(SourceAcl(admins, users, FileSystemRights.ReadAndExecute)));
+        Assert.True(WindowsMaintenanceBackupSecurity.IsSourceSecuritySafe(SourceDirectoryAcl(admins, users,
+            FileSystemRights.ReadAndExecute, includeCreatorOwner: true)));
+
+        foreach (var dangerousRight in new[]
+        {
+            FileSystemRights.ChangePermissions,
+            FileSystemRights.TakeOwnership,
+            FileSystemRights.WriteData,
+            FileSystemRights.AppendData,
+            FileSystemRights.CreateFiles,
+            FileSystemRights.CreateDirectories,
+            FileSystemRights.Delete,
+            FileSystemRights.DeleteSubdirectoriesAndFiles,
+            FileSystemRights.WriteAttributes,
+            FileSystemRights.WriteExtendedAttributes,
+            FileSystemRights.Modify,
+            FileSystemRights.FullControl
+        })
+            Assert.False(WindowsMaintenanceBackupSecurity.IsSourceSecuritySafe(SourceAcl(admins, users, dangerousRight)),
+                $"An unprivileged {dangerousRight} allow ACE must invalidate the source snapshot.");
+
+        Assert.False(WindowsMaintenanceBackupSecurity.IsSourceSecuritySafe(SourceAcl(users, users, FileSystemRights.ReadAndExecute)));
+        Assert.False(WindowsMaintenanceBackupSecurity.IsSourceSecuritySafe(SourceAcl(admins, interactiveUser, FileSystemRights.FullControl)));
+        Assert.False(WindowsMaintenanceBackupSecurity.IsSourceSecuritySafe(SourceDirectoryAcl(admins, users,
+            FileSystemRights.DeleteSubdirectoriesAndFiles, includeCreatorOwner: true)));
+    }
+
+    [WindowsAclPredicateFact]
+    [SupportedOSPlatform("windows")]
+    public void ProductionVolumeRootPredicateAllowsOnlyDocumentedWindowsRootMutation()
+    {
+        var authenticatedUsers = new SecurityIdentifier("S-1-5-11");
+        var safe = SourceVolumeRootAcl(authenticatedUsers, FileSystemRights.CreateDirectories);
+
+        Assert.True(WindowsMaintenanceBackupSecurity.IsSystemVolumeRootSecuritySafe(safe));
+
+        foreach (var dangerousRight in new[]
+        {
+            FileSystemRights.ChangePermissions,
+            FileSystemRights.TakeOwnership,
+            FileSystemRights.WriteData,
+            FileSystemRights.CreateFiles,
+            FileSystemRights.Delete,
+            FileSystemRights.DeleteSubdirectoriesAndFiles,
+            FileSystemRights.WriteAttributes,
+            FileSystemRights.WriteExtendedAttributes,
+            FileSystemRights.Modify,
+            FileSystemRights.FullControl
+        })
+            Assert.False(WindowsMaintenanceBackupSecurity.IsSystemVolumeRootSecuritySafe(
+                SourceVolumeRootAcl(authenticatedUsers, dangerousRight)),
+                $"The volume root must reject Authenticated Users {dangerousRight}.");
+
+        var userOwnedRoot = SourceVolumeRootAcl(authenticatedUsers, FileSystemRights.CreateDirectories);
+        userOwnedRoot.SetOwner(WindowsIdentity.GetCurrent().User!);
+        Assert.False(WindowsMaintenanceBackupSecurity.IsSystemVolumeRootSecuritySafe(userOwnedRoot));
+
+        var interactiveUserWritable = SourceVolumeRootAcl(authenticatedUsers, FileSystemRights.CreateDirectories);
+        interactiveUserWritable.AddAccessRule(new FileSystemAccessRule(WindowsIdentity.GetCurrent().User!,
+            FileSystemRights.FullControl, AccessControlType.Allow));
+        Assert.False(WindowsMaintenanceBackupSecurity.IsSystemVolumeRootSecuritySafe(interactiveUserWritable));
+    }
+
+    [Fact]
+    [SupportedOSPlatform("windows")]
+    public void ProductionVolumeRootPredicateAcceptsTheActualWindowsVolumeRoot()
+    {
+        var volumeRoot = Path.GetPathRoot(Environment.SystemDirectory)!;
+        var acl = new DirectoryInfo(volumeRoot).GetAccessControl(AccessControlSections.Access | AccessControlSections.Owner);
+
+        Assert.True(WindowsMaintenanceBackupSecurity.IsSystemVolumeRootSecuritySafe(acl),
+            $"The actual Windows volume-root ACL at {volumeRoot} did not match the documented safe policy.");
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static FileSecurity SourceAcl(SecurityIdentifier owner, SecurityIdentifier untrusted, FileSystemRights untrustedRights)
+    {
+        var security = new FileSecurity();
+        security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+        security.SetOwner(owner);
+        security.AddAccessRule(new FileSystemAccessRule(
+            new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null), FileSystemRights.FullControl, AccessControlType.Allow));
+        security.AddAccessRule(new FileSystemAccessRule(
+            new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null), FileSystemRights.FullControl, AccessControlType.Allow));
+        security.AddAccessRule(new FileSystemAccessRule(untrusted, untrustedRights, AccessControlType.Allow));
+        return security;
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static DirectorySecurity SourceDirectoryAcl(SecurityIdentifier owner, SecurityIdentifier untrusted,
+        FileSystemRights untrustedRights, bool includeCreatorOwner)
+    {
+        var security = new DirectorySecurity();
+        security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+        security.SetOwner(owner);
+        const InheritanceFlags inheritance = InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit;
+        security.AddAccessRule(new FileSystemAccessRule(
+            new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null), FileSystemRights.FullControl,
+            inheritance, PropagationFlags.None, AccessControlType.Allow));
+        security.AddAccessRule(new FileSystemAccessRule(
+            new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null), FileSystemRights.FullControl,
+            inheritance, PropagationFlags.None, AccessControlType.Allow));
+        security.AddAccessRule(new FileSystemAccessRule(untrusted, untrustedRights,
+            inheritance, PropagationFlags.None, AccessControlType.Allow));
+        if (includeCreatorOwner)
+            security.AddAccessRule(new FileSystemAccessRule(
+                new SecurityIdentifier(WellKnownSidType.CreatorOwnerSid, null), FileSystemRights.FullControl,
+                inheritance, PropagationFlags.InheritOnly, AccessControlType.Allow));
+        return security;
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static DirectorySecurity SourceVolumeRootAcl(SecurityIdentifier authenticatedUsers, FileSystemRights mutationRight)
+    {
+        var system = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
+        var admins = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
+        var trustedInstaller = new SecurityIdentifier("S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464");
+        var dacl = new RawAcl(GenericAcl.AclRevision, 5);
+        void AddAllow(SecurityIdentifier sid, int mask, AceFlags flags) =>
+            dacl.InsertAce(dacl.Count, new CommonAce(flags, AceQualifier.AccessAllowed, mask, sid, isCallback: false, opaque: null));
+        var inherited = AceFlags.ContainerInherit | AceFlags.ObjectInherit;
+        AddAllow(system, (int)FileSystemRights.FullControl, inherited);
+        AddAllow(admins, (int)FileSystemRights.FullControl, inherited);
+        AddAllow(trustedInstaller, (int)FileSystemRights.FullControl, inherited);
+        AddAllow(authenticatedUsers, (int)mutationRight, AceFlags.None);
+        // This inherited mask is present in the documented Windows volume-root ACL. It is
+        // inherit-only and cannot grant these generic rights on the volume root itself.
+        AddAllow(authenticatedUsers, -536805376, inherited | AceFlags.InheritOnly);
+        var descriptor = new RawSecurityDescriptor(ControlFlags.DiscretionaryAclPresent |
+                ControlFlags.DiscretionaryAclProtected | ControlFlags.SelfRelative,
+            trustedInstaller, admins, null, dacl);
+        var bytes = new byte[descriptor.BinaryLength];
+        descriptor.GetBinaryForm(bytes, 0);
+        var security = new DirectorySecurity();
+        security.SetSecurityDescriptorBinaryForm(bytes, AccessControlSections.Owner | AccessControlSections.Access);
+        return security;
     }
 
     public void Dispose()
