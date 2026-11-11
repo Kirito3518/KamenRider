@@ -527,20 +527,5 @@ public sealed class WindowsMaintenanceJournalStore : IMaintenanceJournalStore
 
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool GetFileInformationByHandle(SafeFileHandle handle, out NativeFileInformation fileInformation);
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct NativeFileInformation
-    {
-        public uint Attributes;
-        public ulong CreationTime;
-        public ulong LastAccessTime;
-        public ulong LastWriteTime;
-        public uint VolumeSerialNumber;
-        public uint FileSizeHigh;
-        public uint FileSizeLow;
-        public uint NumberOfLinks;
-        public uint FileIndexHigh;
-        public uint FileIndexLow;
-    }
+    private static extern bool GetFileInformationByHandle(SafeFileHandle handle, out WindowsFileInformation fileInformation);
 }

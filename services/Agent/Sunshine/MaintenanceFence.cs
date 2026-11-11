@@ -275,14 +275,14 @@ public sealed class WindowsMaintenanceFenceReader : IMaintenanceFenceReader
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GetFileInformationByHandle(SafeFileHandle handle, out NativeFileInformation fileInformation);
 
-    [StructLayout(LayoutKind.Sequential)]
+    [StructLayout(LayoutKind.Sequential, Pack = 4)]
     private struct NativeFileTime
     {
         public uint Low;
         public uint High;
     }
 
-    [StructLayout(LayoutKind.Sequential)]
+    [StructLayout(LayoutKind.Sequential, Pack = 4)]
     private struct NativeFileInformation
     {
         public uint Attributes;

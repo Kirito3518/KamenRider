@@ -151,6 +151,14 @@ public sealed class WindowsMaintenanceWorkStore : IMaintenanceWorkStore
         directory = Path.Combine(Path.GetFullPath(commonData), "KamenRaider.AgentMaintenance", "work");
     }
 
+    internal WindowsMaintenanceWorkStore(string workDirectoryPath)
+    {
+        if (!OperatingSystem.IsWindows())
+            throw new PlatformNotSupportedException("The maintenance work store requires Windows ACLs.");
+        ArgumentException.ThrowIfNullOrWhiteSpace(workDirectoryPath);
+        directory = Path.GetFullPath(workDirectoryPath);
+    }
+
     public string ExtractionRoot => Path.Combine(directory, "target");
 
     public MaintenanceCommandRequest ReadRequest(string expectedCommand)
@@ -169,11 +177,25 @@ public sealed class WindowsMaintenanceWorkStore : IMaintenanceWorkStore
         EnsureWorkDirectory(create: false);
         var path = Path.Combine(directory, "target.zip");
         EnsurePrivateFile(path);
-        using var handle = OpenFile(path, genericRead: true, shareRead: true);
-        if (!GetFileInformationByHandle(handle, out var info) || info.NumberOfLinks != 1 ||
-            (info.Attributes & ((uint)FileAttributes.Directory | (uint)FileAttributes.ReparsePoint)) != 0)
-            throw new UnauthorizedAccessException("The target archive must be a regular single-link file.");
-        return new FileStream(handle, FileAccess.Read, 65536, isAsync: false);
+        return OpenArchiveStream(path);
+    }
+
+    internal static Stream OpenArchiveStream(string path)
+    {
+        var handle = OpenFile(path, genericRead: true, shareRead: true);
+        try
+        {
+            if (!GetFileInformationByHandle(handle, out var info) || info.NumberOfLinks != 1 ||
+                (info.Attributes & ((uint)FileAttributes.Directory | (uint)FileAttributes.ReparsePoint)) != 0)
+                throw new UnauthorizedAccessException("The target archive must be a regular single-link file.");
+            // The returned FileStream owns the SafeFileHandle from this point forward.
+            return new FileStream(handle, FileAccess.Read, 65536, isAsync: false);
+        }
+        catch
+        {
+            handle.Dispose();
+            throw;
+        }
     }
 
     public void CreateExtractionRoot()
@@ -199,13 +221,15 @@ public sealed class WindowsMaintenanceWorkStore : IMaintenanceWorkStore
                 (File.GetAttributes(ancestor) & FileAttributes.ReparsePoint) != 0)
                 throw new UnauthorizedAccessException("The maintenance work path contains a reparse point.");
 
-        if (!Directory.Exists(Path.GetDirectoryName(directory)!))
+        var maintenanceDirectory = Path.GetDirectoryName(directory)
+            ?? throw new InvalidOperationException("The protected maintenance work directory has no parent.");
+        if (!Directory.Exists(maintenanceDirectory))
         {
             if (!create)
                 throw new DirectoryNotFoundException("The protected maintenance directory is unavailable.");
-            new WindowsMaintenanceFenceStore().EnsureLocationForJournal();
+            new WindowsMaintenanceFenceStore(maintenanceDirectory).EnsureLocationForJournal();
         }
-        WindowsMaintenanceFenceStore.ValidateLocationForJournal();
+        WindowsMaintenanceFenceStore.ValidateLocationForJournal(maintenanceDirectory);
 
         if (!Directory.Exists(directory) && create)
         {
@@ -276,7 +300,7 @@ public sealed class WindowsMaintenanceWorkStore : IMaintenanceWorkStore
         return identities.SetEquals([system, admins]);
     }
 
-    private static DirectorySecurity CreatePrivateDirectorySecurity()
+    internal static DirectorySecurity CreatePrivateDirectorySecurity()
     {
         var security = new DirectorySecurity();
         security.SetAccessRuleProtection(true, false);
@@ -285,6 +309,16 @@ public sealed class WindowsMaintenanceWorkStore : IMaintenanceWorkStore
         security.AddAccessRule(new FileSystemAccessRule(SystemSid(), FileSystemRights.FullControl, inheritance, PropagationFlags.None, AccessControlType.Allow));
         security.AddAccessRule(new FileSystemAccessRule(AdministratorsSid(), FileSystemRights.FullControl, inheritance, PropagationFlags.None, AccessControlType.Allow));
         return security;
+    }
+
+    internal static void SetPrivateFileSecurity(string path)
+    {
+        var security = new FileSecurity();
+        security.SetAccessRuleProtection(true, false);
+        security.SetOwner(AdministratorsSid());
+        security.AddAccessRule(new FileSystemAccessRule(SystemSid(), FileSystemRights.FullControl, AccessControlType.Allow));
+        security.AddAccessRule(new FileSystemAccessRule(AdministratorsSid(), FileSystemRights.FullControl, AccessControlType.Allow));
+        new FileInfo(path).SetAccessControl(security);
     }
 
     private static SafeFileHandle OpenFile(string path, bool genericRead, bool shareRead)
@@ -319,22 +353,7 @@ public sealed class WindowsMaintenanceWorkStore : IMaintenanceWorkStore
 
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool GetFileInformationByHandle(SafeFileHandle handle, out NativeFileInformation fileInformation);
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct NativeFileInformation
-    {
-        public uint Attributes;
-        public ulong CreationTime;
-        public ulong LastAccessTime;
-        public ulong LastWriteTime;
-        public uint VolumeSerialNumber;
-        public uint FileSizeHigh;
-        public uint FileSizeLow;
-        public uint NumberOfLinks;
-        public uint FileIndexHigh;
-        public uint FileIndexLow;
-    }
+    private static extern bool GetFileInformationByHandle(SafeFileHandle handle, out WindowsFileInformation fileInformation);
 }
 
 internal static class LocalUpdateEngineRequestValidation

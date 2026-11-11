@@ -493,7 +493,7 @@ public static class PackageVerifier
         return handle;
     }
 
-    [StructLayout(LayoutKind.Sequential)]
+    [StructLayout(LayoutKind.Sequential, Pack = 4)]
     private struct ByHandleFileInformation
     {
         internal uint Attributes;

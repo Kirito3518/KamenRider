@@ -1,9 +1,31 @@
 using System.Security.Cryptography;
+using System.Runtime.InteropServices;
+using System.Runtime.Versioning;
+using System.Security.Principal;
 using System.Text;
 using KamenRaider.AgentMaintenance;
 using Controller.Tests.Fixtures;
 
 namespace Controller.Tests;
+
+[SupportedOSPlatform("windows")]
+public sealed class ElevatedWindowsWorkStoreFactAttribute : FactAttribute
+{
+    public ElevatedWindowsWorkStoreFactAttribute()
+    {
+        if (!OperatingSystem.IsWindows() ||
+            !new WindowsPrincipal(WindowsIdentity.GetCurrent()).IsInRole(WindowsBuiltInRole.Administrator))
+        {
+            Skip = "The production work-store ACL integration requires an elevated Windows test process.";
+            return;
+        }
+        try { _ = WindowsMaintenanceFenceStore.ResolveAgentServiceSid(); }
+        catch (Exception)
+        {
+            Skip = "The production Agent service SID is unavailable for the Windows work-store ACL integration.";
+        }
+    }
+}
 
 public sealed class AgentMaintenanceCliTests
 {
@@ -162,4 +184,93 @@ public sealed class AgentMaintenanceCliTests
         Assert.Throws<InvalidDataException>(() => MaintenanceCommandRequestParser.Parse(
             Encoding.UTF8.GetBytes(json), "validate-archive"));
     }
+
+    [Fact]
+    [SupportedOSPlatform("windows")]
+    public void ProductionArchiveHandleRemainsOwnedByItsReturnedStream()
+    {
+        if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("The native file identity check requires Windows.");
+        var root = Path.Combine(Path.GetTempPath(), "kr-maint-handle-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        var path = Path.Combine(root, "target.zip");
+        var expected = new byte[] { 1, 3, 5, 7, 9 };
+        File.WriteAllBytes(path, expected);
+        try
+        {
+            using var stream = WindowsMaintenanceWorkStore.OpenArchiveStream(path);
+            Assert.Equal(expected.Length, stream.Length);
+            var actual = new byte[expected.Length];
+            stream.ReadExactly(actual);
+            Assert.Equal(expected, actual);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void WindowsFileInformationLayoutMatchesByHandleFileInformation()
+    {
+        Assert.Equal(52, Marshal.SizeOf<WindowsFileInformation>());
+        Assert.Equal(4, Marshal.OffsetOf<WindowsFileInformation>(nameof(WindowsFileInformation.CreationTime)).ToInt32());
+        Assert.Equal(28, Marshal.OffsetOf<WindowsFileInformation>(nameof(WindowsFileInformation.VolumeSerialNumber)).ToInt32());
+        Assert.Equal(40, Marshal.OffsetOf<WindowsFileInformation>(nameof(WindowsFileInformation.NumberOfLinks)).ToInt32());
+        Assert.Equal(48, Marshal.OffsetOf<WindowsFileInformation>(nameof(WindowsFileInformation.FileIndexLow)).ToInt32());
+    }
+
+    [Fact]
+    [SupportedOSPlatform("windows")]
+    public void ProductionArchiveHandleCheckAcceptsOneLinkAndRejectsHardlinks()
+    {
+        if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("The native file identity check requires Windows.");
+        var root = Path.Combine(Path.GetTempPath(), "kr-maint-link-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        var original = Path.Combine(root, "target.zip");
+        var linked = Path.Combine(root, "linked.zip");
+        File.WriteAllBytes(original, [0x50, 0x4b, 0x03, 0x04]);
+        try
+        {
+            using (var stream = WindowsMaintenanceWorkStore.OpenArchiveStream(original))
+                Assert.Equal(4, stream.Length);
+            Assert.True(CreateHardLinkW(linked, original, IntPtr.Zero), $"CreateHardLinkW failed with {Marshal.GetLastWin32Error()}.");
+            Assert.Throws<UnauthorizedAccessException>(() => WindowsMaintenanceWorkStore.OpenArchiveStream(linked));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [ElevatedWindowsWorkStoreFact]
+    [SupportedOSPlatform("windows")]
+    public void ProductionWorkStoreReadsPinnedArchiveFromAProtectedTemporaryTree()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "kr-maint-store-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var protectedRoot = Path.Combine(root, "maintenance");
+            new WindowsMaintenanceFenceStore(protectedRoot).EnsureLocationForJournal();
+            var workRoot = Path.Combine(protectedRoot, "work");
+            new DirectoryInfo(workRoot).Create(WindowsMaintenanceWorkStore.CreatePrivateDirectorySecurity());
+            var archivePath = Path.Combine(workRoot, "target.zip");
+            var expected = new byte[] { 2, 4, 6, 8 };
+            File.WriteAllBytes(archivePath, expected);
+            WindowsMaintenanceWorkStore.SetPrivateFileSecurity(archivePath);
+
+            using var stream = new WindowsMaintenanceWorkStore(workRoot).OpenArchiveRead();
+            var actual = new byte[expected.Length];
+            stream.ReadExactly(actual);
+            Assert.Equal(expected, actual);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true, EntryPoint = "CreateHardLinkW")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CreateHardLinkW(string newFileName, string existingFileName, IntPtr securityAttributes);
 }

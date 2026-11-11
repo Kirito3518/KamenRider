@@ -339,6 +339,13 @@ public sealed class WindowsMaintenanceFenceStore : IMaintenanceFenceStore
         EnsureDirectorySecurity(store.directory);
     }
 
+    internal static void ValidateLocationForJournal(string directoryPath)
+    {
+        var store = new WindowsMaintenanceFenceStore(directoryPath);
+        store.EnsureAncestorsHaveNoReparsePoints();
+        EnsureDirectorySecurity(store.directory);
+    }
+
     private void EnsureAncestorsHaveNoReparsePoints()
     {
         foreach (var ancestor in Ancestors(directory))
@@ -525,22 +532,7 @@ public sealed class WindowsMaintenanceFenceStore : IMaintenanceFenceStore
 
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool GetFileInformationByHandle(SafeFileHandle handle, out NativeFileInformation fileInformation);
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct NativeFileInformation
-    {
-        public uint Attributes;
-        public ulong CreationTime;
-        public ulong LastAccessTime;
-        public ulong LastWriteTime;
-        public uint VolumeSerialNumber;
-        public uint FileSizeHigh;
-        public uint FileSizeLow;
-        public uint NumberOfLinks;
-        public uint FileIndexHigh;
-        public uint FileIndexLow;
-    }
+    private static extern bool GetFileInformationByHandle(SafeFileHandle handle, out WindowsFileInformation fileInformation);
 }
 
 public sealed record MaintenanceFirewallProfile(string Name, bool Enabled, bool AllowLocalFirewallRules);
