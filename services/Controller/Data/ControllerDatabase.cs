@@ -4,6 +4,7 @@ using KamenRaider.Controller.RemoteDesktop;
 using System.Net;
 using System.Security.Cryptography;
 using System.Text.Json;
+using KamenRaider.Controller.Security;
 namespace KamenRaider.Controller.Data;
 public record EnrollmentPolicy(int MaxPending = 100, int NewPerMinute = 10);
 public sealed class EnrollmentCapacityException : Exception { }
@@ -15,6 +16,8 @@ public sealed partial class ControllerDatabase : IDisposable
     private readonly TimeProvider clock;
     private readonly string agentReleaseRoot;
     private readonly bool agentReleaseRemediationEnabled;
+    private readonly string syncProofRuntimeEpoch = Guid.NewGuid().ToString("N");
+    private readonly byte[] syncProofHmacKey = RandomNumberGenerator.GetBytes(32);
     public ControllerDatabase(string path, EnrollmentPolicy? policy = null, TimeProvider? clock = null, bool agentReleaseRemediationEnabled = false) {
         this.policy = policy ?? new(); this.clock = clock ?? TimeProvider.System;
         this.agentReleaseRemediationEnabled = agentReleaseRemediationEnabled;
@@ -24,7 +27,7 @@ public sealed partial class ControllerDatabase : IDisposable
         connection=new SqliteConnection(new SqliteConnectionStringBuilder {DataSource=path, ForeignKeys=true, Pooling=false}.ToString()); connection.Open();
         try {
             using var transaction=connection.BeginTransaction();
-            foreach (var name in new[] { "001-machines.sql", "002-leases-commands.sql", "003-pairing.sql", "004-boot-challenges.sql", "005-config-acks.sql", "006-enrollment-tickets.sql", "007-admin-vnc-sessions.sql", "008-vnc-approved-target.sql", "009-agent-version.sql", "010-completed-leases.sql", "011-readiness-diagnostics.sql", "012-agent-releases.sql", "013-agent-update-downloads.sql", "014-agent-maintenance-chains.sql" }) {
+            foreach (var name in new[] { "001-machines.sql", "002-leases-commands.sql", "003-pairing.sql", "004-boot-challenges.sql", "005-config-acks.sql", "006-enrollment-tickets.sql", "007-admin-vnc-sessions.sql", "008-vnc-approved-target.sql", "009-agent-version.sql", "010-completed-leases.sql", "011-readiness-diagnostics.sql", "012-agent-releases.sql", "013-agent-update-downloads.sql", "014-agent-maintenance-chains.sql", "015-agent-sync-proof.sql" }) {
                 if(name=="003-pairing.sql"){using var version=connection.CreateCommand();version.Transaction=transaction;version.CommandText="PRAGMA user_version";if((long)version.ExecuteScalar()!>=3)continue;}
                 if(name=="004-boot-challenges.sql"){using var version=connection.CreateCommand();version.Transaction=transaction;version.CommandText="PRAGMA user_version";if((long)version.ExecuteScalar()!>=4)continue;}
                 if(name=="010-completed-leases.sql"){using var version=connection.CreateCommand();version.Transaction=transaction;version.CommandText="PRAGMA user_version";if((long)version.ExecuteScalar()!>=10)continue;}
@@ -32,6 +35,7 @@ public sealed partial class ControllerDatabase : IDisposable
                 if(name=="012-agent-releases.sql"){using var version=connection.CreateCommand();version.Transaction=transaction;version.CommandText="PRAGMA user_version";if((long)version.ExecuteScalar()!>=12)continue;}
                 if(name=="013-agent-update-downloads.sql"){using var version=connection.CreateCommand();version.Transaction=transaction;version.CommandText="PRAGMA user_version";if((long)version.ExecuteScalar()!>=13)continue;}
                 if(name=="014-agent-maintenance-chains.sql"){using var version=connection.CreateCommand();version.Transaction=transaction;version.CommandText="PRAGMA user_version";if((long)version.ExecuteScalar()!>=14)continue;}
+                if(name=="015-agent-sync-proof.sql"){using var version=connection.CreateCommand();version.Transaction=transaction;version.CommandText="PRAGMA user_version";if((long)version.ExecuteScalar()!>=15)continue;}
                 if(name=="008-vnc-approved-target.sql") {
                     using var columns=connection.CreateCommand();columns.Transaction=transaction;columns.CommandText="PRAGMA table_info(machines)";using var rows=columns.ExecuteReader();
                     var hasVncLocalIp=false;while(rows.Read())if(rows.GetString(1)=="vnc_local_ip")hasVncLocalIp=true;
@@ -47,11 +51,18 @@ public sealed partial class ControllerDatabase : IDisposable
                 using var cmd=connection.CreateCommand(); cmd.Transaction=transaction; cmd.CommandText=reader.ReadToEnd(); cmd.ExecuteNonQuery();
             }
             ControllerDatabaseMaintenance.ValidateMaintenanceChainSchema(connection,transaction);
+            ControllerDatabaseMaintenance.ValidateSyncProofSchema(connection,transaction);
+            using (var invalidateRuntimeProofs = connection.CreateCommand())
+            {
+                invalidateRuntimeProofs.Transaction = transaction;
+                invalidateRuntimeProofs.CommandText = "UPDATE agent_sync_proof_state SET token_sequence=NULL,token_digest=NULL,token_epoch=NULL,token_issued_tick=NULL,last_proven_runtime_epoch=NULL,last_proven_tick=NULL";
+                invalidateRuntimeProofs.ExecuteNonQuery();
+            }
             transaction.Commit();
         } catch { connection.Dispose(); throw; }
     }
     private bool disposed;
-    public void Dispose(){lock(gate){if(disposed)return;disposed=true;foreach(var timer in pairingPinTimers.Values)timer.Dispose();pairingPinTimers.Clear();pairingPins.Clear();connection.Dispose();}}
+    public void Dispose(){lock(gate){if(disposed)return;disposed=true;foreach(var timer in pairingPinTimers.Values)timer.Dispose();pairingPinTimers.Clear();pairingPins.Clear();CryptographicOperations.ZeroMemory(syncProofHmacKey);connection.Dispose();}}
     private SqliteCommand Command(string sql, params (string,object?)[] values) { var cmd=connection.CreateCommand();cmd.CommandText=sql; foreach(var (name,value) in values) cmd.Parameters.AddWithValue(name,value??DBNull.Value); return cmd; }
     public string? PublicKey(string id) { lock(gate) {using var cmd=Command("SELECT public_key FROM machines WHERE machine_id=$id",("$id",id)); return cmd.ExecuteScalar() as string;} }
     public EnrollmentTicketResponse CreateEnrollmentTicket() { lock(gate) {
@@ -64,13 +75,27 @@ public sealed partial class ControllerDatabase : IDisposable
         transaction.Commit();
         return new(token,expires);
     }}
-    public EnrollmentResult Enroll(EnrollmentRequest request,string? enrollmentTicket=null) { lock(gate) {
+    public EnrollmentResult Enroll(VerifiedAgentRequest verified,EnrollmentRequest request,string? enrollmentTicket=null) {
+        ArgumentNullException.ThrowIfNull(verified);
+        ArgumentNullException.ThrowIfNull(request);
+        lock(gate) {
+            if (verified.Method != "POST" || verified.Path != "/agent/enroll" || verified.MachineId != request.MachineId
+                || verified.KeyFingerprint.Length != 64 || !FixedHexEquals(PublicKeyFingerprint(request.PublicKey), verified.KeyFingerprint)
+                || !IsWithinLegacyWindow(verified))
+                throw new UnauthorizedAccessException("Signed enrollment request is invalid or outside the allowed window.");
+            using var transaction = connection.BeginTransaction();
+            if (!AcceptScopedNonce(transaction, verified)) throw new UnauthorizedAccessException("Signed enrollment request was replayed or invalidated.");
+            var result = EnrollCore(transaction, request, enrollmentTicket);
+            transaction.Commit();
+            return result;
+        }
+    }
+    private EnrollmentResult EnrollCore(SqliteTransaction transaction,EnrollmentRequest request,string? enrollmentTicket) {
         if(string.IsNullOrWhiteSpace(request.MachineId)||request.MachineId.Length>128) throw new ArgumentException("Invalid machine ID");
         using var key=ECDsa.Create(); key.ImportSubjectPublicKeyInfo(Convert.FromBase64String(request.PublicKey),out var bytes);
         if(bytes!=Convert.FromBase64String(request.PublicKey).Length) throw new ArgumentException("Invalid key");
         Ports(request.MoonlightPort,request.SunshinePort);
         ValidateNetworkMetadata(request.LocalIp, request.MacAddress);
-        using var transaction = connection.BeginTransaction();
         // Existing identities bypass admission budgets and never rewrite administrator data.
         using (var lookup = Command("SELECT public_key, approval_status FROM machines WHERE machine_id=$id", ("$id", request.MachineId)))
         {
@@ -96,13 +121,12 @@ public sealed partial class ControllerDatabase : IDisposable
             if (counts.GetInt64(0) >= policy.MaxPending || counts.GetInt64(1) >= policy.NewPerMinute)
                 throw new EnrollmentCapacityException();
         }
-        using (var insert = Command("INSERT INTO machines(machine_id,public_key,local_ip,mac_address,moonlight_port,sunshine_port) VALUES($id,$key,$ip,$mac,$moon,$sun); INSERT INTO enrollment_admissions(admitted_at) VALUES($at)",
-            ("$id",request.MachineId),("$key",request.PublicKey),("$ip",request.LocalIp),("$mac",request.MacAddress),("$moon",request.MoonlightPort),("$sun",request.SunshinePort),("$at",clock.GetUtcNow().ToUnixTimeMilliseconds()))) {
+        using (var insert = Command("INSERT INTO machines(machine_id,public_key,local_ip,mac_address,moonlight_port,sunshine_port) VALUES($id,$key,$ip,$mac,$moon,$sun); INSERT INTO enrollment_admissions(admitted_at) VALUES($at); INSERT INTO agent_sync_proof_state(machine_id,key_fingerprint) VALUES($id,$fingerprint)",
+            ("$id",request.MachineId),("$key",request.PublicKey),("$ip",request.LocalIp),("$mac",request.MacAddress),("$moon",request.MoonlightPort),("$sun",request.SunshinePort),("$at",clock.GetUtcNow().ToUnixTimeMilliseconds()),("$fingerprint",PublicKeyFingerprint(request.PublicKey)))) {
             insert.Transaction = transaction; insert.ExecuteNonQuery();
         }
-        transaction.Commit();
         return new(request.MachineId, "pending");
-    } }
+    }
     private static string? GetEnrollmentTicketHash(string? ticket) {
         if(ticket is null||!System.Text.RegularExpressions.Regex.IsMatch(ticket,@"\A[A-Za-z0-9_-]{43}\z",System.Text.RegularExpressions.RegexOptions.CultureInvariant))return null;
         return Convert.ToHexString(SHA256.HashData(System.Text.Encoding.ASCII.GetBytes(ticket)));
@@ -178,9 +202,9 @@ public sealed partial class ControllerDatabase : IDisposable
             throw new ArgumentException("Invalid MAC address");
     }
     private static void Ports(int moon,int sun) {if(moon is <1 or >65535 || sun is <1 or >65535)throw new ArgumentException("Invalid port");}
-    private static (string Readiness,bool CanRent) EvaluateRentability(string approvalStatus,long revision,DateTimeOffset now,DateTimeOffset? lastSeen,string? reportedReadiness,bool allocationHeld,bool maintenanceLocked,long? appliedRevision) {
+    private static (string Readiness,bool CanRent) EvaluateRentability(string approvalStatus,long revision,DateTimeOffset now,DateTimeOffset? lastSeen,string? reportedReadiness,bool allocationHeld,bool maintenanceLocked,long? appliedRevision,bool currentProof) {
         var readiness=lastSeen is null?"unknown":now-lastSeen.Value>TimeSpan.FromSeconds(20)?"unreachable":reportedReadiness??"unknown";
-        var canRent=approvalStatus=="approved" && readiness=="ready" && !allocationHeld && !maintenanceLocked && appliedRevision==revision;
+        var canRent=approvalStatus=="approved" && readiness=="ready" && !allocationHeld && !maintenanceLocked && appliedRevision==revision && currentProof;
         return (readiness,canRent);
     }
     public MachineDto[] List() => List(null);
@@ -189,13 +213,14 @@ public sealed partial class ControllerDatabase : IDisposable
         var now=clock.GetUtcNow();
         if(existingTransaction is null) {using var tx=connection.BeginTransaction();ExpireUnstartedAgentUpdates(tx,now.ToUnixTimeMilliseconds());tx.Commit();}
         else ExpireUnstartedAgentUpdates(existingTransaction,now.ToUnixTimeMilliseconds());
-        using var cmd=Command("SELECT m.machine_id,m.approval_status,m.display_name,m.hourly_price,m.local_ip,m.mac_address,m.moonlight_port,m.sunshine_port,m.revision,m.approved_by,m.approved_at,h.last_seen,h.boot_id,h.readiness,EXISTS(SELECT 1 FROM leases l WHERE l.machine_id=m.machine_id AND l.allocation_held=1),a.applied_revision,m.vnc_local_ip,h.agent_version,(SELECT COUNT(*) FROM admin_vnc_sessions v WHERE v.machine_id=m.machine_id AND v.used_at_unix_ms IS NOT NULL AND v.ended_at_unix_ms IS NULL AND v.used_at_unix_ms > $activeVncSince),d.diagnostics_json,COALESCE(c.held,0),o.operation_id,o.target_version,o.status FROM machines m LEFT JOIN machine_heartbeats h ON h.machine_id=m.machine_id LEFT JOIN machine_config_acks a ON a.machine_id=m.machine_id LEFT JOIN machine_readiness_diagnostics d ON d.machine_id=m.machine_id LEFT JOIN agent_maintenance_chains c ON c.chain_id=(SELECT c1.chain_id FROM agent_maintenance_chains c1 WHERE c1.machine_id=m.machine_id ORDER BY c1.held DESC,c1.rowid DESC LIMIT 1) LEFT JOIN agent_update_operations o ON o.operation_id=c.current_head_operation_id ORDER BY m.machine_id",("$activeVncSince",now.AddHours(-1).ToUnixTimeMilliseconds()));
+        using var cmd=Command("SELECT m.machine_id,m.approval_status,m.display_name,m.hourly_price,m.local_ip,m.mac_address,m.moonlight_port,m.sunshine_port,m.revision,m.approved_by,m.approved_at,h.last_seen,h.boot_id,h.readiness,EXISTS(SELECT 1 FROM leases l WHERE l.machine_id=m.machine_id AND l.allocation_held=1),a.applied_revision,m.vnc_local_ip,p.last_proven_version,(SELECT COUNT(*) FROM admin_vnc_sessions v WHERE v.machine_id=m.machine_id AND v.used_at_unix_ms IS NOT NULL AND v.ended_at_unix_ms IS NULL AND v.used_at_unix_ms > $activeVncSince),d.diagnostics_json,COALESCE(c.held,0),o.operation_id,o.target_version,o.status,p.last_proven_runtime_epoch,p.last_proven_tick FROM machines m LEFT JOIN machine_heartbeats h ON h.machine_id=m.machine_id LEFT JOIN machine_config_acks a ON a.machine_id=m.machine_id LEFT JOIN machine_readiness_diagnostics d ON d.machine_id=m.machine_id LEFT JOIN agent_sync_proof_state p ON p.machine_id=m.machine_id LEFT JOIN agent_maintenance_chains c ON c.chain_id=(SELECT c1.chain_id FROM agent_maintenance_chains c1 WHERE c1.machine_id=m.machine_id ORDER BY c1.held DESC,c1.rowid DESC LIMIT 1) LEFT JOIN agent_update_operations o ON o.operation_id=c.current_head_operation_id ORDER BY m.machine_id",("$activeVncSince",now.AddHours(-1).ToUnixTimeMilliseconds()));
         cmd.Transaction=existingTransaction;
         using var r=cmd.ExecuteReader(); var rows=new List<MachineDto>();
         while(r.Read()) {
             DateTimeOffset? seen=r.IsDBNull(11)?null:DateTimeOffset.Parse(r.GetString(11));
             long? appliedRevision=r.IsDBNull(15)?null:r.GetInt64(15);
-            var rentability=EvaluateRentability(r.GetString(1),r.GetInt64(8),now,seen,r.IsDBNull(13)?null:r.GetString(13),r.GetInt64(14)!=0,r.GetInt64(20)!=0,appliedRevision);
+            var currentProof=IsRecentProvenHeartbeat(r.IsDBNull(24)?null:r.GetString(24),r.IsDBNull(25)?null:r.GetInt64(25));
+            var rentability=EvaluateRentability(r.GetString(1),r.GetInt64(8),now,seen,r.IsDBNull(13)?null:r.GetString(13),r.GetInt64(14)!=0,r.GetInt64(20)!=0,appliedRevision,currentProof);
             rows.Add(new MachineDto(r.GetString(0),r.GetString(1),r.GetString(2),r.GetInt64(3),r.GetString(4),r.GetString(5),r.GetInt32(6),r.GetInt32(7),r.GetInt64(8),seen,r.IsDBNull(12)?null:r.GetString(12),rentability.Readiness,r.IsDBNull(17)?null:r.GetString(17),r.IsDBNull(9)?null:r.GetString(9),r.IsDBNull(10)?null:DateTimeOffset.Parse(r.GetString(10))) {AppliedConfigRevision=appliedRevision,VncLocalIp=r.IsDBNull(16)?null:r.GetString(16),ActiveAdminVncSessions=r.GetInt32(18),CanRent=rentability.CanRent,AllocationHeld=r.GetInt64(14)!=0,ReadinessDiagnostics=r.IsDBNull(19)?null:JsonSerializer.Deserialize<ReadinessDiagnostic[]>(r.GetString(19)),AgentUpdateOperationId=r.IsDBNull(21)?null:r.GetString(21),AgentUpdateTargetVersion=r.IsDBNull(22)?null:r.GetString(22),AgentUpdateStatus=r.IsDBNull(23)?null:r.GetString(23)});
         }
         r.Close();

@@ -6,6 +6,35 @@ namespace Controller.Tests;
 public sealed class AgentUpdateMigrationTests
 {
     [Fact]
+    public void StartupAndSnapshotOperationsRejectWeakenedProofSchema()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "agent-proof-schema-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        var source = Path.Combine(root, "source.db");
+        var destination = Path.Combine(root, "destination.db");
+        var backup = Path.Combine(root, "backup.db");
+        try
+        {
+            using (new ControllerDatabase(source)) { }
+            using (new ControllerDatabase(destination)) { }
+            using (var connection = Open(source))
+            {
+                Assert.Equal(15L, Scalar(connection, "PRAGMA user_version"));
+                using var weaken = connection.CreateCommand();
+                weaken.CommandText = "DROP TRIGGER agent_update_reports_immutable_delete";
+                weaken.ExecuteNonQuery();
+            }
+            var original = File.ReadAllBytes(destination);
+            Assert.Throws<InvalidDataException>(() => new ControllerDatabase(source));
+            Assert.Throws<InvalidDataException>(() => ControllerDatabaseMaintenance.Backup(source, backup));
+            Assert.Throws<InvalidDataException>(() => ControllerDatabaseMaintenance.Restore(source, destination));
+            Assert.False(File.Exists(backup));
+            Assert.Equal(original, File.ReadAllBytes(destination));
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    [Fact]
     public void EveryLegacyNonterminalOperationImportsAsAHeldChain()
     {
         var path = Path.Combine(Path.GetTempPath(), $"agent-chain-migration-{Guid.NewGuid():N}.db");
@@ -63,7 +92,7 @@ public sealed class AgentUpdateMigrationTests
             CreateVersionElevenDatabase(path);
             using (new ControllerDatabase(path)) { }
             using var verify = Open(path);
-            Assert.Equal(14L, Scalar(verify, "PRAGMA user_version"));
+            Assert.Equal(15L, Scalar(verify, "PRAGMA user_version"));
             Assert.Equal("pc", Scalar(verify, "SELECT machine_id FROM machines"));
             using (var seed = verify.CreateCommand())
             {
@@ -86,8 +115,55 @@ public sealed class AgentUpdateMigrationTests
                 Assert.Throws<SqliteException>(() => duplicate.ExecuteNonQuery());
             }
             using (new ControllerDatabase(path)) { }
-            Assert.Equal(14L, Scalar(verify, "PRAGMA user_version"));
+            Assert.Equal(15L, Scalar(verify, "PRAGMA user_version"));
             Assert.Equal(1L, Scalar(verify, "SELECT COUNT(*) FROM agent_update_operations"));
+        }
+        finally { if (File.Exists(path)) File.Delete(path); }
+    }
+
+    [Fact]
+    public void VersionFourteenReceiptMigratesAsUnprovenAndCannotRent()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"agent-proof-v14-{Guid.NewGuid():N}.db");
+        try
+        {
+            CreateVersionElevenDatabase(path);
+            using (var connection = Open(path))
+            using (var transaction = connection.BeginTransaction())
+            {
+                foreach (var name in new[] { "012-agent-releases.sql", "013-agent-update-downloads.sql", "014-agent-maintenance-chains.sql" })
+                {
+                    using var resource = typeof(ControllerDatabase).Assembly.GetManifestResourceStream($"KamenRaider.Controller.Data.Migrations.{name}")!;
+                    using var reader = new StreamReader(resource);
+                    using var migration = connection.CreateCommand();
+                    migration.Transaction = transaction;
+                    migration.CommandText = reader.ReadToEnd();
+                    migration.ExecuteNonQuery();
+                }
+                using var seed = connection.CreateCommand();
+                seed.Transaction = transaction;
+                seed.CommandText = "UPDATE machines SET approval_status='approved'; INSERT INTO machine_config_acks(machine_id,applied_revision) VALUES('pc',1); INSERT INTO machine_heartbeats(machine_id,last_seen,boot_id,readiness,agent_version) VALUES('pc',$now,'legacy-boot','ready','legacy-hint');";
+                seed.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O"));
+                seed.ExecuteNonQuery();
+                transaction.Commit();
+            }
+
+            using (var source = Open(path)) Assert.Equal(14L, Scalar(source, "PRAGMA user_version"));
+            using (var database = new ControllerDatabase(path))
+            {
+                using (var migrated = Open(path)) Assert.Equal(15L, Scalar(migrated, "PRAGMA user_version"));
+                var machine = Assert.Single(database.List());
+                Assert.False(machine.CanRent);
+                Assert.Null(machine.AgentVersion);
+                Assert.Equal("legacy-boot", machine.BootId);
+            }
+
+            using var verify = Open(path);
+            Assert.Equal(1L, Scalar(verify, "SELECT COUNT(*) FROM agent_sync_proof_state WHERE machine_id='pc' AND mode='legacyUnproven' AND sequence=0 AND token_sequence IS NULL AND last_proven_sequence IS NULL AND last_proven_version IS NULL AND legacy_reported_version='legacy-hint'"));
+            Assert.Equal(1L, Scalar(verify, "SELECT COUNT(*) FROM machine_heartbeats WHERE machine_id='pc' AND agent_version IS NULL"));
+            Assert.Equal(0L, Scalar(verify, "SELECT COUNT(*) FROM agent_signed_request_scopes"));
+            Assert.Equal(0L, Scalar(verify, "SELECT COUNT(*) FROM agent_signed_request_nonces"));
+            Assert.Equal(0L, Scalar(verify, "SELECT COUNT(*) FROM agent_update_evidence_challenges"));
         }
         finally { if (File.Exists(path)) File.Delete(path); }
     }

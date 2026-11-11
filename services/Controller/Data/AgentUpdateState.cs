@@ -251,6 +251,9 @@ public sealed partial class ControllerDatabase
         {
             var nowMs = clock.GetUtcNow().ToUnixTimeMilliseconds();
             using var tx = connection.BeginTransaction();
+            var canonicalReport = JsonSerializer.Serialize(new { machineId, operationId, releaseVersion, targetVersion, packageHash = expectedHash, status });
+            var reportDigest = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonicalReport)));
+            var reportRequestId = reportDigest;
             string currentStatus;
             using (var operation = Command("SELECT status FROM agent_update_operations WHERE operation_id=$operation AND ticket_hash=$ticket AND machine_id=$machine AND release_version=$release AND target_version=$target AND upper(target_package_sha256)=upper($hash) AND ticket_started_at_unix_ms IS NOT NULL AND status IN ('installing','awaitingHeartbeat','rollingBack','failed') AND EXISTS(SELECT 1 FROM agent_maintenance_chains c WHERE c.chain_id=agent_update_operations.chain_id AND c.current_head_operation_id=agent_update_operations.operation_id AND c.held=1 AND c.generation=agent_update_operations.ticket_generation AND agent_update_operations.ticket_purpose='apply')",
                 ("$operation", operationId), ("$ticket", ticketHash), ("$machine", machineId), ("$release", releaseVersion), ("$target", targetVersion), ("$hash", expectedHash)))
@@ -262,8 +265,28 @@ public sealed partial class ControllerDatabase
             }
             if (currentStatus is not ("installing" or "awaitingHeartbeat" or "rollingBack" or "failed"))
                 throw new InvalidOperationException("Update operation cannot accept a status report");
+            var reportAlreadyRecorded = false;
+            using (var previousReport = Command("SELECT body_digest,status FROM agent_update_reports WHERE operation_id=$operation AND request_id=$request",
+                ("$operation", operationId), ("$request", reportRequestId)))
+            {
+                previousReport.Transaction = tx;
+                using var report = previousReport.ExecuteReader();
+                if (report.Read())
+                {
+                    if (report.GetString(0) != reportDigest || report.GetString(1) != status)
+                        throw new InvalidOperationException("Update report request ID was reused with different content");
+                    reportAlreadyRecorded = true;
+                }
+            }
+            if (reportAlreadyRecorded)
+            {
+                var duplicate = FindAgentUpdateOperation(tx, operationId);
+                tx.Commit();
+                return duplicate;
+            }
             if (currentStatus == status)
             {
+                AppendAgentUpdateReport(tx, operationId, reportRequestId, reportDigest, status);
                 var unchanged = FindAgentUpdateOperation(tx, operationId);
                 tx.Commit();
                 return unchanged;
@@ -282,10 +305,19 @@ public sealed partial class ControllerDatabase
                 update.Transaction = tx;
                 if (update.ExecuteNonQuery() != 1) throw new UnauthorizedAccessException("Update ticket changed during status reporting");
             }
+            AppendAgentUpdateReport(tx, operationId, reportRequestId, reportDigest, status);
             var result = FindAgentUpdateOperation(tx, operationId);
             tx.Commit();
             return result;
         }
+    }
+
+    private void AppendAgentUpdateReport(SqliteTransaction tx, string operationId, string requestId, string bodyDigest, string status)
+    {
+        using var insert = Command("INSERT INTO agent_update_reports(operation_id,request_id,body_digest,generation,status) VALUES($operation,$request,$digest,(SELECT COALESCE(MAX(generation),0)+1 FROM agent_update_reports WHERE operation_id=$operation),$status)",
+            ("$operation", operationId), ("$request", requestId), ("$digest", bodyDigest), ("$status", status));
+        insert.Transaction = tx;
+        insert.ExecuteNonQuery();
     }
 
     private (string OperationId, string ReleaseVersion, string TargetVersion, string TargetPackageSha256) FindAgentUpdateTicketContext(string machineId, string ticket)

@@ -17,6 +17,32 @@ public class EnrollmentHttpTests
         b.Configuration.AddInMemoryCollection(new Dictionary<string,string?> { ["InternalUrl"]="http://127.0.0.1:5101",["AgentUrl"]="https://127.0.0.1:5102",["DatabasePath"]=path,["ServiceCredential"]="secret" });
         b.WebHost.UseTestServer();b.Services.AddTransient<IStartupFilter,LoopbackTestFilter>();
     });
+    [Fact] public async Task EnrollmentNonceReplayIsRejectedAfterControllerRestart() {
+        var path=Path.Combine(Path.GetTempPath(),Guid.NewGuid()+".db");using var key=ECDsa.Create();
+        var enrollment=new EnrollmentRequest("restart-pc",Convert.ToBase64String(key.ExportSubjectPublicKeyInfo()),"192.0.2.1","001122334455",47989,47990);
+        var body=JsonSerializer.Serialize(enrollment,new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        var timestamp=DateTimeOffset.UtcNow.ToUnixTimeSeconds();var nonce=Guid.NewGuid().ToString("N");
+        var signature=Convert.ToBase64String(key.SignData(Encoding.UTF8.GetBytes($"restart-pc\nPOST\n/agent/enroll\n{timestamp}\n{nonce}\n{Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(body)))}"),HashAlgorithmName.SHA256));
+        string ticket;
+        await using(var first=Build(path)) {
+            await first.StartAsync();var database=first.Services.GetRequiredService<KamenRaider.Controller.Data.ControllerDatabase>();ticket=database.CreateEnrollmentTicket().Ticket;
+            using var client=first.GetTestClient();client.BaseAddress=new Uri("https://localhost");client.DefaultRequestHeaders.Add("Test-Local-Port","5102");
+            using var accepted=await Send(client);Assert.Equal(HttpStatusCode.OK,accepted.StatusCode);await first.StopAsync();
+        }
+        await using(var second=Build(path)) {
+            await second.StartAsync();using var client=second.GetTestClient();client.BaseAddress=new Uri("https://localhost");client.DefaultRequestHeaders.Add("Test-Local-Port","5102");
+            using var replay=await Send(client);Assert.Equal(HttpStatusCode.Unauthorized,replay.StatusCode);
+            Assert.Equal("pending",Assert.Single(second.Services.GetRequiredService<KamenRaider.Controller.Data.ControllerDatabase>().List()).ApprovalStatus);
+            await second.StopAsync();
+        }
+        File.Delete(path);
+
+        async Task<HttpResponseMessage> Send(HttpClient client) {
+            using var request=new HttpRequestMessage(HttpMethod.Post,"/agent/enroll"){Content=new StringContent(body,Encoding.UTF8,"application/json")};
+            request.Headers.Add("X-Agent-Timestamp",timestamp.ToString());request.Headers.Add("X-Agent-Nonce",nonce);request.Headers.Add("X-Agent-Signature",signature);request.Headers.Add("X-Enrollment-Ticket",ticket);
+            return await client.SendAsync(request);
+        }
+    }
     [Fact] public async Task NewEnrollmentRequiresAnAdminIssuedTicket() {
         var path=Path.Combine(Path.GetTempPath(),Guid.NewGuid()+".db");
         await using(var app=Build(path)) {

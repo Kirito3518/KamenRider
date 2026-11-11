@@ -244,8 +244,9 @@ public sealed class AgentUpdateTests
         fixture.Db.StartAgentUpdate("pc", update.Ticket);
         fixture.Db.ReportAgentUpdateStatus("pc", update.Ticket, status);
         var request = new SyncRequest("boot", "192.0.2.1", "001122334455", 3, "ready", []) { AgentVersion = version, AgentUpdateChallenge = "old-proof" };
-        var response = fixture.Db.Sync("pc", request);
-        Assert.Null(response.AgentUpdateChallenge);
+        var response = fixture.Db.SyncLegacy("pc", request);
+        Assert.Equal(200, response.StatusCode);
+        Assert.Null(response.Response?.AgentUpdateChallenge);
         Assert.Equal(status, OperationStatus(fixture.Path, update.OperationId));
         Assert.False(Assert.Single(fixture.Db.List()).CanRent);
     }

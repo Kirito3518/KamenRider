@@ -2,6 +2,7 @@ using KamenRaider.Contracts;
 using KamenRaider.Controller.Data;
 using KamenRaider.Controller.Security;
 using System.Text.Json;
+using System.Text;
 namespace KamenRaider.Controller.Machines;
 public static class MachineEndpoints
 {
@@ -19,15 +20,15 @@ public static class MachineEndpoints
         app.MapPost("/internal/machines/{id}/approve",(string id,MachineIdentityConfirmation confirmation,HttpContext context,ControllerDatabase db)=>Execute(()=>db.ApproveVerified(id,context.Request.Headers["X-Authenticated-Actor-Id"].ToString(),confirmation.Fingerprint)));
         app.MapPost("/internal/machines/{id}/reject",(string id,MachineIdentityConfirmation confirmation,ControllerDatabase db)=>Execute(()=>db.RejectPending(id,confirmation.Fingerprint)));
         app.MapPost("/agent/enroll",async (HttpContext context,ControllerDatabase db,AgentAuthentication auth)=> {
-            using var reader=new StreamReader(context.Request.Body);var body=await reader.ReadToEndAsync();
+            using var memory=new MemoryStream();await context.Request.Body.CopyToAsync(memory,context.RequestAborted);var bytes=memory.ToArray();
+            string body;try{body=new UTF8Encoding(false,true).GetString(bytes);}catch(DecoderFallbackException){return Results.BadRequest();}
             EnrollmentRequest? request;
             try {request=JsonSerializer.Deserialize<EnrollmentRequest>(body,new JsonSerializerOptions(JsonSerializerDefaults.Web));} catch(JsonException){return Results.BadRequest();}
             if(request is null)return Results.BadRequest();
-            if(!long.TryParse(context.Request.Headers["X-Agent-Timestamp"],out var seconds))return Results.Unauthorized();
-            DateTimeOffset timestamp;try {timestamp=DateTimeOffset.FromUnixTimeSeconds(seconds);}catch(ArgumentOutOfRangeException){return Results.Unauthorized();}
             // Enrollment proves possession even for a previously approved ID. Its submitted key never authenticates another route.
-            if(!auth.Verify(request.MachineId,request.PublicKey,"POST","/agent/enroll",timestamp,context.Request.Headers["X-Agent-Nonce"].ToString(),body,context.Request.Headers["X-Agent-Signature"].ToString(),DateTimeOffset.UtcNow))return Results.Unauthorized();
-            return Execute(()=>db.Enroll(request,context.Request.Headers["X-Enrollment-Ticket"].ToString()));
+            var verified=auth.VerifySignature(request.MachineId,request.PublicKey,"POST","/agent/enroll",context.Request.Headers["X-Agent-Timestamp"].ToString(),context.Request.Headers["X-Agent-Nonce"].ToString(),bytes,context.Request.Headers["X-Agent-Signature"].ToString());
+            if(verified is null)return Results.Unauthorized();
+            return Execute(()=>db.Enroll(verified,request,context.Request.Headers["X-Enrollment-Ticket"].ToString()));
         });
     }
     private static IResult Execute<T>(Func<T> action) {

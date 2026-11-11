@@ -2,10 +2,11 @@ using KamenRaider.Agent.Identity;
 using KamenRaider.Controller.Security;
 using System.Security.AccessControl;
 using System.Security.Principal;
+using System.Text;
 namespace Agent.Tests;
 public class IdentityTests
 {
-    [Fact] public void IdentityPersistsAndSignsBodyWithReplayProtection() {
+    [Fact] public void IdentityPersistsAndVerifierAuthenticatesWithoutOwningReplayAcceptance() {
         var dir=Path.Combine(Path.GetTempPath(),Guid.NewGuid().ToString());
         string id, key;
         using(var identity=DeviceIdentity.LoadOrCreate(dir)) { id=identity.MachineId; key=identity.PublicKey; }
@@ -13,10 +14,15 @@ public class IdentityTests
             Assert.Equal(id,identity.MachineId); Assert.Equal(key,identity.PublicKey);
             var auth=new AgentAuthentication(); var now=DateTimeOffset.UtcNow;
             var signature=identity.Sign("POST","/agent/heartbeat",now,"nonce","body");
-            Assert.False(auth.Verify(id,key,"POST","/agent/heartbeat",now,"nonce","tampered",signature,now));
-            Assert.True(auth.Verify(id,key,"POST","/agent/heartbeat",now,"nonce","body",signature,now));
-            Assert.False(auth.Verify(id,key,"POST","/agent/heartbeat",now,"nonce","body",signature,now));
-            Assert.False(new AgentAuthentication().Verify(id,key,"POST","/agent/heartbeat",now,"nonce","body",signature,now.AddSeconds(61)));
+            var seconds=now.ToUnixTimeSeconds().ToString(System.Globalization.CultureInfo.InvariantCulture);
+            Assert.Null(auth.VerifySignature(id,key,"POST","/agent/heartbeat",seconds,"nonce",Encoding.UTF8.GetBytes("tampered"),signature));
+            var verified=auth.VerifySignature(id,key,"POST","/agent/heartbeat",seconds,"nonce",Encoding.UTF8.GetBytes("body"),signature);
+            Assert.NotNull(verified);
+            Assert.Equal(id,verified.MachineId);Assert.Equal("POST",verified.Method);Assert.Equal("/agent/heartbeat",verified.Path);
+            Assert.NotNull(auth.VerifySignature(id,key,"POST","/agent/heartbeat",seconds,"nonce",Encoding.UTF8.GetBytes("body"),signature));
+            var future=now.AddMinutes(5);
+            var futureSignature=identity.Sign("POST","/agent/heartbeat",future,"future-nonce","body");
+            Assert.NotNull(auth.VerifySignature(id,key,"POST","/agent/heartbeat",future.ToUnixTimeSeconds().ToString(System.Globalization.CultureInfo.InvariantCulture),"future-nonce",Encoding.UTF8.GetBytes("body"),futureSignature));
         }
         Directory.Delete(dir,true);
     }

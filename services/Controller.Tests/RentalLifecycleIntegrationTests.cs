@@ -102,7 +102,7 @@ public sealed class RentalLifecycleIntegrationTests
                 var enforcer = new LeaseEnforcer(new LeaseStore(agentData), clock, clock, gate, shutdown);
                 var importer = new LeaseEnforcerReconciledLeaseImporter(enforcer);
                 var controllerUri = new Uri("https://localhost/");
-                var reconciliation = new ReconciliationClient(agentHttp, identity, controllerUri);
+                var reconciliation = new ReconciliationClient(agentHttp, identity, controllerUri, clock);
 
                 var boot = new BootReconciler(clock, gate, configuration, reconciliation, bootEnvironment, importer, new IntegrationBaselineEvidence(BootEvidenceStatus.Passed));
                 Assert.Equal(Readiness.Ready, await boot.ReconcileAsync(default));

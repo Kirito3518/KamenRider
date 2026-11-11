@@ -1,4 +1,5 @@
 using System.Net;
+using System.Text;
 using System.Text.Json;
 using KamenRaider.Agent.Identity;
 using KamenRaider.Agent.Enrollment;
@@ -28,8 +29,8 @@ public class EnrollmentClientTests
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,CancellationToken token) {
             EnrollmentTicket=request.Headers.GetValues("X-Enrollment-Ticket").Single();
             var body=await request.Content!.ReadAsStringAsync(token);
-            var timestamp=DateTimeOffset.FromUnixTimeSeconds(long.Parse(request.Headers.GetValues("X-Agent-Timestamp").Single()));
-            Verified=new AgentAuthentication().Verify(identity.MachineId,identity.PublicKey,"POST","/agent/enroll",timestamp,request.Headers.GetValues("X-Agent-Nonce").Single(),body,request.Headers.GetValues("X-Agent-Signature").Single(),DateTimeOffset.UtcNow);
+            var timestamp=request.Headers.GetValues("X-Agent-Timestamp").Single();
+            Verified=new AgentAuthentication().VerifySignature(identity.MachineId,identity.PublicKey,"POST","/agent/enroll",timestamp,request.Headers.GetValues("X-Agent-Nonce").Single(),Encoding.UTF8.GetBytes(body),request.Headers.GetValues("X-Agent-Signature").Single()) is not null;
             Assert.Equal("192.0.2.1",JsonDocument.Parse(body).RootElement.GetProperty("localIp").GetString());
             return new HttpResponseMessage(Verified?HttpStatusCode.OK:HttpStatusCode.Unauthorized) {
                 Content=new StringContent(JsonSerializer.Serialize(new {machineId=identity.MachineId,approvalStatus="pending"}))

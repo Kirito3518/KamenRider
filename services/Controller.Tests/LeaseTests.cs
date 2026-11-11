@@ -104,6 +104,7 @@ public class LeaseTests {
     [Fact] public async Task AllocationIsUniqueAcrossConnectionsAndRetriesAreDurable() {
         using var f=new LeaseFixture();
         using var other=new ControllerDatabase(f.Path,clock:f.Time);
+        other.Sync("pc",new("boot","192.0.2.1","001122334455",3,"ready",[]));
         var start=new TaskCompletionSource();
         async Task<LeaseDto?> Attempt(LeaseService service,string key) {
             await start.Task;

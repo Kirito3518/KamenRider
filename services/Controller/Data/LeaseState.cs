@@ -45,11 +45,12 @@ public sealed partial class ControllerDatabase {
             var prior=PriorRequest(tx,scope,idempotencyKey,fp);
             if(prior is not null) {var existing=FindLease(tx,prior)!.Dto;tx.Commit();return existing;}
             string? currentBoot;
-            using(var eligibility=LeaseCommand(tx,"SELECT m.approval_status,m.revision,h.last_seen,h.readiness,EXISTS(SELECT 1 FROM leases l WHERE l.machine_id=m.machine_id AND l.allocation_held=1),a.applied_revision,EXISTS(SELECT 1 FROM agent_maintenance_chains c WHERE c.machine_id=m.machine_id AND c.held=1),h.boot_id FROM machines m LEFT JOIN machine_heartbeats h ON h.machine_id=m.machine_id LEFT JOIN machine_config_acks a ON a.machine_id=m.machine_id WHERE m.machine_id=$id",("$id",machineId))) {
+            using(var eligibility=LeaseCommand(tx,"SELECT m.approval_status,m.revision,h.last_seen,h.readiness,EXISTS(SELECT 1 FROM leases l WHERE l.machine_id=m.machine_id AND l.allocation_held=1),a.applied_revision,EXISTS(SELECT 1 FROM agent_maintenance_chains c WHERE c.machine_id=m.machine_id AND c.held=1),h.boot_id,p.last_proven_runtime_epoch,p.last_proven_tick FROM machines m LEFT JOIN machine_heartbeats h ON h.machine_id=m.machine_id LEFT JOIN machine_config_acks a ON a.machine_id=m.machine_id LEFT JOIN agent_sync_proof_state p ON p.machine_id=m.machine_id WHERE m.machine_id=$id",("$id",machineId))) {
                 using var row=eligibility.ExecuteReader();
                 if(!row.Read())throw new InvalidOperationException("Machine is not currently rentable");
                 currentBoot=row.IsDBNull(7)?null:row.GetString(7);
-                var rentability=EvaluateRentability(row.GetString(0),row.GetInt64(1),nowUtc,row.IsDBNull(2)?null:DateTimeOffset.Parse(row.GetString(2)),row.IsDBNull(3)?null:row.GetString(3),row.GetInt64(4)!=0,row.GetInt64(6)!=0,row.IsDBNull(5)?null:row.GetInt64(5));
+                var currentProof=IsRecentProvenHeartbeat(row.IsDBNull(8)?null:row.GetString(8),row.IsDBNull(9)?null:row.GetInt64(9));
+                var rentability=EvaluateRentability(row.GetString(0),row.GetInt64(1),nowUtc,row.IsDBNull(2)?null:DateTimeOffset.Parse(row.GetString(2)),row.IsDBNull(3)?null:row.GetString(3),row.GetInt64(4)!=0,row.GetInt64(6)!=0,row.IsDBNull(5)?null:row.GetInt64(5),currentProof);
                 if(!rentability.CanRent)throw new InvalidOperationException("Machine is not currently rentable");
             }
             var id=Guid.NewGuid().ToString("N");

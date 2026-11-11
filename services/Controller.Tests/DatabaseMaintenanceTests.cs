@@ -353,6 +353,84 @@ public class DatabaseMaintenanceTests
         finally { DeleteRoot(root); }
     }
 
+    [Fact]
+    public void VersionFifteenBackupRestorePreservesProofReplayAndEvidenceState()
+    {
+        var root = NewRoot();
+        try
+        {
+            var source = Path.Combine(root, "source", "controller.db");
+            var backup = Path.Combine(root, "backup", "controller.db");
+            var destination = Path.Combine(root, "restored", "controller.db");
+            var packageHash = AddReleaseArtifact(source, "2.3.4", "v15 replay fixture release");
+            using (var database = new ControllerDatabase(source)) AddMachine(database, "source-machine");
+
+            string fingerprint;
+            var tokenDigest = new string('A', 64);
+            var syncNonceDigest = new string('B', 64);
+            var evidenceNonceDigest = new string('D', 64);
+            var recoveryNonceDigest = new string('E', 64);
+            using (var connection = OpenDatabase(source))
+            using (var transaction = connection.BeginTransaction())
+            {
+                using var command = connection.CreateCommand();
+                command.Transaction = transaction;
+                command.CommandText = "SELECT public_key FROM machines WHERE machine_id='source-machine'";
+                fingerprint = Convert.ToHexString(SHA256.HashData(Convert.FromBase64String((string)command.ExecuteScalar()!)));
+
+                command.CommandText = "INSERT INTO agent_maintenance_chains VALUES('chain-v15','source-machine','head-v15',3,1,0,100,100); INSERT INTO agent_update_operations(operation_id,machine_id,chain_id,release_version,target_version,target_package_sha256,status,ticket_hash,ticket_generation,ticket_purpose,ticket_expires_at_unix_ms,created_at_unix_ms,updated_at_unix_ms) VALUES('head-v15','source-machine','chain-v15','2.3.4','2.3.4',$package,'awaitingInstaller','ticket-v15',3,'apply',9999999999999,100,100);";
+                command.Parameters.AddWithValue("$package", packageHash);
+                command.ExecuteNonQuery();
+                command.Parameters.Clear();
+
+                command.CommandText = "UPDATE agent_sync_proof_state SET key_fingerprint=$fingerprint,mode='challengeRequired',sequence=8,token_sequence=8,token_digest=$digest,token_epoch='source-epoch',token_issued_tick=500,last_proven_sequence=7,last_proven_runtime_epoch='source-epoch',last_proven_tick=400,last_proven_version='1.2.3',legacy_last_second=1234,last_received_at='2026-11-11T00:00:00.0000000+00:00',legacy_reported_version='legacy-hint' WHERE machine_id='source-machine';";
+                command.Parameters.AddWithValue("$fingerprint", fingerprint);
+                command.Parameters.AddWithValue("$digest", tokenDigest);
+                command.ExecuteNonQuery();
+                command.Parameters.Clear();
+
+                command.CommandText = "INSERT INTO agent_signed_request_scopes(machine_id,key_fingerprint,path,cutoff_second) VALUES('source-machine',$fingerprint,'/agent/sync',1000); INSERT INTO agent_signed_request_nonces(machine_id,key_fingerprint,path,nonce_digest,signed_second) VALUES('source-machine',$fingerprint,'/agent/sync',$nonce,1001);";
+                command.Parameters.AddWithValue("$fingerprint", fingerprint);
+                command.Parameters.AddWithValue("$nonce", syncNonceDigest);
+                command.ExecuteNonQuery();
+                command.Parameters.Clear();
+
+                command.CommandText = "INSERT INTO agent_update_reports(operation_id,request_id,body_digest,generation,status) VALUES('head-v15','report-request',$digest,1,'awaitingHeartbeat'); INSERT INTO agent_update_evidence_challenges(challenge_id,machine_id,key_fingerprint,chain_id,head_operation_id,generation,purpose,nonce_digest,expires_at_unix_ms,consumed_at_unix_ms,request_id) VALUES('evidence-v15','source-machine',$fingerprint,'chain-v15','head-v15',3,'source',$nonce,9999999999999,2000,'source-proof-request'); INSERT INTO agent_update_evidence_challenges(challenge_id,machine_id,key_fingerprint,chain_id,head_operation_id,generation,purpose,nonce_digest,expires_at_unix_ms,consumed_at_unix_ms,request_id) VALUES('recovery-evidence-v15','source-machine',$fingerprint,'chain-v15','head-v15',3,'recoveryInspection',$recoveryNonce,9999999999999,NULL,NULL);";
+                command.Parameters.AddWithValue("$digest", new string('C', 64));
+                command.Parameters.AddWithValue("$fingerprint", fingerprint);
+                command.Parameters.AddWithValue("$nonce", evidenceNonceDigest);
+                command.Parameters.AddWithValue("$recoveryNonce", recoveryNonceDigest);
+                command.ExecuteNonQuery();
+                transaction.Commit();
+            }
+
+            ControllerDatabaseMaintenance.Backup(source, backup);
+            ControllerDatabaseMaintenance.Restore(backup, destination);
+
+            using (var snapshot = OpenDatabase(destination))
+            {
+                Assert.Equal(15L, Scalar(snapshot, "PRAGMA user_version"));
+                Assert.Equal(1L, Scalar(snapshot, $"SELECT COUNT(*) FROM agent_sync_proof_state WHERE machine_id='source-machine' AND sequence=8 AND token_sequence=8 AND token_digest='{tokenDigest}' AND last_proven_sequence=7 AND last_proven_version='1.2.3'"));
+                Assert.Equal(1L, Scalar(snapshot, "SELECT COUNT(*) FROM agent_signed_request_scopes WHERE machine_id='source-machine' AND key_fingerprint='" + fingerprint + "' AND path='/agent/sync' AND cutoff_second=1000"));
+                Assert.Equal(1L, Scalar(snapshot, $"SELECT COUNT(*) FROM agent_signed_request_nonces WHERE machine_id='source-machine' AND nonce_digest='{syncNonceDigest}' AND signed_second=1001"));
+                Assert.Equal(1L, Scalar(snapshot, "SELECT COUNT(*) FROM agent_update_reports WHERE operation_id='head-v15' AND request_id='report-request' AND generation=1"));
+                Assert.Equal(1L, Scalar(snapshot, "SELECT COUNT(*) FROM agent_update_evidence_challenges WHERE challenge_id='evidence-v15' AND purpose='source' AND consumed_at_unix_ms=2000 AND request_id='source-proof-request'"));
+                Assert.Equal(1L, Scalar(snapshot, "SELECT COUNT(*) FROM agent_update_evidence_challenges WHERE challenge_id='recovery-evidence-v15' AND purpose='recoveryInspection' AND consumed_at_unix_ms IS NULL AND request_id IS NULL"));
+            }
+
+            using (var restored = new ControllerDatabase(destination))
+            using (var reopened = OpenDatabase(destination))
+            {
+                Assert.Equal(1L, Scalar(reopened, "SELECT COUNT(*) FROM agent_sync_proof_state WHERE machine_id='source-machine' AND sequence=8 AND token_sequence IS NULL AND token_digest IS NULL AND last_proven_sequence=7 AND last_proven_version='1.2.3' AND last_proven_runtime_epoch IS NULL AND last_proven_tick IS NULL"));
+                Assert.Equal(1L, Scalar(reopened, $"SELECT COUNT(*) FROM agent_signed_request_nonces WHERE machine_id='source-machine' AND nonce_digest='{syncNonceDigest}'"));
+                Assert.Equal(1L, Scalar(reopened, "SELECT COUNT(*) FROM agent_update_evidence_challenges WHERE challenge_id='evidence-v15' AND consumed_at_unix_ms=2000"));
+                Assert.Equal(1L, Scalar(reopened, "SELECT COUNT(*) FROM agent_update_evidence_challenges WHERE challenge_id='recovery-evidence-v15' AND purpose='recoveryInspection' AND consumed_at_unix_ms IS NULL"));
+                Assert.Equal("head-v15", Assert.Single(restored.List()).AgentUpdateOperationId);
+            }
+        }
+        finally { DeleteRoot(root); }
+    }
+
     [Theory]
     [InlineData("awaitingInstaller", false, false)]
     [InlineData("installing", true, false)]
@@ -1360,6 +1438,13 @@ public class DatabaseMaintenanceTests
         var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = path, ForeignKeys = true, Pooling = false }.ToString());
         connection.Open();
         return connection;
+    }
+
+    private static long Scalar(SqliteConnection connection, string sql)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        return Convert.ToInt64(command.ExecuteScalar());
     }
 
     private static string CreateLegacyReleaseWithOperation(string path, int version, string status, bool withHeldLease)
