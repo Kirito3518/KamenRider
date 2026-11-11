@@ -22,6 +22,7 @@ public static class AgentHost
             .Validate(o => o.IsValid(), "HTTPS ControllerUrl, absolute DataDirectory, valid MoonlightPort/SunshinePort and NetworkAdapterId are required.").ValidateOnStart();
         builder.Services.AddHostedService<KamenRaider.Agent.Enrollment.EnrollmentWorker>();
         builder.Services.AddSingleton(TimeProvider.System);
+        builder.Services.TryAddSingleton<KamenRaider.Agent.Sunshine.IMaintenanceFenceReader, KamenRaider.Agent.Sunshine.WindowsMaintenanceFenceReader>();
         builder.Services.AddSingleton<KamenRaider.Agent.Leases.IBootClock,KamenRaider.Agent.Leases.WindowsBootClock>();
         builder.Services.TryAddSingleton<KamenRaider.Agent.Sunshine.StreamGuardPipeClient>();
         builder.Services.TryAddSingleton<KamenRaider.Agent.Leases.IStreamGate>(sp => sp.GetRequiredService<KamenRaider.Agent.Sunshine.StreamGuardPipeClient>());
@@ -71,6 +72,7 @@ public static class StreamGuardHost
         configure?.Invoke(builder);
         builder.Services.AddWindowsService(options => options.ServiceName = "KamenRaider Stream Guard");
         builder.Services.AddSingleton(TimeProvider.System);
+        builder.Services.TryAddSingleton<KamenRaider.Agent.Sunshine.IMaintenanceFenceReader, KamenRaider.Agent.Sunshine.WindowsMaintenanceFenceReader>();
         builder.Services.AddSingleton<KamenRaider.Agent.Leases.IBootClock,KamenRaider.Agent.Leases.WindowsBootClock>();
         builder.Services.TryAddSingleton<KamenRaider.Agent.Sunshine.IWindowsServiceApi>(_ =>
         {

@@ -23,6 +23,12 @@ namespace Controller.Tests;
 
 public sealed class RentalLifecycleIntegrationTests
 {
+    private sealed class ClearMaintenanceFenceReader : IMaintenanceFenceReader
+    {
+        public MaintenanceFenceSnapshot Read() =>
+            new(true, false, "test-operation", "test-chain", "test-operation", 1, "controllerConfirmed");
+    }
+
     private const string ServiceCredential = "integration-service-credential";
     private const string LocalIp = "192.168.1.40";
     private const string MacAddress = "001122334455";
@@ -99,7 +105,7 @@ public sealed class RentalLifecycleIntegrationTests
                 var bootEnvironment = new IntegrationBootEnvironment(clock, gate, sunshine);
                 var configuration = new AppliedConfiguration(agentData);
                 var shutdown = new IntegrationShutdown();
-                var enforcer = new LeaseEnforcer(new LeaseStore(agentData), clock, clock, gate, shutdown);
+                var enforcer = new LeaseEnforcer(new LeaseStore(agentData), clock, clock, gate, shutdown, new ClearMaintenanceFenceReader());
                 var importer = new LeaseEnforcerReconciledLeaseImporter(enforcer);
                 var controllerUri = new Uri("https://localhost/");
                 var reconciliation = new ReconciliationClient(agentHttp, identity, controllerUri, clock);

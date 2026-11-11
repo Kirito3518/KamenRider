@@ -27,7 +27,8 @@ public sealed class StreamGateCoordinator(
     ISunshineServiceControl sunshine,
     TimeProvider time,
     IBootClock boot,
-    IStreamGrantHistoryStore historyStore) : IStreamGuardControl
+    IStreamGrantHistoryStore historyStore,
+    IMaintenanceFenceReader maintenanceFence) : IStreamGuardControl
 {
     private static readonly TimeSpan MaintenanceLimit = TimeSpan.FromSeconds(45);
     private readonly SemaphoreSlim lifecycle = new(1, 1);
@@ -91,6 +92,7 @@ public sealed class StreamGateCoordinator(
                 Volatile.Read(ref blockRequestGeneration) != expectedBlockRequestGeneration)
                 throw new InvalidOperationException("The stream gate was blocked while the grant request was waiting.");
 
+            EnsureMaintenanceFenceClear();
             EnsureGrantHistoryLoaded();
             PruneGrantHistory();
 
@@ -114,6 +116,7 @@ public sealed class StreamGateCoordinator(
 
                 if (await IsOpenAndVerifiedAsync(cancellationToken))
                 {
+                    EnsureMaintenanceFenceClear();
                     if (!IsCurrentGrant(grant))
                         throw new InvalidOperationException("The stream grant expired while the active gate was being verified.");
 
@@ -132,6 +135,7 @@ public sealed class StreamGateCoordinator(
             }
 
             await EnsureClosedAsync();
+            EnsureMaintenanceFenceClear();
             if (!IsCurrentGrant(grant))
                 throw new InvalidOperationException("The stream grant expired while the gate was being prepared.");
 
@@ -143,28 +147,34 @@ public sealed class StreamGateCoordinator(
             Volatile.Write(ref openingGrant, grant);
             if (Volatile.Read(ref gateGeneration) != openingGeneration ||
                 Volatile.Read(ref blockRequestGeneration) != expectedBlockRequestGeneration ||
-                !IsCurrentGrant(grant))
+                !IsCurrentGrant(grant) ||
+                IsMaintenanceFenceHeld())
                 throw new InvalidOperationException("The stream grant expired or was blocked before Sunshine could start.");
 
             // The previously verified closed state is no longer valid once a start is attempted,
             // including when StartAndWaitAsync throws after partially starting the service.
             closedVerified = false;
             await sunshine.StartAndWaitAsync(cancellationToken);
+            EnsureMaintenanceFenceClear();
             if (!await sunshine.IsRunningAsync(cancellationToken))
                 throw new IOException("Sunshine did not reach the running state while ingress was blocked.");
+            EnsureMaintenanceFenceClear();
             if (Volatile.Read(ref gateGeneration) != openingGeneration ||
                 Volatile.Read(ref blockRequestGeneration) != expectedBlockRequestGeneration ||
                 !IsCurrentGrant(grant))
                 throw new InvalidOperationException("The stream grant expired while Sunshine was starting.");
 
             await ingress.SetBlockedAsync(false, cancellationToken);
+            EnsureMaintenanceFenceClear();
             if (await ingress.IsBlockedAsync(cancellationToken))
                 throw new IOException("The Sunshine firewall block remains enabled.");
+            EnsureMaintenanceFenceClear();
             if (!await sunshine.IsRunningAsync(cancellationToken))
                 throw new IOException("Sunshine stopped while opening stream ingress.");
             if (Volatile.Read(ref gateGeneration) != openingGeneration ||
                 Volatile.Read(ref blockRequestGeneration) != expectedBlockRequestGeneration ||
-                !IsCurrentGrant(grant))
+                !IsCurrentGrant(grant) ||
+                IsMaintenanceFenceHeld())
                 throw new InvalidOperationException("The stream grant expired before ingress was confirmed open.");
 
             Volatile.Write(ref currentGrant, grant);
@@ -199,6 +209,9 @@ public sealed class StreamGateCoordinator(
         await lifecycle.WaitAsync(cancellationToken);
         try
         {
+            if (IsMaintenanceFenceHeld())
+                return false;
+
             var grant = CurrentGrant;
             if (maintenanceActive || grant is null ||
                 !string.Equals(grant.RentalId, scope.RentalId, StringComparison.Ordinal) ||
@@ -209,7 +222,9 @@ public sealed class StreamGateCoordinator(
                 !IsCurrentGrant(grant))
                 return false;
 
-            return await IsOpenAndVerifiedAsync(cancellationToken) && IsCurrentGrant(grant);
+            return await IsOpenAndVerifiedAsync(cancellationToken) &&
+                IsCurrentGrant(grant) &&
+                !IsMaintenanceFenceHeld();
         }
         finally
         {
@@ -222,20 +237,26 @@ public sealed class StreamGateCoordinator(
         await lifecycle.WaitAsync(cancellationToken);
         try
         {
+            EnsureMaintenanceFenceClear();
             if (maintenanceActive)
                 throw new InvalidOperationException("Fenced Sunshine maintenance is already active.");
 
             await EnsureClosedAsync();
+            EnsureMaintenanceFenceClear();
             maintenanceActive = true;
             maintenanceBootId = boot.BootId;
             maintenanceDeadlineUptimeMilliseconds = checked(boot.UptimeMilliseconds + (long)MaintenanceLimit.TotalMilliseconds);
             closedVerified = false;
 
+            EnsureMaintenanceFenceClear();
             await sunshine.StartAndWaitAsync(cancellationToken);
+            EnsureMaintenanceFenceClear();
             if (!await ingress.IsBlockedAsync(cancellationToken))
                 throw new IOException("Sunshine ingress became unblocked during fenced maintenance.");
+            EnsureMaintenanceFenceClear();
             if (!await sunshine.IsRunningAsync(cancellationToken))
                 throw new IOException("Sunshine did not start behind the maintenance firewall block.");
+            EnsureMaintenanceFenceClear();
             if (boot.BootId != maintenanceBootId || boot.UptimeMilliseconds >= maintenanceDeadlineUptimeMilliseconds)
                 throw new TimeoutException("Fenced Sunshine maintenance expired while starting.");
         }
@@ -287,6 +308,12 @@ public sealed class StreamGateCoordinator(
     {
         if (!await lifecycle.WaitAsync(0, cancellationToken))
         {
+            if (IsMaintenanceFenceHeld())
+            {
+                await CloseAndDrainContendedOperationAsync();
+                return;
+            }
+
             var grant = CurrentGrant;
             if (grant is not null && !IsCurrentGrant(grant) &&
                 ReferenceEquals(Interlocked.CompareExchange(ref currentGrant, null, grant), grant))
@@ -305,6 +332,13 @@ public sealed class StreamGateCoordinator(
 
         try
         {
+            if (IsMaintenanceFenceHeld())
+            {
+                ClearMaintenanceState();
+                await BlockCoreAsync();
+                return;
+            }
+
             if (maintenanceActive)
             {
                 if (maintenanceBootId != boot.BootId || boot.UptimeMilliseconds >= maintenanceDeadlineUptimeMilliseconds)
@@ -367,9 +401,33 @@ public sealed class StreamGateCoordinator(
 
     private async Task<bool> IsOpenAndVerifiedAsync(CancellationToken cancellationToken)
     {
+        if (IsMaintenanceFenceHeld())
+            return false;
+
         var blocked = await ingress.IsBlockedAsync(cancellationToken);
+        if (IsMaintenanceFenceHeld())
+            return false;
         var running = await sunshine.IsRunningAsync(cancellationToken);
-        return !blocked && running;
+        return !IsMaintenanceFenceHeld() && !blocked && running;
+    }
+
+    private bool IsMaintenanceFenceHeld()
+    {
+        try
+        {
+            var snapshot = maintenanceFence.Read();
+            return !snapshot.IsKnown || snapshot.IsHeld;
+        }
+        catch
+        {
+            return true;
+        }
+    }
+
+    private void EnsureMaintenanceFenceClear()
+    {
+        if (IsMaintenanceFenceHeld())
+            throw new InvalidOperationException("The durable Agent maintenance fence is held or unreadable.");
     }
 
     private bool IsCurrentGrant(StreamLeaseGrant? grant) =>

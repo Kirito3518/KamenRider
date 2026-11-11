@@ -276,7 +276,7 @@ public class StreamGuardPipeTests
         var events = new List<string>();
         var ingress = new LifecycleIngress(events);
         var sunshine = new LifecycleSunshine(events);
-        var coordinator = new StreamGateCoordinator(ingress, sunshine, TimeProvider.System, new LifecycleClock(), new GrantHistoryStore());
+        var coordinator = new StreamGateCoordinator(ingress, sunshine, TimeProvider.System, new LifecycleClock(), new GrantHistoryStore(), new TestMaintenanceFence());
         var server = CreateCurrentUserPipeServer(pipeName);
         using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
         var serve = Task.Run(async () =>
@@ -329,7 +329,7 @@ public class StreamGuardPipeTests
         var events = new List<string>();
         var ingress = new LifecycleIngress(events);
         var sunshine = new LifecycleSunshine(events);
-        var coordinator = new StreamGateCoordinator(ingress, sunshine, TimeProvider.System, new LifecycleClock(), new GrantHistoryStore());
+        var coordinator = new StreamGateCoordinator(ingress, sunshine, TimeProvider.System, new LifecycleClock(), new GrantHistoryStore(), new TestMaintenanceFence());
         var server = CreateCurrentUserPipeServer(pipeName);
         using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
         var serve = Task.Run(async () =>

@@ -1,6 +1,7 @@
 <Solution>
   <Project Path="Agent.Tests/Agent.Tests.csproj" />
   <Project Path="Agent/Agent.csproj" />
+  <Project Path="AgentMaintenance/AgentMaintenance.csproj" />
   <Project Path="AgentPackage/AgentPackage.csproj" />
   <Project Path="AgentPackageVerifier/AgentPackageVerifier.csproj" />
   <Project Path="Contracts/Contracts.csproj" />

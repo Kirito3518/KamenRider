@@ -131,13 +131,14 @@ public class StreamGateCoordinatorTests
         public readonly Ingress Ingress;
         public readonly Sunshine Sunshine;
         public readonly GrantHistoryStore History = new();
+        public readonly TestMaintenanceFence Fence = new();
         public readonly StreamGateCoordinator Gate;
 
         public Fixture()
         {
             Ingress = new(Events);
             Sunshine = new(Events);
-            Gate = new(Ingress, Sunshine, Clock, Clock, History);
+            Gate = new(Ingress, Sunshine, Clock, Clock, History, Fence);
         }
 
         public StreamLeaseGrant Grant(long revision = 1, long deadline = 61000, int expirySeconds = 60) =>
@@ -156,6 +157,67 @@ public class StreamGateCoordinatorTests
         Assert.True(f.Ingress.Blocked);
         Assert.False(f.Sunshine.Running);
         Assert.Null(f.Gate.CurrentGrant);
+    }
+
+    [Fact]
+    public async Task DurableMaintenanceHoldRejectsGrantAndOrdinaryBlockCannotClearIt()
+    {
+        var f = new Fixture();
+        f.Fence.SetHeld();
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => f.Gate.AllowAsync(f.Grant(), default));
+        Assert.True(f.Ingress.Blocked);
+        Assert.False(f.Sunshine.Running);
+
+        await f.Gate.BlockAsync(default);
+
+        Assert.True(f.Fence.Read().IsHeld);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => f.Gate.AllowAsync(f.Grant(), default));
+        Assert.True(f.Ingress.Blocked);
+        Assert.False(f.Sunshine.Running);
+    }
+
+    [Fact]
+    public async Task DurableHoldDiscoveredDuringDelayedAllowClosesGateBeforeReturning()
+    {
+        var f = new Fixture();
+        using var entered = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        f.Ingress.ApplyAllowBeforeDelay = true;
+        f.Ingress.AllowEntered = entered;
+        f.Ingress.ContinueAllow = release;
+
+        var allow = Task.Run(() => f.Gate.AllowAsync(f.Grant(), default));
+        Assert.True(entered.Wait(TimeSpan.FromSeconds(2)));
+        f.Fence.SetHeld();
+        release.Set();
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => allow);
+        Assert.True(f.Ingress.Blocked);
+        Assert.False(f.Sunshine.Running);
+        Assert.True(f.Gate.CurrentGrant is null);
+    }
+
+    [Fact]
+    public async Task RestartedGuardRepairsUnexpectedOpenGateWhileDurableHoldRemains()
+    {
+        var f = new Fixture();
+        f.Ingress.Blocked = false;
+        f.Sunshine.Running = true;
+        f.Fence.SetHeld();
+
+        var restarted = new StreamGateCoordinator(
+            f.Ingress,
+            f.Sunshine,
+            f.Clock,
+            f.Clock,
+            f.History,
+            f.Fence);
+        await restarted.EnforceAsync(default);
+
+        Assert.True(f.Ingress.Blocked);
+        Assert.False(f.Sunshine.Running);
+        Assert.True(f.Fence.Read().IsHeld);
     }
 
     [Fact]
@@ -505,7 +567,7 @@ public class StreamGateCoordinatorTests
         var clock = new Clock();
         var history = new GrantHistoryStore();
         var firstEvents = new List<string>();
-        var firstGate = new StreamGateCoordinator(new Ingress(firstEvents), new Sunshine(firstEvents), clock, clock, history);
+        var firstGate = new StreamGateCoordinator(new Ingress(firstEvents), new Sunshine(firstEvents), clock, clock, history, new TestMaintenanceFence());
         var original = new StreamLeaseGrant("rental", 1, "boot", clock.Now.AddSeconds(60), 61000);
         var latest = new StreamLeaseGrant("rental", 2, "boot", clock.Now.AddSeconds(120), 121000);
         await firstGate.AllowAsync(original, default);
@@ -515,7 +577,7 @@ public class StreamGateCoordinatorTests
         var restartedEvents = new List<string>();
         var restartedIngress = new Ingress(restartedEvents);
         var restartedSunshine = new Sunshine(restartedEvents);
-        var restartedGate = new StreamGateCoordinator(restartedIngress, restartedSunshine, clock, clock, history);
+        var restartedGate = new StreamGateCoordinator(restartedIngress, restartedSunshine, clock, clock, history, new TestMaintenanceFence());
         await restartedGate.BlockAsync(default);
 
         await Assert.ThrowsAsync<InvalidOperationException>(() => restartedGate.AllowAsync(original, default));
@@ -532,7 +594,7 @@ public class StreamGateCoordinatorTests
         var clock = new Clock();
         var history = new GrantHistoryStore();
         var firstEvents = new List<string>();
-        var firstGate = new StreamGateCoordinator(new Ingress(firstEvents), new Sunshine(firstEvents), clock, clock, history);
+        var firstGate = new StreamGateCoordinator(new Ingress(firstEvents), new Sunshine(firstEvents), clock, clock, history, new TestMaintenanceFence());
         var earlierRental = new StreamLeaseGrant("rental-a", 1, "boot", clock.Now.AddSeconds(60), 61000);
         var laterRental = new StreamLeaseGrant("rental-b", 1, "boot", clock.Now.AddSeconds(120), 121000);
         await firstGate.AllowAsync(earlierRental, default);
@@ -543,7 +605,7 @@ public class StreamGateCoordinatorTests
         var restartedEvents = new List<string>();
         var restartedIngress = new Ingress(restartedEvents);
         var restartedSunshine = new Sunshine(restartedEvents);
-        var restartedGate = new StreamGateCoordinator(restartedIngress, restartedSunshine, clock, clock, history);
+        var restartedGate = new StreamGateCoordinator(restartedIngress, restartedSunshine, clock, clock, history, new TestMaintenanceFence());
         await restartedGate.BlockAsync(default);
 
         await Assert.ThrowsAsync<InvalidOperationException>(() => restartedGate.AllowAsync(earlierRental, default));

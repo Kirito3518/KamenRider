@@ -318,7 +318,7 @@ public class AgentSyncCycleTests {
         public Clock Clock=new();
         public AppliedConfiguration Configuration;
         public Gate Gate=new();public LeaseEnforcer Enforcer;
-        public Fixture(){System.IO.Directory.CreateDirectory(ConfigDirectory);Configuration=new(ConfigDirectory);Enforcer=new(new LeaseStore(Path.Combine(Directory,"leases")),Clock,Clock,Gate,new Power());}
+        public Fixture(){System.IO.Directory.CreateDirectory(ConfigDirectory);Configuration=new(ConfigDirectory);Enforcer=new(new LeaseStore(Path.Combine(Directory,"leases")),Clock,Clock,Gate,new Power(),new TestMaintenanceFence());}
         public CommandEnvelope Command(long revision=1,int expiry=60,string id="cmd")=>new(id,"ApplyLease","rental",revision,"boot",Clock.Now.AddMinutes(3),JsonSerializer.SerializeToElement(new{startsAtUtc=DateTimeOffset.Parse("2026-10-29T00:00:00Z"),expiresAtUtc=DateTimeOffset.Parse("2026-10-29T00:00:00Z").AddSeconds(expiry)}));
         public void Dispose(){if(System.IO.Directory.Exists(Directory))System.IO.Directory.Delete(Directory,true);}
     }

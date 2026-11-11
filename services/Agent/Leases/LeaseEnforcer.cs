@@ -1,21 +1,38 @@
 using System.Text.Json;
 using KamenRaider.Contracts;
 using KamenRaider.Agent.Power;
+using KamenRaider.Agent.Sunshine;
 namespace KamenRaider.Agent.Leases;
 public interface IBootClock {string BootId {get;} long UptimeMilliseconds {get;}}
 public sealed record StreamLeaseGrant(string RentalId,long Revision,string BootId,DateTimeOffset ExpiresAtUtc,long DeadlineUptimeMilliseconds);
 public interface IStreamGate {Task BlockAsync(CancellationToken ct);Task AllowAsync(StreamLeaseGrant grant,CancellationToken ct);}
-public sealed class LeaseEnforcer(LeaseStore store,TimeProvider time,IBootClock boot,IStreamGate gate,IShutdown shutdown) {
+public sealed record LeaseMaintenanceSnapshot(
+ bool IsKnown,
+ LeaseSnapshot? Current,
+ LeaseSnapshot? PendingInitial,
+ string? Fault,
+ MaintenanceFenceSnapshot Fence);
+
+public sealed class LeaseEnforcer(LeaseStore store,TimeProvider time,IBootClock boot,IStreamGate gate,IShutdown shutdown,IMaintenanceFenceReader maintenanceFence) {
  private readonly SemaphoreSlim commands=new(1,1);
  private readonly object state=new();
  private bool initialized;private bool requiresControllerTime;private bool controllerTimeObserved;private bool importSaved;private volatile bool confirmed;private int shutdownState;private int expiryGateInFlight;private long? recoveryDeadline;
  private LeaseSnapshot? current;private LeaseSnapshot? pendingInitial;private string? fault;private DateTimeOffset? serverTime;private long serverUptime;
  public LeaseSnapshot? Current=>Volatile.Read(ref current);
  public string? Fault=>Volatile.Read(ref fault);
- public bool CanStream=>confirmed&&Fault is null&&Current is {} s&&s.BootId==boot.BootId&&boot.UptimeMilliseconds<s.DeadlineUptimeMilliseconds;
- public KamenRaider.Agent.Sunshine.PairingScope? CurrentPairingScope {get{lock(state){if(!confirmed||fault is not null||current is not{} s||s.BootId!=boot.BootId||boot.UptimeMilliseconds>=EnforcementDeadline(s))return null;return new(s.RentalId,s.Revision,s.BootId,s.ExpiresAtUtc,EnforcementDeadline(s));}}}
+ public async Task<LeaseMaintenanceSnapshot> GetMaintenanceSnapshotAsync(CancellationToken ct){
+  await commands.WaitAsync(ct);try{
+   await InitializeCoreAsync(ct,false);
+   var fence=ReadMaintenanceFence();
+   lock(state)return new(initialized&&fault is null&&fence.IsKnown,current,pendingInitial,fault,fence);
+  }finally{commands.Release();}
+ }
+ public bool CanStream=>!IsMaintenanceFenceHeld()&&confirmed&&Fault is null&&Current is {} s&&s.BootId==boot.BootId&&boot.UptimeMilliseconds<s.DeadlineUptimeMilliseconds;
+ private MaintenanceFenceSnapshot ReadMaintenanceFence(){try{return maintenanceFence.Read();}catch{return MaintenanceFenceSnapshot.UnknownHeld;}}
+ private bool IsMaintenanceFenceHeld(){var snapshot=ReadMaintenanceFence();return !snapshot.IsKnown||snapshot.IsHeld;}
+ public KamenRaider.Agent.Sunshine.PairingScope? CurrentPairingScope {get{if(IsMaintenanceFenceHeld())return null;lock(state){if(IsMaintenanceFenceHeld()||!confirmed||fault is not null||current is not{} s||s.BootId!=boot.BootId||boot.UptimeMilliseconds>=EnforcementDeadline(s))return null;return new(s.RentalId,s.Revision,s.BootId,s.ExpiresAtUtc,EnforcementDeadline(s));}}}
  public TimeSpan PairingCommandTimeRemaining(CommandEnvelope command){lock(state){if(!CanStream||Current is not {} s||command.Type!="PairPin"||command.RentalId!=s.RentalId||command.LeaseRevision!=s.Revision||command.BootId!=s.BootId)return TimeSpan.Zero;var until=command.ValidUntilUtc<s.ExpiresAtUtc?command.ValidUntilUtc:s.ExpiresAtUtc;var remaining=until-EffectiveNow();return remaining>TimeSpan.Zero?remaining:TimeSpan.Zero;}}
- public async Task<bool> CanPrepareMachineAsync(CommandEnvelope command,CancellationToken ct){await commands.WaitAsync(ct);try{await InitializeCoreAsync(ct);lock(state)return fault is null&&command.Type=="PrepareMachine"&&command.LeaseRevision>0&&!string.IsNullOrWhiteSpace(command.RentalId)&&command.BootId==boot.BootId&&command.ValidUntilUtc>EffectiveNow()&&current is null&&pendingInitial is null;}finally{commands.Release();}}
+ public async Task<bool> CanPrepareMachineAsync(CommandEnvelope command,CancellationToken ct){await commands.WaitAsync(ct);try{await InitializeCoreAsync(ct);lock(state)return !IsMaintenanceFenceHeld()&&fault is null&&command.Type=="PrepareMachine"&&command.LeaseRevision>0&&!string.IsNullOrWhiteSpace(command.RentalId)&&command.BootId==boot.BootId&&command.ValidUntilUtc>EffectiveNow()&&current is null&&pendingInitial is null;}finally{commands.Release();}}
  public async Task InitializeAsync(CancellationToken ct){await commands.WaitAsync(ct);try{await InitializeCoreAsync(ct);}finally{commands.Release();}}
  private async Task InitializeCoreAsync(CancellationToken ct,bool blockGate=true){if(initialized)return;
   try{var loaded=await store.LoadAsync(ct);
@@ -60,7 +77,7 @@ private DateTimeOffset EffectiveNow(){var now=time.GetUtcNow();if(serverTime is 
  }
  public async Task<bool> ImportReconciledLeaseAsync(ActiveLeaseConfirmation lease,DateTimeOffset controllerTime,long requestStartedUptime,CancellationToken ct){await commands.WaitAsync(ct);try{
   await InitializeCoreAsync(ct,false);LeaseSnapshot next;
-  lock(state){var now=boot.UptimeMilliseconds;var old=current;if(lease.BootId!=boot.BootId||lease.LeaseRevision<=0||string.IsNullOrWhiteSpace(lease.RentalId)||requestStartedUptime<0||requestStartedUptime>now)return false;
+  lock(state){var now=boot.UptimeMilliseconds;var old=current;if(IsMaintenanceFenceHeld()||lease.BootId!=boot.BootId||lease.LeaseRevision<=0||string.IsNullOrWhiteSpace(lease.RentalId)||requestStartedUptime<0||requestStartedUptime>now)return false;
    if(old is null){if(fault is not null||pendingInitial is not null)return false;}
    else if(fault!="ReconciliationRequired"||old.BootId==boot.BootId||old.RecoveryDeadlineUptimeMilliseconds is not null||lease.RentalId!=old.RentalId||lease.LeaseRevision!=old.Revision||lease.ExpiresAtUtc!=old.ExpiresAtUtc)return false;
    var effective=controllerTime.AddMilliseconds(now-requestStartedUptime);var floor=EffectiveNow();if(floor>effective)effective=floor;if(lease.ExpiresAtUtc<=effective)return false;
@@ -68,13 +85,14 @@ private DateTimeOffset EffectiveNow(){var now=time.GetUtcNow();if(serverTime is 
    next=new(lease.RentalId,lease.LeaseRevision,lease.ExpiresAtUtc,lease.BootId,commandId,checked(now+(long)(lease.ExpiresAtUtc-effective).TotalMilliseconds));current=next;recoveryDeadline=null;fault="ImportPending";confirmed=false;importSaved=false;controllerTimeObserved=true;
   }
   await gate.BlockAsync(ct);
+  if(IsMaintenanceFenceHeld())return false;
   try{await store.SaveAsync(next,ct);}catch(Exception ex) when(ex is IOException or UnauthorizedAccessException){lock(state){fault="LeaseStorageFailed";}return false;}
-  lock(state){importSaved=true;if(!ReferenceEquals(current,next)||fault!="ImportPending"||boot.BootId!=next.BootId||boot.UptimeMilliseconds>=next.DeadlineUptimeMilliseconds)return false;fault=null;return true;}
+  lock(state){importSaved=true;if(IsMaintenanceFenceHeld()||!ReferenceEquals(current,next)||fault!="ImportPending"||boot.BootId!=next.BootId||boot.UptimeMilliseconds>=next.DeadlineUptimeMilliseconds)return false;fault=null;return true;}
  }finally{commands.Release();}}
  public async Task<CommandResult> ApplyAsync(CommandEnvelope command,CancellationToken ct){await commands.WaitAsync(ct);LeaseSnapshot? initialCandidate=null;var initialMayBeDurable=false;try{
   await InitializeCoreAsync(ct,false);var failed=new CommandResult(command.CommandId,"failed",command.LeaseRevision,"LeaseRejected");LeaseSnapshot? previous;LeaseSnapshot next;
   lock(state){
-   if(fault is not null||command.Type!="ApplyLease"||command.BootId!=boot.BootId||command.LeaseRevision<=0||string.IsNullOrWhiteSpace(command.RentalId)||command.ValidUntilUtc<=EffectiveNow())return failed;
+   if(IsMaintenanceFenceHeld()||fault is not null||command.Type!="ApplyLease"||command.BootId!=boot.BootId||command.LeaseRevision<=0||string.IsNullOrWhiteSpace(command.RentalId)||command.ValidUntilUtc<=EffectiveNow())return failed;
    DateTimeOffset expires,starts;try{expires=command.Payload.GetProperty("expiresAtUtc").GetDateTimeOffset();starts=command.Payload.GetProperty("startsAtUtc").GetDateTimeOffset();}catch(Exception ex) when(ex is InvalidOperationException or KeyNotFoundException or FormatException){return failed;}
    if(expires<=EffectiveNow()||starts>expires)return failed;
    previous=current;
@@ -97,7 +115,7 @@ private DateTimeOffset EffectiveNow(){var now=time.GetUtcNow();if(serverTime is 
   // Neither disk nor gate owns the expiry path. Recheck after every await before publishing.
   lock(state){if(!CanCommit(previous,next,command))return failed;if(next.RecoveryDeadlineUptimeMilliseconds is {} guard)recoveryDeadline=recoveryDeadline is {} existing?Math.Min(existing,guard):guard;current=next;return new(command.CommandId,"applied",command.LeaseRevision);}
  }finally{lock(state){if(ReferenceEquals(pendingInitial,initialCandidate)&&(!initialMayBeDurable||ReferenceEquals(current,initialCandidate)))pendingInitial=null;}commands.Release();}}
- private bool CanCommit(LeaseSnapshot? previous,LeaseSnapshot next,CommandEnvelope command)=>fault is null&&ReferenceEquals(previous,current)&&boot.BootId==next.BootId&&boot.UptimeMilliseconds<next.DeadlineUptimeMilliseconds&&(previous is null||boot.UptimeMilliseconds<EnforcementDeadline(previous))&&command.ValidUntilUtc>EffectiveNow();
+ private bool CanCommit(LeaseSnapshot? previous,LeaseSnapshot next,CommandEnvelope command)=>!IsMaintenanceFenceHeld()&&fault is null&&ReferenceEquals(previous,current)&&boot.BootId==next.BootId&&boot.UptimeMilliseconds<next.DeadlineUptimeMilliseconds&&(previous is null||boot.UptimeMilliseconds<EnforcementDeadline(previous))&&command.ValidUntilUtc>EffectiveNow();
  public async Task ConfirmAsync(ActiveLeaseConfirmation? confirmation,CancellationToken ct){await commands.WaitAsync(ct);try{await InitializeCoreAsync(ct);LeaseSnapshot? candidate;
   lock(state){confirmed=false;candidate=CanTryOpenGate(confirmation)?current:null;}
   if(candidate?.RecoveryDeadlineUptimeMilliseconds is not null){var finalized=candidate with{RecoveryDeadlineUptimeMilliseconds=null};try{
@@ -111,11 +129,16 @@ private DateTimeOffset EffectiveNow(){var now=time.GetUtcNow();if(serverTime is 
    try{await gate.BlockAsync(CancellationToken.None);}catch(Exception blockError){throw new AggregateException("The stream gate failed to open and could not be confirmed closed.",openError,blockError);}
    throw;
   }
+  if(IsMaintenanceFenceHeld()){
+   lock(state)confirmed=false;
+   await gate.BlockAsync(CancellationToken.None);
+   return;
+  }
   lock(state){if(ReferenceEquals(current,candidate)&&CanTryOpenGate(confirmation)){if(fault=="StreamGateFailed")fault=null;confirmed=Matches(confirmation);}else confirmed=false;}
   if(!CanStream)await gate.BlockAsync(ct);
  }finally{commands.Release();}}
- private bool CanTryOpenGate(ActiveLeaseConfirmation? confirmation)=>(fault is null or "StreamGateFailed")&&LeaseMatches(confirmation);
- private bool Matches(ActiveLeaseConfirmation? confirmation)=>fault is null&&LeaseMatches(confirmation);
+ private bool CanTryOpenGate(ActiveLeaseConfirmation? confirmation)=>!IsMaintenanceFenceHeld()&&(fault is null or "StreamGateFailed")&&LeaseMatches(confirmation);
+ private bool Matches(ActiveLeaseConfirmation? confirmation)=>!IsMaintenanceFenceHeld()&&fault is null&&LeaseMatches(confirmation);
  private bool LeaseMatches(ActiveLeaseConfirmation? confirmation)=>(!requiresControllerTime||controllerTimeObserved)&&current is {} s&&s.BootId==boot.BootId&&boot.UptimeMilliseconds<EnforcementDeadline(s)&&confirmation is {} c&&c.RentalId==s.RentalId&&c.BootId==s.BootId&&c.LeaseRevision==s.Revision&&c.ExpiresAtUtc==s.ExpiresAtUtc;
  public async Task EnforceAsync(CancellationToken ct){
   // No command semaphore, disk operation, or gate operation may delay known expiry.

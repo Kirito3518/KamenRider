@@ -1,0 +1,546 @@
+using System.Runtime.InteropServices;
+using System.Runtime.Versioning;
+using System.Security.AccessControl;
+using System.Security.Principal;
+using System.Text.Json;
+using System.Text.RegularExpressions;
+using Microsoft.Win32.SafeHandles;
+
+namespace KamenRaider.AgentMaintenance;
+
+public sealed record MaintenanceOperationBinding(
+    string OperationId,
+    string ChainId,
+    string HeadOperationId,
+    long Generation,
+    string ControllerOrigin,
+    string EnrollmentKeyFingerprint,
+    int HelperProtocol,
+    string TargetRuntime,
+    string TargetVersion,
+    string TargetSha256);
+
+public sealed record MaintenanceJournalEvidence(
+    string? BackupOwnerOperationId = null,
+    string? BackupDigest = null,
+    string? SourceVersion = null,
+    string? SourceInventoryDigest = null);
+
+public sealed record MaintenanceJournalOperation(
+    MaintenanceOperationBinding Binding,
+    string Phase,
+    List<string> PhaseHistory,
+    string? BackupOwnerOperationId = null,
+    string? BackupDigest = null,
+    string? SourceVersion = null,
+    string? SourceInventoryDigest = null);
+
+public sealed record MaintenanceJournalSnapshot(
+    int SchemaVersion,
+    string ChainId,
+    string HeadOperationId,
+    long Generation,
+    List<MaintenanceJournalOperation> Operations);
+
+public interface IMaintenanceJournalStore
+{
+    MaintenanceJournalSnapshot? Read(string chainId);
+    void WriteAtomic(string chainId, MaintenanceJournalSnapshot snapshot);
+}
+
+public sealed class MaintenanceJournal(IMaintenanceJournalStore store, string chainId)
+{
+    private static readonly string[] NormalPhases =
+    [
+        "inspected",
+        "controllerStarted",
+        "targetValidated",
+        "servicesQuiesced",
+        "backupPublished",
+        "sourceBound",
+        "swapIntent",
+        "sourceMoved",
+        "targetPlaced",
+        "servicesStarted",
+        "outcomeReported",
+        "controllerConfirmed"
+    ];
+
+    public MaintenanceJournalSnapshot Start(MaintenanceOperationBinding binding)
+    {
+        ArgumentNullException.ThrowIfNull(store);
+        ArgumentNullException.ThrowIfNull(binding);
+        ValidateChainId(chainId);
+        ValidateBinding(binding);
+        if (!string.Equals(binding.ChainId, chainId, StringComparison.Ordinal))
+            throw new InvalidOperationException("The operation belongs to another maintenance chain.");
+
+        var current = ReadValidated();
+        if (current is not null)
+        {
+            var existing = current.Operations.SingleOrDefault(entry => entry.Binding.OperationId == binding.OperationId);
+            if (existing is not null && existing.Binding == binding)
+                return current;
+            throw new InvalidOperationException("The maintenance chain already has a journaled operation or this operation binding changed.");
+        }
+
+        if (binding.HeadOperationId != binding.OperationId)
+            throw new InvalidOperationException("A new maintenance journal must begin at its operation head.");
+        var operation = new MaintenanceJournalOperation(binding, "inspected", ["inspected"]);
+        var snapshot = new MaintenanceJournalSnapshot(1, chainId, binding.OperationId, binding.Generation, [operation]);
+        ValidateSnapshot(snapshot);
+        store.WriteAtomic(chainId, snapshot);
+        return ReadPublished(snapshot);
+    }
+
+    public MaintenanceJournalSnapshot Advance(
+        string operationId,
+        string nextPhase,
+        MaintenanceJournalEvidence? evidence = null)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(operationId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(nextPhase);
+        var current = ReadValidated()
+            ?? throw new InvalidOperationException("The maintenance journal is missing; the operation remains held.");
+        if (current.HeadOperationId != operationId || current.Operations.Count != 1 ||
+            current.Operations[0].Binding.OperationId != operationId)
+            throw new InvalidOperationException("Only the current journal head can advance.");
+
+        var operation = current.Operations[0];
+        var resolvedEvidence = evidence ?? new MaintenanceJournalEvidence();
+        if (operation.Phase == nextPhase)
+        {
+            if (EvidenceMatches(operation, nextPhase, resolvedEvidence))
+                return current;
+            throw new InvalidOperationException("A retried journal phase has different evidence.");
+        }
+        var phaseIndex = Array.IndexOf(NormalPhases, operation.Phase);
+        var nextIndex = Array.IndexOf(NormalPhases, nextPhase);
+        if (phaseIndex < 0 || nextIndex != phaseIndex + 1)
+            throw new InvalidOperationException("The maintenance journal phase must advance exactly one step.");
+
+        var updated = ApplyEvidence(operation, nextPhase, resolvedEvidence);
+        var operations = new List<MaintenanceJournalOperation> { updated };
+        var snapshot = current with { Operations = operations };
+        ValidateSnapshot(snapshot);
+        store.WriteAtomic(chainId, snapshot);
+        return ReadPublished(snapshot);
+    }
+
+    public MaintenanceJournalSnapshot? Read() => ReadValidated();
+
+    private MaintenanceJournalOperation ApplyEvidence(
+        MaintenanceJournalOperation current,
+        string nextPhase,
+        MaintenanceJournalEvidence evidence)
+    {
+        if (nextPhase == "backupPublished")
+        {
+            if (!string.Equals(evidence.BackupOwnerOperationId, current.Binding.OperationId, StringComparison.Ordinal) ||
+                !IsDigest(evidence.BackupDigest) ||
+                evidence.SourceVersion is not null || evidence.SourceInventoryDigest is not null)
+                throw new InvalidOperationException("A verified backup owner and digest are required before backupPublished.");
+            return current with
+            {
+                Phase = nextPhase,
+                PhaseHistory = Append(current.PhaseHistory, nextPhase),
+                BackupOwnerOperationId = evidence.BackupOwnerOperationId,
+                BackupDigest = evidence.BackupDigest
+            };
+        }
+
+        if (nextPhase == "sourceBound")
+        {
+            if (current.BackupOwnerOperationId is null || current.BackupDigest is null ||
+                string.IsNullOrWhiteSpace(evidence.SourceVersion) ||
+                !IsDigest(evidence.SourceInventoryDigest) ||
+                evidence.BackupOwnerOperationId is not null || evidence.BackupDigest is not null ||
+                string.Equals(evidence.SourceVersion, current.Binding.TargetVersion, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("A distinct source version, inventory digest, and published backup are required before sourceBound.");
+            return current with
+            {
+                Phase = nextPhase,
+                PhaseHistory = Append(current.PhaseHistory, nextPhase),
+                SourceVersion = evidence.SourceVersion,
+                SourceInventoryDigest = evidence.SourceInventoryDigest
+            };
+        }
+
+        if (evidence != new MaintenanceJournalEvidence())
+            throw new InvalidOperationException("Evidence is accepted only when publishing a backup or binding a source.");
+        return current with { Phase = nextPhase, PhaseHistory = Append(current.PhaseHistory, nextPhase) };
+    }
+
+    private static bool EvidenceMatches(
+        MaintenanceJournalOperation operation,
+        string phase,
+        MaintenanceJournalEvidence evidence) => phase switch
+    {
+        "backupPublished" => operation.BackupOwnerOperationId == evidence.BackupOwnerOperationId &&
+            operation.BackupDigest == evidence.BackupDigest && evidence.SourceVersion is null && evidence.SourceInventoryDigest is null,
+        "sourceBound" => operation.SourceVersion == evidence.SourceVersion &&
+            operation.SourceInventoryDigest == evidence.SourceInventoryDigest && evidence.BackupOwnerOperationId is null && evidence.BackupDigest is null,
+        _ => evidence == new MaintenanceJournalEvidence()
+    };
+
+    private MaintenanceJournalSnapshot? ReadValidated()
+    {
+        var snapshot = store.Read(chainId);
+        if (snapshot is not null)
+            ValidateSnapshot(snapshot);
+        return snapshot;
+    }
+
+    private MaintenanceJournalSnapshot ReadPublished(MaintenanceJournalSnapshot expected)
+    {
+        var published = ReadValidated();
+        if (!SameSnapshot(published, expected))
+            throw new IOException("The atomic maintenance journal update could not be verified after publication.");
+        return published!;
+    }
+
+    private static bool SameSnapshot(MaintenanceJournalSnapshot? actual, MaintenanceJournalSnapshot expected)
+    {
+        if (actual is null || actual.SchemaVersion != expected.SchemaVersion || actual.ChainId != expected.ChainId ||
+            actual.HeadOperationId != expected.HeadOperationId || actual.Generation != expected.Generation ||
+            actual.Operations.Count != expected.Operations.Count)
+            return false;
+        for (var index = 0; index < expected.Operations.Count; index++)
+        {
+            var first = actual.Operations[index];
+            var second = expected.Operations[index];
+            if (first.Binding != second.Binding || first.Phase != second.Phase ||
+                first.BackupOwnerOperationId != second.BackupOwnerOperationId || first.BackupDigest != second.BackupDigest ||
+                first.SourceVersion != second.SourceVersion || first.SourceInventoryDigest != second.SourceInventoryDigest ||
+                !first.PhaseHistory.SequenceEqual(second.PhaseHistory, StringComparer.Ordinal))
+                return false;
+        }
+        return true;
+    }
+
+    private void ValidateSnapshot(MaintenanceJournalSnapshot snapshot)
+    {
+        if (snapshot.SchemaVersion != 1 || snapshot.ChainId != chainId || snapshot.Operations is null ||
+            snapshot.Operations.Count != 1 || snapshot.Generation <= 0)
+            throw new InvalidDataException("The maintenance journal header is invalid or unsupported.");
+        var operation = snapshot.Operations[0];
+        ValidateBinding(operation.Binding);
+        if (operation.Binding.ChainId != chainId ||
+            operation.Binding.OperationId != snapshot.HeadOperationId ||
+            operation.Binding.HeadOperationId != snapshot.HeadOperationId ||
+            operation.Binding.Generation != snapshot.Generation ||
+            operation.PhaseHistory is null || operation.PhaseHistory.Count == 0 ||
+            operation.PhaseHistory[^1] != operation.Phase ||
+            operation.PhaseHistory.Distinct(StringComparer.Ordinal).Count() != operation.PhaseHistory.Count)
+            throw new InvalidDataException("The maintenance journal operation head is inconsistent.");
+
+        var phaseIndex = Array.IndexOf(NormalPhases, operation.Phase);
+        if (phaseIndex < 0 || operation.PhaseHistory.Count != phaseIndex + 1 ||
+            !operation.PhaseHistory.SequenceEqual(NormalPhases.Take(phaseIndex + 1), StringComparer.Ordinal))
+            throw new InvalidDataException("The maintenance journal phase history is not a valid prefix.");
+
+        if (phaseIndex >= Array.IndexOf(NormalPhases, "backupPublished"))
+        {
+            if (operation.BackupOwnerOperationId != operation.Binding.OperationId || !IsDigest(operation.BackupDigest))
+                throw new InvalidDataException("The maintenance journal backup binding is missing or invalid.");
+        }
+        else if (operation.BackupOwnerOperationId is not null || operation.BackupDigest is not null)
+        {
+            throw new InvalidDataException("The maintenance journal contains backup facts before backupPublished.");
+        }
+
+        if (phaseIndex >= Array.IndexOf(NormalPhases, "sourceBound"))
+        {
+            if (string.IsNullOrWhiteSpace(operation.SourceVersion) || !IsDigest(operation.SourceInventoryDigest) ||
+                string.Equals(operation.SourceVersion, operation.Binding.TargetVersion, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException("The maintenance journal source binding is missing or invalid.");
+        }
+        else if (operation.SourceVersion is not null || operation.SourceInventoryDigest is not null)
+        {
+            throw new InvalidDataException("The maintenance journal contains source facts before sourceBound.");
+        }
+    }
+
+    private static void ValidateBinding(MaintenanceOperationBinding binding)
+    {
+        ValidateChainId(binding.ChainId);
+        ValidateChainId(binding.OperationId);
+        ValidateChainId(binding.HeadOperationId);
+        if (binding.Generation <= 0 || binding.HelperProtocol <= 0 ||
+            !Uri.TryCreate(binding.ControllerOrigin, UriKind.Absolute, out var origin) ||
+            origin.Scheme != Uri.UriSchemeHttps || origin.UserInfo.Length != 0 || origin.Query.Length != 0 || origin.Fragment.Length != 0 || origin.AbsolutePath != "/" ||
+            !string.Equals(origin.GetLeftPart(UriPartial.Authority) + "/", binding.ControllerOrigin, StringComparison.Ordinal) ||
+            !IsDigest(binding.EnrollmentKeyFingerprint) ||
+            binding.TargetRuntime is not ("win-x64" or "win-arm64") ||
+            string.IsNullOrWhiteSpace(binding.TargetVersion) || binding.TargetVersion.Length > 128 ||
+            !IsDigest(binding.TargetSha256))
+            throw new InvalidDataException("The maintenance operation binding is invalid.");
+    }
+
+    private static void ValidateChainId(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value) || value.Length > 128 ||
+            !Regex.IsMatch(value, "\\A[A-Za-z0-9._-]+\\z", RegexOptions.CultureInvariant))
+            throw new InvalidDataException("The maintenance chain or operation ID is invalid.");
+    }
+
+    private static bool IsDigest(string? value) =>
+        value is { Length: 64 } && value.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f');
+
+    private static List<string> Append(List<string> values, string value) => [.. values, value];
+}
+
+[SupportedOSPlatform("windows")]
+public sealed class WindowsMaintenanceJournalStore : IMaintenanceJournalStore
+{
+    private const int MaximumJournalBytes = 1024 * 1024;
+    private static readonly JsonSerializerOptions JsonOptions = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        PropertyNameCaseInsensitive = false,
+        MaxDepth = 12
+    };
+    private readonly string directory;
+
+    public WindowsMaintenanceJournalStore()
+    {
+        if (!OperatingSystem.IsWindows())
+            throw new PlatformNotSupportedException("The maintenance journal store requires Windows.");
+        var data = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
+        if (string.IsNullOrWhiteSpace(data) || !Path.IsPathFullyQualified(data))
+            throw new InvalidOperationException("The native CommonApplicationData path is unavailable.");
+        directory = Path.Combine(Path.GetFullPath(data), "KamenRaider.AgentMaintenance", "journals");
+    }
+
+    public MaintenanceJournalSnapshot? Read(string chainId)
+    {
+        ValidateChainId(chainId);
+        EnsureParentReady(create: false);
+        if (!Directory.Exists(directory))
+            return null;
+        EnsureDirectorySecurity(directory);
+        var path = JournalPath(chainId);
+        if (!File.Exists(path))
+            return null;
+        EnsureFileSecurity(path);
+        var bytes = ReadSingleLinkFile(path);
+        if (bytes.Length is <= 0 or > MaximumJournalBytes)
+            throw new InvalidDataException("The maintenance journal has an invalid size.");
+        try
+        {
+            return JsonSerializer.Deserialize<MaintenanceJournalSnapshot>(bytes, JsonOptions)
+                ?? throw new InvalidDataException("The maintenance journal is empty.");
+        }
+        catch (JsonException ex)
+        {
+            throw new InvalidDataException("The maintenance journal is malformed.", ex);
+        }
+    }
+
+    public void WriteAtomic(string chainId, MaintenanceJournalSnapshot snapshot)
+    {
+        ValidateChainId(chainId);
+        ArgumentNullException.ThrowIfNull(snapshot);
+        if (snapshot.ChainId != chainId)
+            throw new InvalidDataException("The journal path does not match its chain ID.");
+        EnsureParentReady(create: true);
+        EnsurePrivateDirectory();
+        var path = JournalPath(chainId);
+        if (File.Exists(path))
+            EnsureFileSecurity(path);
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(snapshot, JsonOptions);
+        if (bytes.Length is <= 0 or > MaximumJournalBytes)
+            throw new InvalidDataException("The maintenance journal exceeds its size limit.");
+
+        var temporary = Path.Combine(directory, ".journal-" + Guid.NewGuid().ToString("N") + ".tmp");
+        try
+        {
+            using (var stream = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None, 4096, FileOptions.WriteThrough))
+            {
+                SetFileSecurity(temporary);
+                stream.Write(bytes);
+                stream.Flush(flushToDisk: true);
+            }
+            EnsureFileSecurity(temporary);
+            if (File.Exists(path))
+                File.Replace(temporary, path, null, ignoreMetadataErrors: false);
+            else
+                File.Move(temporary, path);
+            EnsureFileSecurity(path);
+        }
+        finally
+        {
+            if (File.Exists(temporary))
+                File.Delete(temporary);
+        }
+    }
+
+    private string JournalPath(string chainId) => Path.Combine(directory, chainId + ".json");
+
+    private void EnsureParentReady(bool create)
+    {
+        foreach (var ancestor in Ancestors(directory))
+            if ((Directory.Exists(ancestor) || File.Exists(ancestor)) &&
+                (File.GetAttributes(ancestor) & FileAttributes.ReparsePoint) != 0)
+                throw new UnauthorizedAccessException("The maintenance journal path contains a reparse point.");
+
+        var parent = Path.GetDirectoryName(directory)!;
+        if (create)
+        {
+            new WindowsMaintenanceFenceStore().EnsureLocationForJournal();
+            EnsurePrivateDirectory();
+        }
+        else if (!Directory.Exists(parent))
+            return;
+
+        if (Directory.Exists(parent))
+            WindowsMaintenanceFenceStore.ValidateLocationForJournal();
+    }
+
+    private void EnsureDirectorySecurity(string path)
+    {
+        if ((File.GetAttributes(path) & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != FileAttributes.Directory)
+            throw new UnauthorizedAccessException("The maintenance journal path is not a regular directory.");
+        var security = new DirectoryInfo(path).GetAccessControl(AccessControlSections.Access | AccessControlSections.Owner);
+        if (!IsPrivateSecurity(security, isDirectory: true))
+            throw new UnauthorizedAccessException("The maintenance journal directory ACL or owner is unsafe.");
+    }
+
+    private void EnsureFileSecurity(string path)
+    {
+        if ((File.GetAttributes(path) & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != 0)
+            throw new UnauthorizedAccessException("The maintenance journal is not a regular file.");
+        var security = new FileInfo(path).GetAccessControl(AccessControlSections.Access | AccessControlSections.Owner);
+        if (!IsPrivateSecurity(security, isDirectory: false))
+            throw new UnauthorizedAccessException("The maintenance journal ACL or owner is unsafe.");
+        using var handle = OpenReadHandle(path);
+        if (!GetFileInformationByHandle(handle, out var info) || info.NumberOfLinks != 1)
+            throw new UnauthorizedAccessException("The maintenance journal must have exactly one hard link.");
+    }
+
+    private static bool IsPrivateSecurity(FileSystemSecurity security, bool isDirectory)
+    {
+        var system = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
+        var admins = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
+        var owner = security.GetOwner(typeof(SecurityIdentifier)) as SecurityIdentifier;
+        if (!security.AreAccessRulesProtected || owner is null || (owner != system && owner != admins))
+            return false;
+        var inheritance = isDirectory ? InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit : InheritanceFlags.None;
+        var rules = security.GetAccessRules(true, true, typeof(SecurityIdentifier)).Cast<FileSystemAccessRule>().ToArray();
+        if (rules.Length != 2)
+            return false;
+        var identities = new HashSet<SecurityIdentifier>();
+        foreach (var rule in rules)
+        {
+            if (rule.AccessControlType != AccessControlType.Allow || rule.IsInherited ||
+                rule.PropagationFlags != PropagationFlags.None || rule.InheritanceFlags != inheritance ||
+                rule.IdentityReference is not SecurityIdentifier sid || !identities.Add(sid) ||
+                rule.FileSystemRights != FileSystemRights.FullControl)
+                return false;
+        }
+        return identities.SetEquals([system, admins]);
+    }
+
+    private static void SetFileSecurity(string path)
+    {
+        var security = new FileSecurity();
+        security.SetAccessRuleProtection(true, false);
+        security.SetOwner(AdministratorsSid());
+        security.AddAccessRule(new FileSystemAccessRule(SystemSid(), FileSystemRights.FullControl, AccessControlType.Allow));
+        security.AddAccessRule(new FileSystemAccessRule(AdministratorsSid(), FileSystemRights.FullControl, AccessControlType.Allow));
+        new FileInfo(path).SetAccessControl(security);
+    }
+
+    private static DirectorySecurity CreateDirectorySecurity()
+    {
+        var security = new DirectorySecurity();
+        security.SetAccessRuleProtection(true, false);
+        security.SetOwner(AdministratorsSid());
+        const InheritanceFlags inherit = InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit;
+        security.AddAccessRule(new FileSystemAccessRule(SystemSid(), FileSystemRights.FullControl, inherit, PropagationFlags.None, AccessControlType.Allow));
+        security.AddAccessRule(new FileSystemAccessRule(AdministratorsSid(), FileSystemRights.FullControl, inherit, PropagationFlags.None, AccessControlType.Allow));
+        return security;
+    }
+
+    private void EnsurePrivateDirectory()
+    {
+        if (!Directory.Exists(directory))
+        {
+            try { new DirectoryInfo(directory).Create(CreateDirectorySecurity()); }
+            catch (IOException) when (Directory.Exists(directory)) { }
+        }
+        EnsureDirectorySecurity(directory);
+    }
+
+    private static void ValidateChainId(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value) || value.Length > 128 ||
+            !Regex.IsMatch(value, "\\A[A-Za-z0-9._-]+\\z", RegexOptions.CultureInvariant))
+            throw new InvalidDataException("The maintenance chain ID is invalid.");
+    }
+
+    private static byte[] ReadSingleLinkFile(string path)
+    {
+        using var handle = OpenReadHandle(path);
+        if (!GetFileInformationByHandle(handle, out var info) || info.NumberOfLinks != 1 ||
+            (info.Attributes & ((uint)FileAttributes.Directory | (uint)FileAttributes.ReparsePoint)) != 0)
+            throw new UnauthorizedAccessException("The maintenance journal must be a regular single-link file.");
+        using var stream = new FileStream(handle, FileAccess.Read, 4096, isAsync: false);
+        if (stream.Length is <= 0 or > MaximumJournalBytes)
+            return [];
+        var bytes = new byte[(int)stream.Length];
+        stream.ReadExactly(bytes);
+        return bytes;
+    }
+
+    private static SafeFileHandle OpenReadHandle(string path)
+    {
+        const uint genericRead = 0x80000000;
+        const uint shareReadWriteDelete = 0x00000001 | 0x00000002 | 0x00000004;
+        const uint openExisting = 3;
+        const uint openReparsePoint = 0x00200000;
+        var handle = CreateFile(path, genericRead, shareReadWriteDelete, IntPtr.Zero, openExisting, openReparsePoint, IntPtr.Zero);
+        if (handle.IsInvalid)
+        {
+            var error = Marshal.GetLastWin32Error();
+            handle.Dispose();
+            throw new IOException("The maintenance journal could not be opened safely.", new System.ComponentModel.Win32Exception(error));
+        }
+        return handle;
+    }
+
+    private static IEnumerable<string> Ancestors(string path)
+    {
+        var current = Path.GetFullPath(path);
+        while (!string.IsNullOrEmpty(current))
+        {
+            yield return current;
+            current = Path.GetDirectoryName(current)!;
+        }
+    }
+
+    private static SecurityIdentifier SystemSid() => new(WellKnownSidType.LocalSystemSid, null);
+    private static SecurityIdentifier AdministratorsSid() => new(WellKnownSidType.BuiltinAdministratorsSid, null);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true, EntryPoint = "CreateFileW")]
+    private static extern SafeFileHandle CreateFile(string fileName, uint desiredAccess, uint shareMode, IntPtr securityAttributes, uint creationDisposition, uint flagsAndAttributes, IntPtr templateFile);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetFileInformationByHandle(SafeFileHandle handle, out NativeFileInformation fileInformation);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeFileInformation
+    {
+        public uint Attributes;
+        public ulong CreationTime;
+        public ulong LastAccessTime;
+        public ulong LastWriteTime;
+        public uint VolumeSerialNumber;
+        public uint FileSizeHigh;
+        public uint FileSizeLow;
+        public uint NumberOfLinks;
+        public uint FileIndexHigh;
+        public uint FileIndexLow;
+    }
+}

@@ -23,7 +23,8 @@ public static class StreamGuardRecovery
             new WindowsSunshineServiceControl(services, installation),
             TimeProvider.System,
             new KamenRaider.Agent.Leases.WindowsBootClock(),
-            new WindowsStreamGrantHistoryStore());
+            new WindowsStreamGrantHistoryStore(),
+            new WindowsMaintenanceFenceReader());
         gate.BlockAsync(CancellationToken.None).GetAwaiter().GetResult();
     }
 }
