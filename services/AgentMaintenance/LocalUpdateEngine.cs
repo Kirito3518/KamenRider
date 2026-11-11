@@ -74,7 +74,15 @@ public sealed record AgentMaintenanceCommandResult(
     string? TargetRuntime,
     string? InventoryDigest,
     long? TotalBytes,
-    IReadOnlyList<PackageNode>? Nodes);
+    IReadOnlyList<PackageNode>? Nodes,
+    AgentMaintenanceSourceResult? Source = null);
+
+public sealed record AgentMaintenanceSourceResult(
+    string Version,
+    string? AssemblyInformationalVersion,
+    int? AgentUpdateChallengeProtocol,
+    string DepsSha256,
+    string AgentAssemblySha256);
 
 public interface IMaintenanceWorkStore
 {

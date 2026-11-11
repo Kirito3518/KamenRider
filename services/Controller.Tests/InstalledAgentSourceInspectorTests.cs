@@ -11,10 +11,12 @@ namespace Controller.Tests;
 
 public sealed class InstalledAgentSourceInspectorTests : IDisposable
 {
-    private sealed class BackupSecurity(string sourceRoot, string backupRoot) : IMaintenanceBackupSecurity
+    private sealed class BackupSecurity(string sourceRoot, string backupRoot, bool rejectSource = false) : IMaintenanceBackupSecurity
     {
         public void EnsureSourceRoot(string path)
         {
+            if (rejectSource)
+                throw new UnauthorizedAccessException("simulated unsafe source ACL");
             Assert.Equal(Path.GetFullPath(sourceRoot), Path.GetFullPath(path));
             Assert.True(Directory.Exists(path));
         }
@@ -76,6 +78,17 @@ public sealed class InstalledAgentSourceInspectorTests : IDisposable
             }
             Snapshot = snapshot;
         }
+    }
+
+    private sealed class UnusedWorkStore : IMaintenanceWorkStore
+    {
+        public MaintenanceCommandRequest ReadRequest(string expectedCommand) =>
+            throw new InvalidOperationException("The read-only inspect command must not read an archive request.");
+        public Stream OpenArchiveRead() =>
+            throw new InvalidOperationException("The read-only inspect command must not open an archive.");
+        public string ExtractionRoot => throw new InvalidOperationException("The read-only inspect command has no extraction root.");
+        public void CreateExtractionRoot() =>
+            throw new InvalidOperationException("The read-only inspect command must not create an extraction tree.");
     }
 
     private sealed record IdentitySource(string MachineId, string PrivateKey) : ITrustedIdentitySource
@@ -180,6 +193,38 @@ public sealed class InstalledAgentSourceInspectorTests : IDisposable
         Assert.Equal(1, snapshot.AgentUpdateChallengeProtocol);
         Assert.Equal(Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(Path.Combine(sourceRoot, "Agent.deps.json")))), snapshot.DepsSha256);
         Assert.Equal(Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(Path.Combine(sourceRoot, "Agent.dll")))), snapshot.AgentAssemblySha256);
+    }
+
+    [Fact]
+    public void InspectCommandReturnsOnlyAclCheckedSourceMetadata()
+    {
+        var inspector = new InstalledAgentSourceInspector(sourceRoot, NewSecurity());
+        var host = new WindowsAgentMaintenanceCommandHost(new LocalUpdateEngine(new UnusedWorkStore()), inspector);
+
+        var result = host.Execute("inspect");
+
+        Assert.Equal("ok", result.Status);
+        Assert.Null(result.Category);
+        Assert.Equal("1.2.3", result.Version);
+        Assert.NotNull(result.Source);
+        Assert.Equal("1.2.3", result.Source.Version);
+        Assert.Equal(1, result.Source.AgentUpdateChallengeProtocol);
+        Assert.Equal(Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(Path.Combine(sourceRoot, "Agent.deps.json")))), result.Source.DepsSha256);
+        Assert.Equal(Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(Path.Combine(sourceRoot, "Agent.dll")))), result.Source.AgentAssemblySha256);
+        var json = JsonSerializer.Serialize(result, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        Assert.DoesNotContain(sourceRoot, json, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("ticket", json, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("privateKey", json, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void InspectCommandRejectsAnUntrustedInstalledSourceWithoutRepairingIt()
+    {
+        var inspector = new InstalledAgentSourceInspector(sourceRoot, new BackupSecurity(sourceRoot, backupRoot, rejectSource: true));
+        var host = new WindowsAgentMaintenanceCommandHost(new LocalUpdateEngine(new UnusedWorkStore()), inspector);
+
+        Assert.Throws<UnauthorizedAccessException>(() => host.Execute("inspect"));
+        Assert.True(File.Exists(Path.Combine(sourceRoot, "Agent.dll")));
     }
 
     [Fact]

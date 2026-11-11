@@ -198,8 +198,10 @@ public sealed partial class ControllerDatabase
                 tx.Commit();
                 return priorResult;
             }
-            if (request.RuntimeEpoch != syncProofRuntimeEpoch || challengeRuntimeEpoch != syncProofRuntimeEpoch)
-                throw new InvalidOperationException("The source challenge belongs to a previous Controller runtime.");
+            if (challengeRuntimeEpoch != syncProofRuntimeEpoch)
+                throw new AgentUpdateSourceChallengeRenewalRequiredException();
+            if (request.RuntimeEpoch != challengeRuntimeEpoch)
+                throw new InvalidOperationException("The source binding runtime does not match its issued challenge.");
             EnsureSourceChallengeFresh(challengeIssuedAtUnixMs, challengeIssuedMonotonicTick,
                 challengeExpiresAtUnixMs, challengeRuntimeEpoch, nowMs);
             var expectedChallengeToken = CreateAgentUpdateSourceChallengeToken(verified.MachineId, verified.KeyFingerprint,

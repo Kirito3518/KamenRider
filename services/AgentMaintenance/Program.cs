@@ -4,9 +4,18 @@ internal static class Program
 {
     public static int Main(string[] args)
     {
-        IAgentMaintenanceCommandHost host = OperatingSystem.IsWindows()
-            ? new WindowsAgentMaintenanceCommandHost(new LocalUpdateEngine(new WindowsMaintenanceWorkStore()))
-            : new UnsupportedPlatformCommandHost();
+        IAgentMaintenanceCommandHost host;
+        if (OperatingSystem.IsWindows())
+        {
+            var security = new WindowsMaintenanceBackupSecurity();
+            var inspector = new InstalledAgentSourceInspector(security.SourceRoot, security);
+            host = new WindowsAgentMaintenanceCommandHost(
+                new LocalUpdateEngine(new WindowsMaintenanceWorkStore()), inspector);
+        }
+        else
+        {
+            host = new UnsupportedPlatformCommandHost();
+        }
         return AgentMaintenanceCli.Run(args, host, Console.Out, Console.Error);
     }
 

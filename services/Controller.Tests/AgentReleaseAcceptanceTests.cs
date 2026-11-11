@@ -1,4 +1,5 @@
 using System.IO.Compression;
+using System.Reflection;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
@@ -108,6 +109,9 @@ public sealed class AgentReleaseAcceptanceTests
         using var bindingReplay = await fixture.SendSignedAsync(AcceptanceFixture.UpdatePath(ticket, "source-binding"), binding,
             nonce: "stale-source-binding", signedSecond: staleSignedSecond);
         Assert.Equal(HttpStatusCode.Unauthorized, bindingReplay.StatusCode);
+        // The binding is durable before the response is observed. Simulate the
+        // helper losing that response and reconnecting to a restarted Controller.
+        await fixture.RestartAsync();
         using var exactRetry = await fixture.SendSignedAsync(AcceptanceFixture.UpdatePath(ticket, "source-binding"), binding,
             nonce: "stale-source-binding-retry", signedSecond: staleSignedSecond);
         Assert.Equal(HttpStatusCode.OK, exactRetry.StatusCode);
@@ -156,6 +160,60 @@ public sealed class AgentReleaseAcceptanceTests
         using var renewedChallenge = await fixture.SendSignedAsync(AcceptanceFixture.UpdatePath(ticket, "source-challenge"),
             nextChallengeRequest, nonce: "source-expiry-challenge-1");
         Assert.Equal(HttpStatusCode.OK, renewedChallenge.StatusCode);
+        await fixture.AssertLockedAsync(ticket, "installing");
+    }
+
+    [Fact]
+    public async Task PersistedBindIntentRotatesAfterControllerRestartBeforeCommit()
+    {
+        await using var fixture = await AcceptanceFixture.CreateAsync();
+        var ticket = await fixture.PublishAndReserveAsync();
+        var operation = await fixture.StartAndDownloadAsync(ticket);
+        var sourceRoot = fixture.CreateInstalledSourceRoot();
+        var backupRoot = Path.Combine(fixture.Root, "maintenance-backups");
+        using var identity = fixture.CreateIdentity();
+        var journalStore = new AcceptanceJournalStore();
+        var journal = new MaintenanceJournal(journalStore, operation.ChainId);
+        var binding = new MaintenanceOperationBinding(operation.OperationId, operation.ChainId,
+            operation.CurrentHeadOperationId!, operation.Generation, "https://localhost/", identity.KeyFingerprint.ToLowerInvariant(),
+            1, "win-x64", ticket.TargetVersion, ticket.TargetPackageSha256.ToLowerInvariant());
+        _ = journal.Start(binding);
+        _ = journal.Advance(operation.OperationId, "controllerStarted");
+        _ = journal.Advance(operation.OperationId, "targetValidated");
+        _ = journal.Advance(operation.OperationId, "servicesQuiesced");
+
+        var security = new AcceptanceBackupSecurity(sourceRoot, backupRoot);
+        var publisher = new MaintenanceBackupPublisher(sourceRoot, backupRoot, security, new AcceptanceBackupAuthorization());
+        var backupOperation = new MaintenanceBackupOperation(sourceRoot,
+            new InstalledAgentSourceInspector(sourceRoot, security), publisher, journal);
+        var sawPersistedIntentAtRestart = false;
+        using var http = new HttpClient(new RestartBeforeBindingHandler(fixture, () =>
+        {
+            sawPersistedIntentAtRestart = journal.Read()?.Operations.Single().SourceBindingIntent is not null;
+        }));
+        var client = new HttpMaintenanceSourceBindingClient(http, fixture.Clock);
+        var coordinator = new MaintenanceSourceBindingOperation(backupOperation, journal, client, identity,
+            new AcceptanceBootIdentity(), fixture.Clock);
+
+        var result = await coordinator.BindAsync(new MaintenanceSourceBindingParameters(ticket.Ticket,
+            ticket.ReleaseVersion, new string('a', 64), "win-x64", 1), CancellationToken.None);
+
+        var recorded = journal.Read()!.Operations.Single();
+        var rejected = Assert.Single(recorded.RejectedSourceBindingIntents!);
+        var accepted = Assert.IsType<MaintenanceSourceBindingIntent>(recorded.SourceBindingIntent);
+        Assert.True(sawPersistedIntentAtRestart);
+        Assert.Equal("sourceBound", recorded.Phase);
+        Assert.Equal(0, rejected.AttemptNumber);
+        Assert.Equal(1, accepted.AttemptNumber);
+        Assert.NotEqual(rejected.ChallengeId, accepted.ChallengeId);
+        Assert.NotEqual(rejected.SourceRequestId, accepted.SourceRequestId);
+        Assert.Equal(rejected.Evidence.SourceVersion, accepted.Evidence.SourceVersion);
+        Assert.Equal(rejected.Evidence.BackupOwnerOperationId, accepted.Evidence.BackupOwnerOperationId);
+        Assert.Equal(rejected.Evidence.BackupDigest, accepted.Evidence.BackupDigest);
+        Assert.Equal(rejected.Evidence.InventoryDigest, accepted.Evidence.InventoryDigest);
+        Assert.Equal(accepted.Evidence.SourceVersion, result.SourceVersion);
+        Assert.Equal(accepted.Evidence.BackupDigest, result.BackupDigest);
+        Assert.True(result.ControllerOperation.Held);
         await fixture.AssertLockedAsync(ticket, "installing");
     }
 
@@ -949,6 +1007,109 @@ public sealed class AgentReleaseAcceptanceTests
         await fixture.AssertLockedAsync(ticket, "awaitingInstaller");
     }
 
+    private sealed class AcceptanceJournalStore : IMaintenanceJournalStore
+    {
+        public MaintenanceJournalSnapshot? Snapshot { get; private set; }
+        public MaintenanceJournalSnapshot? Read(string chainId) => Snapshot;
+        public void WriteAtomic(string chainId, MaintenanceJournalSnapshot snapshot) => Snapshot = snapshot;
+    }
+
+    private sealed class AcceptanceBackupAuthorization : IMaintenanceBackupAuthorization
+    {
+        public void VerifyHeldAndQuiesced(string operationId)
+        {
+            if (string.IsNullOrWhiteSpace(operationId))
+                throw new InvalidOperationException("The fake authorization requires an operation ID.");
+        }
+    }
+
+    private sealed class AcceptanceBootIdentity : IMaintenanceBootIdentityProvider
+    {
+        public string ReadBootId() => "acceptance-boot";
+    }
+
+    private sealed class AcceptanceBackupSecurity(string sourceRoot, string backupRoot) : IMaintenanceBackupSecurity
+    {
+        private static string Full(string path) => Path.GetFullPath(path);
+        private static bool Within(string path, string root) =>
+            Full(path).StartsWith(Full(root).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar,
+                StringComparison.OrdinalIgnoreCase);
+
+        public void EnsureSourceRoot(string path)
+        {
+            if (!string.Equals(Full(path), Full(sourceRoot), StringComparison.OrdinalIgnoreCase) || !Directory.Exists(path))
+                throw new UnauthorizedAccessException("The fake source root is not available.");
+        }
+        public void EnsureSourceDirectory(string path)
+        {
+            if (!Within(path, sourceRoot) && !string.Equals(Full(path), Full(sourceRoot), StringComparison.OrdinalIgnoreCase))
+                throw new UnauthorizedAccessException("The fake source directory is outside its test tree.");
+            if (!Directory.Exists(path)) throw new DirectoryNotFoundException(path);
+        }
+        public void EnsureBackupDirectory(string path, bool create)
+        {
+            if (!string.Equals(Full(path), Full(backupRoot), StringComparison.OrdinalIgnoreCase))
+                throw new UnauthorizedAccessException("The fake backup root is not canonical.");
+            if (create) Directory.CreateDirectory(path);
+            if (!Directory.Exists(path)) throw new DirectoryNotFoundException(path);
+        }
+        public void EnsurePrivateDirectory(string path, bool create)
+        {
+            if (!Within(path, backupRoot)) throw new UnauthorizedAccessException("The fake backup directory is outside its test tree.");
+            if (create) Directory.CreateDirectory(path);
+            if (!Directory.Exists(path)) throw new DirectoryNotFoundException(path);
+        }
+        public Stream OpenSourceFile(string path)
+        {
+            EnsureSourceDirectory(Path.GetDirectoryName(path)!);
+            return File.OpenRead(path);
+        }
+        public Stream OpenPrivateFile(string path)
+        {
+            if (!Within(path, backupRoot) || !File.Exists(path)) throw new FileNotFoundException("Fake backup file missing.", path);
+            return File.OpenRead(path);
+        }
+        public Stream CreateBackupFile(string path)
+        {
+            if (!Within(path, backupRoot)) throw new UnauthorizedAccessException("The fake backup file is outside its test tree.");
+            return new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+        }
+        public void EnsurePrivateFile(string path)
+        {
+            if (!Within(path, backupRoot) || !File.Exists(path)) throw new FileNotFoundException("Fake backup file missing.", path);
+        }
+        public void FlushDirectory(string path)
+        {
+            if (!Directory.Exists(path)) throw new DirectoryNotFoundException(path);
+        }
+        public void PublishDirectory(string stagingDirectory, string publishedDirectory)
+        {
+            EnsurePrivateDirectory(stagingDirectory, create: false);
+            if (!Within(publishedDirectory, backupRoot) || Directory.Exists(publishedDirectory) || File.Exists(publishedDirectory))
+                throw new IOException("The fake publication destination is not unused.");
+            Directory.Move(stagingDirectory, publishedDirectory);
+        }
+    }
+
+    private sealed class RestartBeforeBindingHandler(
+        AcceptanceFixture fixture,
+        Action onRestart) : HttpMessageHandler
+    {
+        private int restarted;
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            if (request.RequestUri?.AbsolutePath.EndsWith("/source-binding", StringComparison.Ordinal) == true &&
+                Interlocked.Exchange(ref restarted, 1) == 0)
+            {
+                onRestart();
+                await fixture.RestartAsync();
+            }
+            request.Headers.TryAddWithoutValidation("Test-Local-Port", "5102");
+            return await fixture.SendThroughCurrentControllerAsync(request, cancellationToken);
+        }
+    }
+
     private sealed class AcceptanceClock : TimeProvider
     {
         public DateTimeOffset Now { get; set; } = DateTimeOffset.UtcNow;
@@ -964,14 +1125,15 @@ public sealed class AgentReleaseAcceptanceTests
         {
             public TrustedIdentityDocument ReadExisting() => document;
         }
-        private readonly WebApplication app;
-        private readonly HttpClient agent;
-        private readonly HttpClient renter;
+        private WebApplication app;
+        private HttpClient agent = null!;
+        private HttpClient renter = null!;
         private readonly byte[] package = AgentPackageCorpus.Valid();
         private int rentalAttempt;
         private string? syncChallenge;
         public AcceptanceClock Clock { get; }
-        public HttpClient Admin { get; }
+        public HttpClient Admin { get; private set; } = null!;
+        public string Root => root;
         public string? CurrentSyncChallenge => syncChallenge;
 
         private AcceptanceFixture(string root, AcceptanceClock clock, WebApplication app)
@@ -979,6 +1141,11 @@ public sealed class AgentReleaseAcceptanceTests
             this.root = root;
             Clock = clock;
             this.app = app;
+            InitializeClients();
+        }
+
+        private void InitializeClients()
+        {
             Admin = app.GetTestClient();
             Admin.DefaultRequestHeaders.Add("X-Service-Credential", "acceptance-fixture-only");
             Admin.DefaultRequestHeaders.Add("X-Authenticated-Actor-Id", "acceptance-admin");
@@ -996,6 +1163,12 @@ public sealed class AgentReleaseAcceptanceTests
             var root = Path.Combine(Path.GetTempPath(), "kr-release-acceptance-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(root);
             var clock = new AcceptanceClock();
+            var app = await StartAsync(root, clock);
+            return new AcceptanceFixture(root, clock, app);
+        }
+
+        private static async Task<WebApplication> StartAsync(string root, AcceptanceClock clock)
+        {
             var app = ControllerHost.Build([], builder =>
             {
                 builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
@@ -1012,7 +1185,45 @@ public sealed class AgentReleaseAcceptanceTests
                 builder.Services.AddSingleton<TimeProvider>(clock);
             });
             await app.StartAsync();
-            return new AcceptanceFixture(root, clock, app);
+            return app;
+        }
+
+        public async Task RestartAsync()
+        {
+            Admin.Dispose();
+            renter.Dispose();
+            agent.Dispose();
+            await app.DisposeAsync();
+            app = await StartAsync(root, Clock);
+            InitializeClients();
+        }
+
+        public async Task<HttpResponseMessage> SendThroughCurrentControllerAsync(HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            using var handler = app.GetTestServer().CreateHandler();
+            using var invoker = new HttpMessageInvoker(handler, disposeHandler: false);
+            return await invoker.SendAsync(request, cancellationToken);
+        }
+
+        public TrustedIdentity CreateIdentity() => TrustedIdentity.ReadExisting(new TestTrustedIdentitySource(
+            new(MachineId, Convert.ToBase64String(key.ExportPkcs8PrivateKey()))));
+
+        public string CreateInstalledSourceRoot()
+        {
+            var metadata = typeof(AgentReleaseAcceptanceTests).Assembly.GetCustomAttributes<AssemblyMetadataAttribute>()
+                .Single(attribute => attribute.Key == "LegacyInstalledAgentOutputPath");
+            var fixtureOutput = Path.GetFullPath(metadata.Value!);
+            var sourceRoot = Path.Combine(root, "installed-source", "Agent");
+            Directory.CreateDirectory(sourceRoot);
+            foreach (var file in Directory.EnumerateFiles(fixtureOutput, "*", SearchOption.AllDirectories))
+            {
+                var relative = Path.GetRelativePath(fixtureOutput, file);
+                var destination = Path.Combine(sourceRoot, relative);
+                Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+                File.Copy(file, destination);
+            }
+            return sourceRoot;
         }
 
         public async Task<AgentUpdateTicketResponse> PublishAndReserveAsync()

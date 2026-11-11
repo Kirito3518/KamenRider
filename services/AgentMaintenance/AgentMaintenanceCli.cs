@@ -9,7 +9,9 @@ public interface IAgentMaintenanceCommandHost
     AgentMaintenanceCommandResult Execute(string command);
 }
 
-public sealed class WindowsAgentMaintenanceCommandHost(LocalUpdateEngine engine) : IAgentMaintenanceCommandHost
+public sealed class WindowsAgentMaintenanceCommandHost(
+    LocalUpdateEngine engine,
+    InstalledAgentSourceInspector? sourceInspector = null) : IAgentMaintenanceCommandHost
 {
     private static readonly HashSet<string> KnownCommands = new(StringComparer.Ordinal)
     {
@@ -21,6 +23,16 @@ public sealed class WindowsAgentMaintenanceCommandHost(LocalUpdateEngine engine)
         ArgumentNullException.ThrowIfNull(engine);
         if (!KnownCommands.Contains(command))
             throw new InvalidOperationException("The maintenance command is not recognized.");
+
+        if (command == "inspect")
+        {
+            if (sourceInspector is null)
+                return new("unavailable", "sourceInspectorUnavailable", null, null, null, null, null, null);
+            var source = sourceInspector.Inspect();
+            return new("ok", null, null, source.Version, null, null, null, null,
+                new AgentMaintenanceSourceResult(source.Version, source.AssemblyInformationalVersion,
+                    source.AgentUpdateChallengeProtocol, source.DepsSha256, source.AgentAssemblySha256));
+        }
 
         if (command is "validate-archive" or "extract")
         {
