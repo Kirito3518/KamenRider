@@ -294,7 +294,9 @@ public sealed class MaintenanceBackupOperation(
         var snapshot = journal.Read()
             ?? throw new InvalidOperationException("The maintenance journal is missing; backup verification remains held.");
         if (snapshot.Operations.Count != 1 || snapshot.HeadOperationId != operationId ||
-            snapshot.Operations[0].Binding.OperationId != operationId || snapshot.Operations[0].Phase is not ("backupPublished" or "sourceBound"))
+            snapshot.Operations[0].Binding.OperationId != operationId || snapshot.Operations[0].Phase is not
+                ("backupPublished" or "sourceBound" or "swapIntent" or "sourceMoved" or "targetPlaced" or
+                 "rollbackIntent" or "targetMovedToFailed" or "sourceRestored" or "rollbackServicesStarted"))
             throw new InvalidOperationException("The immutable backup is not bound to the current journal head.");
         return publisher.VerifyPublished(operationId);
     }

@@ -27,7 +27,10 @@ public sealed record MaintenanceJournalEvidence(
     string? BackupOwnerOperationId = null,
     string? BackupDigest = null,
     string? SourceVersion = null,
-    string? SourceInventoryDigest = null);
+    string? SourceInventoryDigest = null,
+    string? TargetInventoryDigest = null,
+    string? RollbackReason = null,
+    string? RestoredBackupDigest = null);
 
 public sealed record MaintenanceSourceChallengeAttempt(
     int AttemptNumber,
@@ -57,7 +60,10 @@ public sealed record MaintenanceJournalOperation(
     MaintenanceSourceBindingIntent? SourceBindingIntent = null,
     MaintenanceSourceChallengeAttempt? PendingSourceChallengeAttempt = null,
     List<MaintenanceSourceChallengeAttempt>? RejectedSourceChallengeAttempts = null,
-    List<MaintenanceSourceBindingIntent>? RejectedSourceBindingIntents = null);
+    List<MaintenanceSourceBindingIntent>? RejectedSourceBindingIntents = null,
+    string? TargetInventoryDigest = null,
+    string? RollbackReason = null,
+    string? RestoredBackupDigest = null);
 
 public sealed record MaintenanceJournalSnapshot(
     int SchemaVersion,
@@ -88,6 +94,13 @@ public sealed class MaintenanceJournal(IMaintenanceJournalStore store, string ch
         "servicesStarted",
         "outcomeReported",
         "controllerConfirmed"
+    ];
+    private static readonly string[] RollbackTail =
+    [
+        "rollbackIntent",
+        "targetMovedToFailed",
+        "sourceRestored",
+        "rollbackServicesStarted"
     ];
     private const int MaximumSourceBindingAttempts = 32;
 
@@ -139,10 +152,8 @@ public sealed class MaintenanceJournal(IMaintenanceJournalStore store, string ch
                 return current;
             throw new InvalidOperationException("A retried journal phase has different evidence.");
         }
-        var phaseIndex = Array.IndexOf(NormalPhases, operation.Phase);
-        var nextIndex = Array.IndexOf(NormalPhases, nextPhase);
-        if (phaseIndex < 0 || nextIndex != phaseIndex + 1)
-            throw new InvalidOperationException("The maintenance journal phase must advance exactly one step.");
+        if (!CanAdvance(operation.Phase, nextPhase))
+            throw new InvalidOperationException("The maintenance journal phase transition is not allowed.");
 
         var updated = ApplyEvidence(operation, nextPhase, resolvedEvidence);
         var operations = new List<MaintenanceJournalOperation> { updated };
@@ -316,8 +327,55 @@ public sealed class MaintenanceJournal(IMaintenanceJournalStore store, string ch
             };
         }
 
+        if (nextPhase == "swapIntent")
+        {
+            if (!IsDigest(evidence.TargetInventoryDigest) || evidence.BackupOwnerOperationId is not null ||
+                evidence.BackupDigest is not null || evidence.SourceVersion is not null || evidence.SourceInventoryDigest is not null ||
+                evidence.RollbackReason is not null || evidence.RestoredBackupDigest is not null)
+                throw new InvalidOperationException("A verified target inventory digest is required before the installation swap.");
+            return current with
+            {
+                Phase = nextPhase,
+                PhaseHistory = Append(current.PhaseHistory, nextPhase),
+                TargetInventoryDigest = evidence.TargetInventoryDigest
+            };
+        }
+
+        if (nextPhase == "rollbackIntent")
+        {
+            if (!IsDigest(current.TargetInventoryDigest) || current.BackupDigest is null ||
+                evidence.TargetInventoryDigest != current.TargetInventoryDigest ||
+                evidence.BackupDigest != current.BackupDigest ||
+                evidence.RollbackReason is not ("applyFailed" or "targetStartFailed" or "reconcileAmbiguous") ||
+                evidence.BackupOwnerOperationId is not null || evidence.SourceVersion is not null ||
+                evidence.SourceInventoryDigest is not null || evidence.RestoredBackupDigest is not null)
+                throw new InvalidOperationException("Rollback intent must bind the verified target and immutable original backup.");
+            return current with
+            {
+                Phase = nextPhase,
+                PhaseHistory = Append(current.PhaseHistory, nextPhase),
+                RollbackReason = evidence.RollbackReason
+            };
+        }
+
+        if (nextPhase == "sourceRestored")
+        {
+            if (current.RollbackReason is null || current.BackupDigest is null ||
+                evidence.RestoredBackupDigest != current.BackupDigest ||
+                evidence.BackupOwnerOperationId is not null || evidence.BackupDigest is not null ||
+                evidence.SourceVersion is not null || evidence.SourceInventoryDigest is not null ||
+                evidence.TargetInventoryDigest is not null || evidence.RollbackReason is not null)
+                throw new InvalidOperationException("The original immutable backup digest must be verified before sourceRestored.");
+            return current with
+            {
+                Phase = nextPhase,
+                PhaseHistory = Append(current.PhaseHistory, nextPhase),
+                RestoredBackupDigest = evidence.RestoredBackupDigest
+            };
+        }
+
         if (evidence != new MaintenanceJournalEvidence())
-            throw new InvalidOperationException("Evidence is accepted only when publishing a backup or binding a source.");
+            throw new InvalidOperationException("Evidence is accepted only for backup, source binding, target swap, and rollback phases.");
         return current with { Phase = nextPhase, PhaseHistory = Append(current.PhaseHistory, nextPhase) };
     }
 
@@ -333,8 +391,35 @@ public sealed class MaintenanceJournal(IMaintenanceJournalStore store, string ch
             operation.SourceBindingIntent.Evidence.SourceVersion == evidence.SourceVersion &&
             operation.SourceBindingIntent.Evidence.InventoryDigest == evidence.SourceInventoryDigest &&
             evidence.BackupOwnerOperationId is null && evidence.BackupDigest is null,
+        "swapIntent" => operation.TargetInventoryDigest == evidence.TargetInventoryDigest &&
+            evidence.BackupOwnerOperationId is null && evidence.BackupDigest is null && evidence.SourceVersion is null &&
+            evidence.SourceInventoryDigest is null && evidence.RollbackReason is null && evidence.RestoredBackupDigest is null,
+        "rollbackIntent" => operation.TargetInventoryDigest == evidence.TargetInventoryDigest &&
+            operation.BackupDigest == evidence.BackupDigest && operation.RollbackReason == evidence.RollbackReason &&
+            evidence.BackupOwnerOperationId is null && evidence.SourceVersion is null && evidence.SourceInventoryDigest is null &&
+            evidence.RestoredBackupDigest is null,
+        "sourceRestored" => operation.RestoredBackupDigest == evidence.RestoredBackupDigest &&
+            evidence.BackupOwnerOperationId is null && evidence.BackupDigest is null && evidence.SourceVersion is null &&
+            evidence.SourceInventoryDigest is null && evidence.TargetInventoryDigest is null && evidence.RollbackReason is null,
         _ => evidence == new MaintenanceJournalEvidence()
     };
+
+    private static bool CanAdvance(string current, string next)
+    {
+        var currentIndex = Array.IndexOf(NormalPhases, current);
+        var nextIndex = Array.IndexOf(NormalPhases, next);
+        if (currentIndex >= 0 && nextIndex == currentIndex + 1)
+            return true;
+        if (next == "rollbackIntent" && current is "swapIntent" or "sourceMoved" or "targetPlaced")
+            return true;
+        var rollbackIndex = Array.IndexOf(RollbackTail, current);
+        var rollbackNextIndex = Array.IndexOf(RollbackTail, next);
+        if (rollbackIndex >= 0 && rollbackNextIndex == rollbackIndex + 1)
+            return true;
+        if (current == "rollbackServicesStarted" && next == "outcomeReported")
+            return true;
+        return false;
+    }
 
     private MaintenanceJournalSnapshot? ReadValidated()
     {
@@ -367,6 +452,9 @@ public sealed class MaintenanceJournal(IMaintenanceJournalStore store, string ch
                 first.SourceVersion != second.SourceVersion || first.SourceInventoryDigest != second.SourceInventoryDigest ||
                 first.SourceBindingIntent != second.SourceBindingIntent ||
                 first.PendingSourceChallengeAttempt != second.PendingSourceChallengeAttempt ||
+                first.TargetInventoryDigest != second.TargetInventoryDigest ||
+                first.RollbackReason != second.RollbackReason ||
+                first.RestoredBackupDigest != second.RestoredBackupDigest ||
                 !(first.RejectedSourceChallengeAttempts ?? []).SequenceEqual(second.RejectedSourceChallengeAttempts ?? []) ||
                 !(first.RejectedSourceBindingIntents ?? []).SequenceEqual(second.RejectedSourceBindingIntents ?? []) ||
                 !first.PhaseHistory.SequenceEqual(second.PhaseHistory, StringComparer.Ordinal))
@@ -391,12 +479,17 @@ public sealed class MaintenanceJournal(IMaintenanceJournalStore store, string ch
             operation.PhaseHistory.Distinct(StringComparer.Ordinal).Count() != operation.PhaseHistory.Count)
             throw new InvalidDataException("The maintenance journal operation head is inconsistent.");
 
-        var phaseIndex = Array.IndexOf(NormalPhases, operation.Phase);
-        if (phaseIndex < 0 || operation.PhaseHistory.Count != phaseIndex + 1 ||
-            !operation.PhaseHistory.SequenceEqual(NormalPhases.Take(phaseIndex + 1), StringComparer.Ordinal))
-            throw new InvalidDataException("The maintenance journal phase history is not a valid prefix.");
+        if (operation.PhaseHistory[0] != "inspected" ||
+            operation.PhaseHistory.Where((phase, index) => index != 0 && !CanAdvance(operation.PhaseHistory[index - 1], phase)).Any())
+            throw new InvalidDataException("The maintenance journal phase history is not a valid transition sequence.");
 
-        if (phaseIndex >= Array.IndexOf(NormalPhases, "backupPublished"))
+        var hasBackupPhase = operation.PhaseHistory.Contains("backupPublished", StringComparer.Ordinal);
+        var hasSourcePhase = operation.PhaseHistory.Contains("sourceBound", StringComparer.Ordinal);
+        var hasSwapPhase = operation.PhaseHistory.Contains("swapIntent", StringComparer.Ordinal);
+        var hasRollbackPhase = operation.PhaseHistory.Contains("rollbackIntent", StringComparer.Ordinal);
+        var hasRestorePhase = operation.PhaseHistory.Contains("sourceRestored", StringComparer.Ordinal);
+
+        if (hasBackupPhase)
         {
             if (operation.BackupOwnerOperationId != operation.Binding.OperationId || !IsDigest(operation.BackupDigest))
                 throw new InvalidDataException("The maintenance journal backup binding is missing or invalid.");
@@ -406,7 +499,7 @@ public sealed class MaintenanceJournal(IMaintenanceJournalStore store, string ch
             throw new InvalidDataException("The maintenance journal contains backup facts before backupPublished.");
         }
 
-        if (phaseIndex >= Array.IndexOf(NormalPhases, "sourceBound"))
+        if (hasSourcePhase)
         {
             if (string.IsNullOrWhiteSpace(operation.SourceVersion) || !IsDigest(operation.SourceInventoryDigest) ||
                 string.Equals(operation.SourceVersion, operation.Binding.TargetVersion, StringComparison.OrdinalIgnoreCase) ||
@@ -422,18 +515,48 @@ public sealed class MaintenanceJournal(IMaintenanceJournalStore store, string ch
 
         if (operation.SourceBindingIntent is not null)
         {
-            if (phaseIndex < Array.IndexOf(NormalPhases, "backupPublished"))
+            if (!hasBackupPhase)
                 throw new InvalidDataException("The maintenance journal contains source-binding intent before backup publication.");
             ValidateSourceBindingIntent(operation, operation.SourceBindingIntent);
         }
-        ValidateSourceBindingAttempts(operation, phaseIndex);
+        if (hasSwapPhase)
+        {
+            if (!IsDigest(operation.TargetInventoryDigest))
+                throw new InvalidDataException("The maintenance journal swap intent has no verified target inventory digest.");
+        }
+        else if (operation.TargetInventoryDigest is not null)
+        {
+            throw new InvalidDataException("The maintenance journal contains target inventory facts before swap intent.");
+        }
+
+        if (hasRollbackPhase)
+        {
+            if (!hasSwapPhase || operation.RollbackReason is not ("applyFailed" or "targetStartFailed" or "reconcileAmbiguous"))
+                throw new InvalidDataException("The maintenance journal rollback intent is incomplete.");
+        }
+        else if (operation.RollbackReason is not null)
+        {
+            throw new InvalidDataException("The maintenance journal contains rollback facts before rollback intent.");
+        }
+
+        if (hasRestorePhase)
+        {
+            if (!hasRollbackPhase || !FixedHexEquals(operation.RestoredBackupDigest, operation.BackupDigest))
+                throw new InvalidDataException("The maintenance journal restored source does not match its immutable backup.");
+        }
+        else if (operation.RestoredBackupDigest is not null)
+        {
+            throw new InvalidDataException("The maintenance journal contains restore facts before sourceRestored.");
+        }
+
+        ValidateSourceBindingAttempts(operation, hasBackupPhase);
     }
 
-    private static void ValidateSourceBindingAttempts(MaintenanceJournalOperation operation, int phaseIndex)
+    private static void ValidateSourceBindingAttempts(MaintenanceJournalOperation operation, bool hasBackupPhase)
     {
         var rejectedChallenges = operation.RejectedSourceChallengeAttempts ?? [];
         var rejectedBindings = operation.RejectedSourceBindingIntents ?? [];
-        if (phaseIndex < Array.IndexOf(NormalPhases, "backupPublished"))
+        if (!hasBackupPhase)
         {
             if (operation.SourceBindingIntent is not null || operation.PendingSourceChallengeAttempt is not null ||
                 rejectedChallenges.Count != 0 || rejectedBindings.Count != 0)

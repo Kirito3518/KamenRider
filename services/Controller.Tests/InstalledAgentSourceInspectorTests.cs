@@ -6,6 +6,8 @@ using System.Text.Json;
 using KamenRaider.Contracts;
 using System.Text.Json.Nodes;
 using KamenRaider.AgentMaintenance;
+using KamenRaider.AgentPackage;
+using Controller.Tests.Fixtures;
 
 namespace Controller.Tests;
 
@@ -166,6 +168,174 @@ public sealed class InstalledAgentSourceInspectorTests : IDisposable
                 request.SourceVersion, bodyDigest, request.BackupOwnerOperationId, request.BackupDigest,
                 "installing", timeProvider.GetUtcNow(), timeProvider.GetUtcNow()));
         }
+    }
+
+    private sealed class ApplyAuthorization(List<string> events) : IMaintenanceApplyAuthorization
+    {
+        public void VerifyHeldAndQuiesced(string operationId) => events.Add("authorize-quiesced");
+        public void VerifyHeld(string operationId) => events.Add("authorize-held");
+    }
+
+    private sealed class ApplyServices(List<string> events) : IMaintenanceApplyServiceLifecycle
+    {
+        public string? FailedVersion { get; set; }
+        public int StopChecks { get; private set; }
+
+        public Task EnsureStoppedAndVerifyQuiescedAsync(CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            StopChecks++;
+            events.Add("stop-quiesced");
+            return Task.CompletedTask;
+        }
+
+        public Task StartAndVerifyAsync(string installDirectory, string expectedVersion, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            events.Add("start:" + expectedVersion);
+            if (expectedVersion == FailedVersion)
+                throw new InvalidOperationException("simulated target service start failure");
+            return Task.CompletedTask;
+        }
+    }
+
+    private sealed class ApplyFileSystem(List<string> events) : IMaintenanceApplyFileSystem
+    {
+        public void EnsureProtectedInstallParent(string installDirectory)
+        {
+            var parent = Path.GetDirectoryName(Path.GetFullPath(installDirectory))!;
+            Assert.True(Directory.Exists(parent));
+            events.Add("parent-verified");
+        }
+
+        public bool DirectoryExists(string path) => Directory.Exists(path);
+
+        public void PrepareTargetInstallTree(string extractedTree, string destination, PackageInventory expected)
+        {
+            CopyNodes(extractedTree, destination, expected.Nodes.Select(node =>
+                new MaintenanceBackupNode(node.Path, node.IsDirectory, node.Length, node.Sha256)));
+            events.Add("target-staged");
+        }
+
+        public void ValidateTargetInstallTree(string path, PackageInventory expected) =>
+            PackageVerifier.ValidateExtracted(path, expected);
+
+        public void VerifyBackupTree(string path, MaintenanceBackupResult backup)
+        {
+            var actual = Scan(path);
+            Assert.Equal(backup.Nodes.OrderBy(node => node.RelativePath, StringComparer.Ordinal),
+                actual.OrderBy(node => node.RelativePath, StringComparer.Ordinal));
+        }
+
+        public void PrepareBackupInstallTree(string backupPath, string destination, MaintenanceBackupResult backup) =>
+            CopyNodes(backupPath, destination, backup.Nodes);
+
+        public void MoveDirectory(string source, string destination)
+        {
+            Assert.Equal(Path.GetDirectoryName(Path.GetFullPath(source)), Path.GetDirectoryName(Path.GetFullPath(destination)), StringComparer.OrdinalIgnoreCase);
+            Directory.Move(source, destination);
+            events.Add("move:" + Path.GetFileName(destination));
+        }
+
+        public void FlushParent(string path) => events.Add("flush-parent");
+
+        private static void CopyNodes(string source, string destination, IEnumerable<MaintenanceBackupNode> nodes)
+        {
+            Directory.CreateDirectory(destination);
+            foreach (var node in nodes.Where(node => node.IsDirectory).OrderBy(node => node.RelativePath.Count(character => character == '/')))
+                Directory.CreateDirectory(Local(destination, node.RelativePath));
+            foreach (var node in nodes.Where(node => !node.IsDirectory))
+                File.Copy(Local(source, node.RelativePath), Local(destination, node.RelativePath));
+        }
+
+        private static List<MaintenanceBackupNode> Scan(string root)
+        {
+            var result = new List<MaintenanceBackupNode>();
+            foreach (var directory in Directory.EnumerateDirectories(root, "*", SearchOption.AllDirectories))
+                result.Add(new(Path.GetRelativePath(root, directory).Replace('\\', '/'), true, 0, null));
+            foreach (var file in Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories))
+            {
+                using var stream = File.OpenRead(file);
+                result.Add(new(Path.GetRelativePath(root, file).Replace('\\', '/'), false, stream.Length,
+                    Convert.ToHexStringLower(SHA256.HashData(stream))));
+            }
+            return result;
+        }
+
+        private static string Local(string root, string relativePath) =>
+            Path.Combine(root, relativePath.Replace('/', Path.DirectorySeparatorChar));
+    }
+
+    [Fact]
+    public async Task ApplyPublishesVerifiedTargetOnlyAfterSourceMoveAndKeepsOriginalBackup()
+    {
+        var setup = await PrepareApplySetupAsync();
+        var events = new List<string>();
+        var fileSystem = new ApplyFileSystem(events);
+        var services = new ApplyServices(events);
+        var apply = new MaintenanceApplyOperation(sourceRoot, setup.ExtractedTarget, setup.Journal,
+            setup.BackupOperation, new ApplyAuthorization(events), fileSystem, services);
+
+        var result = await apply.ApplyAsync("operation-1", setup.ExpectedTarget, CancellationToken.None);
+
+        Assert.Equal("applied", result.Outcome);
+        Assert.Equal("2.3.4", result.InstalledVersion);
+        Assert.Equal("servicesStarted", setup.Journal.Read()!.Operations.Single().Phase);
+        Assert.Equal(["swapIntent", "sourceMoved", "targetPlaced", "servicesStarted"],
+            setup.Journal.Read()!.Operations.Single().PhaseHistory.TakeLast(4));
+        PackageVerifier.ValidateExtracted(sourceRoot, setup.ExpectedTarget);
+        Assert.True(Directory.Exists(Path.Combine(Path.GetDirectoryName(sourceRoot)!, ".Agent-prior-operation-1")));
+        Assert.Equal(0, services.StopChecks);
+        Assert.True(events.IndexOf("target-staged") < events.FindIndex(value => value.StartsWith("move:.Agent-prior-", StringComparison.Ordinal)));
+    }
+
+    [Fact]
+    public async Task ApplyRetryRecoversWhenJournalFlushFailsAfterOriginalTreeMove()
+    {
+        var setup = await PrepareApplySetupAsync();
+        setup.JournalStore.FailOnPhase = "sourceMoved";
+        var events = new List<string>();
+        var apply = new MaintenanceApplyOperation(sourceRoot, setup.ExtractedTarget, setup.Journal,
+            setup.BackupOperation, new ApplyAuthorization(events), new ApplyFileSystem(events), new ApplyServices(events));
+        var prior = Path.Combine(Path.GetDirectoryName(sourceRoot)!, ".Agent-prior-operation-1");
+
+        await Assert.ThrowsAsync<IOException>(() => apply.ApplyAsync("operation-1", setup.ExpectedTarget, CancellationToken.None));
+
+        Assert.Equal("swapIntent", setup.Journal.Read()!.Operations.Single().Phase);
+        Assert.False(Directory.Exists(sourceRoot));
+        Assert.True(Directory.Exists(prior));
+
+        var result = await apply.ApplyAsync("operation-1", setup.ExpectedTarget, CancellationToken.None);
+
+        Assert.Equal("applied", result.Outcome);
+        Assert.Equal("servicesStarted", setup.Journal.Read()!.Operations.Single().Phase);
+        PackageVerifier.ValidateExtracted(sourceRoot, setup.ExpectedTarget);
+        Assert.True(Directory.Exists(prior));
+    }
+
+    [Fact]
+    public async Task ApplyRestoresImmutableBackupWhenTargetServiceCannotStart()
+    {
+        var setup = await PrepareApplySetupAsync();
+        var events = new List<string>();
+        var fileSystem = new ApplyFileSystem(events);
+        var services = new ApplyServices(events) { FailedVersion = setup.ExpectedTarget.Version };
+        var apply = new MaintenanceApplyOperation(sourceRoot, setup.ExtractedTarget, setup.Journal,
+            setup.BackupOperation, new ApplyAuthorization(events), fileSystem, services);
+
+        var result = await apply.ApplyAsync("operation-1", setup.ExpectedTarget, CancellationToken.None);
+
+        var recorded = setup.Journal.Read()!.Operations.Single();
+        var backup = setup.BackupOperation.VerifyPublishedBackup("operation-1");
+        Assert.Equal("rolledBack", result.Outcome);
+        Assert.Equal("1.2.3", result.InstalledVersion);
+        Assert.Equal("targetStartFailed", result.RollbackReason);
+        Assert.Equal("rollbackServicesStarted", recorded.Phase);
+        Assert.Equal(["rollbackIntent", "targetMovedToFailed", "sourceRestored", "rollbackServicesStarted"],
+            recorded.PhaseHistory.TakeLast(4));
+        fileSystem.VerifyBackupTree(sourceRoot, backup);
+        Assert.True(Directory.Exists(Path.Combine(Path.GetDirectoryName(sourceRoot)!, ".Agent-failed-operation-1")));
+        Assert.Equal(1, services.StopChecks);
     }
 
     private readonly string root = Path.Combine(Path.GetTempPath(), "kr-source-inspector-" + Guid.NewGuid().ToString("N"));
@@ -529,7 +699,40 @@ public sealed class InstalledAgentSourceInspectorTests : IDisposable
 
     private BackupSecurity NewSecurity() => new(sourceRoot, backupRoot);
 
-    private MemoryJournalStore NewJournalAt(string phase, string targetVersion = "2.3.4", string? keyFingerprint = null)
+    private sealed record ApplySetup(
+        MemoryJournalStore JournalStore,
+        MaintenanceJournal Journal,
+        MaintenanceBackupOperation BackupOperation,
+        PackageInventory ExpectedTarget,
+        string ExtractedTarget);
+
+    private async Task<ApplySetup> PrepareApplySetupAsync()
+    {
+        var archive = AgentPackageCorpus.Valid("win-x64");
+        var expectedTarget = PackageVerifier.ValidateArchive(new MemoryStream(archive), AgentPackageCorpus.Version);
+        using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        using var identity = TrustedIdentity.ReadExisting(new IdentitySource(
+            "0123456789abcdef0123456789abcdef", Convert.ToBase64String(key.ExportPkcs8PrivateKey())));
+        var journalStore = NewJournalAt("servicesQuiesced", expectedTarget.Version,
+            identity.KeyFingerprint.ToLowerInvariant(), expectedTarget.ArchiveHash);
+        var journal = new MaintenanceJournal(journalStore, "chain-1");
+        var security = NewSecurity();
+        var publisher = new MaintenanceBackupPublisher(sourceRoot, backupRoot, security, new Authorization());
+        var backupOperation = new MaintenanceBackupOperation(sourceRoot,
+            new InstalledAgentSourceInspector(sourceRoot, security), publisher, journal);
+        var binding = new MaintenanceSourceBindingOperation(backupOperation, journal,
+            new SourceBindingClient(TimeProvider.System), identity, new BootIdentity("native-boot-1"));
+        _ = await binding.BindAsync(new MaintenanceSourceBindingParameters(new string('A', 43),
+            expectedTarget.Version, new string('c', 64), "win-x64", 1), CancellationToken.None);
+
+        var extractedTarget = Path.Combine(root, "target-extracted");
+        Directory.CreateDirectory(extractedTarget);
+        _ = PackageVerifier.Extract(new MemoryStream(archive), extractedTarget, expectedTarget);
+        return new(journalStore, journal, backupOperation, expectedTarget, extractedTarget);
+    }
+
+    private MemoryJournalStore NewJournalAt(string phase, string targetVersion = "2.3.4", string? keyFingerprint = null,
+        string? targetSha256 = null)
     {
         var phases = new[] { "inspected", "controllerStarted", "targetValidated", "servicesQuiesced" };
         var targetIndex = Array.IndexOf(phases, phase);
@@ -537,7 +740,8 @@ public sealed class InstalledAgentSourceInspectorTests : IDisposable
         var store = new MemoryJournalStore();
         var journal = new MaintenanceJournal(store, "chain-1");
         journal.Start(new MaintenanceOperationBinding("operation-1", "chain-1", "operation-1", 1,
-            "https://controller.example/", keyFingerprint ?? new string('a', 64), 1, "win-x64", targetVersion, new string('b', 64)));
+            "https://controller.example/", keyFingerprint ?? new string('a', 64), 1, "win-x64", targetVersion,
+            targetSha256 ?? new string('b', 64)));
         foreach (var next in phases.Skip(1).Take(targetIndex))
             journal.Advance("operation-1", next);
         return store;
