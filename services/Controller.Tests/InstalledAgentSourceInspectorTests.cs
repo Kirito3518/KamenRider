@@ -1,5 +1,8 @@
 using System.Reflection;
 using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+using KamenRaider.Contracts;
 using System.Text.Json.Nodes;
 using KamenRaider.AgentMaintenance;
 
@@ -55,16 +58,77 @@ public sealed class InstalledAgentSourceInspectorTests : IDisposable
     {
         public MaintenanceJournalSnapshot? Snapshot { get; private set; }
         public bool FailNextWrite { get; set; }
+        public string? FailOnPhase { get; set; }
         public MaintenanceJournalSnapshot? Read(string chainId) => Snapshot;
 
         public void WriteAtomic(string chainId, MaintenanceJournalSnapshot snapshot)
         {
+            if (snapshot.Operations.Single().Phase == FailOnPhase)
+            {
+                FailOnPhase = null;
+                throw new IOException("simulated phase journal flush failure");
+            }
             if (FailNextWrite)
             {
                 FailNextWrite = false;
                 throw new IOException("simulated journal flush failure");
             }
             Snapshot = snapshot;
+        }
+    }
+
+    private sealed record IdentitySource(string MachineId, string PrivateKey) : ITrustedIdentitySource
+    {
+        public TrustedIdentityDocument ReadExisting() => new(MachineId, PrivateKey);
+    }
+
+    private sealed record BootIdentity(string BootId) : IMaintenanceBootIdentityProvider
+    {
+        public string ReadBootId() => BootId;
+    }
+
+    private sealed class SourceBindingClient(TimeProvider timeProvider) : IMaintenanceSourceBindingClient
+    {
+        public int ChallengeCalls { get; private set; }
+        public List<AgentUpdateSourceBindingRequest> BindingRequests { get; } = [];
+        public List<string> BindingBodyDigests { get; } = [];
+        public bool EvidenceSignatureVerified { get; private set; }
+        public AgentUpdateSourceChallengeRequest? ChallengeRequest { get; private set; }
+        public AgentUpdateSourceChallengeResponse ChallengeResponse { get; set; } = new(
+            Guid.NewGuid().ToString("N"), "opaque-source-challenge", "runtime-1", DateTimeOffset.UtcNow.AddMinutes(5));
+
+        public Task<AgentUpdateSourceChallengeResponse> IssueChallengeAsync(string controllerOrigin, string machineId,
+            string operationId, AgentUpdateSourceChallengeRequest request, TrustedIdentity identity,
+            CancellationToken cancellationToken)
+        {
+            ChallengeCalls++;
+            ChallengeRequest = request;
+            return Task.FromResult(ChallengeResponse);
+        }
+
+        public Task<AgentUpdateOperationDto> BindSourceAsync(string controllerOrigin, string machineId,
+            string operationId, AgentUpdateSourceBindingRequest request, TrustedIdentity identity,
+            CancellationToken cancellationToken)
+        {
+            BindingRequests.Add(request);
+            var body = JsonSerializer.SerializeToUtf8Bytes(request, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+            var bodyDigest = Convert.ToHexString(SHA256.HashData(body));
+            BindingBodyDigests.Add(bodyDigest);
+            var evidence = new AgentUpdateSourceEvidence(machineId, identity.KeyFingerprint, operationId,
+                request.ChainId, request.HeadOperationId, request.Generation, request.TargetVersion,
+                request.TargetPackageSha256, request.ChallengeId, request.ChallengeRequestId, request.RequestId,
+                request.HelperBuildSha256, request.HelperRuntime, request.HelperProtocol, request.RuntimeEpoch,
+                request.SourceVersion, request.BackupOwnerOperationId, request.BackupDigest,
+                request.InventoryDigest, request.InstalledTreeDigest, request.NativeBootId, request.JournalPhase);
+            using var publicKey = ECDsa.Create();
+            publicKey.ImportSubjectPublicKeyInfo(Convert.FromBase64String(identity.PublicKey), out _);
+            EvidenceSignatureVerified = publicKey.VerifyData(AgentUpdateSourceEvidenceCanonicalizer.CanonicalBytes(evidence),
+                Convert.FromBase64String(request.EvidenceSignature), HashAlgorithmName.SHA256);
+            return Task.FromResult(new AgentUpdateOperationDto(operationId, machineId, request.ChainId,
+                request.HeadOperationId, request.Generation, true, null, request.ReleaseVersion,
+                request.TargetVersion, request.TargetPackageSha256, request.HelperRuntime, 2, null,
+                request.SourceVersion, bodyDigest, request.BackupOwnerOperationId, request.BackupDigest,
+                "installing", timeProvider.GetUtcNow(), timeProvider.GetUtcNow()));
         }
     }
 
@@ -206,9 +270,78 @@ public sealed class InstalledAgentSourceInspectorTests : IDisposable
         Assert.False(Directory.Exists(backupRoot));
     }
 
+    [Fact]
+    public async Task SourceBindingPersistsExactSignedRequestBeforeSendingAndRecoversJournalWriteFailure()
+    {
+        using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        using var identity = TrustedIdentity.ReadExisting(new IdentitySource(
+            "0123456789abcdef0123456789abcdef", Convert.ToBase64String(key.ExportPkcs8PrivateKey())));
+        var journalStore = NewJournalAt("servicesQuiesced", keyFingerprint: identity.KeyFingerprint.ToLowerInvariant());
+        var journal = new MaintenanceJournal(journalStore, "chain-1");
+        var security = NewSecurity();
+        var authorization = new Authorization();
+        var publisher = new MaintenanceBackupPublisher(sourceRoot, backupRoot, security, authorization);
+        var backupOperation = new MaintenanceBackupOperation(sourceRoot,
+            new InstalledAgentSourceInspector(sourceRoot, security), publisher, journal);
+        var backup = backupOperation.Publish("operation-1").Backup;
+        var client = new SourceBindingClient(TimeProvider.System);
+        var operation = new MaintenanceSourceBindingOperation(backupOperation, journal, client, identity,
+            new BootIdentity("native-boot-1"));
+        var ticket = new string('A', 43);
+        var parameters = new MaintenanceSourceBindingParameters(ticket, "2.3.4", new string('c', 64), "win-x64", 1);
+        journalStore.FailOnPhase = "sourceBound";
+
+        await Assert.ThrowsAsync<IOException>(() => operation.BindAsync(parameters, CancellationToken.None));
+
+        var held = journal.Read()!.Operations.Single();
+        Assert.Equal("backupPublished", held.Phase);
+        Assert.NotNull(held.SourceBindingIntent);
+        Assert.DoesNotContain(ticket, JsonSerializer.Serialize(journal.Read()));
+        Assert.Equal(backup.InventoryDigest, held.SourceBindingIntent!.Evidence.InventoryDigest);
+        Assert.Equal(backup.BackupDigest, held.SourceBindingIntent.Evidence.BackupDigest);
+        Assert.Equal("native-boot-1", held.SourceBindingIntent.Evidence.NativeBootId);
+        Assert.True(client.EvidenceSignatureVerified);
+        Assert.Equal(1, client.ChallengeCalls);
+        var firstRequest = Assert.Single(client.BindingRequests);
+
+        _ = await operation.BindAsync(parameters, CancellationToken.None);
+
+        Assert.Equal("sourceBound", journal.Read()!.Operations.Single().Phase);
+        Assert.Equal(1, client.ChallengeCalls);
+        Assert.Equal(2, client.BindingRequests.Count);
+        Assert.Equal(firstRequest, client.BindingRequests[1]);
+        Assert.Equal(client.BindingBodyDigests[0], client.BindingBodyDigests[1]);
+        Assert.Equal(held.SourceBindingIntent.BindingBodyDigest, client.BindingBodyDigests[0], ignoreCase: true);
+        Assert.Equal("1.2.3", journal.Read()!.Operations.Single().SourceVersion);
+    }
+
+    [Fact]
+    public async Task SourceBindingRejectsBeforeChallengeUnlessBackupWasJournaled()
+    {
+        var journalStore = NewJournalAt("targetValidated");
+        var journal = new MaintenanceJournal(journalStore, "chain-1");
+        var security = NewSecurity();
+        var client = new SourceBindingClient(TimeProvider.System);
+        using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        using var identity = TrustedIdentity.ReadExisting(new IdentitySource(
+            "0123456789abcdef0123456789abcdef", Convert.ToBase64String(key.ExportPkcs8PrivateKey())));
+        var publisher = new MaintenanceBackupPublisher(sourceRoot, backupRoot, security, new Authorization());
+        var backupOperation = new MaintenanceBackupOperation(sourceRoot,
+            new InstalledAgentSourceInspector(sourceRoot, security), publisher, journal);
+        var operation = new MaintenanceSourceBindingOperation(backupOperation, journal, client, identity,
+            new BootIdentity("native-boot-1"));
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => operation.BindAsync(
+            new MaintenanceSourceBindingParameters(new string('A', 43), "2.3.4", new string('c', 64), "win-x64", 1),
+            CancellationToken.None));
+
+        Assert.Equal(0, client.ChallengeCalls);
+        Assert.False(Directory.Exists(backupRoot));
+    }
+
     private BackupSecurity NewSecurity() => new(sourceRoot, backupRoot);
 
-    private MemoryJournalStore NewJournalAt(string phase, string targetVersion = "2.3.4")
+    private MemoryJournalStore NewJournalAt(string phase, string targetVersion = "2.3.4", string? keyFingerprint = null)
     {
         var phases = new[] { "inspected", "controllerStarted", "targetValidated", "servicesQuiesced" };
         var targetIndex = Array.IndexOf(phases, phase);
@@ -216,7 +349,7 @@ public sealed class InstalledAgentSourceInspectorTests : IDisposable
         var store = new MemoryJournalStore();
         var journal = new MaintenanceJournal(store, "chain-1");
         journal.Start(new MaintenanceOperationBinding("operation-1", "chain-1", "operation-1", 1,
-            "https://controller.example/", new string('a', 64), 1, "win-x64", targetVersion, new string('b', 64)));
+            "https://controller.example/", keyFingerprint ?? new string('a', 64), 1, "win-x64", targetVersion, new string('b', 64)));
         foreach (var next in phases.Skip(1).Take(targetIndex))
             journal.Advance("operation-1", next);
         return store;

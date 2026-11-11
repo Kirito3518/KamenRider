@@ -286,6 +286,19 @@ public sealed class MaintenanceBackupOperation(
         return new(source, backup);
     }
 
+    public MaintenanceBackupResult VerifyPublishedBackup(string operationId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(operationId);
+        ArgumentNullException.ThrowIfNull(publisher);
+        ArgumentNullException.ThrowIfNull(journal);
+        var snapshot = journal.Read()
+            ?? throw new InvalidOperationException("The maintenance journal is missing; backup verification remains held.");
+        if (snapshot.Operations.Count != 1 || snapshot.HeadOperationId != operationId ||
+            snapshot.Operations[0].Binding.OperationId != operationId || snapshot.Operations[0].Phase is not ("backupPublished" or "sourceBound"))
+            throw new InvalidOperationException("The immutable backup is not bound to the current journal head.");
+        return publisher.VerifyPublished(operationId);
+    }
+
     private static bool ContainsSourceMetadata(MaintenanceBackupResult backup, InstalledAgentSourceSnapshot source)
     {
         var deps = backup.Nodes.SingleOrDefault(node => !node.IsDirectory && node.RelativePath == "Agent.deps.json");

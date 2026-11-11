@@ -1,9 +1,12 @@
 using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
 using System.Security.AccessControl;
+using System.Security.Cryptography;
 using System.Security.Principal;
+using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using KamenRaider.Contracts;
 using Microsoft.Win32.SafeHandles;
 
 namespace KamenRaider.AgentMaintenance;
@@ -26,6 +29,16 @@ public sealed record MaintenanceJournalEvidence(
     string? SourceVersion = null,
     string? SourceInventoryDigest = null);
 
+public sealed record MaintenanceSourceBindingIntent(
+    AgentUpdateSourceEvidence Evidence,
+    string ChallengeId,
+    string Challenge,
+    string RuntimeEpoch,
+    DateTimeOffset ChallengeExpiresAtUtc,
+    string EvidenceSignature,
+    string SourceRequestId,
+    string BindingBodyDigest);
+
 public sealed record MaintenanceJournalOperation(
     MaintenanceOperationBinding Binding,
     string Phase,
@@ -33,7 +46,8 @@ public sealed record MaintenanceJournalOperation(
     string? BackupOwnerOperationId = null,
     string? BackupDigest = null,
     string? SourceVersion = null,
-    string? SourceInventoryDigest = null);
+    string? SourceInventoryDigest = null,
+    MaintenanceSourceBindingIntent? SourceBindingIntent = null);
 
 public sealed record MaintenanceJournalSnapshot(
     int SchemaVersion,
@@ -129,6 +143,34 @@ public sealed class MaintenanceJournal(IMaintenanceJournalStore store, string ch
 
     public MaintenanceJournalSnapshot? Read() => ReadValidated();
 
+    public MaintenanceJournalSnapshot RecordSourceBindingIntent(
+        string operationId,
+        MaintenanceSourceBindingIntent intent)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(operationId);
+        ArgumentNullException.ThrowIfNull(intent);
+        var current = ReadValidated()
+            ?? throw new InvalidOperationException("The maintenance journal is missing; the operation remains held.");
+        if (current.HeadOperationId != operationId || current.Operations.Count != 1 ||
+            current.Operations[0].Binding.OperationId != operationId || current.Operations[0].Phase != "backupPublished")
+            throw new InvalidOperationException("A source binding intent requires the current operation's published backup phase.");
+
+        var operation = current.Operations[0];
+        ValidateSourceBindingIntent(operation, intent);
+        if (operation.SourceBindingIntent is not null)
+        {
+            if (operation.SourceBindingIntent != intent)
+                throw new InvalidOperationException("The source binding intent is immutable once recorded.");
+            return current;
+        }
+
+        var updated = operation with { SourceBindingIntent = intent };
+        var snapshot = current with { Operations = [updated] };
+        ValidateSnapshot(snapshot);
+        store.WriteAtomic(chainId, snapshot);
+        return ReadPublished(snapshot);
+    }
+
     private MaintenanceJournalOperation ApplyEvidence(
         MaintenanceJournalOperation current,
         string nextPhase,
@@ -154,6 +196,9 @@ public sealed class MaintenanceJournal(IMaintenanceJournalStore store, string ch
             if (current.BackupOwnerOperationId is null || current.BackupDigest is null ||
                 string.IsNullOrWhiteSpace(evidence.SourceVersion) ||
                 !IsDigest(evidence.SourceInventoryDigest) ||
+                current.SourceBindingIntent is null ||
+                current.SourceBindingIntent.Evidence.SourceVersion != evidence.SourceVersion ||
+                current.SourceBindingIntent.Evidence.InventoryDigest != evidence.SourceInventoryDigest ||
                 evidence.BackupOwnerOperationId is not null || evidence.BackupDigest is not null ||
                 string.Equals(evidence.SourceVersion, current.Binding.TargetVersion, StringComparison.OrdinalIgnoreCase))
                 throw new InvalidOperationException("A distinct source version, inventory digest, and published backup are required before sourceBound.");
@@ -179,7 +224,10 @@ public sealed class MaintenanceJournal(IMaintenanceJournalStore store, string ch
         "backupPublished" => operation.BackupOwnerOperationId == evidence.BackupOwnerOperationId &&
             operation.BackupDigest == evidence.BackupDigest && evidence.SourceVersion is null && evidence.SourceInventoryDigest is null,
         "sourceBound" => operation.SourceVersion == evidence.SourceVersion &&
-            operation.SourceInventoryDigest == evidence.SourceInventoryDigest && evidence.BackupOwnerOperationId is null && evidence.BackupDigest is null,
+            operation.SourceInventoryDigest == evidence.SourceInventoryDigest && operation.SourceBindingIntent is not null &&
+            operation.SourceBindingIntent.Evidence.SourceVersion == evidence.SourceVersion &&
+            operation.SourceBindingIntent.Evidence.InventoryDigest == evidence.SourceInventoryDigest &&
+            evidence.BackupOwnerOperationId is null && evidence.BackupDigest is null,
         _ => evidence == new MaintenanceJournalEvidence()
     };
 
@@ -212,6 +260,7 @@ public sealed class MaintenanceJournal(IMaintenanceJournalStore store, string ch
             if (first.Binding != second.Binding || first.Phase != second.Phase ||
                 first.BackupOwnerOperationId != second.BackupOwnerOperationId || first.BackupDigest != second.BackupDigest ||
                 first.SourceVersion != second.SourceVersion || first.SourceInventoryDigest != second.SourceInventoryDigest ||
+                first.SourceBindingIntent != second.SourceBindingIntent ||
                 !first.PhaseHistory.SequenceEqual(second.PhaseHistory, StringComparer.Ordinal))
                 return false;
         }
@@ -252,14 +301,78 @@ public sealed class MaintenanceJournal(IMaintenanceJournalStore store, string ch
         if (phaseIndex >= Array.IndexOf(NormalPhases, "sourceBound"))
         {
             if (string.IsNullOrWhiteSpace(operation.SourceVersion) || !IsDigest(operation.SourceInventoryDigest) ||
-                string.Equals(operation.SourceVersion, operation.Binding.TargetVersion, StringComparison.OrdinalIgnoreCase))
+                string.Equals(operation.SourceVersion, operation.Binding.TargetVersion, StringComparison.OrdinalIgnoreCase) ||
+                operation.SourceBindingIntent is null ||
+                operation.SourceBindingIntent.Evidence.SourceVersion != operation.SourceVersion ||
+                operation.SourceBindingIntent.Evidence.InventoryDigest != operation.SourceInventoryDigest)
                 throw new InvalidDataException("The maintenance journal source binding is missing or invalid.");
         }
         else if (operation.SourceVersion is not null || operation.SourceInventoryDigest is not null)
         {
             throw new InvalidDataException("The maintenance journal contains source facts before sourceBound.");
         }
+
+        if (operation.SourceBindingIntent is not null)
+        {
+            if (phaseIndex < Array.IndexOf(NormalPhases, "backupPublished"))
+                throw new InvalidDataException("The maintenance journal contains source-binding intent before backup publication.");
+            ValidateSourceBindingIntent(operation, operation.SourceBindingIntent);
+        }
     }
+
+    private static void ValidateSourceBindingIntent(
+        MaintenanceJournalOperation operation,
+        MaintenanceSourceBindingIntent intent)
+    {
+        var binding = operation.Binding;
+        var evidence = intent.Evidence ?? throw new InvalidDataException("The maintenance source evidence is missing.");
+        var invalidFields = new List<string>();
+        void Require(bool valid, string field)
+        {
+            if (!valid) invalidFields.Add(field);
+        }
+        Require(operation.BackupOwnerOperationId == binding.OperationId && IsDigest(operation.BackupDigest), "backup binding");
+        Require(evidence.OperationId == binding.OperationId && evidence.ChainId == binding.ChainId &&
+            evidence.HeadOperationId == binding.HeadOperationId && evidence.Generation == binding.Generation, "operation head");
+        Require(FixedHexEquals(evidence.KeyFingerprint, binding.EnrollmentKeyFingerprint), "enrollment fingerprint");
+        Require(evidence.TargetVersion == binding.TargetVersion &&
+            FixedHexEquals(evidence.TargetPackageSha256, binding.TargetSha256), "target package");
+        Require(evidence.HelperProtocol == binding.HelperProtocol && evidence.HelperRuntime == binding.TargetRuntime &&
+            IsDigest(evidence.HelperBuildSha256), "helper identity");
+        Require(evidence.BackupOwnerOperationId == operation.BackupOwnerOperationId &&
+            FixedHexEquals(evidence.BackupDigest, operation.BackupDigest) && IsDigest(evidence.BackupDigest), "backup evidence");
+        Require(IsDigest(evidence.InventoryDigest) && IsDigest(evidence.InstalledTreeDigest) &&
+            FixedHexEquals(evidence.InventoryDigest, evidence.InstalledTreeDigest), "source inventory");
+        Require(!string.Equals(evidence.SourceVersion, binding.TargetVersion, StringComparison.OrdinalIgnoreCase), "source version");
+        Require(evidence.ChallengeId == intent.ChallengeId && Guid.TryParseExact(intent.ChallengeId, "N", out _) &&
+            !string.IsNullOrWhiteSpace(intent.Challenge) && intent.Challenge.Length <= 4096 &&
+            !intent.Challenge.Any(char.IsControl), "challenge");
+        Require(evidence.ChallengeRequestId is { Length: > 0 and <= 128 } &&
+            evidence.SourceRequestId == intent.SourceRequestId && intent.SourceRequestId is { Length: > 0 and <= 128 } &&
+            Regex.IsMatch(intent.SourceRequestId, "\\A[A-Za-z0-9._-]+\\z", RegexOptions.CultureInvariant), "request identifiers");
+        Require(!string.IsNullOrWhiteSpace(intent.RuntimeEpoch) && intent.RuntimeEpoch.Length <= 128 &&
+            !intent.RuntimeEpoch.Any(char.IsControl) && intent.ChallengeExpiresAtUtc != default, "challenge runtime");
+        Require(!string.IsNullOrWhiteSpace(evidence.NativeBootId) && evidence.NativeBootId.Length <= 256 &&
+            !evidence.NativeBootId.Any(char.IsControl) && evidence.JournalPhase == "backupPublished", "native boot and phase");
+        Require(intent.EvidenceSignature is { Length: > 0 and <= 1024 } && IsDigest(intent.BindingBodyDigest), "signature and request digest");
+        if (invalidFields.Count != 0)
+            throw new InvalidDataException("The maintenance source-binding intent is invalid: " + string.Join(", ", invalidFields) + ".");
+
+        try
+        {
+            _ = Convert.FromBase64String(intent.EvidenceSignature);
+            _ = AgentUpdateSourceEvidenceCanonicalizer.CanonicalBytes(evidence);
+        }
+        catch (Exception exception) when (exception is FormatException or ArgumentException)
+        {
+            throw new InvalidDataException("The maintenance source-binding signature or evidence is malformed.", exception);
+        }
+    }
+
+    private static bool FixedHexEquals(string? first, string? second) =>
+        first is not null && second is not null && IsHexDigest(first) && IsHexDigest(second) &&
+        CryptographicOperations.FixedTimeEquals(
+            Encoding.ASCII.GetBytes(first.ToUpperInvariant()), Encoding.ASCII.GetBytes(second.ToUpperInvariant()));
 
     private static void ValidateBinding(MaintenanceOperationBinding binding)
     {
@@ -286,6 +399,9 @@ public sealed class MaintenanceJournal(IMaintenanceJournalStore store, string ch
 
     private static bool IsDigest(string? value) =>
         value is { Length: 64 } && value.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f');
+
+    private static bool IsHexDigest(string? value) =>
+        value is { Length: 64 } && value.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f' or >= 'A' and <= 'F');
 
     private static List<string> Append(List<string> values, string value) => [.. values, value];
 }

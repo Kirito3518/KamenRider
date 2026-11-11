@@ -114,6 +114,18 @@ public sealed class MaintenanceBackupPublisher
         return ReadAndVerifyPublished(operationId, finalDirectory);
     }
 
+    public MaintenanceBackupResult VerifyPublished(string operationId)
+    {
+        if (operationId is null || !OperationIdPattern.IsMatch(operationId))
+            throw new InvalidDataException("The backup operation ID is invalid.");
+        authorization.VerifyHeldAndQuiesced(operationId);
+        security.EnsureBackupDirectory(backupRoot, create: false);
+        var finalDirectory = Path.Combine(backupRoot, operationId);
+        if (!Directory.Exists(finalDirectory) || File.Exists(finalDirectory))
+            throw new DirectoryNotFoundException("The immutable Agent backup has not been published.");
+        return ReadAndVerifyPublished(operationId, finalDirectory);
+    }
+
     private MaintenanceBackupResult ReadAndVerifyPublished(string operationId, string directory)
     {
         security.EnsurePrivateDirectory(directory, create: false);
