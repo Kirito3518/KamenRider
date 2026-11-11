@@ -19,7 +19,7 @@ $release=& $build -ReleaseVersion '2.3.4' -Plan
 if($release.AgentVersion -ne '2.3.4' -or $release.ReleaseVersion -ne '2.3.4'){throw 'Release plan must use the explicit release version.'}
 foreach($entry in @('Update-AgentPackage.ps1','Update-Agent.ps1')){if($entry -notin $release.PackageEntries){throw "Release package plan is missing $entry."}}
 foreach($entry in @('Update-AgentPackage.ps1','Update-Agent.ps1')){if($entry -in $default.PackageEntries){throw "Enrollment package plan must not change by including $entry."}}
-if($release.ManifestPath -ne 'AgentPackage.manifest.json' -or $release.Manifest.packageFormatVersion -ne 1){throw 'Release plan must include the versioned package manifest.'}
+if($release.ManifestPath -ne 'AgentPackage.manifest.json' -or $release.Manifest.packageFormatVersion -ne 1 -or $release.Manifest.agentUpdateChallengeProtocol -ne 2){throw 'Release plan must include the versioned protocol-2 package manifest.'}
 $publicRoot=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\public'))+[IO.Path]::DirectorySeparatorChar
 if($release.ArchivePath.StartsWith($publicRoot,[StringComparison]::OrdinalIgnoreCase)){throw 'Default release output must be private and outside public/.'}
 $statusLines=@(& git -C ([IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))) status --porcelain --untracked-files=all)

@@ -5,6 +5,7 @@ using System.Reflection;
 using System.Reflection.Metadata;
 using System.Reflection.PortableExecutable;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text.Json;
 using Controller.Tests.Fixtures;
 using KamenRaider.AgentPackage;
@@ -326,7 +327,7 @@ public sealed class AgentPackageConformanceTests
     {
         var entries = AgentPackageCorpus.Entries();
         var i = entries.FindIndex(e => e.Name == "Agent/Agent.dll");
-        entries[i] = ("Agent/Agent.dll", File.ReadAllBytes(typeof(AgentMetadataFixture).Assembly.Location));
+        entries[i] = ("Agent/Agent.dll", File.ReadAllBytes(typeof(LegacyAgentMetadataFixture).Assembly.Location));
         AssertArchive(AgentPackageCorpus.Build(entries), "metadata");
     }
 
@@ -1007,7 +1008,8 @@ public sealed class AgentPackageConformanceTests
             using var json = JsonDocument.Parse(bytes);
             Assert.Equal("rejected", json.RootElement.GetProperty("status").GetString());
             Assert.Equal("io", json.RootElement.GetProperty("category").GetString());
-            Assert.Equal(JsonValueKind.Null, json.RootElement.GetProperty("runtime").ValueKind);
+            Assert.Equal(JsonValueKind.Null, json.RootElement.GetProperty("targetRuntime").ValueKind);
+            Assert.Equal(JsonValueKind.Null, json.RootElement.GetProperty("archiveHash").ValueKind);
         }
         finally { AgentPackageCorpus.DeleteOwnedTemp(root, "kr-package-cli-"); }
     }
@@ -1302,11 +1304,19 @@ public sealed class AgentPackageConformanceTests
             var jsonBytes = File.ReadAllBytes(output);
             Assert.InRange(jsonBytes.Length, 1, 256);
             using var json = JsonDocument.Parse(jsonBytes);
-            Assert.Equal(new[] { "category", "runtime", "status" }, json.RootElement.EnumerateObject().Select(p => p.Name).Order(StringComparer.Ordinal).ToArray());
+            Assert.Equal(new[] { "agentUpdateChallengeProtocol", "archiveHash", "category", "status", "targetRuntime", "version" },
+                json.RootElement.EnumerateObject().Select(p => p.Name).Order(StringComparer.Ordinal).ToArray());
             Assert.Equal(category is null ? 0 : 1, code);
             Assert.Equal(category is null ? "accepted" : "rejected", json.RootElement.GetProperty("status").GetString());
             Assert.Equal(category, json.RootElement.GetProperty("category").GetString());
-            Assert.Equal(runtime, json.RootElement.GetProperty("runtime").GetString());
+            Assert.Equal(runtime, json.RootElement.GetProperty("targetRuntime").GetString());
+            Assert.Equal(category is null ? version : null, json.RootElement.GetProperty("version").GetString());
+            Assert.Equal(category is null ? 2 : (int?)null,
+                json.RootElement.GetProperty("agentUpdateChallengeProtocol").ValueKind == JsonValueKind.Number
+                    ? json.RootElement.GetProperty("agentUpdateChallengeProtocol").GetInt32()
+                    : null);
+            Assert.Equal(category is null ? Convert.ToHexStringLower(SHA256.HashData(bytes)) : null,
+                json.RootElement.GetProperty("archiveHash").GetString());
         }
         finally { AgentPackageCorpus.DeleteOwnedTemp(root, "kr-package-cli-"); }
     }

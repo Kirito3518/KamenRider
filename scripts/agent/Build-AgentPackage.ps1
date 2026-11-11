@@ -28,7 +28,8 @@ $archive=Join-Path $OutputDirectory 'AgentPackage.zip'
 $hashFile=Join-Path $OutputDirectory 'AgentPackage.sha256'
 $manifestPath='AgentPackage.manifest.json'
 $agentVersion=if($releaseBuild){$ReleaseVersion}else{$agentVersion}
-$manifest=[pscustomobject]@{packageFormatVersion=1;agentInformationalVersion=$agentVersion;sourceCommit=$revision;sourceDirty=($statusLines.Count -gt 0);releaseBuild=$releaseBuild;agentUpdateChallengeProtocol=1}
+$manifest=[pscustomobject]@{packageFormatVersion=1;agentInformationalVersion=$agentVersion;sourceCommit=$revision;sourceDirty=($statusLines.Count -gt 0);releaseBuild=$releaseBuild;agentUpdateChallengeProtocol=2}
+$verifierProject=Join-Path $repo 'services/AgentPackageVerifier/AgentPackageVerifier.csproj'
 $scriptNames=@('Install-AgentPackage.ps1','Install-Service.ps1','Install-TightVncServer.ps1','Prepare-SunshineStreamGate.ps1','PrivateInstallFiles.ps1','ServiceInstallTransaction.ps1')
 if($releaseBuild){$scriptNames+=@('Update-AgentPackage.ps1','Update-Agent.ps1')}
 $entries=@('Agent')+$scriptNames+$manifestPath
@@ -79,25 +80,83 @@ try {
    [IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip,$file.FullName,$entryName,[IO.Compression.CompressionLevel]::Optimal) | Out-Null
   }
  } finally {$zip.Dispose()}
+ $hash=(Get-FileHash -LiteralPath $stagedArchive -Algorithm SHA256).Hash.ToUpperInvariant()
+ if($releaseBuild){
+  if(-not (Test-Path -LiteralPath $verifierProject -PathType Leaf)){throw 'Trusted Agent package verifier source project is missing.'}
+  $verifierOutput=Join-Path $stage 'trusted-verifier-output'
+  $verifierArtifacts=Join-Path $stage 'trusted-verifier-artifacts'
+  & dotnet build $verifierProject -c Release -o $verifierOutput --artifacts-path $verifierArtifacts --nologo
+  if($LASTEXITCODE -ne 0){throw 'Trusted Agent package verifier build failed.'}
+  $verifierDll=Join-Path $verifierOutput 'AgentPackageVerifier.dll'
+  if(-not (Test-Path -LiteralPath $verifierDll -PathType Leaf) -or -not (Test-Path -LiteralPath (Join-Path $verifierOutput 'AgentPackageVerifier.runtimeconfig.json') -PathType Leaf)){
+   throw 'Trusted Agent package verifier build output is incomplete.'
+  }
+  $verificationPath=Join-Path $stage 'verification.json'
+  & dotnet $verifierDll validate-archive --archive $stagedArchive --version $agentVersion --output-json $verificationPath
+  $verificationExitCode=$LASTEXITCODE
+  if($verificationExitCode -ne 0 -or -not (Test-Path -LiteralPath $verificationPath -PathType Leaf)){
+   throw 'Trusted Agent package verifier rejected the completed ZIP.'
+  }
+  try {$verification=[IO.File]::ReadAllText($verificationPath) | ConvertFrom-Json -ErrorAction Stop}
+  catch {throw 'Trusted Agent package verifier returned invalid JSON.'}
+  $expectedFields=@('status','category','targetRuntime','version','agentUpdateChallengeProtocol','archiveHash')
+  $actualFields=@($verification.PSObject.Properties | ForEach-Object {$_.Name})
+  if($verification -isnot [pscustomobject] -or $actualFields.Count -ne $expectedFields.Count -or @($expectedFields | Where-Object {$_ -notin $actualFields}).Count -ne 0){
+   throw 'Trusted Agent package verifier returned an incomplete typed result.'
+  }
+  $challengeProtocol=$verification.agentUpdateChallengeProtocol
+  if(
+   $verification.status -isnot [string] -or $verification.status -cne 'accepted' -or $null -ne $verification.category -or
+   $verification.targetRuntime -isnot [string] -or $verification.targetRuntime -cne $Runtime -or
+   $verification.version -isnot [string] -or $verification.version -cne $agentVersion -or
+   ($challengeProtocol -isnot [int] -and $challengeProtocol -isnot [long]) -or $challengeProtocol -ne 2 -or
+   $verification.archiveHash -isnot [string] -or $verification.archiveHash -cnotmatch '\A[0-9a-f]{64}\z'
+  ){
+   throw 'Trusted Agent package verifier returned a mismatched typed result.'
+  }
+  if($verification.archiveHash.ToUpperInvariant() -cne $hash){throw 'Trusted Agent package verifier returned a mismatched archive hash.'}
+ }
  $null=New-Item -ItemType Directory -Path $OutputDirectory -Force
  $outputTemp=Join-Path $OutputDirectory ('.AgentPackage-'+[guid]::NewGuid().ToString('N')+'.tmp')
+ $outputHashTemp=Join-Path $OutputDirectory ('.AgentPackage-'+[guid]::NewGuid().ToString('N')+'.hash.tmp')
  [IO.File]::Copy($stagedArchive,$outputTemp,$false)
- if(Test-Path -LiteralPath $archive){
+ [IO.File]::WriteAllText($outputHashTemp,$hash+[Environment]::NewLine,[Text.Encoding]::ASCII)
+ $archiveExisted=Test-Path -LiteralPath $archive
+ $hashExisted=Test-Path -LiteralPath $hashFile
+ $archivePublished=$false
+ $hashPublished=$false
+ try {
+ if($archiveExisted){
   $outputBackup=Join-Path $OutputDirectory ('.AgentPackage-'+[guid]::NewGuid().ToString('N')+'.bak')
   [IO.File]::Replace($outputTemp,$archive,$outputBackup)
   $outputTemp=$null
-  [IO.File]::Delete($outputBackup)
-  $outputBackup=$null
  }else{
   [IO.File]::Move($outputTemp,$archive)
   $outputTemp=$null
  }
- $hash=(Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToUpperInvariant()
- [IO.File]::WriteAllText($hashFile,$hash+[Environment]::NewLine,[Text.Encoding]::ASCII)
+ $archivePublished=$true
+ if($hashExisted){
+  $outputHashBackup=Join-Path $OutputDirectory ('.AgentPackage-'+[guid]::NewGuid().ToString('N')+'.hash.bak')
+  [IO.File]::Replace($outputHashTemp,$hashFile,$outputHashBackup)
+  $outputHashTemp=$null
+ }else{
+  [IO.File]::Move($outputHashTemp,$hashFile)
+  $outputHashTemp=$null
+ }
+ $hashPublished=$true
+ if($outputBackup){[IO.File]::Delete($outputBackup);$outputBackup=$null}
+ if($outputHashBackup){[IO.File]::Delete($outputHashBackup);$outputHashBackup=$null}
+ } catch {
+  if($hashPublished){if($hashExisted -and $outputHashBackup -and (Test-Path -LiteralPath $outputHashBackup)){[IO.File]::Copy($outputHashBackup,$hashFile,$true)}elseif(-not $hashExisted -and (Test-Path -LiteralPath $hashFile)){[IO.File]::Delete($hashFile)}}
+  if($archivePublished){if($archiveExisted -and $outputBackup -and (Test-Path -LiteralPath $outputBackup)){[IO.File]::Copy($outputBackup,$archive,$true)}elseif(-not $archiveExisted -and (Test-Path -LiteralPath $archive)){[IO.File]::Delete($archive)}}
+  throw
+ }
  [pscustomobject]@{PackagePath=$archive;Sha256=$hash;HashFilePath=$hashFile;Runtime=$Runtime;AgentVersion=$agentVersion;ReleaseVersion=$(if($releaseBuild){$ReleaseVersion}else{$null});ReleaseBuild=$releaseBuild;ManifestPath=$manifestPath;Manifest=$manifest}
 } finally {
  if($outputTemp -and (Test-Path -LiteralPath $outputTemp)){Remove-Item -LiteralPath $outputTemp -Force}
+ if($outputHashTemp -and (Test-Path -LiteralPath $outputHashTemp)){Remove-Item -LiteralPath $outputHashTemp -Force}
  if($outputBackup -and (Test-Path -LiteralPath $outputBackup)){Remove-Item -LiteralPath $outputBackup -Force}
+ if($outputHashBackup -and (Test-Path -LiteralPath $outputHashBackup)){Remove-Item -LiteralPath $outputHashBackup -Force}
  $resolved=[IO.Path]::GetFullPath($stage)
  $temp=[IO.Path]::GetFullPath($tempRoot).TrimEnd('\')+'\'
  if(-not $resolved.StartsWith($temp,[StringComparison]::OrdinalIgnoreCase) -or [IO.Path]::GetFileName($resolved) -notlike 'kr-agent-package-*'){throw 'Unsafe package staging cleanup path.'}

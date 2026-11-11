@@ -17,7 +17,9 @@ public sealed partial class ControllerDatabase
         Identifier(release.Version);
         if (release.Channel is not ("stable" or "beta") || string.IsNullOrWhiteSpace(release.ReleaseNotes)
             || !Path.IsPathFullyQualified(release.PackagePath) || release.PackageSizeBytes <= 0
-            || string.IsNullOrWhiteSpace(release.SourceCommit) || release.SourceDirty || !release.ReleaseBuild)
+            || string.IsNullOrWhiteSpace(release.SourceCommit) || release.SourceDirty || !release.ReleaseBuild
+            || release.TargetRuntime is not ("win-x64" or "win-arm64" or "unknown")
+            || release.AgentUpdateChallengeProtocol is not (1 or 2))
             throw new ArgumentException("Invalid Agent release metadata");
 
         byte[] hash;
@@ -30,10 +32,11 @@ public sealed partial class ControllerDatabase
         {
             var publishedAt = clock.GetUtcNow();
             using var tx = connection.BeginTransaction();
-            using (var insert = Command("INSERT INTO agent_releases(version,channel,release_notes,package_sha256,package_path,package_size_bytes,source_commit,source_dirty,release_build,package_format,published_at_unix_ms) VALUES($version,$channel,$notes,$hash,$path,$size,$commit,0,1,'AgentPackage.zip',$published)",
+            using (var insert = Command("INSERT INTO agent_releases(version,channel,release_notes,package_sha256,package_path,package_size_bytes,source_commit,source_dirty,release_build,package_format,published_at_unix_ms,target_runtime,agent_update_challenge_protocol) VALUES($version,$channel,$notes,$hash,$path,$size,$commit,0,1,'AgentPackage.zip',$published,$runtime,$protocol)",
                 ("$version", release.Version), ("$channel", release.Channel), ("$notes", release.ReleaseNotes), ("$hash", canonicalHash),
                 ("$path", release.PackagePath), ("$size", release.PackageSizeBytes), ("$commit", release.SourceCommit),
-                ("$published", publishedAt.ToUnixTimeMilliseconds())))
+                ("$published", publishedAt.ToUnixTimeMilliseconds()), ("$runtime", release.TargetRuntime),
+                ("$protocol", release.AgentUpdateChallengeProtocol)))
             {
                 insert.Transaction = tx;
                 insert.ExecuteNonQuery();
@@ -99,7 +102,9 @@ public sealed partial class ControllerDatabase
             string packageHash;
             string packagePath;
             long packageSize;
-            using (var release = Command("SELECT version,package_sha256,package_path,package_size_bytes FROM agent_releases WHERE version=$version", ("$version", releaseVersion)))
+            string publishedRuntime;
+            int publishedChallengeProtocol;
+            using (var release = Command("SELECT version,package_sha256,package_path,package_size_bytes,target_runtime,agent_update_challenge_protocol FROM agent_releases WHERE version=$version", ("$version", releaseVersion)))
             {
                 release.Transaction = tx;
                 using var row = release.ExecuteReader();
@@ -108,8 +113,13 @@ public sealed partial class ControllerDatabase
                 packageHash = row.GetString(1);
                 packagePath = row.GetString(2);
                 packageSize = row.GetInt64(3);
+                publishedRuntime = row.GetString(4);
+                publishedChallengeProtocol = row.GetInt32(5);
             }
             using var artifact = OpenUpdateArtifact(packagePath, packageHash, packageSize, targetVersion, out var inventory);
+            if (publishedChallengeProtocol != 2 || inventory.AgentUpdateChallengeProtocol != publishedChallengeProtocol
+                || publishedRuntime is not ("win-x64" or "win-arm64") || inventory.TargetRuntime != publishedRuntime)
+                throw new InvalidOperationException("The selected release is unavailable, corrupt, or lacks update confirmation support; publish a compatible release.");
 
             var ticket = NewAgentUpdateTicket(out var ticketHash);
             var operationId = Guid.NewGuid().ToString("N");

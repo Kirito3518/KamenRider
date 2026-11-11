@@ -929,7 +929,8 @@ public sealed class AgentReleaseAcceptanceTests
             Directory.CreateDirectory(Path.GetDirectoryName(artifact)!);
             await File.WriteAllBytesAsync(artifact, package);
             var database = app.Services.GetRequiredService<ControllerDatabase>();
-            var release = database.PublishAgentRelease(new("2.3.4", "stable", "fixture", hash, artifact, package.Length, "0123456789ab", false, true));
+            var release = database.PublishAgentRelease(new("2.3.4", "stable", "fixture", hash, artifact, package.Length,
+                "0123456789ab", false, true, "win-x64", 2));
 
             using var enrollmentResponse = await Admin.PostAsync("/internal/agent-enrollment-tickets", null);
             Assert.Equal(HttpStatusCode.OK, enrollmentResponse.StatusCode);

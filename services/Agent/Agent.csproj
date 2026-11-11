@@ -13,7 +13,7 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="Agent.Tests" />
-    <AssemblyMetadata Include="AgentUpdateChallengeProtocol" Value="1" />
+    <AssemblyMetadata Include="AgentUpdateChallengeProtocol" Value="2" />
   </ItemGroup>
 
   <ItemGroup>

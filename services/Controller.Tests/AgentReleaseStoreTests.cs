@@ -1,6 +1,7 @@
 using KamenRaider.Controller.Agents;
 using KamenRaider.Controller.Data;
 using KamenRaider.Controller.Machines;
+using KamenRaider.AgentPackage;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.TestHost;
@@ -8,9 +9,9 @@ using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.DependencyInjection;
 using System.IO.Compression;
 using System.Net;
+using System.Reflection;
 using System.Net.Http.Json;
 using System.Net.Http.Headers;
-using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -45,20 +46,37 @@ public sealed class AgentReleaseStoreTests
         Assert.Contains("Invalid Agent release version", await response.Content.ReadAsStringAsync());
     }
 
-    [Theory]
-    [InlineData("powershell.exe")]
-    [InlineData("pwsh.exe")]
-    public async Task PublishedBytesPassBothUpdaterValidatorsBeforeAnyInstallation(string engine)
+    [Fact]
+    public async Task PublishedBytesPassSharedVerifierBeforeAnyInstallation()
     {
         using var fixture = new ReleaseFixture();
         await using var host = await fixture.StartHost();
         using var response = await Publish(host.Client, fixture.CreatePackage("2.3.4"), "2.3.4");
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         var stored = fixture.ReadStoredRelease("2.3.4");
-        var project = typeof(AgentReleaseStoreTests).Assembly.GetCustomAttributes<AssemblyMetadataAttribute>()
+        using var package = File.OpenRead(stored.Path);
+        var inventory = PackageVerifier.ValidateArchive(package, "2.3.4");
+        Assert.Equal("win-x64", inventory.TargetRuntime);
+        Assert.Equal(2, inventory.AgentUpdateChallengeProtocol);
+        Assert.Equal(stored.Hash, inventory.ArchiveHash, ignoreCase: true);
+        Assert.False(Path.GetFullPath(stored.Path).StartsWith(Path.Combine(fixture.Root, "public") + Path.DirectorySeparatorChar,
+            StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Theory]
+    [InlineData("powershell.exe")]
+    [InlineData("pwsh.exe")]
+    public async Task CurrentUpdaterRejectsProtocolTwoWhileDefaultReleaseGateStaysClosed(string engine)
+    {
+        using var fixture = new ReleaseFixture();
+        await using var host = await fixture.StartHost();
+        using var response = await Publish(host.Client, AgentPackageCorpus.Valid(), "2.3.4");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var stored = fixture.ReadStoredRelease("2.3.4");
+        var project = typeof(AgentReleaseStoreTests).Assembly.GetCustomAttributes<System.Reflection.AssemblyMetadataAttribute>()
             .Single(attribute => attribute.Key == "ControllerProjectPath").Value!;
         var repo = Path.GetFullPath(Path.Combine(Path.GetDirectoryName(project)!, "..", ".."));
-        var script = Path.Combine(fixture.Root, "validate-published.ps1");
+        var script = Path.Combine(fixture.Root, "validate-protocol-two.ps1");
         File.WriteAllText(script, """
             param($Updater,$Transaction,$Archive,$Hash,$Expanded)
             $ErrorActionPreference='Stop'
@@ -67,7 +85,7 @@ public sealed class AgentReleaseStoreTests
             Test-AgentUpdatePackageArchive -ArchivePath $Archive -ExpectedSha256 $Hash -TargetVersion '2.3.4' | Out-Null
             Expand-AgentUpdatePackageArchive -ArchivePath $Archive -Destination $Expanded | Out-Null
             Test-AgentUpdatePackageManifest -PackageRoot $Expanded -TargetVersion '2.3.4' | Out-Null
-            'Published package passed updater validation without installation.'
+            'Protocol-2 package passed current updater validation.'
             """);
         var start = new System.Diagnostics.ProcessStartInfo(engine) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
         foreach (var argument in new[] { "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script,
@@ -79,8 +97,9 @@ public sealed class AgentReleaseStoreTests
         var output = process.StandardOutput.ReadToEndAsync();
         var error = process.StandardError.ReadToEndAsync();
         await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(30));
-        Assert.True(process.ExitCode == 0, await output + await error);
-        Assert.Contains("Published package passed updater validation", await output);
+        Assert.NotEqual(0, process.ExitCode);
+        Assert.Contains("does not identify the requested clean release", await output + await error, StringComparison.OrdinalIgnoreCase);
+        Assert.Throws<InvalidOperationException>(() => fixture.Db.ReserveAgentUpdate("machine", "2.3.4", "admin", "closed-gate"));
     }
 
     [Fact]
@@ -94,6 +113,25 @@ public sealed class AgentReleaseStoreTests
         Assert.Equal(HttpStatusCode.BadRequest, forged.StatusCode);
         using var capable = await Publish(host.Client, fixture.CreatePackage("2.3.4", challengeProtocol: true), "2.3.4");
         Assert.Equal(HttpStatusCode.OK, capable.StatusCode);
+    }
+
+    [Theory]
+    [InlineData("win-x64")]
+    [InlineData("win-arm64")]
+    public async Task PublishedReleaseStoresVerifiedWrapperRuntimeAndProtocol(string runtime)
+    {
+        using var fixture = new ReleaseFixture();
+        await using var host = await fixture.StartHost();
+        using var response = await Publish(host.Client, AgentPackageCorpus.Valid(runtime), "2.3.4");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        using var connection = fixture.OpenDatabase();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT target_runtime,agent_update_challenge_protocol FROM agent_releases WHERE version='2.3.4'";
+        using var row = command.ExecuteReader();
+        Assert.True(row.Read());
+        Assert.Equal(runtime, row.GetString(0));
+        Assert.Equal(2, row.GetInt32(1));
     }
     [Theory]
     [InlineData("Update-Agent.ps1", "0123456789ab", false)]
@@ -328,41 +366,32 @@ public sealed class AgentReleaseStoreTests
             string omitted = "", string sourceCommit = "0123456789ab", bool unexpectedRoot = false, bool challengeProtocol = true)
         {
             agentAssemblyPath ??= typeof(AgentMetadataFixture).Assembly.Location;
-            using var memory = new MemoryStream();
-            using (var archive = new ZipArchive(memory, ZipArchiveMode.Create, leaveOpen: true))
+            var entries = AgentPackageCorpus.Entries();
+            entries[entries.FindIndex(entry => entry.Name == "Agent/Agent.dll")] =
+                ("Agent/Agent.dll", File.ReadAllBytes(agentAssemblyPath));
+            var dependencyVersion = agentLibraryVersion ?? version;
+            entries[entries.FindIndex(entry => entry.Name == "Agent/Agent.deps.json")] =
+                ("Agent/Agent.deps.json", AgentPackageCorpus.Utf8(JsonSerializer.Serialize(
+                    new { libraries = new Dictionary<string, object> { ["Agent/" + dependencyVersion] = new { type = "project" } } })));
+            entries[entries.FindIndex(entry => entry.Name == "Update-Agent.ps1")] = ("Update-Agent.ps1", AgentPackageCorpus.Utf8(marker));
+            if (omitted.Length > 0) entries.RemoveAll(entry => entry.Name == omitted);
+            if (unexpectedRoot) entries.Add(("unexpected.txt", AgentPackageCorpus.Utf8("unexpected")));
+            if (traversal) entries.Add(("../escape.txt", AgentPackageCorpus.Utf8("unsafe")));
+            if (duplicate) entries.Add(("Agent/Agent.exe", AgentPackageCorpus.Utf8("replacement")));
+            for (var index = 0; index < extraEntries; index++) entries.Add(($"Agent/extra/{index:D5}.txt", []));
+            var manifest = new Dictionary<string, object>
             {
-                AddEntry(archive, "Agent/Agent.exe", marker);
-                var agentAssemblyEntry = archive.CreateEntry("Agent/Agent.dll", CompressionLevel.Optimal);
-                using (var agentAssemblyOutput = agentAssemblyEntry.Open())
-                using (var agentAssemblyInput = File.OpenRead(agentAssemblyPath))
-                    agentAssemblyInput.CopyTo(agentAssemblyOutput);
-                var dependencyVersion = agentLibraryVersion ?? version;
-                AddEntry(archive, "Agent/Agent.deps.json", JsonSerializer.Serialize(new { libraries = new Dictionary<string, object> { ["Agent/" + dependencyVersion] = new { type = "project" } } }));
-                AddEntry(archive, "Install-AgentPackage.ps1", "install");
-                AddEntry(archive, "Install-Service.ps1", "service");
-                AddEntry(archive, "Install-TightVncServer.ps1", "vnc");
-                AddEntry(archive, "Prepare-SunshineStreamGate.ps1", "sunshine");
-                AddEntry(archive, "PrivateInstallFiles.ps1", "private");
-                AddEntry(archive, "ServiceInstallTransaction.ps1", "transaction");
-                if (omitted != "Update-Agent.ps1") AddEntry(archive, "Update-Agent.ps1", "updater");
-                if (omitted != "Update-AgentPackage.ps1") AddEntry(archive, "Update-AgentPackage.ps1", "transaction");
-                if (unexpectedRoot) AddEntry(archive, "unexpected.txt", "unexpected");
-                if (traversal) AddEntry(archive, "../escape.txt", "unsafe");
-                if (duplicate) AddEntry(archive, "Agent/Agent.exe", "replacement");
-                for (var index = 0; index < extraEntries; index++) AddEntry(archive, $"extra/{index:D5}.txt", string.Empty);
-                var manifest = JsonSerializer.Serialize(new Dictionary<string,object>
-                {
-                    ["packageFormatVersion"] = 1,
-                    ["agentInformationalVersion"] = version,
-                    ["sourceCommit"] = sourceCommit,
-                    ["sourceDirty"] = sourceDirty,
-                    ["releaseBuild"] = releaseBuild,
-                });
-                if (challengeProtocol) manifest = manifest[..^1] + ",\"agentUpdateChallengeProtocol\":1}";
-                AddEntry(archive, "AgentPackage.manifest.json", manifest);
-                if (duplicateManifest) AddEntry(archive, "AgentPackage.manifest.json", manifest);
-            }
-            return memory.ToArray();
+                ["packageFormatVersion"] = 1,
+                ["agentInformationalVersion"] = version,
+                ["sourceCommit"] = sourceCommit,
+                ["sourceDirty"] = sourceDirty,
+                ["releaseBuild"] = releaseBuild,
+            };
+            if (challengeProtocol) manifest["agentUpdateChallengeProtocol"] = 2;
+            entries[entries.FindIndex(entry => entry.Name == "AgentPackage.manifest.json")] =
+                ("AgentPackage.manifest.json", AgentPackageCorpus.Utf8(JsonSerializer.Serialize(manifest)));
+            if (duplicateManifest) entries.Add(("AgentPackage.manifest.json", AgentPackageCorpus.Utf8(JsonSerializer.Serialize(manifest))));
+            return AgentPackageCorpus.Build(entries);
         }
 
         public FileStream OpenOversizedCompressedPackage()
@@ -410,18 +439,11 @@ public sealed class AgentReleaseStoreTests
             return (row.GetString(0), row.GetString(1), row.GetInt64(2));
         }
 
-        private SqliteConnection OpenDatabase()
+        public SqliteConnection OpenDatabase()
         {
             var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = DatabasePath, Pooling = false }.ToString());
             connection.Open();
             return connection;
-        }
-
-        private static void AddEntry(ZipArchive archive, string name, string contents)
-        {
-            var entry = archive.CreateEntry(name, CompressionLevel.Optimal);
-            using var writer = new StreamWriter(entry.Open(), new UTF8Encoding(false));
-            writer.Write(contents);
         }
 
         public void Dispose()

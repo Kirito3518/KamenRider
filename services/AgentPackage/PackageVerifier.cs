@@ -219,12 +219,14 @@ public static class PackageVerifier
                 if (node.Path.Equals("Agent/Agent.exe", StringComparison.OrdinalIgnoreCase)) exeData = capture;
                 inventoryNodes.Add(new PackageNode(node.Path, false, entry.Length, hash));
             }
-            ValidateManifest(manifestData!, version);
+            var manifestMetadata = ValidateManifest(manifestData!, version);
             ValidateDeps(depsData!, version);
             ValidateAssembly(dllData!, version);
             var runtime = ReadRuntime(exeData!);
             var archiveHash = Convert.ToHexStringLower(SHA256.HashData(bytes));
-            return new Analysis(new PackageInventory(archiveHash, version, runtime, inventoryNodes, total, InventoryDigest(inventoryNodes)), ordered);
+            return new Analysis(new PackageInventory(archiveHash, version, runtime, inventoryNodes, total,
+                InventoryDigest(inventoryNodes), manifestMetadata.SourceCommit, manifestMetadata.SourceDirty,
+                manifestMetadata.ReleaseBuild, manifestMetadata.AgentUpdateChallengeProtocol), ordered);
         }
         finally { foreach (var stream in tempStreams) stream.Dispose(); }
     }
@@ -316,7 +318,7 @@ public static class PackageVerifier
         return Convert.ToHexStringLower(SHA256.HashData(memory.ToArray()));
     }
 
-    private static void ValidateManifest(Stream data, string version)
+    private static ManifestMetadata ValidateManifest(Stream data, string version)
     {
         try
         {
@@ -333,10 +335,13 @@ public static class PackageVerifier
                 || !CommitPattern.IsMatch(commit.GetString() ?? "")
                 || obj.GetProperty("sourceDirty").ValueKind != JsonValueKind.False
                 || obj.GetProperty("releaseBuild").ValueKind != JsonValueKind.True) throw ManifestError();
+            return new ManifestMetadata(commit.GetString()!, false, true, 2);
         }
         catch (PackageValidationException) { throw; }
         catch (Exception e) when (e is JsonException or InvalidOperationException or FormatException or DecoderFallbackException) { throw ManifestError(); }
     }
+
+    private sealed record ManifestMetadata(string SourceCommit, bool SourceDirty, bool ReleaseBuild, int AgentUpdateChallengeProtocol);
 
     private static void ValidateDeps(Stream data, string version)
     {

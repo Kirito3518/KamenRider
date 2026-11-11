@@ -361,6 +361,19 @@ public sealed class AgentUpdateTests
     }
 
     [Fact]
+    public void HistoricalProtocolOneReleaseRemainsListedButCannotBeReserved()
+    {
+        using var fixture = new LeaseFixture(agentReleaseRemediationEnabled: true);
+        var bytes = AgentUpdateTestPackage.Create("2.3.4", challengeProtocol: 1);
+        AddRelease(fixture.Path, "2.3.4", packageBytes: bytes, targetRuntime: "unknown", challengeProtocol: 1);
+
+        Assert.Equal("2.3.4", Assert.Single(fixture.Db.ListAgentReleases()).Version);
+        Assert.Throws<InvalidOperationException>(() => fixture.Db.ReserveAgentUpdate("pc", "2.3.4", "admin", "legacy-release"));
+        Assert.Null(Assert.Single(fixture.Db.List()).AgentUpdateOperationId);
+        Assert.True(Assert.Single(fixture.Db.List()).CanRent);
+    }
+
+    [Fact]
     public void CorruptPublishedArtifactCannotAcquireAnUpdateLock()
     {
         using var fixture = new LeaseFixture(agentReleaseRemediationEnabled: true);
@@ -783,9 +796,10 @@ public sealed class AgentUpdateTests
         return request;
     }
 
-    private static void AddRelease(string path, string version, string? packageHash = null, long packageSize = 100, bool missing = false)
+    private static void AddRelease(string path, string version, string? packageHash = null, long packageSize = 100, bool missing = false,
+        string targetRuntime = "win-x64", int challengeProtocol = 2, byte[]? packageBytes = null)
     {
-        var bytes = ProtocolTwoPackage(version);
+        var bytes = packageBytes ?? ProtocolTwoPackage(version);
         var hash = packageHash ?? Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes));
         var package = ControllerReleasePath(path, hash);
         if (packageHash is null && !missing)
@@ -796,11 +810,13 @@ public sealed class AgentUpdateTests
         }
         using var connection = Open(path);
         using var command = connection.CreateCommand();
-        command.CommandText = "INSERT INTO agent_releases(version,channel,release_notes,package_sha256,package_path,package_size_bytes,source_commit,source_dirty,release_build,package_format,published_at_unix_ms) VALUES($version,'stable','release notes',$hash,$package,$size,'test-commit',0,1,'AgentPackage.zip',1)";
+        command.CommandText = "INSERT INTO agent_releases(version,channel,release_notes,package_sha256,package_path,package_size_bytes,source_commit,source_dirty,release_build,package_format,published_at_unix_ms,target_runtime,agent_update_challenge_protocol) VALUES($version,'stable','release notes',$hash,$package,$size,'test-commit',0,1,'AgentPackage.zip',1,$runtime,$protocol)";
         command.Parameters.AddWithValue("$version", version);
         command.Parameters.AddWithValue("$hash", hash);
         command.Parameters.AddWithValue("$package", package);
         command.Parameters.AddWithValue("$size", packageSize);
+        command.Parameters.AddWithValue("$runtime", targetRuntime);
+        command.Parameters.AddWithValue("$protocol", challengeProtocol);
         command.ExecuteNonQuery();
     }
 

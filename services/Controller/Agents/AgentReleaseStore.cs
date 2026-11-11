@@ -1,12 +1,8 @@
 using KamenRaider.Contracts;
+using KamenRaider.AgentPackage;
 using KamenRaider.Controller.Data;
 using Microsoft.Data.Sqlite;
-using System.IO.Compression;
-using System.Reflection.Metadata;
-using System.Reflection.PortableExecutable;
 using System.Security.Cryptography;
-using System.Text;
-using System.Text.Json;
 using System.Text.RegularExpressions;
 
 namespace KamenRaider.Controller.Agents;
@@ -25,23 +21,7 @@ public sealed class AgentReleaseStore
     public const int MaximumManifestBytes = 64 * 1024;
     public const int MaximumReleaseNotesLength = 4_000;
 
-    private static readonly string[] RequiredFiles =
-    [
-        "Agent/Agent.exe",
-        "Agent/Agent.dll",
-        "Agent/Agent.deps.json",
-        "Install-AgentPackage.ps1",
-        "Install-Service.ps1",
-        "Install-TightVncServer.ps1",
-        "Prepare-SunshineStreamGate.ps1",
-        "PrivateInstallFiles.ps1",
-        "ServiceInstallTransaction.ps1",
-        "Update-AgentPackage.ps1",
-        "Update-Agent.ps1",
-    ];
-    private static readonly HashSet<string> AllowedRootEntries = new(RequiredFiles.Where(file => !file.StartsWith("Agent/", StringComparison.Ordinal)).Append("Agent").Append("AgentPackage.manifest.json"), StringComparer.OrdinalIgnoreCase);
     private static readonly Regex SupportedVersion = new(@"\A(?:\d+\.\d+\.\d+|1\.0\.0\+g[0-9a-f]{12,40})\z", RegexOptions.CultureInvariant | RegexOptions.Compiled);
-    private static readonly Regex SourceCommit = new(@"\A[0-9a-f]{12}\z", RegexOptions.CultureInvariant | RegexOptions.Compiled);
     private readonly string artifactRoot;
 
     public AgentReleaseStore(string artifactRoot)
@@ -106,11 +86,10 @@ public sealed class AgentReleaseStore
         if (database.ListAgentReleases().Any(release => release.Version == version))
             throw new AgentReleaseConflictException("This Agent version has already been published");
 
-        string sha256;
-        AgentPackageManifest manifest;
+        PackageInventory inventory;
         try
         {
-            (sha256, manifest) = ValidatePackage(staged.FilePath, staged.SizeBytes, version);
+            inventory = ValidatePackage(staged.FilePath, staged.SizeBytes, version);
         }
         catch (AgentReleaseValidationException)
         {
@@ -120,11 +99,12 @@ public sealed class AgentReleaseStore
         {
             throw;
         }
-        catch (Exception exception) when (exception is InvalidDataException or EndOfStreamException or JsonException or DecoderFallbackException or NotSupportedException or BadImageFormatException)
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException or BadImageFormatException)
         {
             throw new AgentReleaseValidationException("Agent package is not a valid supported ZIP archive", exception);
         }
 
+        var sha256 = inventory.ArchiveHash.ToUpperInvariant();
         var packageDirectory = Path.Combine(artifactRoot, "sha256", sha256[..2].ToLowerInvariant());
         Directory.CreateDirectory(packageDirectory);
         var packagePath = Path.Combine(packageDirectory, sha256.ToLowerInvariant() + ".zip");
@@ -134,7 +114,8 @@ public sealed class AgentReleaseStore
         {
             return database.PublishAgentRelease(new AgentReleasePublication(
                 version, channel, releaseNotes, sha256, packagePath, staged.SizeBytes,
-                manifest.SourceCommit, manifest.SourceDirty, manifest.ReleaseBuild));
+                inventory.SourceCommit, inventory.SourceDirty, inventory.ReleaseBuild,
+                inventory.TargetRuntime, inventory.AgentUpdateChallengeProtocol));
         }
         catch (SqliteException exception) when (exception.SqliteErrorCode == 19)
         {
@@ -171,289 +152,50 @@ public sealed class AgentReleaseStore
         }
     }
 
-    internal void ValidateRetainedForUpdate(string path, long size, string version, string expectedHash)
+    internal PackageInventory ValidateRetainedForUpdate(string path, long size, string version, string expectedHash)
     {
-        if (version.Length > 64 || !SupportedVersion.IsMatch(version))
-            throw new AgentReleaseValidationException("Invalid Agent release version");
-        var (actualHash, _) = ValidatePackage(path, size, version);
-        if (!string.Equals(actualHash, expectedHash, StringComparison.OrdinalIgnoreCase))
+        var inventory = ValidatePackage(path, size, version);
+        if (!string.Equals(inventory.ArchiveHash, expectedHash, StringComparison.OrdinalIgnoreCase))
             throw new AgentReleaseValidationException("Stored Agent package does not match its content address");
+        return inventory;
     }
 
-    private (string Sha256, AgentPackageManifest Manifest) ValidatePackage(string path, long compressedSize, string version)
+    private PackageInventory ValidatePackage(string path, long compressedSize, string version)
     {
         if (compressedSize <= 0 || compressedSize > MaximumCompressedBytes)
             throw new AgentReleaseTooLargeException("Agent package exceeds the 100 MiB compressed limit");
+        if (version.Length > 64 || !SupportedVersion.IsMatch(version))
+            throw new AgentReleaseValidationException("Invalid Agent release version");
+        if (!Path.IsPathFullyQualified(path))
+            throw new AgentReleaseValidationException("Agent package path must be absolute");
 
-        using var package = File.OpenRead(path);
-        var hashBytes = SHA256.HashData(package);
-        var sha256 = Convert.ToHexString(hashBytes);
-        package.Position = 0;
-        using var archive = new ZipArchive(package, ZipArchiveMode.Read, leaveOpen: false);
-        if (archive.Entries.Count > MaximumEntries)
-            throw new AgentReleaseTooLargeException("Agent package exceeds the 5,000 ZIP entry limit");
-
-        var paths = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
-        var pathsWithDescendants = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        ZipArchiveEntry? manifestEntry = null;
-        long declaredExpanded = 0;
-        foreach (var entry in archive.Entries)
-        {
-            var isDirectory = entry.FullName.EndsWith("/", StringComparison.Ordinal);
-            var normalized = ValidateEntryPath(entry.FullName, isDirectory);
-            if (!AllowedRootEntries.Contains(normalized.Split('/')[0]))
-                throw new AgentReleaseValidationException("Agent package contains an unexpected root entry");
-            if (!paths.TryAdd(normalized, isDirectory))
-                throw new AgentReleaseValidationException("Agent package contains duplicate ZIP entry paths");
-            RejectPathCollisions(paths, pathsWithDescendants, normalized, isDirectory);
-            RejectUnsupportedEntryType(entry);
-
-            if (entry.Length < 0 || entry.Length > MaximumExpandedBytes - declaredExpanded)
-                throw new AgentReleaseTooLargeException("Agent package exceeds the 500 MiB declared expanded-size limit");
-            declaredExpanded += entry.Length;
-            if (isDirectory && entry.Length != 0)
-                throw new AgentReleaseValidationException("ZIP directory entries must not contain file data");
-            if (entry.FullName.Equals("AgentPackage.manifest.json", StringComparison.Ordinal)) manifestEntry = entry;
-            if (entry.FullName.Equals("Agent/appsettings.json", StringComparison.OrdinalIgnoreCase))
-                throw new AgentReleaseValidationException("Agent package must not include the protected appsettings.json configuration");
-            if (Regex.IsMatch(entry.FullName, @"(?i)(^|/)tightvnc[^/]*\.msi\z", RegexOptions.CultureInvariant))
-                throw new AgentReleaseValidationException("The separately licensed TightVNC MSI must not be included in the Agent package");
-        }
-
-        foreach (var required in RequiredFiles)
-            if (!paths.TryGetValue(required, out var isDirectory) || isDirectory)
-                throw new AgentReleaseValidationException($"Agent package is missing required file {required}");
-        if (manifestEntry is null) throw new AgentReleaseValidationException("Agent package is missing AgentPackage.manifest.json");
-        if (manifestEntry.Length is <= 0 or > MaximumManifestBytes)
-            throw new AgentReleaseValidationException("Agent package manifest must not exceed 64 KiB");
-
-        long actualExpanded = 0;
-        var buffer = new byte[64 * 1024];
-        foreach (var entry in archive.Entries)
-        {
-            long actualEntry = 0;
-            using var entryStream = entry.Open();
-            while (true)
-            {
-                var read = entryStream.Read(buffer, 0, buffer.Length);
-                if (read == 0) break;
-                actualEntry += read;
-                actualExpanded += read;
-                if (actualExpanded > MaximumExpandedBytes)
-                    throw new AgentReleaseTooLargeException("Agent package exceeds the 500 MiB expanded-size limit");
-                if (actualEntry > entry.Length)
-                    throw new AgentReleaseValidationException("ZIP entry expanded beyond its declared length");
-            }
-            if (actualEntry != entry.Length)
-                throw new AgentReleaseValidationException("ZIP entry data does not match its declared length");
-        }
-
-        var manifest = ReadManifest(manifestEntry);
-        if (manifest.PackageFormatVersion != PackageFormatVersion)
-            throw new AgentReleaseValidationException("Unsupported Agent package format version");
-        if (manifest.AgentUpdateChallengeProtocol != 1)
-            throw new AgentReleaseValidationException("Agent package does not support update confirmation; publish a compatible release");
-        if (!string.Equals(manifest.AgentInformationalVersion, version, StringComparison.Ordinal))
-            throw new AgentReleaseValidationException("Release version does not match the Agent informational version in the package manifest");
-        ValidateAgentDependencyVersion(paths, archive, version);
-        ValidateAgentAssemblyInformationalVersion(archive, version);
-        if (!SourceCommit.IsMatch(manifest.SourceCommit))
-            throw new AgentReleaseValidationException("Agent package manifest sourceCommit is invalid");
-        if (manifest.SourceDirty || !manifest.ReleaseBuild)
-            throw new AgentReleaseValidationException("Dirty or non-release Agent packages cannot be published");
-        return (sha256, manifest);
-    }
-
-    private static void ValidateAgentDependencyVersion(Dictionary<string, bool> paths, ZipArchive archive, string version)
-    {
-        const string dependencyPath = "Agent/Agent.deps.json";
-        var dependencyEntry = archive.GetEntry(dependencyPath);
-        if (!paths.TryGetValue(dependencyPath, out var isDirectory) || isDirectory || dependencyEntry is null)
-            throw new AgentReleaseValidationException("Agent package is missing Agent/Agent.deps.json");
-        if (dependencyEntry.Length is <= 0 or > 16 * 1024 * 1024)
-            throw new AgentReleaseValidationException("Agent dependency manifest has an invalid size");
-        using var stream = dependencyEntry.Open();
-        using var document = JsonDocument.Parse(stream, new JsonDocumentOptions { MaxDepth = 32 });
-        if (!document.RootElement.TryGetProperty("libraries", out var libraries) || libraries.ValueKind != JsonValueKind.Object
-            || !libraries.TryGetProperty("Agent/" + version, out var agentProject)
-            || agentProject.ValueKind != JsonValueKind.Object
-            || !agentProject.TryGetProperty("type", out var type)
-            || type.ValueKind != JsonValueKind.String
-            || !string.Equals(type.GetString(), "project", StringComparison.Ordinal))
-            throw new AgentReleaseValidationException("Agent package version does not match the published Agent project identity");
-    }
-
-    private void ValidateAgentAssemblyInformationalVersion(ZipArchive archive, string version)
-    {
-        var assemblyEntry = archive.GetEntry("Agent/Agent.dll");
-        if (assemblyEntry is null || assemblyEntry.Length <= 0 || assemblyEntry.Length > MaximumExpandedBytes)
-            throw new AgentReleaseValidationException("Agent package is missing a valid Agent/Agent.dll");
-
-        var metadataPath = Path.Combine(artifactRoot, ".AgentAssemblyMetadata-" + Guid.NewGuid().ToString("N") + ".tmp");
         try
         {
-            using (var input = assemblyEntry.Open())
-            using (var output = new FileStream(metadataPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 64 * 1024, FileOptions.SequentialScan))
-            {
-                var buffer = new byte[64 * 1024];
-                long copied = 0;
-                while (true)
-                {
-                    var read = input.Read(buffer, 0, buffer.Length);
-                    if (read == 0) break;
-                    copied += read;
-                    if (copied > assemblyEntry.Length || copied > MaximumExpandedBytes)
-                        throw new AgentReleaseValidationException("Agent/Agent.dll exceeds its declared size");
-                    output.Write(buffer, 0, read);
-                }
-                if (copied != assemblyEntry.Length)
-                    throw new AgentReleaseValidationException("Agent/Agent.dll does not match its declared ZIP size");
-            }
-
-            using var assemblyFile = File.OpenRead(metadataPath);
-            using var peReader = new PEReader(assemblyFile, PEStreamOptions.LeaveOpen);
-            if (!peReader.HasMetadata)
-                throw new AgentReleaseValidationException("Agent/Agent.dll is not a managed assembly");
-            var metadata = peReader.GetMetadataReader();
-            if (!metadata.IsAssembly)
-                throw new AgentReleaseValidationException("Agent/Agent.dll does not contain assembly metadata");
-
-            string? informationalVersion = null;
-            string? challengeProtocol = null;
-            var assembly = metadata.GetAssemblyDefinition();
-            foreach (var attributeHandle in assembly.GetCustomAttributes())
-            {
-                var attribute = metadata.GetCustomAttribute(attributeHandle);
-                if (IsAssemblyAttribute(metadata, attribute.Constructor, "AssemblyMetadataAttribute"))
-                {
-                    var data = metadata.GetBlobReader(attribute.Value);
-                    if (data.ReadUInt16() != 1) throw new AgentReleaseValidationException("Agent/Agent.dll has malformed capability metadata");
-                    var key = data.ReadSerializedString();
-                    var capabilityValue = data.ReadSerializedString();
-                    if (data.ReadUInt16() != 0 || data.RemainingBytes != 0) throw new AgentReleaseValidationException("Agent/Agent.dll has malformed capability metadata");
-                    if (key == "AgentUpdateChallengeProtocol")
-                    {
-                        if (challengeProtocol is not null) throw new AgentReleaseValidationException("Agent/Agent.dll has duplicate update capability metadata");
-                        challengeProtocol = capabilityValue ?? "";
-                    }
-                    continue;
-                }
-                if (!IsAssemblyAttribute(metadata, attribute.Constructor, "AssemblyInformationalVersionAttribute")) continue;
-                if (informationalVersion is not null)
-                    throw new AgentReleaseValidationException("Agent/Agent.dll has duplicate informational version attributes");
-
-                var value = metadata.GetBlobReader(attribute.Value);
-                if (value.ReadUInt16() != 1)
-                    throw new AgentReleaseValidationException("Agent/Agent.dll has malformed informational version metadata");
-                informationalVersion = value.ReadSerializedString();
-                var namedArgumentCount = value.ReadUInt16();
-                if (namedArgumentCount != 0 || value.RemainingBytes != 0)
-                    throw new AgentReleaseValidationException("Agent/Agent.dll has malformed informational version metadata");
-            }
-
-            if (!string.Equals(informationalVersion, version, StringComparison.Ordinal))
-                throw new AgentReleaseValidationException("Release version does not match Agent/Agent.dll AssemblyInformationalVersion");
-            if (challengeProtocol != "1")
-                throw new AgentReleaseValidationException("Agent/Agent.dll does not support update confirmation; publish a compatible release");
+            using var package = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 64 * 1024, FileOptions.SequentialScan);
+            if (package.Length != compressedSize)
+                throw new AgentReleaseValidationException("Stored Agent package size does not match its release metadata");
+            var inventory = PackageVerifier.ValidateArchive(package, version);
+            if (inventory.AgentUpdateChallengeProtocol != 2 || inventory.TargetRuntime is not ("win-x64" or "win-arm64"))
+                throw new AgentReleaseValidationException("Agent package does not support update confirmation; publish a compatible release");
+            return inventory;
+        }
+        catch (PackageValidationException exception) when (exception.Category == "limit")
+        {
+            throw new AgentReleaseTooLargeException(exception.Message);
+        }
+        catch (PackageValidationException exception)
+        {
+            throw new AgentReleaseValidationException(exception.Message, exception);
         }
         catch (AgentReleaseValidationException)
         {
             throw;
         }
-        catch (Exception exception) when (exception is BadImageFormatException or ArgumentOutOfRangeException or InvalidOperationException)
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException or BadImageFormatException)
         {
-            throw new AgentReleaseValidationException("Agent/Agent.dll has invalid assembly metadata", exception);
-        }
-        finally
-        {
-            TryDelete(metadataPath);
+            throw new AgentReleaseValidationException("Agent package is not a valid supported ZIP archive", exception);
         }
     }
-
-    private static bool IsAssemblyAttribute(MetadataReader metadata, EntityHandle constructor, string attributeName)
-    {
-        EntityHandle typeHandle = constructor.Kind switch
-        {
-            HandleKind.MemberReference => metadata.GetMemberReference((MemberReferenceHandle)constructor).Parent,
-            HandleKind.MethodDefinition => metadata.GetMethodDefinition((MethodDefinitionHandle)constructor).GetDeclaringType(),
-            _ => default,
-        };
-        if (typeHandle.Kind != HandleKind.TypeReference) return false;
-        var type = metadata.GetTypeReference((TypeReferenceHandle)typeHandle);
-        if (!string.Equals(metadata.GetString(type.Namespace), "System.Reflection", StringComparison.Ordinal)
-            || !string.Equals(metadata.GetString(type.Name), attributeName, StringComparison.Ordinal)
-            || type.ResolutionScope.Kind != HandleKind.AssemblyReference)
-            return false;
-        var assemblyName = metadata.GetString(metadata.GetAssemblyReference((AssemblyReferenceHandle)type.ResolutionScope).Name);
-        return assemblyName is "System.Runtime" or "System.Private.CoreLib" or "mscorlib";
-    }
-
-    private static string ValidateEntryPath(string entryName, bool isDirectory)
-    {
-        if (string.IsNullOrEmpty(entryName) || entryName.Contains('\\') || entryName[0] == '/' || entryName.Contains('\0'))
-            throw new AgentReleaseValidationException("Agent package contains an absolute or non-portable ZIP path");
-        if (isDirectory) entryName = entryName[..^1];
-        if (entryName.Length == 0) throw new AgentReleaseValidationException("Agent package contains an empty ZIP path");
-        var segments = entryName.Split('/');
-        foreach (var segment in segments)
-        {
-            if (segment.Length == 0 || segment is "." or ".." || segment.EndsWith(' ') || segment.EndsWith('.'))
-                throw new AgentReleaseValidationException("Agent package contains a path traversal or ambiguous ZIP path");
-            foreach (var character in segment)
-                if (character < 32 || character is '<' or '>' or ':' or '"' or '|' or '?' or '*')
-                    throw new AgentReleaseValidationException("Agent package contains a non-portable ZIP path");
-            var deviceName = segment.Split('.')[0];
-            if (deviceName.Equals("CON", StringComparison.OrdinalIgnoreCase) || deviceName.Equals("PRN", StringComparison.OrdinalIgnoreCase)
-                || deviceName.Equals("AUX", StringComparison.OrdinalIgnoreCase) || deviceName.Equals("NUL", StringComparison.OrdinalIgnoreCase)
-                || Regex.IsMatch(deviceName, @"\A(?:COM|LPT)[1-9]\z", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
-                throw new AgentReleaseValidationException("Agent package contains a reserved Windows path name");
-        }
-        return entryName;
-    }
-
-    private static void RejectPathCollisions(Dictionary<string, bool> paths, HashSet<string> pathsWithDescendants, string path, bool isDirectory)
-    {
-        var separator = path.IndexOf('/');
-        while (separator >= 0)
-        {
-            var parent = path[..separator];
-            if (paths.TryGetValue(parent, out var parentIsDirectory) && !parentIsDirectory)
-                throw new AgentReleaseValidationException("Agent package ZIP entries collide as file and directory paths");
-            pathsWithDescendants.Add(parent);
-            separator = path.IndexOf('/', separator + 1);
-        }
-        if (!isDirectory && pathsWithDescendants.Contains(path))
-            throw new AgentReleaseValidationException("Agent package ZIP entries collide as file and directory paths");
-    }
-
-    private static void RejectUnsupportedEntryType(ZipArchiveEntry entry)
-    {
-        var unixType = (entry.ExternalAttributes >> 16) & 0xF000;
-        if (unixType is not (0 or 0x8000 or 0x4000))
-            throw new AgentReleaseValidationException("Agent package contains an unsupported ZIP entry type");
-    }
-
-    private static AgentPackageManifest ReadManifest(ZipArchiveEntry entry)
-    {
-        using var stream = entry.Open();
-        using var memory = new MemoryStream((int)entry.Length);
-        stream.CopyTo(memory);
-        using var document = JsonDocument.Parse(memory.ToArray(), new JsonDocumentOptions { MaxDepth = 8 });
-        if (document.RootElement.ValueKind != JsonValueKind.Object)
-            throw new AgentReleaseValidationException("Agent package manifest must be a JSON object");
-        var propertyNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var property in document.RootElement.EnumerateObject())
-            if (!propertyNames.Add(property.Name))
-                throw new AgentReleaseValidationException("Agent package manifest contains duplicate fields");
-        var expected = new HashSet<string>(["packageFormatVersion", "agentInformationalVersion", "sourceCommit", "sourceDirty", "releaseBuild", "agentUpdateChallengeProtocol"], StringComparer.Ordinal);
-        if (!propertyNames.SetEquals(expected))
-            throw new AgentReleaseValidationException("Agent package manifest has unexpected or missing fields");
-        var manifest = JsonSerializer.Deserialize<AgentPackageManifest>(document.RootElement.GetRawText(), new JsonSerializerOptions(JsonSerializerDefaults.Web));
-        if (manifest is null || string.IsNullOrWhiteSpace(manifest.AgentInformationalVersion) || string.IsNullOrWhiteSpace(manifest.SourceCommit))
-            throw new AgentReleaseValidationException("Agent package manifest is incomplete");
-        return manifest;
-    }
-
     private static void RetainImmutableArtifact(string stagedPath, string finalPath, string expectedHash, long expectedSize)
     {
         if (File.Exists(finalPath))
@@ -490,8 +232,6 @@ public sealed class AgentReleaseStore
         catch (IOException) { }
         catch (UnauthorizedAccessException) { }
     }
-
-    private sealed record AgentPackageManifest(int PackageFormatVersion, string AgentInformationalVersion, string SourceCommit, bool SourceDirty, bool ReleaseBuild, int AgentUpdateChallengeProtocol);
 
     public sealed class StagedAgentPackage : IDisposable
     {
