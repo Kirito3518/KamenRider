@@ -130,15 +130,15 @@ public sealed class AgentUpdateTests
         Assert.Throws<UnauthorizedAccessException>(() => fixture.Db.BindAgentUpdateSource(
             VerifiedAgentRequestFixture.Create(fixture.Db, "pc", bindingPath, badEvidence), ticket.OperationId, badEvidence));
 
-        var bound = fixture.Db.BindAgentUpdateSource(bindingEnvelope, ticket.OperationId, bindingRequest);
+        _ = fixture.Db.BindAgentUpdateSource(bindingEnvelope, ticket.OperationId, bindingRequest);
+        // The Controller may have committed this exact body before its response was lost.
         fixture.Reopen();
         var retried = fixture.Db.BindAgentUpdateSource(
             VerifiedAgentRequestFixture.Create(fixture.Db, "pc", bindingPath, bindingRequest), ticket.OperationId, bindingRequest);
 
         Assert.Equal(challenge, repeatedChallenge);
-        Assert.Equal("1.0.0", bound.SourceVersion);
-        Assert.Equal(new string('B', 64), bound.BackupDigest);
-        Assert.Equal(bound, retried);
+        Assert.Equal("1.0.0", retried.SourceVersion);
+        Assert.Equal(new string('B', 64), retried.BackupDigest);
         var changed = bindingRequest with { NativeBootId = "boot-2" };
         Assert.Throws<InvalidOperationException>(() => fixture.Db.BindAgentUpdateSource(
             VerifiedAgentRequestFixture.Create(fixture.Db, "pc", bindingPath, changed), ticket.OperationId, changed));
@@ -189,7 +189,7 @@ public sealed class AgentUpdateTests
             var issuedAt = rolledBack.Time.Now;
             rolledBack.Time.Now = issuedAt.AddMinutes(11);
             rolledBack.Time.Now = issuedAt.AddMinutes(1);
-            Assert.Throws<InvalidOperationException>(() => rolledBack.Db.IssueAgentUpdateSourceChallenge(
+            Assert.Throws<AgentUpdateSourceChallengeRenewalRequiredException>(() => rolledBack.Db.IssueAgentUpdateSourceChallenge(
                 VerifiedAgentRequestFixture.Create(rolledBack.Db, "pc", path, request), ticket.OperationId, request));
         }
 
@@ -205,7 +205,7 @@ public sealed class AgentUpdateTests
             var oldChallenge = restarted.Db.IssueAgentUpdateSourceChallenge(
                 VerifiedAgentRequestFixture.Create(restarted.Db, "pc", path, request), ticket.OperationId, request);
             restarted.Reopen();
-            Assert.Throws<InvalidOperationException>(() => restarted.Db.IssueAgentUpdateSourceChallenge(
+            Assert.Throws<AgentUpdateSourceChallengeRenewalRequiredException>(() => restarted.Db.IssueAgentUpdateSourceChallenge(
                 VerifiedAgentRequestFixture.Create(restarted.Db, "pc", path, request), ticket.OperationId, request));
 
             var newRequest = request with { RequestId = "source-runtime-new" };

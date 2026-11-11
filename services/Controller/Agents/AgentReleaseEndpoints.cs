@@ -52,6 +52,7 @@ public static class AgentReleaseEndpoints
             return Results.Ok(database.IssueAgentUpdateSourceChallenge(signedBody.Verified!, operationId, request));
         }
         catch (UnauthorizedAccessException) { return Results.Unauthorized(); }
+        catch (AgentUpdateSourceChallengeRenewalRequiredException) { return Results.Conflict(new { code = "sourceChallengeRenewalRequired" }); }
         catch (InvalidOperationException) { return Results.Conflict(); }
         catch (Exception exception) when (exception is ArgumentException or JsonException or DecoderFallbackException) { return Results.BadRequest(); }
         catch (Exception exception) when (exception is IOException or Microsoft.Data.Sqlite.SqliteException) { return Results.StatusCode(StatusCodes.Status503ServiceUnavailable); }
@@ -72,6 +73,7 @@ public static class AgentReleaseEndpoints
             return Results.Ok(database.BindAgentUpdateSource(signedBody.Verified!, operationId, request));
         }
         catch (UnauthorizedAccessException) { return Results.Unauthorized(); }
+        catch (AgentUpdateSourceChallengeRenewalRequiredException) { return Results.Conflict(new { code = "sourceChallengeRenewalRequired" }); }
         catch (InvalidOperationException) { return Results.Conflict(); }
         catch (KeyNotFoundException) { return Results.NotFound(); }
         catch (Exception exception) when (exception is ArgumentException or JsonException or DecoderFallbackException) { return Results.BadRequest(); }

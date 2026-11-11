@@ -124,6 +124,42 @@ public sealed class AgentReleaseAcceptanceTests
     }
 
     [Fact]
+    public async Task ExpiredUnconsumedSourceChallengeReturnsTypedRenewalSignal()
+    {
+        await using var fixture = await AcceptanceFixture.CreateAsync();
+        var ticket = await fixture.PublishAndReserveAsync();
+        var operation = await fixture.StartAndDownloadAsync(ticket);
+        var challengeRequest = new AgentUpdateSourceChallengeRequest(ticket.Ticket, ticket.ReleaseVersion,
+            ticket.TargetVersion, ticket.TargetPackageSha256, "source-expiry-attempt-0", new string('a', 64), "win-x64", 1);
+        using var challengeResponse = await fixture.SendSignedAsync(AcceptanceFixture.UpdatePath(ticket, "source-challenge"),
+            challengeRequest, nonce: "source-expiry-challenge-0");
+        Assert.Equal(HttpStatusCode.OK, challengeResponse.StatusCode);
+        var challenge = Assert.IsType<AgentUpdateSourceChallengeResponse>(
+            await challengeResponse.Content.ReadFromJsonAsync<AgentUpdateSourceChallengeResponse>());
+        var binding = fixture.CreateSignedSourceBinding(ticket, operation, challengeRequest, challenge,
+            "source-expiry-bind-0", "boot-expiry");
+
+        fixture.Clock.Now = fixture.Clock.Now.AddMinutes(11);
+        using var staleBinding = await fixture.SendSignedAsync(AcceptanceFixture.UpdatePath(ticket, "source-binding"),
+            binding, nonce: "source-expiry-binding-stale");
+        Assert.Equal(HttpStatusCode.Conflict, staleBinding.StatusCode);
+        using (var body = JsonDocument.Parse(await staleBinding.Content.ReadAsStringAsync()))
+            Assert.Equal("sourceChallengeRenewalRequired", body.RootElement.GetProperty("code").GetString());
+
+        using var staleChallengeRetry = await fixture.SendSignedAsync(AcceptanceFixture.UpdatePath(ticket, "source-challenge"),
+            challengeRequest, nonce: "source-expiry-challenge-stale");
+        Assert.Equal(HttpStatusCode.Conflict, staleChallengeRetry.StatusCode);
+        using (var body = JsonDocument.Parse(await staleChallengeRetry.Content.ReadAsStringAsync()))
+            Assert.Equal("sourceChallengeRenewalRequired", body.RootElement.GetProperty("code").GetString());
+
+        var nextChallengeRequest = challengeRequest with { RequestId = "source-expiry-attempt-1" };
+        using var renewedChallenge = await fixture.SendSignedAsync(AcceptanceFixture.UpdatePath(ticket, "source-challenge"),
+            nextChallengeRequest, nonce: "source-expiry-challenge-1");
+        Assert.Equal(HttpStatusCode.OK, renewedChallenge.StatusCode);
+        await fixture.AssertLockedAsync(ticket, "installing");
+    }
+
+    [Fact]
     public async Task LegacySameSecondCannotReplaceNewerReceiptOrGainRentalAuthority()
     {
         await using var fixture = await ProofFixture.CreateAsync();

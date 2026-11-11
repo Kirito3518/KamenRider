@@ -29,12 +29,19 @@ public sealed record MaintenanceJournalEvidence(
     string? SourceVersion = null,
     string? SourceInventoryDigest = null);
 
+public sealed record MaintenanceSourceChallengeAttempt(
+    int AttemptNumber,
+    string RequestId,
+    string RequestBodyDigest);
+
 public sealed record MaintenanceSourceBindingIntent(
     AgentUpdateSourceEvidence Evidence,
+    int AttemptNumber,
     string ChallengeId,
     string Challenge,
     string RuntimeEpoch,
     DateTimeOffset ChallengeExpiresAtUtc,
+    string ChallengeRequestBodyDigest,
     string EvidenceSignature,
     string SourceRequestId,
     string BindingBodyDigest);
@@ -47,7 +54,10 @@ public sealed record MaintenanceJournalOperation(
     string? BackupDigest = null,
     string? SourceVersion = null,
     string? SourceInventoryDigest = null,
-    MaintenanceSourceBindingIntent? SourceBindingIntent = null);
+    MaintenanceSourceBindingIntent? SourceBindingIntent = null,
+    MaintenanceSourceChallengeAttempt? PendingSourceChallengeAttempt = null,
+    List<MaintenanceSourceChallengeAttempt>? RejectedSourceChallengeAttempts = null,
+    List<MaintenanceSourceBindingIntent>? RejectedSourceBindingIntents = null);
 
 public sealed record MaintenanceJournalSnapshot(
     int SchemaVersion,
@@ -79,6 +89,7 @@ public sealed class MaintenanceJournal(IMaintenanceJournalStore store, string ch
         "outcomeReported",
         "controllerConfirmed"
     ];
+    private const int MaximumSourceBindingAttempts = 32;
 
     public MaintenanceJournalSnapshot Start(MaintenanceOperationBinding binding)
     {
@@ -156,15 +167,109 @@ public sealed class MaintenanceJournal(IMaintenanceJournalStore store, string ch
             throw new InvalidOperationException("A source binding intent requires the current operation's published backup phase.");
 
         var operation = current.Operations[0];
-        ValidateSourceBindingIntent(operation, intent);
         if (operation.SourceBindingIntent is not null)
         {
             if (operation.SourceBindingIntent != intent)
                 throw new InvalidOperationException("The source binding intent is immutable once recorded.");
             return current;
         }
+        if (operation.PendingSourceChallengeAttempt is not { } challengeAttempt ||
+            challengeAttempt.AttemptNumber != intent.AttemptNumber ||
+            challengeAttempt.RequestId != intent.Evidence.ChallengeRequestId ||
+            challengeAttempt.RequestBodyDigest != intent.ChallengeRequestBodyDigest)
+            throw new InvalidOperationException("The source-binding intent does not match its durable challenge request attempt.");
+        ValidateSourceBindingIntent(operation, intent);
 
-        var updated = operation with { SourceBindingIntent = intent };
+        var updated = operation with { SourceBindingIntent = intent, PendingSourceChallengeAttempt = null };
+        var snapshot = current with { Operations = [updated] };
+        ValidateSnapshot(snapshot);
+        store.WriteAtomic(chainId, snapshot);
+        return ReadPublished(snapshot);
+    }
+
+    public MaintenanceJournalSnapshot RecordSourceChallengeAttempt(
+        string operationId,
+        MaintenanceSourceChallengeAttempt attempt)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(operationId);
+        ArgumentNullException.ThrowIfNull(attempt);
+        var current = ReadValidated()
+            ?? throw new InvalidOperationException("The maintenance journal is missing; source challenge issuance remains held.");
+        if (current.HeadOperationId != operationId || current.Operations.Count != 1 ||
+            current.Operations[0].Binding.OperationId != operationId || current.Operations[0].Phase != "backupPublished")
+            throw new InvalidOperationException("A source challenge attempt requires the current operation's published backup phase.");
+        var operation = current.Operations[0];
+        if (operation.SourceBindingIntent is not null)
+            throw new InvalidOperationException("A new source challenge cannot replace an un-rejected binding intent.");
+        if (operation.PendingSourceChallengeAttempt is { } pending)
+        {
+            if (pending == attempt) return current;
+            throw new InvalidOperationException("The pending source challenge request is immutable until a typed renewal rejection.");
+        }
+        if (attempt.AttemptNumber != NextSourceBindingAttemptNumber(operation))
+            throw new InvalidOperationException("The source challenge attempt number is not the next journaled attempt.");
+        ValidateSourceChallengeAttempt(operation.Binding, attempt);
+        var updated = operation with { PendingSourceChallengeAttempt = attempt };
+        var snapshot = current with { Operations = [updated] };
+        ValidateSnapshot(snapshot);
+        store.WriteAtomic(chainId, snapshot);
+        return ReadPublished(snapshot);
+    }
+
+    public MaintenanceJournalSnapshot RejectPendingSourceChallengeAttempt(
+        string operationId,
+        MaintenanceSourceChallengeAttempt expectedAttempt)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(operationId);
+        ArgumentNullException.ThrowIfNull(expectedAttempt);
+        var current = ReadValidated()
+            ?? throw new InvalidOperationException("The maintenance journal is missing; source challenge recovery remains held.");
+        if (current.HeadOperationId != operationId || current.Operations.Count != 1 ||
+            current.Operations[0].Binding.OperationId != operationId || current.Operations[0].Phase != "backupPublished")
+            throw new InvalidOperationException("A source challenge rejection requires the current operation's published backup phase.");
+        var operation = current.Operations[0];
+        if (operation.PendingSourceChallengeAttempt != expectedAttempt || operation.SourceBindingIntent is not null)
+            throw new InvalidOperationException("The typed source challenge rejection does not match the pending journal attempt.");
+        var rejected = operation.RejectedSourceChallengeAttempts ?? [];
+        if (rejected.Count >= MaximumSourceBindingAttempts)
+            throw new InvalidOperationException("The source challenge renewal limit has been reached; the operation remains held.");
+        var updated = operation with
+        {
+            PendingSourceChallengeAttempt = null,
+            RejectedSourceChallengeAttempts = [.. rejected, expectedAttempt]
+        };
+        var snapshot = current with { Operations = [updated] };
+        ValidateSnapshot(snapshot);
+        store.WriteAtomic(chainId, snapshot);
+        return ReadPublished(snapshot);
+    }
+
+    public MaintenanceJournalSnapshot RejectSourceBindingIntent(
+        string operationId,
+        int expectedAttemptNumber,
+        string expectedSourceRequestId,
+        string expectedBindingBodyDigest)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(operationId);
+        var current = ReadValidated()
+            ?? throw new InvalidOperationException("The maintenance journal is missing; source binding recovery remains held.");
+        if (current.HeadOperationId != operationId || current.Operations.Count != 1 ||
+            current.Operations[0].Binding.OperationId != operationId || current.Operations[0].Phase != "backupPublished")
+            throw new InvalidOperationException("A source binding rejection requires the current operation's published backup phase.");
+        var operation = current.Operations[0];
+        var intent = operation.SourceBindingIntent
+            ?? throw new InvalidOperationException("There is no pending source binding intent to reject.");
+        if (intent.AttemptNumber != expectedAttemptNumber || intent.SourceRequestId != expectedSourceRequestId ||
+            !FixedHexEquals(intent.BindingBodyDigest, expectedBindingBodyDigest))
+            throw new InvalidOperationException("The typed challenge-renewal rejection does not match the current signed binding intent.");
+        var rejected = operation.RejectedSourceBindingIntents ?? [];
+        if (rejected.Count >= MaximumSourceBindingAttempts)
+            throw new InvalidOperationException("The source binding renewal limit has been reached; the operation remains held.");
+        var updated = operation with
+        {
+            SourceBindingIntent = null,
+            RejectedSourceBindingIntents = [.. rejected, intent]
+        };
         var snapshot = current with { Operations = [updated] };
         ValidateSnapshot(snapshot);
         store.WriteAtomic(chainId, snapshot);
@@ -261,6 +366,9 @@ public sealed class MaintenanceJournal(IMaintenanceJournalStore store, string ch
                 first.BackupOwnerOperationId != second.BackupOwnerOperationId || first.BackupDigest != second.BackupDigest ||
                 first.SourceVersion != second.SourceVersion || first.SourceInventoryDigest != second.SourceInventoryDigest ||
                 first.SourceBindingIntent != second.SourceBindingIntent ||
+                first.PendingSourceChallengeAttempt != second.PendingSourceChallengeAttempt ||
+                !(first.RejectedSourceChallengeAttempts ?? []).SequenceEqual(second.RejectedSourceChallengeAttempts ?? []) ||
+                !(first.RejectedSourceBindingIntents ?? []).SequenceEqual(second.RejectedSourceBindingIntents ?? []) ||
                 !first.PhaseHistory.SequenceEqual(second.PhaseHistory, StringComparer.Ordinal))
                 return false;
         }
@@ -318,6 +426,60 @@ public sealed class MaintenanceJournal(IMaintenanceJournalStore store, string ch
                 throw new InvalidDataException("The maintenance journal contains source-binding intent before backup publication.");
             ValidateSourceBindingIntent(operation, operation.SourceBindingIntent);
         }
+        ValidateSourceBindingAttempts(operation, phaseIndex);
+    }
+
+    private static void ValidateSourceBindingAttempts(MaintenanceJournalOperation operation, int phaseIndex)
+    {
+        var rejectedChallenges = operation.RejectedSourceChallengeAttempts ?? [];
+        var rejectedBindings = operation.RejectedSourceBindingIntents ?? [];
+        if (phaseIndex < Array.IndexOf(NormalPhases, "backupPublished"))
+        {
+            if (operation.SourceBindingIntent is not null || operation.PendingSourceChallengeAttempt is not null ||
+                rejectedChallenges.Count != 0 || rejectedBindings.Count != 0)
+                throw new InvalidDataException("The maintenance journal contains source-binding attempts before backup publication.");
+            return;
+        }
+
+        if (rejectedChallenges.Count > MaximumSourceBindingAttempts || rejectedBindings.Count > MaximumSourceBindingAttempts ||
+            rejectedChallenges.Any(attempt => attempt is null) || rejectedBindings.Any(intent => intent is null) ||
+            operation.SourceBindingIntent is not null && operation.PendingSourceChallengeAttempt is not null)
+            throw new InvalidDataException("The maintenance journal source-binding attempt history is invalid or exceeds its limit.");
+
+        foreach (var attempt in rejectedChallenges)
+            ValidateSourceChallengeAttempt(operation.Binding, attempt);
+        foreach (var intent in rejectedBindings)
+            ValidateSourceBindingIntent(operation, intent);
+        if (operation.PendingSourceChallengeAttempt is { } pending)
+            ValidateSourceChallengeAttempt(operation.Binding, pending);
+
+        var attemptNumbers = rejectedChallenges.Select(attempt => attempt.AttemptNumber)
+            .Concat(rejectedBindings.Select(intent => intent.AttemptNumber))
+            .Concat(operation.PendingSourceChallengeAttempt is { } pendingAttempt ? [pendingAttempt.AttemptNumber] : [])
+            .Concat(operation.SourceBindingIntent is { } intentAttempt ? [intentAttempt.AttemptNumber] : [])
+            .Order()
+            .ToArray();
+        if (!attemptNumbers.SequenceEqual(Enumerable.Range(0, attemptNumbers.Length)) ||
+            operation.PendingSourceChallengeAttempt is { } currentPending &&
+            currentPending.AttemptNumber != NextSourceBindingAttemptNumber(operation) ||
+            operation.SourceBindingIntent is { } currentIntent &&
+            currentIntent.AttemptNumber != NextSourceBindingAttemptNumber(operation))
+            throw new InvalidDataException("The maintenance journal source-binding attempts are not a contiguous immutable sequence.");
+    }
+
+    private static int NextSourceBindingAttemptNumber(MaintenanceJournalOperation operation) =>
+        (operation.RejectedSourceChallengeAttempts?.Count ?? 0) + (operation.RejectedSourceBindingIntents?.Count ?? 0);
+
+    private static void ValidateSourceChallengeAttempt(
+        MaintenanceOperationBinding binding,
+        MaintenanceSourceChallengeAttempt attempt)
+    {
+        if (attempt.AttemptNumber is < 0 or >= MaximumSourceBindingAttempts ||
+            string.IsNullOrWhiteSpace(attempt.RequestId) || attempt.RequestId.Length > 128 ||
+            !Regex.IsMatch(attempt.RequestId, "\\A[A-Za-z0-9._-]+\\z", RegexOptions.CultureInvariant) ||
+            attempt.RequestId != StableSourceRequestId("source-challenge", binding.OperationId, attempt.AttemptNumber) ||
+            !IsDigest(attempt.RequestBodyDigest))
+            throw new InvalidDataException("The maintenance source challenge attempt is invalid.");
     }
 
     private static void ValidateSourceBindingIntent(
@@ -349,9 +511,13 @@ public sealed class MaintenanceJournal(IMaintenanceJournalStore store, string ch
             !intent.Challenge.Any(char.IsControl), "challenge");
         Require(evidence.ChallengeRequestId is { Length: > 0 and <= 128 } &&
             evidence.SourceRequestId == intent.SourceRequestId && intent.SourceRequestId is { Length: > 0 and <= 128 } &&
-            Regex.IsMatch(intent.SourceRequestId, "\\A[A-Za-z0-9._-]+\\z", RegexOptions.CultureInvariant), "request identifiers");
+            Regex.IsMatch(intent.SourceRequestId, "\\A[A-Za-z0-9._-]+\\z", RegexOptions.CultureInvariant) &&
+            evidence.ChallengeRequestId == StableSourceRequestId("source-challenge", binding.OperationId, intent.AttemptNumber) &&
+            intent.SourceRequestId == StableSourceRequestId("source-binding", binding.OperationId, intent.AttemptNumber), "request identifiers");
         Require(!string.IsNullOrWhiteSpace(intent.RuntimeEpoch) && intent.RuntimeEpoch.Length <= 128 &&
             !intent.RuntimeEpoch.Any(char.IsControl) && intent.ChallengeExpiresAtUtc != default, "challenge runtime");
+        Require(intent.AttemptNumber is >= 0 and < MaximumSourceBindingAttempts &&
+            IsDigest(intent.ChallengeRequestBodyDigest), "challenge request binding");
         Require(!string.IsNullOrWhiteSpace(evidence.NativeBootId) && evidence.NativeBootId.Length <= 256 &&
             !evidence.NativeBootId.Any(char.IsControl) && evidence.JournalPhase == "backupPublished", "native boot and phase");
         Require(intent.EvidenceSignature is { Length: > 0 and <= 1024 } && IsDigest(intent.BindingBodyDigest), "signature and request digest");
@@ -402,6 +568,14 @@ public sealed class MaintenanceJournal(IMaintenanceJournalStore store, string ch
 
     private static bool IsHexDigest(string? value) =>
         value is { Length: 64 } && value.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f' or >= 'A' and <= 'F');
+
+    private static string StableSourceRequestId(string purpose, string operationId, int attemptNumber)
+    {
+        var digest = SHA256.HashData(Encoding.UTF8.GetBytes(
+            "KamenRaider.AgentMaintenance." + purpose + ".v1\n" + operationId + "\n" +
+            attemptNumber.ToString(System.Globalization.CultureInfo.InvariantCulture)));
+        return purpose + "-" + Convert.ToHexStringLower(digest);
+    }
 
     private static List<string> Append(List<string> values, string value) => [.. values, value];
 }

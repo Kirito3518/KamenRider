@@ -1,4 +1,5 @@
 using System.Reflection;
+using System.Net;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -87,11 +88,24 @@ public sealed class InstalledAgentSourceInspectorTests : IDisposable
         public string ReadBootId() => BootId;
     }
 
+    private sealed class StaticResponseHandler(HttpStatusCode status, string body) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
+            Task.FromResult(new HttpResponseMessage(status)
+            {
+                Content = new StringContent(body, Encoding.UTF8, "application/json")
+            });
+    }
+
     private sealed class SourceBindingClient(TimeProvider timeProvider) : IMaintenanceSourceBindingClient
     {
         public int ChallengeCalls { get; private set; }
+        public int RenewalRequiredOnChallengeCall { get; set; }
+        public int RenewalRequiredOnBindingCall { get; set; }
+        public int ConflictOnBindingCall { get; set; }
         public List<AgentUpdateSourceBindingRequest> BindingRequests { get; } = [];
         public List<string> BindingBodyDigests { get; } = [];
+        public List<string> ChallengeRequestIds { get; } = [];
         public bool EvidenceSignatureVerified { get; private set; }
         public AgentUpdateSourceChallengeRequest? ChallengeRequest { get; private set; }
         public AgentUpdateSourceChallengeResponse ChallengeResponse { get; set; } = new(
@@ -103,6 +117,11 @@ public sealed class InstalledAgentSourceInspectorTests : IDisposable
         {
             ChallengeCalls++;
             ChallengeRequest = request;
+            ChallengeRequestIds.Add(request.RequestId);
+            if (ChallengeCalls == RenewalRequiredOnChallengeCall)
+                throw new MaintenanceSourceChallengeRenewalRequiredException();
+            ChallengeResponse = new(Guid.NewGuid().ToString("N"), "opaque-source-challenge-" + ChallengeCalls,
+                "runtime-" + ChallengeCalls, timeProvider.GetUtcNow().AddMinutes(5));
             return Task.FromResult(ChallengeResponse);
         }
 
@@ -124,6 +143,10 @@ public sealed class InstalledAgentSourceInspectorTests : IDisposable
             publicKey.ImportSubjectPublicKeyInfo(Convert.FromBase64String(identity.PublicKey), out _);
             EvidenceSignatureVerified = publicKey.VerifyData(AgentUpdateSourceEvidenceCanonicalizer.CanonicalBytes(evidence),
                 Convert.FromBase64String(request.EvidenceSignature), HashAlgorithmName.SHA256);
+            if (BindingRequests.Count == RenewalRequiredOnBindingCall)
+                throw new MaintenanceSourceChallengeRenewalRequiredException();
+            if (BindingRequests.Count == ConflictOnBindingCall)
+                throw new InvalidOperationException("simulated non-renewal conflict");
             return Task.FromResult(new AgentUpdateOperationDto(operationId, machineId, request.ChainId,
                 request.HeadOperationId, request.Generation, true, null, request.ReleaseVersion,
                 request.TargetVersion, request.TargetPackageSha256, request.HelperRuntime, 2, null,
@@ -337,6 +360,122 @@ public sealed class InstalledAgentSourceInspectorTests : IDisposable
 
         Assert.Equal(0, client.ChallengeCalls);
         Assert.False(Directory.Exists(backupRoot));
+    }
+
+    [Fact]
+    public async Task SourceBindingRotatesChallengeAfterControllerRestartBeforeChallengeWasBound()
+    {
+        using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        using var identity = TrustedIdentity.ReadExisting(new IdentitySource(
+            "0123456789abcdef0123456789abcdef", Convert.ToBase64String(key.ExportPkcs8PrivateKey())));
+        var journalStore = NewJournalAt("servicesQuiesced", keyFingerprint: identity.KeyFingerprint.ToLowerInvariant());
+        var journal = new MaintenanceJournal(journalStore, "chain-1");
+        var security = NewSecurity();
+        var publisher = new MaintenanceBackupPublisher(sourceRoot, backupRoot, security, new Authorization());
+        var backupOperation = new MaintenanceBackupOperation(sourceRoot,
+            new InstalledAgentSourceInspector(sourceRoot, security), publisher, journal);
+        var client = new SourceBindingClient(TimeProvider.System) { RenewalRequiredOnChallengeCall = 1 };
+        var operation = new MaintenanceSourceBindingOperation(backupOperation, journal, client, identity,
+            new BootIdentity("native-boot-1"));
+
+        _ = await operation.BindAsync(
+            new MaintenanceSourceBindingParameters(new string('A', 43), "2.3.4", new string('c', 64), "win-x64", 1),
+            CancellationToken.None);
+
+        var recorded = journal.Read()!.Operations.Single();
+        Assert.Equal("sourceBound", recorded.Phase);
+        Assert.Equal(2, client.ChallengeCalls);
+        Assert.Single(client.BindingRequests);
+        Assert.NotEqual(client.ChallengeRequestIds[0], client.ChallengeRequestIds[1]);
+        Assert.Equal(0, Assert.Single(recorded.RejectedSourceChallengeAttempts!).AttemptNumber);
+        Assert.Equal(1, recorded.SourceBindingIntent!.AttemptNumber);
+        Assert.Empty(recorded.RejectedSourceBindingIntents ?? []);
+    }
+
+    [Fact]
+    public async Task SourceBindingRotatesExactIntentOnlyAfterExplicitStaleChallengeRejection()
+    {
+        using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        using var identity = TrustedIdentity.ReadExisting(new IdentitySource(
+            "0123456789abcdef0123456789abcdef", Convert.ToBase64String(key.ExportPkcs8PrivateKey())));
+        var journalStore = NewJournalAt("servicesQuiesced", keyFingerprint: identity.KeyFingerprint.ToLowerInvariant());
+        var journal = new MaintenanceJournal(journalStore, "chain-1");
+        var security = NewSecurity();
+        var publisher = new MaintenanceBackupPublisher(sourceRoot, backupRoot, security, new Authorization());
+        var backupOperation = new MaintenanceBackupOperation(sourceRoot,
+            new InstalledAgentSourceInspector(sourceRoot, security), publisher, journal);
+        var client = new SourceBindingClient(TimeProvider.System) { RenewalRequiredOnBindingCall = 1 };
+        var operation = new MaintenanceSourceBindingOperation(backupOperation, journal, client, identity,
+            new BootIdentity("native-boot-1"));
+
+        _ = await operation.BindAsync(
+            new MaintenanceSourceBindingParameters(new string('A', 43), "2.3.4", new string('c', 64), "win-x64", 1),
+            CancellationToken.None);
+
+        var recorded = journal.Read()!.Operations.Single();
+        Assert.Equal("sourceBound", recorded.Phase);
+        Assert.Equal(2, client.ChallengeCalls);
+        Assert.Equal(2, client.BindingRequests.Count);
+        Assert.NotEqual(client.BindingRequests[0].RequestId, client.BindingRequests[1].RequestId);
+        Assert.Equal(client.BindingRequests[0].SourceVersion, client.BindingRequests[1].SourceVersion);
+        Assert.Equal(client.BindingRequests[0].BackupDigest, client.BindingRequests[1].BackupDigest);
+        Assert.Equal(client.BindingRequests[0].InventoryDigest, client.BindingRequests[1].InventoryDigest);
+        Assert.Equal(0, Assert.Single(recorded.RejectedSourceBindingIntents!).AttemptNumber);
+        Assert.Equal(1, recorded.SourceBindingIntent!.AttemptNumber);
+        Assert.True(client.EvidenceSignatureVerified);
+    }
+
+    [Fact]
+    public async Task HttpSourceClientOnlyClassifiesTheTypedRenewalConflictAsRotatable()
+    {
+        using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        using var identity = TrustedIdentity.ReadExisting(new IdentitySource(
+            "0123456789abcdef0123456789abcdef", Convert.ToBase64String(key.ExportPkcs8PrivateKey())));
+        var request = new AgentUpdateSourceChallengeRequest(new string('A', 43), "2.3.4", "2.3.4",
+            new string('c', 64), "source-challenge-test", new string('d', 64), "win-x64", 1);
+
+        using var renewalHttp = new HttpClient(new StaticResponseHandler(HttpStatusCode.Conflict,
+            "{\"code\":\"sourceChallengeRenewalRequired\"}"));
+        var renewalClient = new HttpMaintenanceSourceBindingClient(renewalHttp);
+        await Assert.ThrowsAsync<MaintenanceSourceChallengeRenewalRequiredException>(() => renewalClient.IssueChallengeAsync(
+            "https://controller.example/", identity.MachineId, "operation-1", request, identity, CancellationToken.None));
+
+        using var otherConflictHttp = new HttpClient(new StaticResponseHandler(HttpStatusCode.Conflict,
+            "{\"error\":\"conflict\"}"));
+        var otherConflictClient = new HttpMaintenanceSourceBindingClient(otherConflictHttp);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => otherConflictClient.IssueChallengeAsync(
+            "https://controller.example/", identity.MachineId, "operation-1", request, identity, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task AlteredBindParametersCannotReplaceOrRotateThePersistedSignedBody()
+    {
+        using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        using var identity = TrustedIdentity.ReadExisting(new IdentitySource(
+            "0123456789abcdef0123456789abcdef", Convert.ToBase64String(key.ExportPkcs8PrivateKey())));
+        var journalStore = NewJournalAt("servicesQuiesced", keyFingerprint: identity.KeyFingerprint.ToLowerInvariant());
+        var journal = new MaintenanceJournal(journalStore, "chain-1");
+        var security = NewSecurity();
+        var publisher = new MaintenanceBackupPublisher(sourceRoot, backupRoot, security, new Authorization());
+        var backupOperation = new MaintenanceBackupOperation(sourceRoot,
+            new InstalledAgentSourceInspector(sourceRoot, security), publisher, journal);
+        var client = new SourceBindingClient(TimeProvider.System) { ConflictOnBindingCall = 1 };
+        var operation = new MaintenanceSourceBindingOperation(backupOperation, journal, client, identity,
+            new BootIdentity("native-boot-1"));
+        var parameters = new MaintenanceSourceBindingParameters(new string('A', 43), "2.3.4", new string('c', 64), "win-x64", 1);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => operation.BindAsync(parameters, CancellationToken.None));
+        var intent = journal.Read()!.Operations.Single().SourceBindingIntent;
+        Assert.NotNull(intent);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => operation.BindAsync(
+            parameters with { Ticket = new string('B', 43) }, CancellationToken.None));
+
+        var after = journal.Read()!.Operations.Single();
+        Assert.Equal(intent, after.SourceBindingIntent);
+        Assert.Empty(after.RejectedSourceBindingIntents ?? []);
+        Assert.Equal(1, client.ChallengeCalls);
+        Assert.Single(client.BindingRequests);
     }
 
     private BackupSecurity NewSecurity() => new(sourceRoot, backupRoot);

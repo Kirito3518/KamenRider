@@ -22,6 +22,12 @@ public sealed record MaintenanceSourceBindingResult(
     string BackupDigest,
     AgentUpdateOperationDto ControllerOperation);
 
+public sealed class MaintenanceSourceChallengeRenewalRequiredException : InvalidOperationException
+{
+    public MaintenanceSourceChallengeRenewalRequiredException()
+        : base("The Controller rejected an unconsumed source challenge that expired or belongs to a prior runtime.") { }
+}
+
 public interface IMaintenanceSourceBindingClient
 {
     Task<AgentUpdateSourceChallengeResponse> IssueChallengeAsync(
@@ -163,7 +169,12 @@ public sealed class HttpMaintenanceSourceBindingClient : IMaintenanceSourceBindi
             if (response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
                 throw new UnauthorizedAccessException("The Controller rejected the signed maintenance request.");
             if (response.StatusCode == HttpStatusCode.Conflict)
+            {
+                var errorBytes = await ReadBoundedAsync(response.Content, cancellationToken).ConfigureAwait(false);
+                if (IsChallengeRenewalRequired(errorBytes))
+                    throw new MaintenanceSourceChallengeRenewalRequiredException();
                 throw new InvalidOperationException("The Controller rejected the maintenance state transition.");
+            }
             if (response.StatusCode == HttpStatusCode.RequestEntityTooLarge)
                 throw new InvalidDataException("The Controller returned an oversized maintenance response.");
             throw new IOException($"The Controller maintenance endpoint returned HTTP {(int)response.StatusCode}.");
@@ -209,6 +220,22 @@ public sealed class HttpMaintenanceSourceBindingClient : IMaintenanceSourceBindi
         return origin;
     }
 
+    private static bool IsChallengeRenewalRequired(byte[] responseBytes)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(responseBytes, new JsonDocumentOptions { MaxDepth = 4 });
+            return document.RootElement.ValueKind == JsonValueKind.Object &&
+                document.RootElement.TryGetProperty("code", out var code) &&
+                code.ValueKind == JsonValueKind.String &&
+                code.GetString() == "sourceChallengeRenewalRequired";
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
     private static string EscapeIdentifier(string value)
     {
         if (string.IsNullOrWhiteSpace(value) || value.Length > 128 ||
@@ -227,6 +254,7 @@ public sealed class MaintenanceSourceBindingOperation(
     TimeProvider? timeProvider = null)
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+    private const int MaximumRenewalsPerInvocation = 4;
     private readonly TimeProvider clock = timeProvider ?? TimeProvider.System;
 
     public async Task<MaintenanceSourceBindingResult> BindAsync(
@@ -241,54 +269,86 @@ public sealed class MaintenanceSourceBindingOperation(
         ArgumentNullException.ThrowIfNull(bootIdentity);
         ValidateParameters(parameters);
 
-        var snapshot = journal.Read()
-            ?? throw new InvalidOperationException("The maintenance journal is missing; source binding remains held.");
-        if (snapshot.Operations.Count != 1 || snapshot.HeadOperationId != snapshot.Operations[0].Binding.OperationId)
-            throw new InvalidOperationException("The source binding journal head is invalid.");
-        var operation = snapshot.Operations[0];
-        if (operation.Phase is not ("servicesQuiesced" or "backupPublished" or "sourceBound"))
-            throw new InvalidOperationException("Source binding requires the quiesced-service journal phase or a later recoverable phase.");
-        if (!string.Equals(parameters.HelperRuntime, operation.Binding.TargetRuntime, StringComparison.Ordinal))
-            throw new InvalidDataException("The native helper architecture does not match the immutable target runtime.");
-
-        MaintenanceBackupResult backup;
-        MaintenanceSourceBindingIntent? intent = operation.SourceBindingIntent;
-        if (operation.Phase is "servicesQuiesced" or "backupPublished")
+        for (var renewal = 0; ; renewal++)
         {
-            var backupResult = backupOperation.Publish(operation.Binding.OperationId);
-            backup = backupResult.Backup;
-            if (intent is not null &&
-                (!string.Equals(intent.Evidence.SourceVersion, backupResult.Source.Version, StringComparison.Ordinal) ||
-                 !FixedHexEquals(intent.Evidence.InventoryDigest, backup.InventoryDigest)))
-                throw new InvalidOperationException("The installed source no longer matches the immutable source-binding intent.");
-            intent ??= await CreateAndJournalIntentAsync(operation.Binding, backupResult.Source, backup, parameters,
-                cancellationToken).ConfigureAwait(false);
+            var snapshot = journal.Read()
+                ?? throw new InvalidOperationException("The maintenance journal is missing; source binding remains held.");
+            if (snapshot.Operations.Count != 1 || snapshot.HeadOperationId != snapshot.Operations[0].Binding.OperationId)
+                throw new InvalidOperationException("The source binding journal head is invalid.");
+            var operation = snapshot.Operations[0];
+            if (operation.Phase is not ("servicesQuiesced" or "backupPublished" or "sourceBound"))
+                throw new InvalidOperationException("Source binding requires the quiesced-service journal phase or a later recoverable phase.");
+            if (!string.Equals(parameters.HelperRuntime, operation.Binding.TargetRuntime, StringComparison.Ordinal))
+                throw new InvalidDataException("The native helper architecture does not match the immutable target runtime.");
+
+            MaintenanceBackupResult backup;
+            InstalledAgentSourceSnapshot? source = null;
+            MaintenanceSourceBindingIntent? intent = operation.SourceBindingIntent;
+            if (operation.Phase is "servicesQuiesced" or "backupPublished")
+            {
+                var backupResult = backupOperation.Publish(operation.Binding.OperationId);
+                backup = backupResult.Backup;
+                source = backupResult.Source;
+                if (intent is not null &&
+                    (!string.Equals(intent.Evidence.SourceVersion, source.Version, StringComparison.Ordinal) ||
+                     !FixedHexEquals(intent.Evidence.InventoryDigest, backup.InventoryDigest)))
+                    throw new InvalidOperationException("The installed source no longer matches the immutable source-binding intent.");
+                if (intent is null)
+                {
+                    var attemptNumber = NextAttemptNumber(operation);
+                    try
+                    {
+                        intent = await CreateAndJournalIntentAsync(operation.Binding, source, backup, parameters,
+                            attemptNumber, cancellationToken).ConfigureAwait(false);
+                    }
+                    catch (MaintenanceSourceChallengeRenewalRequiredException)
+                    {
+                        var pending = journal.Read()?.Operations.Single().PendingSourceChallengeAttempt
+                            ?? throw new InvalidDataException("The rejected source challenge has no matching durable journal attempt.");
+                        _ = journal.RejectPendingSourceChallengeAttempt(operation.Binding.OperationId, pending);
+                        if (renewal >= MaximumRenewalsPerInvocation) throw;
+                        continue;
+                    }
+                }
+            }
+            else
+            {
+                if (intent is null || operation.SourceVersion != intent.Evidence.SourceVersion ||
+                    operation.SourceInventoryDigest != intent.Evidence.InventoryDigest)
+                    throw new InvalidDataException("The sourceBound journal is missing its exact signed binding intent.");
+                backup = backupOperation.VerifyPublishedBackup(operation.Binding.OperationId);
+            }
+
+            if (!string.Equals(backup.BackupOwnerOperationId, operation.Binding.OperationId, StringComparison.Ordinal) ||
+                !FixedHexEquals(backup.BackupDigest, intent.Evidence.BackupDigest) ||
+                !FixedHexEquals(backup.InventoryDigest, intent.Evidence.InventoryDigest))
+                throw new InvalidDataException("The published backup no longer matches the signed source-binding intent.");
+
+            var bindingRequest = BuildBindingRequest(operation.Binding, parameters, intent);
+            var bodyDigest = ComputeBodyDigest(bindingRequest);
+            if (!FixedHexEquals(bodyDigest, intent.BindingBodyDigest))
+                throw new InvalidOperationException("The signed source-binding retry does not match its journaled request digest.");
+
+            AgentUpdateOperationDto response;
+            try
+            {
+                response = await client.BindSourceAsync(operation.Binding.ControllerOrigin, identity.MachineId,
+                    operation.Binding.OperationId, bindingRequest, identity, cancellationToken).ConfigureAwait(false);
+            }
+            catch (MaintenanceSourceChallengeRenewalRequiredException) when (
+                journal.Read()?.Operations.SingleOrDefault()?.Phase == "backupPublished")
+            {
+                _ = journal.RejectSourceBindingIntent(operation.Binding.OperationId, intent.AttemptNumber,
+                    intent.SourceRequestId, intent.BindingBodyDigest);
+                if (renewal >= MaximumRenewalsPerInvocation) throw;
+                continue;
+            }
+            ValidateAcknowledgement(operation.Binding, identity.MachineId, bindingRequest, bodyDigest, response);
+            _ = journal.Advance(operation.Binding.OperationId, "sourceBound",
+                new MaintenanceJournalEvidence(SourceVersion: intent.Evidence.SourceVersion,
+                    SourceInventoryDigest: intent.Evidence.InventoryDigest));
+            return new(intent.Evidence.SourceVersion, intent.Evidence.InventoryDigest, intent.Evidence.BackupDigest, response);
         }
-        else
-        {
-            if (intent is null || operation.SourceVersion != intent.Evidence.SourceVersion ||
-                operation.SourceInventoryDigest != intent.Evidence.InventoryDigest)
-                throw new InvalidDataException("The sourceBound journal is missing its exact signed binding intent.");
-            backup = backupOperation.VerifyPublishedBackup(operation.Binding.OperationId);
-        }
-
-        if (!string.Equals(backup.BackupOwnerOperationId, operation.Binding.OperationId, StringComparison.Ordinal) ||
-            !FixedHexEquals(backup.BackupDigest, intent.Evidence.BackupDigest) ||
-            !FixedHexEquals(backup.InventoryDigest, intent.Evidence.InventoryDigest))
-            throw new InvalidDataException("The published backup no longer matches the signed source-binding intent.");
-
-        var bindingRequest = BuildBindingRequest(operation.Binding, parameters, intent);
-        var bodyDigest = ComputeBodyDigest(bindingRequest);
-        if (!FixedHexEquals(bodyDigest, intent.BindingBodyDigest))
-            throw new InvalidOperationException("The signed source-binding retry does not match its journaled request digest.");
-
-        var response = await client.BindSourceAsync(operation.Binding.ControllerOrigin, identity.MachineId,
-            operation.Binding.OperationId, bindingRequest, identity, cancellationToken).ConfigureAwait(false);
-        ValidateAcknowledgement(operation.Binding, identity.MachineId, bindingRequest, bodyDigest, response);
-        _ = journal.Advance(operation.Binding.OperationId, "sourceBound",
-            new MaintenanceJournalEvidence(SourceVersion: intent.Evidence.SourceVersion,
-                SourceInventoryDigest: intent.Evidence.InventoryDigest));
-        return new(intent.Evidence.SourceVersion, intent.Evidence.InventoryDigest, intent.Evidence.BackupDigest, response);
     }
 
     private async Task<MaintenanceSourceBindingIntent> CreateAndJournalIntentAsync(
@@ -296,19 +356,23 @@ public sealed class MaintenanceSourceBindingOperation(
         InstalledAgentSourceSnapshot source,
         MaintenanceBackupResult backup,
         MaintenanceSourceBindingParameters parameters,
+        int attemptNumber,
         CancellationToken cancellationToken)
     {
-        var challengeRequestId = StableRequestId("source-challenge", binding.OperationId);
+        var challengeRequestId = StableRequestId("source-challenge", binding.OperationId, attemptNumber);
         var challengeRequest = new AgentUpdateSourceChallengeRequest(parameters.Ticket, parameters.ReleaseVersion,
             binding.TargetVersion, binding.TargetSha256, challengeRequestId, parameters.HelperBuildSha256,
             parameters.HelperRuntime, parameters.HelperProtocol);
+        var challengeRequestBodyDigest = ComputeBodyDigest(challengeRequest);
+        _ = journal.RecordSourceChallengeAttempt(binding.OperationId,
+            new MaintenanceSourceChallengeAttempt(attemptNumber, challengeRequestId, challengeRequestBodyDigest));
         var challenge = await client.IssueChallengeAsync(binding.ControllerOrigin, identity.MachineId,
             binding.OperationId, challengeRequest, identity, cancellationToken).ConfigureAwait(false);
         if (string.IsNullOrWhiteSpace(challenge.ChallengeId) || string.IsNullOrWhiteSpace(challenge.Challenge) ||
             string.IsNullOrWhiteSpace(challenge.RuntimeEpoch) || challenge.ExpiresAtUtc <= clock.GetUtcNow())
             throw new InvalidDataException("The Controller returned an empty or expired source challenge.");
 
-        var sourceRequestId = StableRequestId("source-binding", binding.OperationId);
+        var sourceRequestId = StableRequestId("source-binding", binding.OperationId, attemptNumber);
         var bootId = bootIdentity.ReadBootId();
         if (string.IsNullOrWhiteSpace(bootId) || bootId.Length > 256 || bootId.Any(char.IsControl))
             throw new InvalidDataException("The native boot identity is missing or malformed.");
@@ -320,8 +384,8 @@ public sealed class MaintenanceSourceBindingOperation(
             backup.InventoryDigest, backup.InventoryDigest, bootId, "backupPublished");
         var evidenceSignature = identity.SignSourceEvidence(evidence);
         var bindingRequest = BuildBindingRequest(binding, parameters, evidence, challenge, evidenceSignature);
-        var intent = new MaintenanceSourceBindingIntent(evidence, challenge.ChallengeId, challenge.Challenge,
-            challenge.RuntimeEpoch, challenge.ExpiresAtUtc, evidenceSignature, sourceRequestId,
+        var intent = new MaintenanceSourceBindingIntent(evidence, attemptNumber, challenge.ChallengeId, challenge.Challenge,
+            challenge.RuntimeEpoch, challenge.ExpiresAtUtc, challengeRequestBodyDigest, evidenceSignature, sourceRequestId,
             ComputeBodyDigest(bindingRequest));
         return journal.RecordSourceBindingIntent(binding.OperationId, intent).Operations.Single().SourceBindingIntent
             ?? throw new IOException("The signed source-binding intent was not durably recorded.");
@@ -379,12 +443,20 @@ public sealed class MaintenanceSourceBindingOperation(
             throw new InvalidDataException("The fixed source-binding request parameters are malformed.");
     }
 
-    private static string StableRequestId(string purpose, string operationId)
+    private static int NextAttemptNumber(MaintenanceJournalOperation operation) =>
+        (operation.RejectedSourceChallengeAttempts?.Count ?? 0) +
+        (operation.RejectedSourceBindingIntents?.Count ?? 0);
+
+    private static string StableRequestId(string purpose, string operationId, int attemptNumber)
     {
         var digest = SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(
-            "KamenRaider.AgentMaintenance." + purpose + ".v1\n" + operationId));
+            "KamenRaider.AgentMaintenance." + purpose + ".v1\n" + operationId + "\n" +
+            attemptNumber.ToString(System.Globalization.CultureInfo.InvariantCulture)));
         return purpose + "-" + Convert.ToHexStringLower(digest);
     }
+
+    private static string ComputeBodyDigest<T>(T request) =>
+        Convert.ToHexStringLower(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(request, JsonOptions)));
 
     private static string ComputeBodyDigest(AgentUpdateSourceBindingRequest request) =>
         Convert.ToHexStringLower(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(request, JsonOptions)));

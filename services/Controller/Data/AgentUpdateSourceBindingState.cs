@@ -8,6 +8,12 @@ using Microsoft.Data.Sqlite;
 
 namespace KamenRaider.Controller.Data;
 
+public sealed class AgentUpdateSourceChallengeRenewalRequiredException : InvalidOperationException
+{
+    public AgentUpdateSourceChallengeRenewalRequiredException()
+        : base("The unconsumed source challenge has expired or belongs to a previous Controller runtime.") { }
+}
+
 public sealed partial class ControllerDatabase
 {
     private static readonly JsonSerializerOptions SourceBindingJsonOptions = new(JsonSerializerDefaults.Web);
@@ -290,7 +296,7 @@ public sealed partial class ControllerDatabase
         string runtimeEpoch, long nowUnixMs)
     {
         if (!IsActiveSourceChallenge(issuedAtUnixMs, issuedMonotonicTick, expiresAtUnixMs, runtimeEpoch, nowUnixMs))
-            throw new InvalidOperationException("Source challenge expired or belongs to a previous Controller runtime.");
+            throw new AgentUpdateSourceChallengeRenewalRequiredException();
     }
 
     private string CreateAgentUpdateSourceChallengeToken(string machineId, string keyFingerprint, string chainId,
