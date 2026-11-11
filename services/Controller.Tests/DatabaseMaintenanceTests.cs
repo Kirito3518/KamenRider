@@ -389,7 +389,7 @@ public class DatabaseMaintenanceTests
                 command.ExecuteNonQuery();
                 command.Parameters.Clear();
 
-                command.CommandText = "INSERT INTO agent_signed_request_scopes(machine_id,key_fingerprint,path,cutoff_second) VALUES('source-machine',$fingerprint,'/agent/sync',1000); INSERT INTO agent_signed_request_nonces(machine_id,key_fingerprint,path,nonce_digest,signed_second) VALUES('source-machine',$fingerprint,'/agent/sync',$nonce,1001);";
+                command.CommandText = "INSERT INTO agent_signed_request_scopes(machine_id,key_fingerprint,path,cutoff_second) VALUES('source-machine',$fingerprint,'/agent/sync',1000); INSERT INTO agent_signed_request_nonces(machine_id,key_fingerprint,path,nonce_digest,signed_second,retention_second) VALUES('source-machine',$fingerprint,'/agent/sync',$nonce,1001,1001);";
                 command.Parameters.AddWithValue("$fingerprint", fingerprint);
                 command.Parameters.AddWithValue("$nonce", syncNonceDigest);
                 command.ExecuteNonQuery();
@@ -409,10 +409,10 @@ public class DatabaseMaintenanceTests
 
             using (var snapshot = OpenDatabase(destination))
             {
-                Assert.Equal(15L, Scalar(snapshot, "PRAGMA user_version"));
+                Assert.Equal(16L, Scalar(snapshot, "PRAGMA user_version"));
                 Assert.Equal(1L, Scalar(snapshot, $"SELECT COUNT(*) FROM agent_sync_proof_state WHERE machine_id='source-machine' AND sequence=8 AND token_sequence=8 AND token_digest='{tokenDigest}' AND last_proven_sequence=7 AND last_proven_version='1.2.3'"));
                 Assert.Equal(1L, Scalar(snapshot, "SELECT COUNT(*) FROM agent_signed_request_scopes WHERE machine_id='source-machine' AND key_fingerprint='" + fingerprint + "' AND path='/agent/sync' AND cutoff_second=1000"));
-                Assert.Equal(1L, Scalar(snapshot, $"SELECT COUNT(*) FROM agent_signed_request_nonces WHERE machine_id='source-machine' AND nonce_digest='{syncNonceDigest}' AND signed_second=1001"));
+                Assert.Equal(1L, Scalar(snapshot, $"SELECT COUNT(*) FROM agent_signed_request_nonces WHERE machine_id='source-machine' AND nonce_digest='{syncNonceDigest}' AND signed_second=1001 AND retention_second=1001"));
                 Assert.Equal(1L, Scalar(snapshot, "SELECT COUNT(*) FROM agent_update_reports WHERE operation_id='head-v15' AND request_id='report-request' AND generation=1"));
                 Assert.Equal(1L, Scalar(snapshot, "SELECT COUNT(*) FROM agent_update_evidence_challenges WHERE challenge_id='evidence-v15' AND purpose='source' AND consumed_at_unix_ms=2000 AND request_id='source-proof-request'"));
                 Assert.Equal(1L, Scalar(snapshot, "SELECT COUNT(*) FROM agent_update_evidence_challenges WHERE challenge_id='recovery-evidence-v15' AND purpose='recoveryInspection' AND consumed_at_unix_ms IS NULL AND request_id IS NULL"));
@@ -422,7 +422,7 @@ public class DatabaseMaintenanceTests
             using (var reopened = OpenDatabase(destination))
             {
                 Assert.Equal(1L, Scalar(reopened, "SELECT COUNT(*) FROM agent_sync_proof_state WHERE machine_id='source-machine' AND sequence=8 AND token_sequence IS NULL AND token_digest IS NULL AND last_proven_sequence=7 AND last_proven_version='1.2.3' AND last_proven_runtime_epoch IS NULL AND last_proven_tick IS NULL"));
-                Assert.Equal(1L, Scalar(reopened, $"SELECT COUNT(*) FROM agent_signed_request_nonces WHERE machine_id='source-machine' AND nonce_digest='{syncNonceDigest}'"));
+                Assert.Equal(1L, Scalar(reopened, $"SELECT COUNT(*) FROM agent_signed_request_nonces WHERE machine_id='source-machine' AND nonce_digest='{syncNonceDigest}' AND signed_second=1001 AND retention_second=1001"));
                 Assert.Equal(1L, Scalar(reopened, "SELECT COUNT(*) FROM agent_update_evidence_challenges WHERE challenge_id='evidence-v15' AND consumed_at_unix_ms=2000"));
                 Assert.Equal(1L, Scalar(reopened, "SELECT COUNT(*) FROM agent_update_evidence_challenges WHERE challenge_id='recovery-evidence-v15' AND purpose='recoveryInspection' AND consumed_at_unix_ms IS NULL"));
                 Assert.Equal("head-v15", Assert.Single(restored.List()).AgentUpdateOperationId);

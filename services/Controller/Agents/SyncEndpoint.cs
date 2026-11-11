@@ -18,9 +18,10 @@ public static class SyncEndpoint {
  try {
   var request=JsonSerializer.Deserialize<SyncRequest>(body,new JsonSerializerOptions(JsonSerializerDefaults.Web));if(request is null)return Results.BadRequest();
   var decision=db.Sync(verified,request);
-  return decision.StatusCode==428?Results.Json(new SyncChallengeRequired(decision.Challenge!),statusCode:428)
-   :decision.StatusCode==200?Results.Ok(decision.Response)
-   :Results.StatusCode(decision.StatusCode);
+  if(decision.StatusCode==428)return Results.Json(new SyncChallengeRequired(decision.Challenge!),statusCode:428);
+  if(decision.StatusCode==200)return Results.Ok(decision.Response);
+  if(decision.StatusCode==429)context.Response.Headers.RetryAfter="10";
+  return Results.StatusCode(decision.StatusCode);
  }catch(Exception ex) when(ex is ArgumentException or JsonException){return Results.BadRequest();}
  });
  app.MapPost("/agent/reconcile",async (HttpContext context,ControllerDatabase db,AgentAuthentication auth)=> {

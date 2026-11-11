@@ -11,7 +11,10 @@ public sealed partial class ControllerDatabase
     private static readonly TimeSpan ProvenHeartbeatLifetime = TimeSpan.FromSeconds(60);
     private static readonly TimeSpan LegacySignedRequestWindow = TimeSpan.FromSeconds(60);
     private static readonly TimeSpan SignedNonceRetention = TimeSpan.FromMinutes(2);
+    private static readonly TimeSpan SyncChallengeRateWindow = TimeSpan.FromSeconds(10);
     private const int MaximumSignedRequestNoncesPerScope = 4096;
+    private const int MaximumSyncChallengeResponsesPerWindow = 2;
+    private const string ProtocolTwoSyncNonceScope = "/agent/sync#protocol2";
 
     private sealed record SyncProofState(
         string? KeyFingerprint,
@@ -25,13 +28,15 @@ public sealed partial class ControllerDatabase
         string? LastProvenRuntimeEpoch,
         long? LastProvenTick,
         string? LastProvenVersion,
-        long? LegacyLastSecond);
+        long? LegacyLastSecond,
+        long? ChallengeWindowTick,
+        int ChallengeResponseCount);
 
     private sealed record SyncProofBinding(string ChainId, string HeadOperationId, long Generation, long ReportGeneration);
 
     private SyncProofState? ReadSyncProofState(SqliteTransaction tx, string machineId)
     {
-        using var command = Command("SELECT key_fingerprint,mode,sequence,token_sequence,token_digest,token_epoch,token_issued_tick,last_proven_sequence,last_proven_runtime_epoch,last_proven_tick,last_proven_version,legacy_last_second FROM agent_sync_proof_state WHERE machine_id=$machine", ("$machine", machineId));
+        using var command = Command("SELECT key_fingerprint,mode,sequence,token_sequence,token_digest,token_epoch,token_issued_tick,last_proven_sequence,last_proven_runtime_epoch,last_proven_tick,last_proven_version,legacy_last_second,challenge_window_tick,challenge_response_count FROM agent_sync_proof_state WHERE machine_id=$machine", ("$machine", machineId));
         command.Transaction = tx;
         using var row = command.ExecuteReader();
         if (!row.Read()) return null;
@@ -47,7 +52,9 @@ public sealed partial class ControllerDatabase
             row.IsDBNull(8) ? null : row.GetString(8),
             row.IsDBNull(9) ? null : row.GetInt64(9),
             row.IsDBNull(10) ? null : row.GetString(10),
-            row.IsDBNull(11) ? null : row.GetInt64(11));
+            row.IsDBNull(11) ? null : row.GetInt64(11),
+            row.IsDBNull(12) ? null : row.GetInt64(12),
+            row.GetInt32(13));
     }
 
     private static bool SyncProofKeyMatches(SyncProofState? state, string keyFingerprint)
@@ -133,9 +140,10 @@ public sealed partial class ControllerDatabase
         return nowTick >= tick && clock.GetElapsedTime(tick, nowTick) <= ProvenHeartbeatLifetime;
     }
 
-    private bool AcceptScopedNonce(SqliteTransaction tx, VerifiedAgentRequest verified, bool enforceCutoff = true)
+    private bool AcceptScopedNonce(SqliteTransaction tx, VerifiedAgentRequest verified, bool enforceCutoff = true,
+        string? scopePathOverride = null, string? duplicateScopePath = null)
     {
-        var scopePath = verified.Path;
+        var scopePath = scopePathOverride ?? verified.Path;
         long? existingCutoff;
         using (var cutoffQuery = Command("SELECT cutoff_second FROM agent_signed_request_scopes WHERE machine_id=$machine AND key_fingerprint=$fingerprint AND path=$path",
             ("$machine", verified.MachineId), ("$fingerprint", verified.KeyFingerprint), ("$path", scopePath)))
@@ -152,18 +160,30 @@ public sealed partial class ControllerDatabase
             duplicate.Transaction = tx;
             if (duplicate.ExecuteScalar() is not null) return false;
         }
+        if (duplicateScopePath is not null && duplicateScopePath != scopePath)
+        {
+            using var priorScopeDuplicate = Command("SELECT 1 FROM agent_signed_request_nonces WHERE machine_id=$machine AND key_fingerprint=$fingerprint AND path=$path AND nonce_digest=$nonce",
+                ("$machine", verified.MachineId), ("$fingerprint", verified.KeyFingerprint), ("$path", duplicateScopePath), ("$nonce", verified.NonceDigest));
+            priorScopeDuplicate.Transaction = tx;
+            if (priorScopeDuplicate.ExecuteScalar() is not null) return false;
+        }
 
-        var serverCutoff = clock.GetUtcNow().ToUnixTimeSeconds() - (long)SignedNonceRetention.TotalSeconds;
+        var serverNow = clock.GetUtcNow().ToUnixTimeSeconds();
+        var retentionSeconds = (long)SignedNonceRetention.TotalSeconds;
+        var serverCutoff = serverNow - retentionSeconds;
         var signedCutoff = verified.SignedSeconds - (long)SignedNonceRetention.TotalSeconds;
         var nextCutoff = Math.Max(existingCutoff ?? long.MinValue, enforceCutoff ? signedCutoff : serverCutoff);
-        var storedSecond = enforceCutoff ? verified.SignedSeconds : Math.Max(verified.SignedSeconds, nextCutoff);
+        // Protocol-2 signed seconds are audit input only. Retain from server receipt time,
+        // clamped to the prior durable server-time high-water mark on Controller clock rollback.
+        var priorServerTime = existingCutoff is { } priorCutoff ? checked(priorCutoff + retentionSeconds) : serverNow;
+        var retentionSecond = enforceCutoff ? verified.SignedSeconds : Math.Max(serverNow, priorServerTime);
         using (var scope = Command("INSERT INTO agent_signed_request_scopes(machine_id,key_fingerprint,path,cutoff_second) VALUES($machine,$fingerprint,$path,$cutoff) ON CONFLICT(machine_id,key_fingerprint,path) DO UPDATE SET cutoff_second=MAX(cutoff_second,excluded.cutoff_second)",
             ("$machine", verified.MachineId), ("$fingerprint", verified.KeyFingerprint), ("$path", scopePath), ("$cutoff", nextCutoff)))
         {
             scope.Transaction = tx;
             scope.ExecuteNonQuery();
         }
-        using (var prune = Command("DELETE FROM agent_signed_request_nonces WHERE machine_id=$machine AND key_fingerprint=$fingerprint AND path=$path AND signed_second < (SELECT cutoff_second FROM agent_signed_request_scopes WHERE machine_id=$machine AND key_fingerprint=$fingerprint AND path=$path)",
+        using (var prune = Command("DELETE FROM agent_signed_request_nonces WHERE machine_id=$machine AND key_fingerprint=$fingerprint AND path=$path AND retention_second < (SELECT cutoff_second FROM agent_signed_request_scopes WHERE machine_id=$machine AND key_fingerprint=$fingerprint AND path=$path)",
             ("$machine", verified.MachineId), ("$fingerprint", verified.KeyFingerprint), ("$path", scopePath)))
         {
             prune.Transaction = tx;
@@ -176,10 +196,27 @@ public sealed partial class ControllerDatabase
             if (Convert.ToInt64(count.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture) >= MaximumSignedRequestNoncesPerScope)
                 return false;
         }
-        using var insert = Command("INSERT INTO agent_signed_request_nonces(machine_id,key_fingerprint,path,nonce_digest,signed_second) VALUES($machine,$fingerprint,$path,$nonce,$second)",
-            ("$machine", verified.MachineId), ("$fingerprint", verified.KeyFingerprint), ("$path", scopePath), ("$nonce", verified.NonceDigest), ("$second", storedSecond));
+        using var insert = Command("INSERT INTO agent_signed_request_nonces(machine_id,key_fingerprint,path,nonce_digest,signed_second,retention_second) VALUES($machine,$fingerprint,$path,$nonce,$signed,$retention)",
+            ("$machine", verified.MachineId), ("$fingerprint", verified.KeyFingerprint), ("$path", scopePath),
+            ("$nonce", verified.NonceDigest), ("$signed", verified.SignedSeconds), ("$retention", retentionSecond));
         insert.Transaction = tx;
         return insert.ExecuteNonQuery() == 1;
+    }
+
+    private bool TryConsumeSyncChallengeResponse(SqliteTransaction tx, string machineId)
+    {
+        var state = ReadSyncProofState(tx, machineId) ?? throw new InvalidOperationException("Agent proof state is missing.");
+        var nowTick = clock.GetTimestamp();
+        if (state.ChallengeWindowTick is { } existingTick && nowTick < existingTick) return false;
+        var newWindow = state.ChallengeWindowTick is not { } startTick
+            || clock.GetElapsedTime(startTick, nowTick) >= SyncChallengeRateWindow;
+        if (!newWindow && state.ChallengeResponseCount >= MaximumSyncChallengeResponsesPerWindow) return false;
+
+        var nextCount = newWindow ? 1 : state.ChallengeResponseCount + 1;
+        using var update = Command("UPDATE agent_sync_proof_state SET challenge_window_tick=$tick,challenge_response_count=$count WHERE machine_id=$machine",
+            ("$tick", newWindow ? nowTick : state.ChallengeWindowTick), ("$count", nextCount), ("$machine", machineId));
+        update.Transaction = tx;
+        return update.ExecuteNonQuery() == 1;
     }
 
     private bool IsWithinLegacyWindow(VerifiedAgentRequest verified)
@@ -229,10 +266,16 @@ public sealed partial class ControllerDatabase
         return update.ExecuteNonQuery() == 1;
     }
 
+    private SyncDecision IssueRateLimitedSyncChallenge(SqliteTransaction tx, string machineId, string keyFingerprint)
+    {
+        if (!TryConsumeSyncChallengeResponse(tx, machineId)) return SyncDecision.Rejected(429);
+        return SyncDecision.ChallengeRequired(IssueOrReconstructSyncToken(tx, machineId, keyFingerprint));
+    }
+
     private void MarkSyncProofAccepted(SqliteTransaction tx, VerifiedAgentRequest verified, SyncProofState state, string? version)
     {
         var proofSequence = state.TokenSequence ?? throw new InvalidOperationException("Accepted Agent proof has no token sequence.");
-        using var update = Command("UPDATE agent_sync_proof_state SET key_fingerprint=$fingerprint,mode='challengeRequired',sequence=MAX(sequence,$sequence),last_proven_sequence=$sequence,last_proven_runtime_epoch=$epoch,last_proven_tick=$tick,last_proven_version=$version,last_received_at=$received,token_sequence=NULL,token_digest=NULL,token_epoch=NULL,token_issued_tick=NULL WHERE machine_id=$machine",
+        using var update = Command("UPDATE agent_sync_proof_state SET key_fingerprint=$fingerprint,mode='challengeRequired',sequence=MAX(sequence,$sequence),last_proven_sequence=$sequence,last_proven_runtime_epoch=$epoch,last_proven_tick=$tick,last_proven_version=$version,last_received_at=$received,token_sequence=NULL,token_digest=NULL,token_epoch=NULL,token_issued_tick=NULL,challenge_window_tick=NULL,challenge_response_count=0 WHERE machine_id=$machine",
             ("$fingerprint", verified.KeyFingerprint), ("$sequence", proofSequence), ("$epoch", syncProofRuntimeEpoch), ("$tick", clock.GetTimestamp()),
             ("$version", version), ("$received", clock.GetUtcNow().ToString("O")), ("$machine", verified.MachineId));
         update.Transaction = tx;

@@ -86,6 +86,74 @@ public sealed class AgentReleaseAcceptanceTests
         Assert.Throws<InvalidOperationException>(() => fixture.Database.CreateTrialLease("renter", "pc", 60, "request"));
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task CapturedLegacySyncAfterProofModeIsLatchedHasNoBodyEffects(bool seedLegacyHighWater)
+    {
+        await using var fixture = await ProofFixture.CreateAsync();
+        fixture.Database.Update("pc", new("PC", 500, 1, 2), 1);
+        fixture.Database.Approve("pc", "admin");
+        var machineBefore = Assert.Single(fixture.Database.List());
+        var second = fixture.Clock.Now.ToUnixTimeSeconds();
+
+        if (seedLegacyHighWater)
+        {
+            var priorLegacy = new SyncRequest("prior-legacy-boot", "192.0.2.43", "001122334455", 0, "notReady", [])
+            { AgentVersion = "0.9.0" };
+            using var acceptedPrior = await fixture.SendAsync(priorLegacy, second - 2, nonce: "prior-legacy-request");
+            Assert.Equal(HttpStatusCode.OK, acceptedPrior.StatusCode);
+        }
+
+        var capturedLegacy = new SyncRequest("captured-legacy-boot", "192.0.2.99", "001122334466",
+            machineBefore.ConfigRevision, "ready", [new("captured-command", "applied", 99)],
+            new("captured-lease", 99, "captured-legacy-boot", fixture.Clock.Now.AddMinutes(1), [PairingIds.FoundationSunshineSinglePendingSlotId]))
+        { AgentVersion = "1.0.0" };
+        using var captured = fixture.CreateSignedRequest(capturedLegacy, second - 1, nonce: "captured-legacy-request");
+
+        var proof = new SyncRequest("proved-not-ready-boot", "192.0.2.41", "001122334455", 0, "notReady", [])
+        {
+            SyncProofProtocol = 2,
+            AgentVersion = "2.3.4",
+            ReadinessDiagnostics = [new(ReadinessDiagnosticIds.RuntimeHealth, ReadinessDiagnosticStatuses.Blocked)],
+        };
+        using var challenge = await fixture.SendAsync(proof, second, nonce: "proof-challenge-request");
+        Assert.Equal(HttpStatusCode.PreconditionRequired, challenge.StatusCode);
+        var token = (await challenge.Content.ReadFromJsonAsync<SyncChallengeRequired>())!.AgentUpdateChallenge;
+        using var acceptedProof = await fixture.SendAsync(proof with { AgentUpdateChallenge = token }, second, nonce: "proof-accepted-request");
+        Assert.Equal(HttpStatusCode.OK, acceptedProof.StatusCode);
+        var beforeReplay = Assert.Single(fixture.Database.List());
+        Assert.False(beforeReplay.CanRent);
+        var proofStateBefore = fixture.ReadText("SELECT mode||'|'||sequence||'|'||COALESCE(last_proven_sequence,'')||'|'||COALESCE(last_proven_tick,'')||'|'||COALESCE(last_proven_version,'')||'|'||COALESCE(legacy_last_second,'')||'|'||COALESCE(legacy_reported_version,'') FROM agent_sync_proof_state WHERE machine_id='pc'");
+        var ackBefore = fixture.Scalar("SELECT applied_revision FROM machine_config_acks WHERE machine_id='pc'");
+        var nonceRowsBefore = fixture.Scalar("SELECT COUNT(*) FROM agent_signed_request_nonces WHERE machine_id='pc' AND path='/agent/sync'");
+        var bootRowsBefore = fixture.Scalar("SELECT COUNT(*) FROM machine_boots WHERE machine_id='pc'");
+
+        using var delayed = await fixture.SendPreparedAsync(captured);
+
+        Assert.False(delayed.IsSuccessStatusCode);
+        Assert.Equal(HttpStatusCode.Conflict, delayed.StatusCode);
+        var afterReplay = Assert.Single(fixture.Database.List());
+        Assert.False(afterReplay.CanRent);
+        Assert.Equal(beforeReplay.Readiness, afterReplay.Readiness);
+        Assert.Equal(beforeReplay.BootId, afterReplay.BootId);
+        Assert.Equal(beforeReplay.LocalIp, afterReplay.LocalIp);
+        Assert.Equal(beforeReplay.MacAddress, afterReplay.MacAddress);
+        Assert.Equal(beforeReplay.AppliedConfigRevision, afterReplay.AppliedConfigRevision);
+        Assert.Equal(ackBefore, fixture.Scalar("SELECT applied_revision FROM machine_config_acks WHERE machine_id='pc'"));
+        Assert.Equal("notReady", afterReplay.Readiness);
+        Assert.Equal("proved-not-ready-boot", afterReplay.BootId);
+        Assert.Equal("192.0.2.41", afterReplay.LocalIp);
+        Assert.Equal(0L, afterReplay.AppliedConfigRevision);
+        Assert.Equal(0L, fixture.Scalar("SELECT COUNT(*) FROM machine_boots WHERE machine_id='pc' AND boot_id='captured-legacy-boot'"));
+        Assert.Equal(bootRowsBefore, fixture.Scalar("SELECT COUNT(*) FROM machine_boots WHERE machine_id='pc'"));
+        Assert.Equal(0L, fixture.Scalar("SELECT COUNT(*) FROM command_outbox WHERE machine_id='pc' AND command_id='captured-command'"));
+        Assert.Equal(0L, fixture.Scalar("SELECT COUNT(*) FROM pairing_offers WHERE machine_id='pc'"));
+        Assert.Equal(nonceRowsBefore, fixture.Scalar("SELECT COUNT(*) FROM agent_signed_request_nonces WHERE machine_id='pc' AND path='/agent/sync'"));
+        Assert.Equal(proofStateBefore, fixture.ReadText("SELECT mode||'|'||sequence||'|'||COALESCE(last_proven_sequence,'')||'|'||COALESCE(last_proven_tick,'')||'|'||COALESCE(last_proven_version,'')||'|'||COALESCE(legacy_last_second,'')||'|'||COALESCE(legacy_reported_version,'') FROM agent_sync_proof_state WHERE machine_id='pc'"));
+        Assert.Throws<InvalidOperationException>(() => fixture.Database.CreateTrialLease("renter", "pc", 60, "after-captured-legacy"));
+    }
+
     [Fact]
     public async Task SignatureValidStaleProtocolTwoGetsChallengeButMalformedSecondsAndBadSignaturesAreUnauthorized()
     {
@@ -219,13 +287,13 @@ public sealed class AgentReleaseAcceptanceTests
         using var firstAccepted = await fixture.SendAsync(request with { AgentUpdateChallenge = token }, firstSecond);
         Assert.Equal(HttpStatusCode.OK, firstAccepted.StatusCode);
         var nextToken = (await firstAccepted.Content.ReadFromJsonAsync<SyncResponse>())!.AgentUpdateChallenge;
-        Assert.Equal(1L, fixture.Scalar("SELECT COUNT(*) FROM agent_signed_request_nonces WHERE machine_id='pc' AND path='/agent/sync'"));
+        Assert.Equal(1L, fixture.Scalar("SELECT COUNT(*) FROM agent_signed_request_nonces WHERE machine_id='pc' AND path='/agent/sync#protocol2'"));
 
         fixture.Clock.Now = fixture.Clock.Now.AddSeconds(121);
         fixture.Clock.AdvanceMonotonic(TimeSpan.FromSeconds(121));
         using var secondAccepted = await fixture.SendAsync(request with { AgentUpdateChallenge = nextToken }, nonce: "after-retention-window");
         Assert.Equal(HttpStatusCode.OK, secondAccepted.StatusCode);
-        Assert.Equal(1L, fixture.Scalar("SELECT COUNT(*) FROM agent_signed_request_nonces WHERE machine_id='pc' AND path='/agent/sync'"));
+        Assert.Equal(1L, fixture.Scalar("SELECT COUNT(*) FROM agent_signed_request_nonces WHERE machine_id='pc' AND path='/agent/sync#protocol2'"));
     }
 
     [Fact]
@@ -249,11 +317,11 @@ public sealed class AgentReleaseAcceptanceTests
             using var transaction = connection.BeginTransaction();
             using var command = connection.CreateCommand();
             command.Transaction = transaction;
-            command.CommandText = "INSERT INTO agent_signed_request_scopes(machine_id,key_fingerprint,path,cutoff_second) VALUES('pc',$fingerprint,'/agent/sync',$cutoff)";
+            command.CommandText = "INSERT INTO agent_signed_request_scopes(machine_id,key_fingerprint,path,cutoff_second) VALUES('pc',$fingerprint,'/agent/sync#protocol2',$cutoff)";
             command.Parameters.AddWithValue("$fingerprint", fingerprint);
             command.Parameters.AddWithValue("$cutoff", cutoff);
             command.ExecuteNonQuery();
-            command.CommandText = "INSERT INTO agent_signed_request_nonces(machine_id,key_fingerprint,path,nonce_digest,signed_second) VALUES('pc',$fingerprint,'/agent/sync',$nonce,$cutoff)";
+            command.CommandText = "INSERT INTO agent_signed_request_nonces(machine_id,key_fingerprint,path,nonce_digest,signed_second,retention_second) VALUES('pc',$fingerprint,'/agent/sync#protocol2',$nonce,$cutoff,$cutoff)";
             var nonceParameter = command.Parameters.Add("$nonce", SqliteType.Text);
             for (var index = 0; index < maximumRows - 1; index++)
             {
@@ -267,7 +335,7 @@ public sealed class AgentReleaseAcceptanceTests
         using var accepted = await fixture.SendAsync(request with { AgentUpdateChallenge = token });
         Assert.Equal(HttpStatusCode.OK, accepted.StatusCode);
         var currentToken = (await accepted.Content.ReadFromJsonAsync<SyncResponse>())!.AgentUpdateChallenge;
-        Assert.Equal((long)maximumRows, fixture.Scalar("SELECT COUNT(*) FROM agent_signed_request_nonces WHERE machine_id='pc' AND path='/agent/sync'"));
+        Assert.Equal((long)maximumRows, fixture.Scalar("SELECT COUNT(*) FROM agent_signed_request_nonces WHERE machine_id='pc' AND path='/agent/sync#protocol2'"));
 
         var cappedBody = request with { BootId = "cap-overflow", LocalIp = "192.0.2.44", AgentVersion = "9.9.9", AgentUpdateChallenge = currentToken };
         var beforeCapReject = Assert.Single(fixture.Database.List());
@@ -278,13 +346,195 @@ public sealed class AgentReleaseAcceptanceTests
         Assert.Equal(beforeCapReject.LastSeenAt, afterCapReject.LastSeenAt);
         Assert.Equal(beforeCapReject.BootId, afterCapReject.BootId);
         Assert.Equal(beforeCapReject.AgentVersion, afterCapReject.AgentVersion);
-        Assert.Equal((long)maximumRows, fixture.Scalar("SELECT COUNT(*) FROM agent_signed_request_nonces WHERE machine_id='pc' AND path='/agent/sync'"));
+        Assert.Equal((long)maximumRows, fixture.Scalar("SELECT COUNT(*) FROM agent_signed_request_nonces WHERE machine_id='pc' AND path='/agent/sync#protocol2'"));
 
         fixture.Clock.Now = initialTime.AddSeconds(121);
         using var recovered = await fixture.SendAsync(cappedBody, nonce: "capacity-rejected-nonce");
         Assert.Equal(HttpStatusCode.OK, recovered.StatusCode);
         Assert.Equal("cap-overflow", Assert.Single(fixture.Database.List()).BootId);
-        Assert.Equal(1L, fixture.Scalar("SELECT COUNT(*) FROM agent_signed_request_nonces WHERE machine_id='pc' AND path='/agent/sync'"));
+        Assert.Equal(1L, fixture.Scalar("SELECT COUNT(*) FROM agent_signed_request_nonces WHERE machine_id='pc' AND path='/agent/sync#protocol2'"));
+    }
+
+    [Fact]
+    public async Task ProtocolTwoFutureSignedSecondsDoNotPinNonceCapacityPastServerRetention()
+    {
+        const int maximumRows = 4096;
+        await using var fixture = await ProofFixture.CreateAsync();
+        var serverSecond = fixture.Clock.Now.ToUnixTimeSeconds();
+        const long farFutureSecond = 253402300799;
+        var request = new SyncRequest("future-time-boot", "192.0.2.41", "001122334455", 1, "notReady", [])
+        { SyncProofProtocol = 2 };
+        using var challenge = await fixture.SendAsync(request, farFutureSecond, nonce: "future-challenge-request");
+        Assert.Equal(HttpStatusCode.PreconditionRequired, challenge.StatusCode);
+        var fingerprint = Assert.Single(fixture.Database.List()).PublicKeyFingerprint!;
+        var legacyCutoff = serverSecond - 120;
+        using (var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = fixture.DatabasePath, Pooling = false }.ToString()))
+        {
+            connection.Open();
+            using var transaction = connection.BeginTransaction();
+            using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = "INSERT INTO agent_signed_request_scopes(machine_id,key_fingerprint,path,cutoff_second) VALUES('pc',$fingerprint,'/agent/sync',$cutoff)";
+            command.Parameters.AddWithValue("$fingerprint", fingerprint);
+            command.Parameters.AddWithValue("$cutoff", legacyCutoff);
+            command.ExecuteNonQuery();
+            command.CommandText = "INSERT INTO agent_signed_request_nonces(machine_id,key_fingerprint,path,nonce_digest,signed_second,retention_second) VALUES('pc',$fingerprint,'/agent/sync',$nonce,$second,$second)";
+            var nonceParameter = command.Parameters.Add("$nonce", SqliteType.Text);
+            var secondParameter = command.Parameters.Add("$second", SqliteType.Integer);
+            for (var index = 0; index < maximumRows; index++)
+            {
+                nonceParameter.Value = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes("pre-v2-future-nonce-" + index)));
+                secondParameter.Value = farFutureSecond;
+                command.ExecuteNonQuery();
+            }
+            transaction.Commit();
+        }
+
+        // These v15 rows have ambiguous legacy/v2 provenance. Restart rotates the old token epoch;
+        // the new protocol-2 scope must recover without deleting or reclassifying that old evidence.
+        await fixture.RestartAsync();
+        using var reissued = await fixture.SendAsync(request, farFutureSecond, nonce: "future-reissue-request");
+        Assert.Equal(HttpStatusCode.PreconditionRequired, reissued.StatusCode);
+        var token = (await reissued.Content.ReadFromJsonAsync<SyncChallengeRequired>())!.AgentUpdateChallenge;
+
+        const string preMigrationNonce = "pre-v2-future-nonce-0";
+        using var oldScopeDuplicate = await fixture.SendAsync(request with { AgentUpdateChallenge = token, BootId = "old-scope-replay" },
+            farFutureSecond, nonce: preMigrationNonce);
+        Assert.Equal(HttpStatusCode.PreconditionRequired, oldScopeDuplicate.StatusCode);
+        Assert.Equal(token, (await oldScopeDuplicate.Content.ReadFromJsonAsync<SyncChallengeRequired>())!.AgentUpdateChallenge);
+        Assert.Null(Assert.Single(fixture.Database.List()).LastSeenAt);
+
+        using var accepted = await fixture.SendAsync(request with { AgentUpdateChallenge = token }, farFutureSecond, nonce: "future-accepted-request");
+        Assert.Equal(HttpStatusCode.OK, accepted.StatusCode);
+        var nextToken = (await accepted.Content.ReadFromJsonAsync<SyncResponse>())!.AgentUpdateChallenge;
+        Assert.Equal((long)maximumRows, fixture.Scalar("SELECT COUNT(*) FROM agent_signed_request_nonces WHERE machine_id='pc' AND path='/agent/sync' AND signed_second=253402300799"));
+        Assert.Equal(1L, fixture.Scalar("SELECT COUNT(*) FROM agent_signed_request_nonces WHERE machine_id='pc' AND path='/agent/sync#protocol2'"));
+        Assert.Equal(farFutureSecond, fixture.Scalar("SELECT signed_second FROM agent_signed_request_nonces WHERE machine_id='pc' AND path='/agent/sync#protocol2'"));
+
+        using (var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = fixture.DatabasePath, Pooling = false }.ToString()))
+        {
+            connection.Open();
+            using var transaction = connection.BeginTransaction();
+            using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = "INSERT INTO agent_signed_request_nonces(machine_id,key_fingerprint,path,nonce_digest,signed_second,retention_second) VALUES('pc',$fingerprint,'/agent/sync#protocol2',$nonce,$audit,$retention)";
+            command.Parameters.AddWithValue("$fingerprint", fingerprint);
+            var nonceParameter = command.Parameters.Add("$nonce", SqliteType.Text);
+            var auditParameter = command.Parameters.Add("$audit", SqliteType.Integer);
+            var retentionParameter = command.Parameters.Add("$retention", SqliteType.Integer);
+            for (var index = 0; index < maximumRows - 1; index++)
+            {
+                nonceParameter.Value = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes("future-retained-nonce-" + index)));
+                auditParameter.Value = farFutureSecond;
+                retentionParameter.Value = serverSecond;
+                command.ExecuteNonQuery();
+            }
+            transaction.Commit();
+        }
+
+        var cappedBody = request with
+        {
+            BootId = "future-cap-body",
+            LocalIp = "192.0.2.99",
+            MacAddress = "001122334466",
+            AppliedConfigRevision = 0,
+            Readiness = "ready",
+            CommandResults = [new("future-cap-command", "applied", 99)],
+            PendingPairing = new("future-cap-lease", 99, "future-cap-body", fixture.Clock.Now.AddMinutes(1), [PairingIds.FoundationSunshineSinglePendingSlotId]),
+            AgentVersion = "9.9.9",
+            ReadinessDiagnostics = [new(ReadinessDiagnosticIds.RuntimeHealth, ReadinessDiagnosticStatuses.Passed)],
+            AgentUpdateChallenge = nextToken,
+        };
+        var beforeCap = Assert.Single(fixture.Database.List());
+        using var capped = await fixture.SendAsync(cappedBody, farFutureSecond, nonce: "future-cap-attempt");
+        Assert.Equal(HttpStatusCode.PreconditionRequired, capped.StatusCode);
+        var capChallenge = (await capped.Content.ReadFromJsonAsync<SyncChallengeRequired>())!.AgentUpdateChallenge;
+        Assert.Equal(nextToken, capChallenge);
+        var afterCap = Assert.Single(fixture.Database.List());
+        Assert.Equal(beforeCap.LastSeenAt, afterCap.LastSeenAt);
+        Assert.Equal(beforeCap.BootId, afterCap.BootId);
+        Assert.Equal(beforeCap.AgentVersion, afterCap.AgentVersion);
+        Assert.Equal(beforeCap.Readiness, afterCap.Readiness);
+        Assert.Equal(beforeCap.LocalIp, afterCap.LocalIp);
+        Assert.Equal(beforeCap.MacAddress, afterCap.MacAddress);
+        Assert.Equal(beforeCap.AppliedConfigRevision, afterCap.AppliedConfigRevision);
+        Assert.Equal(1L, fixture.Scalar("SELECT applied_revision FROM machine_config_acks WHERE machine_id='pc'"));
+        Assert.Equal(0L, fixture.Scalar("SELECT COUNT(*) FROM machine_boots WHERE machine_id='pc'"));
+        Assert.Equal(0L, fixture.Scalar("SELECT COUNT(*) FROM command_outbox WHERE machine_id='pc'"));
+        Assert.Equal(0L, fixture.Scalar("SELECT COUNT(*) FROM pairing_offers WHERE machine_id='pc'"));
+        Assert.Equal(0L, fixture.Scalar("SELECT COUNT(*) FROM leases WHERE machine_id='pc'"));
+        Assert.Equal((long)maximumRows, fixture.Scalar("SELECT COUNT(*) FROM agent_signed_request_nonces WHERE machine_id='pc' AND path='/agent/sync#protocol2'"));
+
+        fixture.Clock.Now = fixture.Clock.Now.AddDays(-1);
+        using var duringRollback = await fixture.SendAsync(cappedBody with { AgentUpdateChallenge = capChallenge }, farFutureSecond, nonce: "future-cap-during-rollback");
+        Assert.Equal(HttpStatusCode.PreconditionRequired, duringRollback.StatusCode);
+        var rollbackMachine = Assert.Single(fixture.Database.List());
+        Assert.Equal(beforeCap.LastSeenAt, rollbackMachine.LastSeenAt);
+        Assert.Equal((long)maximumRows, fixture.Scalar("SELECT COUNT(*) FROM agent_signed_request_nonces WHERE machine_id='pc' AND path='/agent/sync#protocol2'"));
+
+        fixture.Clock.Now = fixture.Clock.Now.AddDays(1).AddSeconds(119);
+        fixture.Clock.AdvanceMonotonic(TimeSpan.FromSeconds(119));
+        var rollbackToken = (await duringRollback.Content.ReadFromJsonAsync<SyncChallengeRequired>())!.AgentUpdateChallenge;
+        using var beforeRetention = await fixture.SendAsync(cappedBody with { AgentUpdateChallenge = rollbackToken }, farFutureSecond, nonce: "future-cap-before-retention");
+        Assert.Equal(HttpStatusCode.PreconditionRequired, beforeRetention.StatusCode);
+        Assert.Equal(beforeCap.LastSeenAt, Assert.Single(fixture.Database.List()).LastSeenAt);
+        Assert.Equal((long)maximumRows, fixture.Scalar("SELECT COUNT(*) FROM agent_signed_request_nonces WHERE machine_id='pc' AND path='/agent/sync#protocol2'"));
+
+        fixture.Clock.Now = fixture.Clock.Now.AddSeconds(2);
+        fixture.Clock.AdvanceMonotonic(TimeSpan.FromSeconds(2));
+        var beforeRetentionToken = (await beforeRetention.Content.ReadFromJsonAsync<SyncChallengeRequired>())!.AgentUpdateChallenge;
+        using var recovered = await fixture.SendAsync(cappedBody with { AgentUpdateChallenge = beforeRetentionToken }, farFutureSecond, nonce: "future-cap-attempt");
+        Assert.Equal(HttpStatusCode.OK, recovered.StatusCode);
+        Assert.Equal("future-cap-body", Assert.Single(fixture.Database.List()).BootId);
+        Assert.Equal(1L, fixture.Scalar("SELECT COUNT(*) FROM agent_signed_request_nonces WHERE machine_id='pc' AND path='/agent/sync#protocol2'"));
+        Assert.Equal((long)maximumRows, fixture.Scalar("SELECT COUNT(*) FROM agent_signed_request_nonces WHERE machine_id='pc' AND path='/agent/sync' AND signed_second=253402300799"));
+    }
+
+    [Fact]
+    public async Task RepeatedStaleProofChallengesAreRateLimitedAndRecoverAfterRestart()
+    {
+        await using var fixture = await ProofFixture.CreateAsync();
+        var staleSecond = fixture.Clock.Now.AddDays(-1).ToUnixTimeSeconds();
+        var request = new SyncRequest("rate-limit-boot", "192.0.2.41", "001122334455", 1, "notReady", [])
+        { SyncProofProtocol = 2 };
+
+        using var firstRequest = fixture.CreateSignedRequest(request, staleSecond, nonce: "rate-lost-response");
+        using var first = await fixture.SendPreparedAsync(firstRequest);
+        Assert.Equal(HttpStatusCode.PreconditionRequired, first.StatusCode);
+        var token = (await first.Content.ReadFromJsonAsync<SyncChallengeRequired>())!.AgentUpdateChallenge;
+        using var retryRequest = fixture.CreateSignedRequest(request, staleSecond, nonce: "rate-lost-response");
+        using var oneRetry = await fixture.SendPreparedAsync(retryRequest);
+        Assert.Equal(HttpStatusCode.PreconditionRequired, oneRetry.StatusCode);
+        Assert.Equal(token, (await oneRetry.Content.ReadFromJsonAsync<SyncChallengeRequired>())!.AgentUpdateChallenge);
+
+        using var limited = await fixture.SendAsync(request with { BootId = "rate-limited-body", AgentVersion = "9.9.9" }, staleSecond, nonce: "rate-third");
+        Assert.Equal(HttpStatusCode.TooManyRequests, limited.StatusCode);
+        Assert.Equal("10", limited.Headers.RetryAfter?.Delta?.TotalSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        var afterLimited = Assert.Single(fixture.Database.List());
+        Assert.Null(afterLimited.LastSeenAt);
+        Assert.Equal("192.0.2.40", afterLimited.LocalIp);
+        Assert.Null(afterLimited.AppliedConfigRevision);
+        Assert.Null(Assert.Single(fixture.Database.List()).LastSeenAt);
+        Assert.Equal(0L, fixture.Scalar("SELECT COUNT(*) FROM machine_boots WHERE machine_id='pc'"));
+        Assert.Equal(0L, fixture.Scalar("SELECT COUNT(*) FROM machine_config_acks WHERE machine_id='pc'"));
+        Assert.Equal(0L, fixture.Scalar("SELECT COUNT(*) FROM command_outbox WHERE machine_id='pc'"));
+        Assert.Equal(0L, fixture.Scalar("SELECT COUNT(*) FROM pairing_offers WHERE machine_id='pc'"));
+        Assert.Equal(0L, fixture.Scalar("SELECT COUNT(*) FROM leases WHERE machine_id='pc'"));
+        Assert.Equal(2L, fixture.Scalar("SELECT challenge_response_count FROM agent_sync_proof_state WHERE machine_id='pc'"));
+
+        var rateWindowStart = fixture.Clock.Timestamp;
+        fixture.Clock.Timestamp -= TimeSpan.TicksPerSecond;
+        using var tickRollback = await fixture.SendAsync(request, staleSecond, nonce: "rate-during-tick-rollback");
+        Assert.Equal(HttpStatusCode.TooManyRequests, tickRollback.StatusCode);
+        fixture.Clock.Timestamp = rateWindowStart + TimeSpan.FromSeconds(11).Ticks;
+        using var afterWindow = await fixture.SendAsync(request, staleSecond, nonce: "rate-after-window");
+        Assert.Equal(HttpStatusCode.PreconditionRequired, afterWindow.StatusCode);
+
+        await fixture.RestartAsync();
+        using var recovered = await fixture.SendAsync(request, staleSecond, nonce: "rate-after-restart");
+        Assert.Equal(HttpStatusCode.PreconditionRequired, recovered.StatusCode);
+        Assert.False(string.IsNullOrWhiteSpace((await recovered.Content.ReadFromJsonAsync<SyncChallengeRequired>())!.AgentUpdateChallenge));
+        Assert.Null(Assert.Single(fixture.Database.List()).LastSeenAt);
     }
 
     [Fact]
@@ -445,6 +695,19 @@ public sealed class AgentReleaseAcceptanceTests
             return Convert.ToInt64(command.ExecuteScalar());
         }
 
+        public string? ReadText(string sql)
+        {
+            using var connection = new SqliteConnection(new SqliteConnectionStringBuilder
+            {
+                DataSource = Path.Combine(root, "controller.db"),
+                Pooling = false,
+            }.ToString());
+            connection.Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = sql;
+            return command.ExecuteScalar()?.ToString();
+        }
+
         private ProofFixture(string root, ProofClock clock, WebApplication app)
         {
             this.root = root;
@@ -498,19 +761,29 @@ public sealed class AgentReleaseAcceptanceTests
             string? nonce = null, string machineId = "pc", ECDsa? signingKey = null,
             string? timestampHeader = null, bool omitTimestamp = false)
         {
+            using var message = CreateSignedRequest(request, second, badSignature, nonce, machineId, signingKey, timestampHeader, omitTimestamp);
+            return await client.SendAsync(message);
+        }
+
+        public HttpRequestMessage CreateSignedRequest(SyncRequest request, long? second = null, bool badSignature = false,
+            string? nonce = null, string machineId = "pc", ECDsa? signingKey = null,
+            string? timestampHeader = null, bool omitTimestamp = false)
+        {
             var body = JsonSerializer.Serialize(request, new JsonSerializerOptions(JsonSerializerDefaults.Web));
             var at = second ?? Clock.Now.ToUnixTimeSeconds();
             nonce ??= Guid.NewGuid().ToString("N");
             var signed = $"{machineId}\nPOST\n/agent/sync\n{at}\n{nonce}\n{Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(body)))}";
-            using var message = new HttpRequestMessage(HttpMethod.Post, "/agent/sync") { Content = new StringContent(body, Encoding.UTF8, "application/json") };
+            var message = new HttpRequestMessage(HttpMethod.Post, "/agent/sync") { Content = new StringContent(body, Encoding.UTF8, "application/json") };
             message.Headers.Add("X-Agent-Id", machineId);
             if (!omitTimestamp) message.Headers.Add("X-Agent-Timestamp", timestampHeader ?? at.ToString());
             message.Headers.Add("X-Agent-Nonce", nonce);
             using var wrong = ECDsa.Create();
             var signer = badSignature ? wrong : signingKey ?? key;
             message.Headers.Add("X-Agent-Signature", Convert.ToBase64String(signer.SignData(Encoding.UTF8.GetBytes(signed), HashAlgorithmName.SHA256)));
-            return await client.SendAsync(message);
+            return message;
         }
+
+        public Task<HttpResponseMessage> SendPreparedAsync(HttpRequestMessage message) => client.SendAsync(message);
 
         public async ValueTask DisposeAsync()
         {

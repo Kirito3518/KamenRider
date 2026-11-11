@@ -401,6 +401,40 @@ public static class ControllerDatabaseMaintenance
         var assembly = typeof(ControllerDatabase).Assembly;
         foreach (var resourceName in assembly.GetManifestResourceNames()
             .Where(name => name.StartsWith("KamenRaider.Controller.Data.Migrations.", StringComparison.Ordinal)
+                && int.TryParse(name.AsSpan("KamenRaider.Controller.Data.Migrations.".Length, 3), out var version) && version <= 16)
+            .Order(StringComparer.Ordinal))
+        {
+            using var resource = assembly.GetManifestResourceStream(resourceName)!;
+            using var reader = new StreamReader(resource);
+            using var migration = reference.CreateCommand();
+            migration.Transaction = transaction;
+            migration.CommandText = reader.ReadToEnd();
+            migration.ExecuteNonQuery();
+        }
+        transaction.Commit();
+        var names = new[] { "agent_sync_proof_state", "agent_signed_request_scopes", "agent_signed_request_nonces",
+            "agent_signed_request_nonce_pruning", "agent_update_evidence_challenges", "agent_update_evidence_nonce",
+            "agent_update_reports", "agent_update_reports_immutable_update", "agent_update_reports_immutable_delete" };
+        var result = new Dictionary<string, string>(StringComparer.Ordinal);
+        using var command = reference.CreateCommand();
+        command.CommandText = "SELECT sql FROM sqlite_schema WHERE name=$name";
+        var parameter = command.Parameters.Add("$name", SqliteType.Text);
+        foreach (var name in names)
+        {
+            parameter.Value = name;
+            result.Add(name, NormalizeSql((string)command.ExecuteScalar()!));
+        }
+        return result;
+    });
+
+    private static readonly Lazy<IReadOnlyDictionary<string, string>> syncProofSchemaV15 = new(() =>
+    {
+        using var reference = new SqliteConnection("Data Source=:memory:;Foreign Keys=True");
+        reference.Open();
+        using var transaction = reference.BeginTransaction();
+        var assembly = typeof(ControllerDatabase).Assembly;
+        foreach (var resourceName in assembly.GetManifestResourceNames()
+            .Where(name => name.StartsWith("KamenRaider.Controller.Data.Migrations.", StringComparison.Ordinal)
                 && int.TryParse(name.AsSpan("KamenRaider.Controller.Data.Migrations.".Length, 3), out var version) && version <= 15)
             .Order(StringComparer.Ordinal))
         {
@@ -429,28 +463,40 @@ public static class ControllerDatabaseMaintenance
 
     internal static void ValidateSyncProofSchema(SqliteConnection connection, SqliteTransaction? transaction = null)
     {
+        long userVersion;
+        using (var version = connection.CreateCommand())
+        {
+            version.Transaction = transaction;
+            version.CommandText = "PRAGMA user_version";
+            userVersion = Convert.ToInt64(version.ExecuteScalar(), CultureInfo.InvariantCulture);
+        }
+        var expectedSchema = userVersion >= 16 ? syncProofSchema.Value : syncProofSchemaV15.Value;
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = "SELECT sql FROM sqlite_schema WHERE name=$name";
         var parameter = command.Parameters.Add("$name", SqliteType.Text);
-        foreach (var (name, expected) in syncProofSchema.Value)
+        foreach (var (name, expected) in expectedSchema)
         {
             parameter.Value = name;
             if (command.ExecuteScalar() is not string actual || NormalizeSql(actual) != expected)
                 throw new InvalidDataException($"Controller database has an invalid Agent proof definition '{name}'.");
         }
-        ValidateSyncProofState(connection, transaction);
+        ValidateSyncProofState(connection, transaction, userVersion >= 16);
     }
 
-    private static void ValidateSyncProofState(SqliteConnection connection, SqliteTransaction? transaction)
+    private static void ValidateSyncProofState(SqliteConnection connection, SqliteTransaction? transaction, bool hasChallengeRateLimit)
     {
         using var integrity = connection.CreateCommand();
         integrity.Transaction = transaction;
-        integrity.CommandText = "SELECT " +
+        var rateLimitIntegrity = hasChallengeRateLimit
+            ? "EXISTS(SELECT 1 FROM agent_sync_proof_state WHERE challenge_response_count<0 OR challenge_response_count>2 OR ((challenge_response_count=0)!=(challenge_window_tick IS NULL))) OR "
+            : "";
+        var nonceRetentionIntegrity = hasChallengeRateLimit ? "n.retention_second" : "n.signed_second";
+        integrity.CommandText = "SELECT " + rateLimitIntegrity +
             "EXISTS(SELECT machine_id FROM machines EXCEPT SELECT machine_id FROM agent_sync_proof_state) OR " +
             "EXISTS(SELECT machine_id FROM agent_sync_proof_state EXCEPT SELECT machine_id FROM machines) OR " +
             "EXISTS(SELECT 1 FROM agent_sync_proof_state WHERE sequence<0 OR (token_sequence IS NOT NULL AND (token_sequence>sequence OR token_sequence<=COALESCE(last_proven_sequence,0))) OR (last_proven_sequence IS NOT NULL AND (last_proven_sequence<0 OR last_proven_sequence>sequence)) OR (key_fingerprint IS NOT NULL AND (length(key_fingerprint)!=64 OR key_fingerprint GLOB '*[^0-9A-Fa-f]*')) OR (token_digest IS NOT NULL AND (length(token_digest)!=64 OR token_digest GLOB '*[^0-9A-Fa-f]*'))) OR " +
-            "EXISTS(SELECT 1 FROM agent_signed_request_nonces n JOIN agent_signed_request_scopes s USING(machine_id,key_fingerprint,path) WHERE n.signed_second<s.cutoff_second) OR " +
+            $"EXISTS(SELECT 1 FROM agent_signed_request_nonces n JOIN agent_signed_request_scopes s USING(machine_id,key_fingerprint,path) WHERE {nonceRetentionIntegrity}<s.cutoff_second) OR " +
             "EXISTS(SELECT 1 FROM agent_update_evidence_challenges WHERE length(key_fingerprint)!=64 OR key_fingerprint GLOB '*[^0-9A-Fa-f]*' OR length(nonce_digest)!=64 OR nonce_digest GLOB '*[^0-9A-Fa-f]*')";
         if (Convert.ToInt64(integrity.ExecuteScalar(), CultureInfo.InvariantCulture) != 0)
             throw new InvalidDataException("Controller database has inconsistent Agent proof, replay or evidence state.");

@@ -236,7 +236,7 @@ public sealed class AgentUpdateTests
     [Theory]
     [InlineData("awaitingHeartbeat", "2.0.0")]
     [InlineData("rollingBack", "1.0.0")]
-    public void LegacyHeartbeatEchoCannotConfirmAnOutcome(string status, string version)
+    public void LegacyHeartbeatIsRejectedAfterProofModeAndCannotConfirmAnOutcome(string status, string version)
     {
         using var fixture = new LeaseFixture(agentReleaseRemediationEnabled: true);
         AddRelease(fixture.Path, "2.0.0");
@@ -244,11 +244,21 @@ public sealed class AgentUpdateTests
         fixture.Db.StartAgentUpdate("pc", update.Ticket);
         fixture.Db.ReportAgentUpdateStatus("pc", update.Ticket, status);
         var request = new SyncRequest("boot", "192.0.2.1", "001122334455", 3, "ready", []) { AgentVersion = version, AgentUpdateChallenge = "old-proof" };
+        var before = Assert.Single(fixture.Db.List());
         var response = fixture.Db.SyncLegacy("pc", request);
-        Assert.Equal(200, response.StatusCode);
-        Assert.Null(response.Response?.AgentUpdateChallenge);
+        Assert.Equal(409, response.StatusCode);
+        Assert.Null(response.Response);
         Assert.Equal(status, OperationStatus(fixture.Path, update.OperationId));
-        Assert.False(Assert.Single(fixture.Db.List()).CanRent);
+        var after = Assert.Single(fixture.Db.List());
+        Assert.False(after.CanRent);
+        Assert.Equal(before.LastSeenAt, after.LastSeenAt);
+        Assert.Equal(before.BootId, after.BootId);
+        Assert.Equal(before.AgentVersion, after.AgentVersion);
+        Assert.Equal(before.Readiness, after.Readiness);
+        Assert.Equal(before.LocalIp, after.LocalIp);
+        Assert.Equal(before.AppliedConfigRevision, after.AppliedConfigRevision);
+        Assert.Equal(0L, Scalar(fixture.Path, "SELECT COUNT(*) FROM command_outbox WHERE machine_id='pc'"));
+        Assert.Equal(0L, Scalar(fixture.Path, "SELECT COUNT(*) FROM pairing_offers WHERE machine_id='pc'"));
     }
 
     [Fact]
@@ -818,6 +828,14 @@ public sealed class AgentUpdateTests
         command.CommandText = "SELECT status FROM agent_update_operations WHERE operation_id=$id";
         command.Parameters.AddWithValue("$id", operationId);
         return (string)command.ExecuteScalar()!;
+    }
+
+    private static long Scalar(string path, string sql)
+    {
+        using var connection = Open(path);
+        using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        return Convert.ToInt64(command.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture);
     }
 
     private static void SetStartedStatus(string path, string operationId, string status)

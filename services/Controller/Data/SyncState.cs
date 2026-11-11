@@ -31,6 +31,8 @@ public sealed partial class ControllerDatabase
             if (machine is null || !SyncProofKeyMatches(storedState, verified.KeyFingerprint))
                 return SyncDecision.Rejected(401);
             var state = storedState!;
+            if (request.SyncProofProtocol != 2 && state.Mode == "challengeRequired")
+                return SyncDecision.Rejected(409);
             if (request.AppliedConfigRevision > machine.ConfigRevision)
                 throw new ArgumentException("Agent acknowledged a configuration revision not issued by the Controller");
 
@@ -40,16 +42,17 @@ public sealed partial class ControllerDatabase
                 {
                     ExecuteLease(tx, "UPDATE agent_sync_proof_state SET key_fingerprint=$fingerprint WHERE machine_id=$machine AND key_fingerprint IS NULL",
                         ("$fingerprint", verified.KeyFingerprint), ("$machine", verified.MachineId));
-                    var challenge = IssueOrReconstructSyncToken(tx, verified.MachineId, verified.KeyFingerprint);
+                    var challengeDecision = IssueRateLimitedSyncChallenge(tx, verified.MachineId, verified.KeyFingerprint);
                     tx.Commit();
-                    return SyncDecision.ChallengeRequired(challenge);
+                    return challengeDecision;
                 }
 
-                if (!AcceptScopedNonce(tx, verified, enforceCutoff: false))
+                if (!AcceptScopedNonce(tx, verified, enforceCutoff: false, scopePathOverride: ProtocolTwoSyncNonceScope,
+                    duplicateScopePath: verified.Path))
                 {
-                    var challenge = IssueOrReconstructSyncToken(tx, verified.MachineId, verified.KeyFingerprint);
+                    var challengeDecision = IssueRateLimitedSyncChallenge(tx, verified.MachineId, verified.KeyFingerprint);
                     tx.Commit();
-                    return SyncDecision.ChallengeRequired(challenge);
+                    return challengeDecision;
                 }
                 MarkSyncProofAccepted(tx, verified, state, request.AgentVersion);
                 var accepted = ApplyAcceptedSync(tx, verified.MachineId, machine, request, diagnostics,
