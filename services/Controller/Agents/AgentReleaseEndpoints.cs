@@ -1,17 +1,21 @@
 using KamenRaider.Controller.Data;
 using KamenRaider.Controller.Machines;
+using KamenRaider.Controller.Security;
 using KamenRaider.Contracts;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.WebUtilities;
 using Microsoft.Net.Http.Headers;
 using System.Text;
+using System.Text.Json;
 
 namespace KamenRaider.Controller.Agents;
 
 public static class AgentReleaseEndpoints
 {
     private const long MaximumMultipartRequestBytes = AgentReleaseStore.MaximumCompressedBytes + 128 * 1024;
+    private const int MaximumSourceRequestBytes = 64 * 1024;
+    private static readonly JsonSerializerOptions SignedAgentJsonOptions = new(JsonSerializerDefaults.Web);
 
     public static void MapAgentReleases(this WebApplication app)
     {
@@ -20,6 +24,8 @@ public static class AgentReleaseEndpoints
 
         app.MapPost("/internal/agent-releases", PublishAsync);
         app.MapPost("/agent/machines/{machineId}/agent-updates/{operationId}/start", StartUpdateAsync);
+        app.MapPost("/agent/machines/{machineId}/agent-updates/{operationId}/source-challenge", IssueSourceChallengeAsync);
+        app.MapPost("/agent/machines/{machineId}/agent-updates/{operationId}/source-binding", BindSourceAsync);
         app.MapPost("/agent/machines/{machineId}/agent-updates/{operationId}/status", ReportUpdateStatusAsync);
         app.MapGet("/agent/machines/{machineId}/agent-updates/{operationId}/package", DownloadUpdatePackageAsync);
     }
@@ -27,8 +33,80 @@ public static class AgentReleaseEndpoints
     private static IResult StartUpdateAsync(string machineId, string operationId, AgentUpdateTicketRequest? request, HttpContext context, ControllerDatabase database)
     {
         context.Response.Headers.CacheControl = "no-store";
-        if (request is null) return Results.BadRequest();
-        return ExecuteTicketed(() => database.StartAgentUpdate(machineId, operationId, request.Ticket, request.ReleaseVersion, request.TargetVersion, request.TargetPackageSha256));
+        if (request is null || string.IsNullOrWhiteSpace(request.RequestId)) return Results.BadRequest();
+        return ExecuteTicketed(() => database.StartAgentUpdate(machineId, operationId, request.Ticket, request.ReleaseVersion, request.TargetVersion, request.TargetPackageSha256, request.RequestId));
+    }
+
+    private static async Task<IResult> IssueSourceChallengeAsync(string machineId, string operationId, HttpContext context,
+        ControllerDatabase database, AgentAuthentication authentication, CancellationToken cancellationToken)
+    {
+        context.Response.Headers.CacheControl = "no-store";
+        context.Response.Headers.Pragma = "no-cache";
+        var signedBody = await ReadSignedBodyAsync(context, database, authentication, $"/agent/machines/{machineId}/agent-updates/{operationId}/source-challenge", cancellationToken);
+        if (signedBody.StatusCode != StatusCodes.Status200OK) return Results.StatusCode(signedBody.StatusCode);
+        try
+        {
+            var body = new UTF8Encoding(false, true).GetString(signedBody.Body!);
+            var request = JsonSerializer.Deserialize<AgentUpdateSourceChallengeRequest>(body, SignedAgentJsonOptions);
+            if (request is null) return Results.BadRequest();
+            return Results.Ok(database.IssueAgentUpdateSourceChallenge(signedBody.Verified!, operationId, request));
+        }
+        catch (UnauthorizedAccessException) { return Results.Unauthorized(); }
+        catch (InvalidOperationException) { return Results.Conflict(); }
+        catch (Exception exception) when (exception is ArgumentException or JsonException or DecoderFallbackException) { return Results.BadRequest(); }
+        catch (Exception exception) when (exception is IOException or Microsoft.Data.Sqlite.SqliteException) { return Results.StatusCode(StatusCodes.Status503ServiceUnavailable); }
+    }
+
+    private static async Task<IResult> BindSourceAsync(string machineId, string operationId, HttpContext context,
+        ControllerDatabase database, AgentAuthentication authentication, CancellationToken cancellationToken)
+    {
+        context.Response.Headers.CacheControl = "no-store";
+        context.Response.Headers.Pragma = "no-cache";
+        var signedBody = await ReadSignedBodyAsync(context, database, authentication, $"/agent/machines/{machineId}/agent-updates/{operationId}/source-binding", cancellationToken);
+        if (signedBody.StatusCode != StatusCodes.Status200OK) return Results.StatusCode(signedBody.StatusCode);
+        try
+        {
+            var body = new UTF8Encoding(false, true).GetString(signedBody.Body!);
+            var request = JsonSerializer.Deserialize<AgentUpdateSourceBindingRequest>(body, SignedAgentJsonOptions);
+            if (request is null) return Results.BadRequest();
+            return Results.Ok(database.BindAgentUpdateSource(signedBody.Verified!, operationId, request));
+        }
+        catch (UnauthorizedAccessException) { return Results.Unauthorized(); }
+        catch (InvalidOperationException) { return Results.Conflict(); }
+        catch (KeyNotFoundException) { return Results.NotFound(); }
+        catch (Exception exception) when (exception is ArgumentException or JsonException or DecoderFallbackException) { return Results.BadRequest(); }
+        catch (Exception exception) when (exception is IOException or Microsoft.Data.Sqlite.SqliteException) { return Results.StatusCode(StatusCodes.Status503ServiceUnavailable); }
+    }
+
+    private static async Task<(int StatusCode, byte[]? Body, VerifiedAgentRequest? Verified)> ReadSignedBodyAsync(
+        HttpContext context, ControllerDatabase database, AgentAuthentication authentication, string path,
+        CancellationToken cancellationToken)
+    {
+        context.Request.EnableBuffering();
+        if (!string.Equals(context.Request.Path.Value, path, StringComparison.Ordinal) || context.Request.QueryString.HasValue)
+            return (StatusCodes.Status401Unauthorized, null, null);
+        if (context.Request.ContentLength is > MaximumSourceRequestBytes)
+            return (StatusCodes.Status413PayloadTooLarge, null, null);
+        using var output = new MemoryStream();
+        var buffer = new byte[4096];
+        while (true)
+        {
+            var count = await context.Request.Body.ReadAsync(buffer.AsMemory(), cancellationToken);
+            if (count == 0) break;
+            if (output.Length + count > MaximumSourceRequestBytes)
+                return (StatusCodes.Status413PayloadTooLarge, null, null);
+            output.Write(buffer, 0, count);
+        }
+        var bytes = output.ToArray();
+        var machineId = context.Request.Headers["X-Agent-Id"].ToString();
+        var publicKey = database.PublicKey(machineId);
+        if (publicKey is null) return (StatusCodes.Status401Unauthorized, null, null);
+        var verified = authentication.VerifySignature(machineId, publicKey, "POST", path,
+            context.Request.Headers["X-Agent-Timestamp"].ToString(), context.Request.Headers["X-Agent-Nonce"].ToString(),
+            bytes, context.Request.Headers["X-Agent-Signature"].ToString());
+        return verified is null
+            ? (StatusCodes.Status401Unauthorized, null, null)
+            : (StatusCodes.Status200OK, bytes, verified);
     }
 
     private static IResult ReportUpdateStatusAsync(string machineId, string operationId, AgentUpdateStatusReportRequest? request, HttpContext context, ControllerDatabase database)

@@ -125,9 +125,10 @@ public sealed partial class ControllerDatabase
             var operationId = Guid.NewGuid().ToString("N");
             var chainId = Guid.NewGuid().ToString("N");
             var expires = now.AddMinutes(10);
-            using (var insert = Command("INSERT INTO agent_maintenance_chains(chain_id,machine_id,current_head_operation_id,generation,held,inherited,created_at_unix_ms,updated_at_unix_ms) VALUES($chain,$machine,$operation,1,1,0,$now,$now); INSERT INTO agent_update_operations(operation_id,machine_id,chain_id,release_version,target_version,target_package_sha256,target_runtime,target_protocol,status,ticket_hash,ticket_generation,ticket_purpose,ticket_expires_at_unix_ms,created_at_unix_ms,updated_at_unix_ms) VALUES($operation,$machine,$chain,$release,$target,$hash,$runtime,2,'awaitingInstaller',$ticket,1,'apply',$expires,$now,$now); INSERT INTO agent_update_audit(audit_id,chain_id,operation_id,actor_id,request_id,event_type,new_binding_json,created_at_unix_ms) VALUES($audit,$chain,$operation,$actor,$request,'reserved',$binding,$now)",
+            using (var insert = Command("INSERT INTO agent_maintenance_chains(chain_id,machine_id,current_head_operation_id,generation,held,inherited,created_at_unix_ms,updated_at_unix_ms) VALUES($chain,$machine,$operation,1,1,0,$now,$now); INSERT INTO agent_update_operations(operation_id,machine_id,chain_id,release_version,target_version,target_package_sha256,target_runtime,target_protocol,status,ticket_hash,ticket_generation,ticket_purpose,ticket_expires_at_unix_ms,created_at_unix_ms,updated_at_unix_ms) VALUES($operation,$machine,$chain,$release,$target,$hash,$runtime,2,'awaitingInstaller',$ticket,1,'apply',$expires,$now,$now); INSERT INTO agent_update_audit(audit_id,chain_id,operation_id,actor_id,request_id,event_type,new_binding_json,created_at_unix_ms) VALUES($audit,$chain,$operation,$actor,$request,'reserved',$binding,$now); INSERT INTO agent_update_ticket_runtime_epochs(operation_id,controller_runtime_epoch,issued_monotonic_tick) VALUES($operation,$runtimeEpoch,$issuedTick)",
                 ("$operation", operationId), ("$machine", machineId), ("$release", releaseVersion), ("$target", targetVersion),
                 ("$chain", chainId), ("$hash", packageHash), ("$runtime", inventory.TargetRuntime), ("$ticket", ticketHash),
+                ("$runtimeEpoch", syncProofRuntimeEpoch), ("$issuedTick", clock.GetTimestamp()),
                 ("$audit", Guid.NewGuid().ToString("N")), ("$actor", actorId), ("$request", requestId),
                 ("$binding", JsonSerializer.Serialize(new { releaseVersion, targetVersion, packageHash, inventory.TargetRuntime, inventory.InventoryDigest })),
                 ("$expires", expires.ToUnixTimeMilliseconds()), ("$now", nowMs)))
@@ -178,21 +179,76 @@ public sealed partial class ControllerDatabase
     public AgentUpdateOperationDto StartAgentUpdate(string machineId, string ticket)
     {
         var expected = FindAgentUpdateTicketContext(machineId, ticket);
-        return StartAgentUpdate(machineId, expected.OperationId, ticket, expected.ReleaseVersion, expected.TargetVersion, expected.TargetPackageSha256);
+        var requestId = LegacyAgentUpdateStartRequestId(machineId, ticket, expected.ReleaseVersion, expected.TargetVersion, expected.TargetPackageSha256);
+        return StartAgentUpdate(machineId, expected.OperationId, ticket, expected.ReleaseVersion, expected.TargetVersion, expected.TargetPackageSha256, requestId);
     }
 
     public AgentUpdateOperationDto StartAgentUpdate(string machineId, string operationId, string ticket, string releaseVersion, string targetVersion, string targetPackageSha256)
     {
+        var requestId = LegacyAgentUpdateStartRequestId(machineId, ticket, releaseVersion, targetVersion, targetPackageSha256);
+        return StartAgentUpdate(machineId, operationId, ticket, releaseVersion, targetVersion, targetPackageSha256, requestId);
+    }
+
+    public AgentUpdateOperationDto StartAgentUpdate(string machineId, string operationId, string ticket, string releaseVersion, string targetVersion, string targetPackageSha256, string requestId)
+    {
         Identifier(machineId);
         Identifier(operationId);
+        Identifier(requestId);
         var ticketHash = AgentUpdateTicketHash(ticket) ?? throw new UnauthorizedAccessException("Update ticket is invalid");
         Identifier(releaseVersion);
         Identifier(targetVersion);
         var expectedHash = CanonicalAgentUpdateHash(targetPackageSha256);
+        var requestBody = JsonSerializer.SerializeToUtf8Bytes(
+            new AgentUpdateTicketRequest(ticket, releaseVersion, targetVersion, targetPackageSha256, requestId),
+            new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        var bodyDigest = Convert.ToHexString(SHA256.HashData(requestBody));
         lock (gate)
         {
             var nowMs = clock.GetUtcNow().ToUnixTimeMilliseconds();
             using var tx = connection.BeginTransaction();
+            string? previousRequestId = null;
+            string? previousBodyDigest = null;
+            using (var previous = Command("SELECT request_id,body_digest FROM agent_update_start_requests WHERE operation_id=$operation", ("$operation", operationId)))
+            {
+                previous.Transaction = tx;
+                using var row = previous.ExecuteReader();
+                if (row.Read())
+                {
+                    previousRequestId = row.GetString(0);
+                    previousBodyDigest = row.GetString(1);
+                }
+            }
+            if (previousRequestId is not null)
+            {
+                if (!string.Equals(previousRequestId, requestId, StringComparison.Ordinal)
+                    || !FixedHexEquals(previousBodyDigest!, bodyDigest))
+                    throw new InvalidOperationException("Agent update start request ID was reused with a different body.");
+                using (var priorOperation = Command("SELECT 1 FROM agent_update_operations o JOIN agent_maintenance_chains c ON c.chain_id=o.chain_id AND c.machine_id=o.machine_id WHERE o.operation_id=$operation AND o.ticket_hash=$ticket AND o.machine_id=$machine AND o.release_version=$release AND o.target_version=$target AND upper(o.target_package_sha256)=upper($hash) AND o.ticket_started_at_unix_ms IS NOT NULL AND o.status IN ('installing','awaitingHeartbeat','rollingBack','failed','completed','rolledBack') AND c.current_head_operation_id=o.operation_id AND c.generation=o.ticket_generation",
+                    ("$operation", operationId), ("$ticket", ticketHash), ("$machine", machineId), ("$release", releaseVersion), ("$target", targetVersion), ("$hash", expectedHash)))
+                {
+                    priorOperation.Transaction = tx;
+                    if (priorOperation.ExecuteScalar() is null) throw new UnauthorizedAccessException("Update ticket is invalid");
+                }
+                var priorResult = FindAgentUpdateOperation(tx, operationId);
+                tx.Commit();
+                return priorResult;
+            }
+
+            long issuedAtTick;
+            string? ticketRuntimeEpoch;
+            using (var ticketRuntime = Command("SELECT controller_runtime_epoch,issued_monotonic_tick FROM agent_update_ticket_runtime_epochs WHERE operation_id=$operation", ("$operation", operationId)))
+            {
+                ticketRuntime.Transaction = tx;
+                using var row = ticketRuntime.ExecuteReader();
+                if (!row.Read()) throw new UnauthorizedAccessException("Update ticket was not issued in this Controller runtime.");
+                ticketRuntimeEpoch = row.GetString(0);
+                issuedAtTick = row.GetInt64(1);
+            }
+            var currentTick = clock.GetTimestamp();
+            if (ticketRuntimeEpoch != syncProofRuntimeEpoch || currentTick < issuedAtTick
+                || clock.GetElapsedTime(issuedAtTick, currentTick) >= TimeSpan.FromMinutes(10))
+                throw new UnauthorizedAccessException("Update ticket expired or its Controller runtime changed.");
+
             long expiresAt;
             long? ticketStartedAt;
             using (var operation = Command("SELECT ticket_expires_at_unix_ms,ticket_started_at_unix_ms FROM agent_update_operations WHERE operation_id=$operation AND ticket_hash=$ticket AND machine_id=$machine AND release_version=$release AND target_version=$target AND upper(target_package_sha256)=upper($hash) AND status='awaitingInstaller' AND started_at_unix_ms IS NULL AND ticket_package_downloaded_at_unix_ms IS NULL AND EXISTS(SELECT 1 FROM agent_maintenance_chains c WHERE c.chain_id=agent_update_operations.chain_id AND c.current_head_operation_id=agent_update_operations.operation_id AND c.held=1 AND c.generation=agent_update_operations.ticket_generation AND agent_update_operations.ticket_purpose='apply')",
@@ -211,10 +267,23 @@ public sealed partial class ControllerDatabase
                 start.Transaction = tx;
                 if (start.ExecuteNonQuery() != 1) throw new UnauthorizedAccessException("Update ticket is expired or already used");
             }
+            using (var recordRequest = Command("INSERT INTO agent_update_start_requests(operation_id,request_id,body_digest,created_at_unix_ms) VALUES($operation,$request,$digest,$created)",
+                ("$operation", operationId), ("$request", requestId), ("$digest", bodyDigest), ("$created", nowMs)))
+            {
+                recordRequest.Transaction = tx;
+                recordRequest.ExecuteNonQuery();
+            }
             var result = FindAgentUpdateOperation(tx, operationId);
             tx.Commit();
             return result;
         }
+    }
+
+    private static string LegacyAgentUpdateStartRequestId(string machineId, string ticket, string releaseVersion, string targetVersion, string packageHash)
+    {
+        var canonical = JsonSerializer.SerializeToUtf8Bytes(new { machineId, ticket, releaseVersion, targetVersion, packageHash },
+            new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        return "legacy-" + Convert.ToHexString(SHA256.HashData(canonical)).ToLowerInvariant();
     }
 
     public AgentUpdateOperationDto ConsumeAgentUpdatePackageDownload(string machineId, string operationId, string ticket, string releaseVersion, string targetVersion, string targetPackageSha256)

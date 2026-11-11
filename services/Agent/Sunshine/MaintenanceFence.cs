@@ -65,6 +65,11 @@ public sealed class WindowsMaintenanceFenceReader : IMaintenanceFenceReader
     {
     }
 
+    internal WindowsMaintenanceFenceReader(string path, bool requirePrivateSecurity)
+        : this(path, requireWindows: true, requirePrivateSecurity)
+    {
+    }
+
     private WindowsMaintenanceFenceReader(string path, bool requireWindows, bool requirePrivateSecurity)
     {
         this.path = Path.GetFullPath(path);
@@ -143,13 +148,12 @@ public sealed class WindowsMaintenanceFenceReader : IMaintenanceFenceReader
     {
         ArgumentNullException.ThrowIfNull(security);
         ArgumentNullException.ThrowIfNull(agentServiceSid);
-        if (!security.AreAccessRulesProtected ||
-            security.GetOwner(typeof(SecurityIdentifier)) is not SecurityIdentifier owner ||
-            owner != new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null))
-            return false;
-
         var systemSid = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
         var administratorsSid = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
+        if (!security.AreAccessRulesProtected ||
+            security.GetOwner(typeof(SecurityIdentifier)) is not SecurityIdentifier owner ||
+            (owner != systemSid && owner != administratorsSid))
+            return false;
         var inheritance = isDirectory
             ? InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit
             : InheritanceFlags.None;

@@ -12,5 +12,7 @@
   <ItemGroup>
     <ProjectReference Include="..\AgentPackage\AgentPackage.csproj" />
     <ProjectReference Include="..\Contracts\Contracts.csproj" />
+    <InternalsVisibleTo Include="Agent.Tests" />
+    <InternalsVisibleTo Include="Controller.Tests" />
   </ItemGroup>
 </Project>

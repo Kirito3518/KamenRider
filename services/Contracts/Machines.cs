@@ -31,5 +31,82 @@ public record AgentUpdateOperationDto(string OperationId, string MachineId, stri
     string TargetPackageSha256, string? TargetRuntime, int? TargetProtocol, string? LegacyReportedPreviousVersion,
     string? SourceVersion, string? SourceEvidenceDigest, string? BackupOwnerOperationId, string? BackupDigest,
     string Status, DateTimeOffset CreatedAtUtc, DateTimeOffset UpdatedAtUtc);
-public record AgentUpdateTicketRequest(string Ticket, string ReleaseVersion, string TargetVersion, string TargetPackageSha256);
+public record AgentUpdateTicketRequest(string Ticket, string ReleaseVersion, string TargetVersion, string TargetPackageSha256, string? RequestId = null);
 public record AgentUpdateStatusReportRequest(string Ticket, string ReleaseVersion, string TargetVersion, string TargetPackageSha256, string Status);
+public record AgentUpdateSourceChallengeRequest(
+    string Ticket,
+    string ReleaseVersion,
+    string TargetVersion,
+    string TargetPackageSha256,
+    string RequestId,
+    string HelperBuildSha256,
+    string HelperRuntime,
+    int HelperProtocol);
+public record AgentUpdateSourceChallengeResponse(string ChallengeId, string Challenge, string RuntimeEpoch, DateTimeOffset ExpiresAtUtc);
+public record AgentUpdateSourceBindingRequest(
+    string Ticket,
+    string ReleaseVersion,
+    string TargetVersion,
+    string TargetPackageSha256,
+    string ChallengeId,
+    string Challenge,
+    string ChallengeRequestId,
+    string RequestId,
+    string HelperBuildSha256,
+    string HelperRuntime,
+    int HelperProtocol,
+    string RuntimeEpoch,
+    string SourceVersion,
+    string BackupOwnerOperationId,
+    string BackupDigest,
+    string InventoryDigest,
+    string InstalledTreeDigest,
+    string NativeBootId,
+    string JournalPhase,
+    string ChainId = "",
+    string HeadOperationId = "",
+    long Generation = 0,
+    string EvidenceSignature = "");
+public sealed record AgentUpdateSourceEvidence(
+    string MachineId,
+    string KeyFingerprint,
+    string OperationId,
+    string ChainId,
+    string HeadOperationId,
+    long Generation,
+    string TargetVersion,
+    string TargetPackageSha256,
+    string ChallengeId,
+    string ChallengeRequestId,
+    string SourceRequestId,
+    string HelperBuildSha256,
+    string HelperRuntime,
+    int HelperProtocol,
+    string RuntimeEpoch,
+    string SourceVersion,
+    string BackupOwnerOperationId,
+    string BackupDigest,
+    string InventoryDigest,
+    string InstalledTreeDigest,
+    string NativeBootId,
+    string JournalPhase);
+
+public static class AgentUpdateSourceEvidenceCanonicalizer
+{
+    public static byte[] CanonicalBytes(AgentUpdateSourceEvidence evidence)
+    {
+        ArgumentNullException.ThrowIfNull(evidence);
+        var fields = new[]
+        {
+            evidence.MachineId, evidence.KeyFingerprint, evidence.OperationId, evidence.ChainId,
+            evidence.HeadOperationId, evidence.Generation.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            evidence.TargetVersion, evidence.TargetPackageSha256, evidence.ChallengeId, evidence.ChallengeRequestId, evidence.SourceRequestId,
+            evidence.HelperBuildSha256, evidence.HelperRuntime, evidence.HelperProtocol.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            evidence.RuntimeEpoch, evidence.SourceVersion, evidence.BackupOwnerOperationId, evidence.BackupDigest,
+            evidence.InventoryDigest, evidence.InstalledTreeDigest, evidence.NativeBootId, evidence.JournalPhase,
+        };
+        if (fields.Any(field => string.IsNullOrWhiteSpace(field) || field.Any(char.IsControl)))
+            throw new ArgumentException("Source evidence contains an empty or non-canonical field.", nameof(evidence));
+        return System.Text.Encoding.UTF8.GetBytes(string.Join('\n', new[] { "KamenRaider.AgentUpdateSourceEvidence.v1" }.Concat(fields)));
+    }
+}

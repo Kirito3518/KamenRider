@@ -62,4 +62,26 @@ public sealed class WindowsMaintenanceFenceSecurityTests
             AgentServiceSid,
             isDirectory: true));
     }
+
+    [Fact]
+    public void SystemAndAdministratorsOwnersAreBothAcceptedWithTheSameProtectedReadOnlyAgentAcl()
+    {
+        var file = new FileSecurity();
+        file.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+        file.SetOwner(AdministratorsSid);
+        file.AddAccessRule(new FileSystemAccessRule(SystemSid, FileSystemRights.FullControl, AccessControlType.Allow));
+        file.AddAccessRule(new FileSystemAccessRule(AdministratorsSid, FileSystemRights.FullControl, AccessControlType.Allow));
+        file.AddAccessRule(new FileSystemAccessRule(AgentServiceSid, FileSystemRights.ReadAndExecute | FileSystemRights.Synchronize, AccessControlType.Allow));
+
+        var directory = new DirectorySecurity();
+        directory.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+        directory.SetOwner(AdministratorsSid);
+        const InheritanceFlags inheritance = InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit;
+        directory.AddAccessRule(new FileSystemAccessRule(SystemSid, FileSystemRights.FullControl, inheritance, PropagationFlags.None, AccessControlType.Allow));
+        directory.AddAccessRule(new FileSystemAccessRule(AdministratorsSid, FileSystemRights.FullControl, inheritance, PropagationFlags.None, AccessControlType.Allow));
+        directory.AddAccessRule(new FileSystemAccessRule(AgentServiceSid, FileSystemRights.ReadAndExecute | FileSystemRights.Synchronize, inheritance, PropagationFlags.None, AccessControlType.Allow));
+
+        Assert.True(WindowsMaintenanceFenceReader.IsPrivateSecurity(file, AgentServiceSid, isDirectory: false));
+        Assert.True(WindowsMaintenanceFenceReader.IsPrivateSecurity(directory, AgentServiceSid, isDirectory: true));
+    }
 }

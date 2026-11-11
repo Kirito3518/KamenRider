@@ -251,6 +251,15 @@ public sealed class WindowsMaintenanceFenceStore : IMaintenanceFenceStore
         path = Path.Combine(directory, "maintenance-fence.json");
     }
 
+    internal WindowsMaintenanceFenceStore(string directoryPath)
+    {
+        if (!OperatingSystem.IsWindows())
+            throw new PlatformNotSupportedException("The Windows maintenance fence store requires Windows.");
+        ArgumentException.ThrowIfNullOrWhiteSpace(directoryPath);
+        directory = Path.GetFullPath(directoryPath);
+        path = Path.Combine(directory, "maintenance-fence.json");
+    }
+
     public AgentMaintenanceFenceRecord? Read()
     {
         EnsureAncestorsHaveNoReparsePoints();
@@ -471,7 +480,7 @@ public sealed class WindowsMaintenanceFenceStore : IMaintenanceFenceStore
         return identities.SetEquals([system, administrators, agentServiceSid]);
     }
 
-    private static SecurityIdentifier ResolveAgentServiceSid()
+    internal static SecurityIdentifier ResolveAgentServiceSid()
     {
         var scPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "sc.exe");
         var startInfo = new ProcessStartInfo

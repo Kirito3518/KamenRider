@@ -621,7 +621,7 @@ function New-AgentUpdateActions {
     $session = [pscustomobject]@{ Download = $null }
     return [pscustomobject]@{
         Start = {
-            $body = @{ ticket=$normalized.UpdateTicket; releaseVersion=$normalized.ReleaseVersion; targetVersion=$normalized.TargetVersion; targetPackageSha256=$normalized.PackageSha256 } | ConvertTo-Json -Compress
+            $body = @{ ticket=$normalized.UpdateTicket; releaseVersion=$normalized.ReleaseVersion; targetVersion=$normalized.TargetVersion; targetPackageSha256=$normalized.PackageSha256; requestId=('start-' + $normalized.OperationId) } | ConvertTo-Json -Compress
             Invoke-AgentPinnedHttpRequest -Uri "$operationBase/start" -Method 'POST' -TrustedRootThumbprint $normalized.TrustedRootThumbprint -JsonBody $body | Out-Null
         }.GetNewClosure()
         Download = {

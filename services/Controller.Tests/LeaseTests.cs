@@ -6,19 +6,29 @@ namespace Controller.Tests;
 
 public sealed class LeaseFixture : IDisposable {
     public sealed class Clock : TimeProvider {
-        public DateTimeOffset Now = DateTimeOffset.Parse("2026-10-29T00:00:00Z");
-        public override DateTimeOffset GetUtcNow() => Now;
+        private DateTimeOffset now = DateTimeOffset.Parse("2026-10-29T00:00:00Z");
+        private long timestamp;
+        public DateTimeOffset Now {
+            get => now;
+            set {
+                if (value > now) timestamp = checked(timestamp + (value - now).Ticks);
+                now = value;
+            }
+        }
+        public override DateTimeOffset GetUtcNow() => now;
+        public override long TimestampFrequency => TimeSpan.TicksPerSecond;
+        public override long GetTimestamp() => timestamp;
     }
     public string Path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "kr-lease-fixture-" + Guid.NewGuid().ToString("N"), "controller.db");
     public Clock Time = new();
     public ControllerDatabase Db;
+    public ECDsa AgentKey { get; } = ECDsa.Create();
     private readonly bool agentReleaseRemediationEnabled;
     public LeaseService Leases => new(Db);
     public LeaseFixture(bool agentReleaseRemediationEnabled = false) {
         this.agentReleaseRemediationEnabled = agentReleaseRemediationEnabled;
         Db = new(Path, clock: Time, agentReleaseRemediationEnabled: agentReleaseRemediationEnabled);
-        using var key = ECDsa.Create();
-        Db.EnrollWithTicket(new("pc",Convert.ToBase64String(key.ExportSubjectPublicKeyInfo()),"192.0.2.1","001122334455",1,2));
+        Db.EnrollWithTicket(new("pc",Convert.ToBase64String(AgentKey.ExportSubjectPublicKeyInfo()),"192.0.2.1","001122334455",1,2));
         Db.Update("pc",new("PC",500,1,2),1); Db.Approve("pc","admin");
         Sync();
     }
@@ -38,7 +48,7 @@ public sealed class LeaseFixture : IDisposable {
         return (await Leases.GetLeaseAsync(lease.Id,default))!;
     }
     public void Reopen() { Db.Dispose(); Db=new(Path,clock:Time,agentReleaseRemediationEnabled:agentReleaseRemediationEnabled); }
-    public void Dispose() { Db.Dispose(); var directory=System.IO.Path.GetDirectoryName(Path)!; if(Directory.Exists(directory))Directory.Delete(directory,true); }
+    public void Dispose() { Db.Dispose(); AgentKey.Dispose(); var directory=System.IO.Path.GetDirectoryName(Path)!; if(Directory.Exists(directory))Directory.Delete(directory,true); }
 }
 public class LeaseTests {
     [Theory]

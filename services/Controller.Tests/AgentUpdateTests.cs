@@ -44,6 +44,178 @@ public sealed class AgentUpdateTests
         Assert.False(Assert.Single(fixture.Db.List()).CanRent);
     }
 
+    [Fact]
+    public void StartAckCanBeRecoveredByTheSameRequestAndDifferentBodyConflicts()
+    {
+        using var fixture = new LeaseFixture(agentReleaseRemediationEnabled: true);
+        AddRelease(fixture.Path, "2.0.0");
+        var ticket = fixture.Db.ReserveAgentUpdate("pc", "2.0.0", "admin", "start-idempotent");
+        const string requestId = "start-request-1";
+
+        var started = fixture.Db.StartAgentUpdate("pc", ticket.OperationId, ticket.Ticket,
+            ticket.ReleaseVersion, ticket.TargetVersion, ticket.TargetPackageSha256, requestId);
+        fixture.Reopen();
+        var retried = fixture.Db.StartAgentUpdate("pc", ticket.OperationId, ticket.Ticket,
+            ticket.ReleaseVersion, ticket.TargetVersion, ticket.TargetPackageSha256, requestId);
+
+        Assert.Equal(started, retried);
+        Assert.Equal("installing", retried.Status);
+        Assert.Throws<InvalidOperationException>(() => fixture.Db.StartAgentUpdate("pc", ticket.OperationId, ticket.Ticket,
+            ticket.ReleaseVersion, ticket.TargetVersion, ticket.TargetPackageSha256, "different-start-request"));
+    }
+
+    [Fact]
+    public void UnstartedTicketCannotSurviveControllerRestartOrMonotonicLifetimeAfterClockRollback()
+    {
+        using (var restarted = new LeaseFixture(agentReleaseRemediationEnabled: true))
+        {
+            AddRelease(restarted.Path, "2.0.0");
+            var ticket = restarted.Db.ReserveAgentUpdate("pc", "2.0.0", "admin", "ticket-runtime-restart");
+            restarted.Reopen();
+            Assert.Throws<UnauthorizedAccessException>(() => restarted.Db.StartAgentUpdate("pc", ticket.OperationId,
+                ticket.Ticket, ticket.ReleaseVersion, ticket.TargetVersion, ticket.TargetPackageSha256, "start-after-restart"));
+        }
+
+        using (var rolledBack = new LeaseFixture(agentReleaseRemediationEnabled: true))
+        {
+            AddRelease(rolledBack.Path, "2.0.0");
+            var issuedAt = rolledBack.Time.Now;
+            var ticket = rolledBack.Db.ReserveAgentUpdate("pc", "2.0.0", "admin", "ticket-runtime-rollback");
+            rolledBack.Time.Now = issuedAt.AddMinutes(11);
+            rolledBack.Time.Now = issuedAt.AddMinutes(1);
+            Assert.Throws<UnauthorizedAccessException>(() => rolledBack.Db.StartAgentUpdate("pc", ticket.OperationId,
+                ticket.Ticket, ticket.ReleaseVersion, ticket.TargetVersion, ticket.TargetPackageSha256, "start-after-rollback"));
+        }
+    }
+
+    [Fact]
+    public void SourceChallengeAndBindingAreSignedBoundAndExactRetryIsIdempotent()
+    {
+        using var fixture = new LeaseFixture(agentReleaseRemediationEnabled: true);
+        AddRelease(fixture.Path, "2.0.0");
+        var ticket = fixture.Db.ReserveAgentUpdate("pc", "2.0.0", "admin", "source-binding");
+        var started = fixture.Db.StartAgentUpdate("pc", ticket.OperationId, ticket.Ticket,
+            ticket.ReleaseVersion, ticket.TargetVersion, ticket.TargetPackageSha256, "start-source");
+        var challengePath = $"/agent/machines/pc/agent-updates/{ticket.OperationId}/source-challenge";
+        var challengeRequest = new AgentUpdateSourceChallengeRequest(
+            ticket.Ticket, ticket.ReleaseVersion, ticket.TargetVersion, ticket.TargetPackageSha256,
+            "source-challenge-request", new string('a', 64), "win-x64", 1);
+        var challengeEnvelope = VerifiedAgentRequestFixture.Create(fixture.Db, "pc", challengePath, challengeRequest);
+
+        var challenge = fixture.Db.IssueAgentUpdateSourceChallenge(challengeEnvelope, ticket.OperationId, challengeRequest);
+        var repeatedChallenge = fixture.Db.IssueAgentUpdateSourceChallenge(
+            VerifiedAgentRequestFixture.Create(fixture.Db, "pc", challengePath, challengeRequest), ticket.OperationId, challengeRequest);
+        var bindingPath = $"/agent/machines/pc/agent-updates/{ticket.OperationId}/source-binding";
+        var bindingRequest = new AgentUpdateSourceBindingRequest(
+            ticket.Ticket, ticket.ReleaseVersion, ticket.TargetVersion, ticket.TargetPackageSha256,
+            challenge.ChallengeId, challenge.Challenge, challengeRequest.RequestId, "source-binding-request",
+            challengeRequest.HelperBuildSha256, challengeRequest.HelperRuntime, challengeRequest.HelperProtocol,
+            challenge.RuntimeEpoch, "1.0.0", ticket.OperationId, new string('b', 64), new string('c', 64),
+            new string('d', 64), "boot-1", "backupPublished", started.ChainId, started.CurrentHeadOperationId, started.Generation);
+        var publicKey = Convert.FromBase64String(fixture.Db.PublicKey("pc")!);
+        var fingerprint = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(publicKey));
+        var evidence = new AgentUpdateSourceEvidence("pc", fingerprint, ticket.OperationId, started.ChainId,
+            started.CurrentHeadOperationId, started.Generation, ticket.TargetVersion, ticket.TargetPackageSha256,
+            challenge.ChallengeId, challengeRequest.RequestId, bindingRequest.RequestId, challengeRequest.HelperBuildSha256,
+            challengeRequest.HelperRuntime, challengeRequest.HelperProtocol, challenge.RuntimeEpoch, bindingRequest.SourceVersion,
+            bindingRequest.BackupOwnerOperationId, bindingRequest.BackupDigest, bindingRequest.InventoryDigest,
+            bindingRequest.InstalledTreeDigest, bindingRequest.NativeBootId, bindingRequest.JournalPhase);
+        bindingRequest = bindingRequest with
+        {
+            EvidenceSignature = Convert.ToBase64String(fixture.AgentKey.SignData(
+                AgentUpdateSourceEvidenceCanonicalizer.CanonicalBytes(evidence), System.Security.Cryptography.HashAlgorithmName.SHA256)),
+        };
+        var bindingEnvelope = VerifiedAgentRequestFixture.Create(fixture.Db, "pc", bindingPath, bindingRequest);
+        var badEvidence = bindingRequest with { EvidenceSignature = Convert.ToBase64String(new byte[64]) };
+        Assert.Throws<UnauthorizedAccessException>(() => fixture.Db.BindAgentUpdateSource(
+            VerifiedAgentRequestFixture.Create(fixture.Db, "pc", bindingPath, badEvidence), ticket.OperationId, badEvidence));
+
+        var bound = fixture.Db.BindAgentUpdateSource(bindingEnvelope, ticket.OperationId, bindingRequest);
+        fixture.Reopen();
+        var retried = fixture.Db.BindAgentUpdateSource(
+            VerifiedAgentRequestFixture.Create(fixture.Db, "pc", bindingPath, bindingRequest), ticket.OperationId, bindingRequest);
+
+        Assert.Equal(challenge, repeatedChallenge);
+        Assert.Equal("1.0.0", bound.SourceVersion);
+        Assert.Equal(new string('B', 64), bound.BackupDigest);
+        Assert.Equal(bound, retried);
+        var changed = bindingRequest with { NativeBootId = "boot-2" };
+        Assert.Throws<InvalidOperationException>(() => fixture.Db.BindAgentUpdateSource(
+            VerifiedAgentRequestFixture.Create(fixture.Db, "pc", bindingPath, changed), ticket.OperationId, changed));
+    }
+
+    [Fact]
+    public void SourceChallengeIssuanceIsBoundedPerHeadAndGeneration()
+    {
+        using var fixture = new LeaseFixture(agentReleaseRemediationEnabled: true);
+        AddRelease(fixture.Path, "2.0.0");
+        var ticket = fixture.Db.ReserveAgentUpdate("pc", "2.0.0", "admin", "source-challenge-limit");
+        fixture.Db.StartAgentUpdate("pc", ticket.OperationId, ticket.Ticket,
+            ticket.ReleaseVersion, ticket.TargetVersion, ticket.TargetPackageSha256, "start-source-limit");
+        var path = $"/agent/machines/pc/agent-updates/{ticket.OperationId}/source-challenge";
+
+        for (var index = 0; index < 5; index++)
+        {
+            var hex = index.ToString("x");
+            var request = new AgentUpdateSourceChallengeRequest(ticket.Ticket, ticket.ReleaseVersion,
+                ticket.TargetVersion, ticket.TargetPackageSha256, "source-limit-" + index,
+                new string(hex[0], 64), "win-x64", 1);
+            var response = fixture.Db.IssueAgentUpdateSourceChallenge(
+                VerifiedAgentRequestFixture.Create(fixture.Db, "pc", path, request), ticket.OperationId, request);
+            Assert.Equal(fixture.Db.IssueAgentUpdateSourceChallenge(
+                VerifiedAgentRequestFixture.Create(fixture.Db, "pc", path, request), ticket.OperationId, request), response);
+        }
+
+        var sixth = new AgentUpdateSourceChallengeRequest(ticket.Ticket, ticket.ReleaseVersion,
+            ticket.TargetVersion, ticket.TargetPackageSha256, "source-limit-5", new string('f', 64), "win-x64", 1);
+        Assert.Throws<InvalidOperationException>(() => fixture.Db.IssueAgentUpdateSourceChallenge(
+            VerifiedAgentRequestFixture.Create(fixture.Db, "pc", path, sixth), ticket.OperationId, sixth));
+    }
+
+    [Fact]
+    public void SourceChallengeExpiresMonotonicallyAndOldRuntimeRowsDoNotConsumeNewRuntimeLimit()
+    {
+        using (var rolledBack = new LeaseFixture(agentReleaseRemediationEnabled: true))
+        {
+            AddRelease(rolledBack.Path, "2.0.0");
+            var ticket = rolledBack.Db.ReserveAgentUpdate("pc", "2.0.0", "admin", "source-clock-rollback");
+            rolledBack.Db.StartAgentUpdate("pc", ticket.OperationId, ticket.Ticket,
+                ticket.ReleaseVersion, ticket.TargetVersion, ticket.TargetPackageSha256, "start-source-clock");
+            var path = $"/agent/machines/pc/agent-updates/{ticket.OperationId}/source-challenge";
+            var request = new AgentUpdateSourceChallengeRequest(ticket.Ticket, ticket.ReleaseVersion,
+                ticket.TargetVersion, ticket.TargetPackageSha256, "source-clock-request", new string('a', 64), "win-x64", 1);
+            _ = rolledBack.Db.IssueAgentUpdateSourceChallenge(
+                VerifiedAgentRequestFixture.Create(rolledBack.Db, "pc", path, request), ticket.OperationId, request);
+            var issuedAt = rolledBack.Time.Now;
+            rolledBack.Time.Now = issuedAt.AddMinutes(11);
+            rolledBack.Time.Now = issuedAt.AddMinutes(1);
+            Assert.Throws<InvalidOperationException>(() => rolledBack.Db.IssueAgentUpdateSourceChallenge(
+                VerifiedAgentRequestFixture.Create(rolledBack.Db, "pc", path, request), ticket.OperationId, request));
+        }
+
+        using (var restarted = new LeaseFixture(agentReleaseRemediationEnabled: true))
+        {
+            AddRelease(restarted.Path, "2.0.0");
+            var ticket = restarted.Db.ReserveAgentUpdate("pc", "2.0.0", "admin", "source-runtime-restart");
+            restarted.Db.StartAgentUpdate("pc", ticket.OperationId, ticket.Ticket,
+                ticket.ReleaseVersion, ticket.TargetVersion, ticket.TargetPackageSha256, "start-source-restart");
+            var path = $"/agent/machines/pc/agent-updates/{ticket.OperationId}/source-challenge";
+            var request = new AgentUpdateSourceChallengeRequest(ticket.Ticket, ticket.ReleaseVersion,
+                ticket.TargetVersion, ticket.TargetPackageSha256, "source-runtime-old", new string('b', 64), "win-x64", 1);
+            var oldChallenge = restarted.Db.IssueAgentUpdateSourceChallenge(
+                VerifiedAgentRequestFixture.Create(restarted.Db, "pc", path, request), ticket.OperationId, request);
+            restarted.Reopen();
+            Assert.Throws<InvalidOperationException>(() => restarted.Db.IssueAgentUpdateSourceChallenge(
+                VerifiedAgentRequestFixture.Create(restarted.Db, "pc", path, request), ticket.OperationId, request));
+
+            var newRequest = request with { RequestId = "source-runtime-new" };
+            var newChallenge = restarted.Db.IssueAgentUpdateSourceChallenge(
+                VerifiedAgentRequestFixture.Create(restarted.Db, "pc", path, newRequest), ticket.OperationId, newRequest);
+            Assert.NotEqual(oldChallenge.ChallengeId, newChallenge.ChallengeId);
+            Assert.NotEqual(oldChallenge.RuntimeEpoch, newChallenge.RuntimeEpoch);
+        }
+    }
+
     [Theory]
     [InlineData("start")]
     [InlineData("download")]
@@ -717,6 +889,7 @@ public sealed class AgentUpdateTests
             releaseVersion = "2.0.0",
             targetVersion = "2.0.0",
             targetPackageSha256 = packageHash,
+            requestId = "start-" + operationId,
         };
         using var wrongMachine = await host.Client.PostAsJsonAsync($"/agent/machines/other/agent-updates/{operationId}/start", request);
         Assert.Equal(HttpStatusCode.Unauthorized, wrongMachine.StatusCode);
@@ -728,7 +901,10 @@ public sealed class AgentUpdateTests
         using var started = await host.Client.PostAsJsonAsync($"/agent/machines/pc/agent-updates/{operationId}/start", request);
         Assert.Equal(HttpStatusCode.OK, started.StatusCode);
         using var repeatedStart = await host.Client.PostAsJsonAsync($"/agent/machines/pc/agent-updates/{operationId}/start", request);
-        Assert.Equal(HttpStatusCode.Unauthorized, repeatedStart.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, repeatedStart.StatusCode);
+        using var changedRetry = await host.Client.PostAsJsonAsync($"/agent/machines/pc/agent-updates/{operationId}/start",
+            request with { targetVersion = "2.0.1" });
+        Assert.Equal(HttpStatusCode.Conflict, changedRetry.StatusCode);
 
         var statusReport = new
         {
@@ -773,7 +949,7 @@ public sealed class AgentUpdateTests
         var expiredTicket = await ReadString(first, "ticket");
         var hash = Assert.Single(fixture.Db.ListAgentReleases()).PackageSha256;
         fixture.Time.Now = fixture.Time.Now.AddMinutes(10);
-        using var expiredStart = await host.Client.PostAsync($"/agent/machines/pc/agent-updates/{expiredId}/start", CreateStartContent(expiredTicket, hash));
+        using var expiredStart = await host.Client.PostAsync($"/agent/machines/pc/agent-updates/{expiredId}/start", CreateStartContent(expiredId, expiredTicket, hash));
         Assert.Equal(HttpStatusCode.Unauthorized, expiredStart.StatusCode);
         using var second = await Reserve(host.Client, "pc", "2.0.0");
         var operationId = await ReadString(second, "operationId");
@@ -805,8 +981,8 @@ public sealed class AgentUpdateTests
     private static Task<HttpResponseMessage> Reserve(HttpClient client, string machineId, string releaseVersion) =>
         client.PostAsJsonAsync($"/internal/machines/{machineId}/agent-updates", new { releaseVersion });
 
-    private static JsonContent CreateStartContent(string ticket, string packageHash) =>
-        JsonContent.Create(new { ticket, releaseVersion = "2.0.0", targetVersion = "2.0.0", targetPackageSha256 = packageHash });
+    private static JsonContent CreateStartContent(string operationId, string ticket, string packageHash) =>
+        JsonContent.Create(new { ticket, releaseVersion = "2.0.0", targetVersion = "2.0.0", targetPackageSha256 = packageHash, requestId = "start-" + operationId });
 
     private static HttpRequestMessage CreatePackageRequest(string releaseVersion, string targetVersion, string packageHash, string ticket, string operationId = "placeholder")
     {

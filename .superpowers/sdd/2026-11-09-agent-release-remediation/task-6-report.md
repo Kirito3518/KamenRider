@@ -11,6 +11,12 @@ Work resumed in the existing main checkout at baseline `e7cabcf`. Partial implem
 - The helper fence stores a protected marker and uses a separate Windows Firewall rule from Stream Guard's managed rule. The adapter checks effective `ActiveStore` profile settings and requires a unique active local rule for the exact Sunshine path, with inbound/block/all profiles and unrestricted filters. Failed release restores a held marker and attempts to re-establish the firewall rule.
 - Added a one-operation journal slice with bound operation/controller/identity/target facts, ordered phases, a required backup owner/digest before `backupPublished`, a distinct source version/inventory digest before `sourceBound`, and source-equals-target rejection. The Windows store uses a protected System/Administrators ACL, rejects reparse points/hardlinks, and writes through a flushed temporary file before atomic replacement.
 - Added a fakeable service quiescer. Before any stop it requires an injected authorization check and validates the Agent, Guard, and Sunshine service identities, executable paths, accounts, and required dependencies. It stops Agent and Sunshine before Guard, waits for Stopped plus PID 0, rejects remaining matching processes, rechecks the injected held condition, and only then advances `servicesQuiesced`.
+- Resolved the fence owner mismatch by making the strict Agent/Guard reader accept either SYSTEM or Builtin Administrators as the owner while requiring the same protected exact ACE set. Added deterministic ACL descriptor tests for both secure owner policies. Added a real helper-store-to-production-reader held→clear roundtrip test that is explicitly elevated-only; this host is not elevated, so that integration test was skipped and is not claimed as passed.
+- Added `TrustedIdentity.ReadExisting`, a read-only existing PKCS#8 identity loader with identity ACL, reparse-point, hardlink, size and key validation. It has no create/load-or-create path. Added domain-separated source-evidence signing using the same canonicalizer that Controller verifies.
+- Added Controller migration 018 for durable start request ID/body digest and exact source challenge request ID/body digest. Migration 019 is now reserved for Task 9 restore quarantine in the tracked remediation plan; version 17 remains an input that migrates forward. Version-aware proof schema validation covers v15, v16/v17 and v18.
+- Added durable idempotent start ACK storage before the Controller returns success. The exact request ID and canonical typed body retry returns the current operation; reusing the ID with a different canonical body conflicts. Start HTTP callers now provide stable request IDs.
+- Added signed `/source-challenge` and `/source-binding` routes. Both require canonical request bodies, exact POST path authentication with the enrolled key, a matching held current-head/generation ticket and a fresh scoped nonce. The first-upgrade routes do not use the legacy signed-seconds cutoff; stale client-signed seconds remain authenticated by the enrolled-key signature while replay is rejected by the server-retained scoped nonce. Challenge request ID/body retries are exact within the issuing Controller runtime. Challenges carry persisted issue UTC, monotonic tick, and runtime epoch; monotonic age bounds expiry, wall-clock rollback fails closed, and a restarted Controller rejects unconsumed old-epoch challenges while keeping their rows for audit. Old-epoch rows do not consume the new runtime's active challenge cap. Binding additionally verifies the domain-separated enrollment-key source evidence signature, one-use challenge, distinct source/target versions, same-operation backup ownership, digests, current Controller runtime epoch, and the `backupPublished` phase. A consumed exact binding retry can recover its durable response after restart. Binding provenance is committed atomically and immutable fields are not overwritten. TestServer coverage exercises bad HTTP signatures, bad source-evidence signatures, exact retries, changed-body conflicts, stale signed seconds, nonce replay, challenge runtime restart/rollback, and migration compatibility.
+- New start tickets carry an immutable issuing runtime epoch and monotonic issue tick. The first start must occur within the same Controller runtime and within its monotonic lifetime; restart or elapsed lifetime followed by wall-clock rollback fails closed. Once the durable start ACK exists, an exact request retry can recover it after restart.
 
 The firewall policy command, Windows Service Control Manager adapter, helper journal filesystem store, and ACL behavior were not exercised against the live host. The tests use fakes for all firewall and service operations.
 
@@ -23,6 +29,24 @@ Passed: 20, failed: 0.
 `dotnet test services/Agent.Tests/Agent.Tests.csproj --configuration Release --filter "FullyQualifiedName~MaintenanceFenceReaderTests|FullyQualifiedName~WindowsMaintenanceFenceSecurityTests|FullyQualifiedName~Maintenance" --no-restore`
 
 Passed: 18, failed: 0.
+
+`dotnet test services/Agent.Tests/Agent.Tests.csproj --configuration Release --filter "FullyQualifiedName~WindowsMaintenanceFenceSecurityTests|FullyQualifiedName~MaintenanceFenceStoreRoundTripTests" --no-restore`
+
+Passed: 6, skipped: 1, failed: 0. The skipped elevated Windows writer→production-reader roundtrip did not execute on this non-elevated host; secure owner ACL policy tests for SYSTEM and Administrators did execute.
+
+`dotnet test services/Controller.Tests/Controller.Tests.csproj --configuration Release --filter "FullyQualifiedName~AgentUpdateTests|FullyQualifiedName~AgentReleaseAcceptanceTests|FullyQualifiedName~AgentUpdateMigrationTests|FullyQualifiedName~AgentMaintenanceIdentityTests" --no-restore`
+
+Passed: 83, failed: 0. This includes signed stale-seconds source challenge/binding requests, nonce replay rejection, source challenge rollback/restart behavior, durable start ACK retry after restart, and v17→v18 migration checks.
+
+`powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/agent/Test-AgentUpdatePublicWorkflow.ps1`
+
+Passed under Windows PowerShell 5.1 with fake HTTP, fake services and temporary files.
+
+`pwsh.exe -NoProfile -File scripts/agent/Test-AgentUpdatePublicWorkflow.ps1`
+
+Passed under PowerShell 7 with fake HTTP, fake services and temporary files.
+
+The public updater fake workflow was rerun under both Windows PowerShell 5.1 and PowerShell 7 after the source/runtime changes; both runs passed.
 
 `& 'C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe' -NoLogo -NoProfile -ExecutionPolicy Bypass -File scripts\agent\Test-AgentMaintenancePublish.ps1 -RepositoryRoot (Get-Location).Path`
 
@@ -44,12 +68,15 @@ For an upgrade, a clear marker must not be minted until a trusted path has prove
 
 ## Remaining blockers
 
-- `services/AgentMaintenance/Program.cs` is still a placeholder. There is no fixed typed CLI request protocol, native architecture selection, trusted identity reader, read-only PKCS#8 loading, or end-to-end orchestration.
+- `services/AgentMaintenance/Program.cs` is still a placeholder returning exit code 2. There is no fixed typed CLI request protocol, native architecture selection, or end-to-end orchestration. The read-only identity component is implemented but is not consumed by a helper command.
 - There is no trusted installer initializer for a fresh install and no proven legacy upgrade migration. No safe clear marker is currently provisioned by the installer.
-- `IMaintenanceStopPrerequisites` has only a test fake. No production implementation verifies the installation lock, durable idempotent Controller start ACK, current plus pending Agent lease state, Controller held allocations, independently effective fence, and target architecture continuously before and through stop.
+- `IMaintenanceStopPrerequisites` has only a test fake. No production implementation verifies the installation lock, current plus pending Agent lease state, Controller held allocations, independently effective fence, and target architecture continuously before and through stop. Controller's durable start ACK exists, but it is not wired into helper orchestration.
 - The firewall ActiveStore probe is source code only and was not run. Its profile/rule checks are not yet qualified as a complete positive packet-enforcement proof for supported Windows/GPO configurations.
 - The journal currently supports only one operation entry. Multi-operation recovery chains, `legacyImported`, intent-before-move integration, tree digest reconciliation after each crash boundary, source/backup binding retries, report retries, and held-preserving recovery are not implemented.
-- `TrustedIdentity`, the local update engine, helper CLI operations (`inspect`, `validate-archive`, `extract`, `start`, `bind-source`, `apply`, `report`, `reconcile`), and the legacy installed Agent fixture are absent.
-- Controller start idempotency/request ID and source-challenge/source-binding endpoints and transactions are absent. The existing challenge rows still lack a durable canonical request digest; same-ID/same-body retry versus same-ID/different-body rejection is not enforced. The helper still has no read-only PKCS#8 source-signing path, and the legacy deps parser seam remains unresolved.
+- The local update engine, helper CLI operations (`inspect`, `validate-archive`, `extract`, `start`, `bind-source`, `apply`, `report`, `reconcile`), and the real legacy installed Agent fixture are absent. The helper signing API is not integrated into a running CLI flow.
+- No trusted installer initializer provisions a safe clear fence for fresh installs or proven legacy upgrades. Missing/corrupt still fails closed, so starting new Agent/Guard binaries without a verified marker leaves streaming unavailable.
+- Backup tree creation, immutable backup publication, source inventory generation, protected tree swap, crash reconciliation and outcome report orchestration are not implemented. The source-binding API accepts a helper's claimed digests only after the separate enrollment-key signature; it cannot prove those local tree digests until the missing trusted helper computes them.
 - The public wrapper/ZIP-script execution path is not replaced. The publisher manifest is not consumed by the deployed wrapper or a trusted command route. Package/install wiring for the helper assets is missing.
-- No full Task 6 acceptance suite or independent review of the full change has passed. Commit `acf2df1` is a checkpoint, not Task 6 completion.
+- No full Task 6 acceptance suite or independent review of the full change has passed. Commits `acf2df1` and the source-binding checkpoint are partial implementation only, not Task 6 completion.
+
+Controller start/source challenge rows created before migration 018 have no issuing runtime epoch. They remain auditable but cannot be used to begin a new update under the new first-start rules. Existing unstarted tickets therefore fail closed after this migration; rollout requires a reviewed migration or replacement-ticket path before production deployment.

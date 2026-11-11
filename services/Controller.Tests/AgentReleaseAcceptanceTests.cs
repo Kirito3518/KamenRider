@@ -6,6 +6,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Controller.Tests.Fixtures;
+using KamenRaider.AgentMaintenance;
 using KamenRaider.Contracts;
 using KamenRaider.Controller;
 using KamenRaider.Controller.Data;
@@ -67,6 +68,59 @@ public sealed class AgentReleaseAcceptanceTests
         Assert.Equal("2.3.4", Assert.Single(fixture.Database.List()).AgentVersion);
         Assert.Equal(acceptedLastSeen, Assert.Single(fixture.Database.List()).LastSeenAt);
         Assert.Equal("ready", Assert.Single(fixture.Database.List()).Readiness);
+    }
+
+    [Fact]
+    public async Task SourceChallengeAndBindingRequireTheEnrolledKeyAndSupportExactRetry()
+    {
+        await using var fixture = await AcceptanceFixture.CreateAsync();
+        var ticket = await fixture.PublishAndReserveAsync();
+        var operation = await fixture.StartAndDownloadAsync(ticket);
+        var staleSignedSecond = fixture.Clock.Now.AddDays(-30).ToUnixTimeSeconds();
+        var challengeRequest = new AgentUpdateSourceChallengeRequest(ticket.Ticket, ticket.ReleaseVersion,
+            ticket.TargetVersion, ticket.TargetPackageSha256, "source-challenge-acceptance", new string('a', 64), "win-x64", 1);
+        using var unsignedChallenge = await fixture.SendSignedAsync(AcceptanceFixture.UpdatePath(ticket, "source-challenge"),
+            challengeRequest, badSignature: true);
+        Assert.Equal(HttpStatusCode.Unauthorized, unsignedChallenge.StatusCode);
+        using var challengeResponse = await fixture.SendSignedAsync(AcceptanceFixture.UpdatePath(ticket, "source-challenge"),
+            challengeRequest, nonce: "stale-source-challenge", signedSecond: staleSignedSecond);
+        Assert.Equal(HttpStatusCode.OK, challengeResponse.StatusCode);
+        Assert.Equal("no-store", challengeResponse.Headers.CacheControl?.ToString());
+        var challenge = Assert.IsType<AgentUpdateSourceChallengeResponse>(
+            await challengeResponse.Content.ReadFromJsonAsync<AgentUpdateSourceChallengeResponse>());
+        using var challengeReplay = await fixture.SendSignedAsync(AcceptanceFixture.UpdatePath(ticket, "source-challenge"),
+            challengeRequest, nonce: "stale-source-challenge", signedSecond: staleSignedSecond);
+        Assert.Equal(HttpStatusCode.Unauthorized, challengeReplay.StatusCode);
+        using var challengeRetry = await fixture.SendSignedAsync(AcceptanceFixture.UpdatePath(ticket, "source-challenge"),
+            challengeRequest, nonce: "stale-source-challenge-retry", signedSecond: staleSignedSecond);
+        Assert.Equal(HttpStatusCode.OK, challengeRetry.StatusCode);
+        Assert.Equal(challenge, await challengeRetry.Content.ReadFromJsonAsync<AgentUpdateSourceChallengeResponse>());
+
+        var binding = fixture.CreateSignedSourceBinding(ticket, operation, challengeRequest, challenge,
+            "source-binding-acceptance", "boot-acceptance");
+        using var firstBinding = await fixture.SendSignedAsync(AcceptanceFixture.UpdatePath(ticket, "source-binding"), binding,
+            nonce: "stale-source-binding", signedSecond: staleSignedSecond);
+        Assert.Equal(HttpStatusCode.OK, firstBinding.StatusCode);
+        var bound = Assert.IsType<AgentUpdateOperationDto>(await firstBinding.Content.ReadFromJsonAsync<AgentUpdateOperationDto>());
+        Assert.Equal("1.2.3", bound.SourceVersion);
+        Assert.Equal(binding.BackupDigest.ToUpperInvariant(), bound.BackupDigest);
+
+        using var bindingReplay = await fixture.SendSignedAsync(AcceptanceFixture.UpdatePath(ticket, "source-binding"), binding,
+            nonce: "stale-source-binding", signedSecond: staleSignedSecond);
+        Assert.Equal(HttpStatusCode.Unauthorized, bindingReplay.StatusCode);
+        using var exactRetry = await fixture.SendSignedAsync(AcceptanceFixture.UpdatePath(ticket, "source-binding"), binding,
+            nonce: "stale-source-binding-retry", signedSecond: staleSignedSecond);
+        Assert.Equal(HttpStatusCode.OK, exactRetry.StatusCode);
+        Assert.Equal(bound, await exactRetry.Content.ReadFromJsonAsync<AgentUpdateOperationDto>());
+
+        using var changedBody = await fixture.SendSignedAsync(AcceptanceFixture.UpdatePath(ticket, "source-binding"),
+            binding with { NativeBootId = "different-boot" }, nonce: "stale-source-binding-changed", signedSecond: staleSignedSecond);
+        Assert.Equal(HttpStatusCode.Conflict, changedBody.StatusCode);
+
+        var changedChallenge = challengeRequest with { HelperBuildSha256 = new string('b', 64) };
+        using var challengeIdReuse = await fixture.SendSignedAsync(AcceptanceFixture.UpdatePath(ticket, "source-challenge"),
+            changedChallenge, nonce: "stale-source-challenge-changed", signedSecond: staleSignedSecond);
+        Assert.Equal(HttpStatusCode.Conflict, challengeIdReuse.StatusCode);
     }
 
     [Fact]
@@ -832,7 +886,7 @@ public sealed class AgentReleaseAcceptanceTests
         fixture.Clock.Now = fixture.Clock.Now.AddMinutes(11);
         await fixture.HeartbeatAsync("1.2.3");
         await fixture.AssertLockedAsync(ticket, "failed");
-        using var recovery = await fixture.Admin.PostAsync($"/internal/machines/acceptance-pc/agent-updates/{ticket.OperationId}/recovery-ticket", null);
+        using var recovery = await fixture.Admin.PostAsync($"/internal/machines/0123456789abcdef0123456789abcdef/agent-updates/{ticket.OperationId}/recovery-ticket", null);
         Assert.Equal(HttpStatusCode.Conflict, recovery.StatusCode);
         await fixture.AssertLockedAsync(ticket, "failed");
     }
@@ -867,9 +921,13 @@ public sealed class AgentReleaseAcceptanceTests
 
     private sealed class AcceptanceFixture : IAsyncDisposable
     {
-        private const string MachineId = "acceptance-pc";
+        private const string MachineId = "0123456789abcdef0123456789abcdef";
         private readonly string root;
         private readonly ECDsa key = ECDsa.Create();
+        private sealed class TestTrustedIdentitySource(TrustedIdentityDocument document) : ITrustedIdentitySource
+        {
+            public TrustedIdentityDocument ReadExisting() => document;
+        }
         private readonly WebApplication app;
         private readonly HttpClient agent;
         private readonly HttpClient renter;
@@ -972,10 +1030,11 @@ public sealed class AgentReleaseAcceptanceTests
             return ticket;
         }
 
-        public async Task StartAndDownloadAsync(AgentUpdateTicketResponse ticket)
+        public async Task<AgentUpdateOperationDto> StartAndDownloadAsync(AgentUpdateTicketResponse ticket)
         {
             using var started = await agent.PostAsJsonAsync(UpdatePath(ticket, "start"),
-                new AgentUpdateTicketRequest(ticket.Ticket, ticket.ReleaseVersion, ticket.TargetVersion, ticket.TargetPackageSha256));
+                new AgentUpdateTicketRequest(ticket.Ticket, ticket.ReleaseVersion, ticket.TargetVersion, ticket.TargetPackageSha256,
+                    "start-" + ticket.OperationId));
             Assert.Equal(HttpStatusCode.OK, started.StatusCode);
             var operation = Assert.IsType<AgentUpdateOperationDto>(await started.Content.ReadFromJsonAsync<AgentUpdateOperationDto>());
             Assert.Null(operation.SourceVersion);
@@ -990,6 +1049,32 @@ public sealed class AgentReleaseAcceptanceTests
             Assert.Equal("no-store", download.Headers.CacheControl?.ToString());
             Assert.Equal("application/zip", download.Content.Headers.ContentType?.MediaType);
             Assert.Equal(package, await download.Content.ReadAsByteArrayAsync());
+            return operation;
+        }
+
+        public AgentUpdateSourceBindingRequest CreateSignedSourceBinding(AgentUpdateTicketResponse ticket,
+            AgentUpdateOperationDto operation, AgentUpdateSourceChallengeRequest challengeRequest,
+            AgentUpdateSourceChallengeResponse challenge, string requestId, string bootId)
+        {
+            var request = new AgentUpdateSourceBindingRequest(ticket.Ticket, ticket.ReleaseVersion, ticket.TargetVersion,
+                ticket.TargetPackageSha256, challenge.ChallengeId, challenge.Challenge, challengeRequest.RequestId,
+                requestId, challengeRequest.HelperBuildSha256, challengeRequest.HelperRuntime, challengeRequest.HelperProtocol,
+                challenge.RuntimeEpoch, "1.2.3", ticket.OperationId, new string('b', 64), new string('c', 64),
+                new string('d', 64), bootId, "backupPublished", operation.ChainId, operation.CurrentHeadOperationId,
+                operation.Generation);
+            using var identity = TrustedIdentity.ReadExisting(new TestTrustedIdentitySource(new(MachineId,
+                Convert.ToBase64String(key.ExportPkcs8PrivateKey()))));
+            var evidence = new AgentUpdateSourceEvidence(MachineId,
+                identity.KeyFingerprint, operation.OperationId, operation.ChainId,
+                operation.CurrentHeadOperationId, operation.Generation, ticket.TargetVersion, ticket.TargetPackageSha256,
+                challenge.ChallengeId, challengeRequest.RequestId, requestId, challengeRequest.HelperBuildSha256,
+                challengeRequest.HelperRuntime, challengeRequest.HelperProtocol, challenge.RuntimeEpoch,
+                request.SourceVersion, request.BackupOwnerOperationId, request.BackupDigest, request.InventoryDigest,
+                request.InstalledTreeDigest, request.NativeBootId, request.JournalPhase);
+            return request with
+            {
+                EvidenceSignature = identity.SignSourceEvidence(evidence),
+            };
         }
 
         public async Task ConfigureAsync()
@@ -1033,23 +1118,26 @@ public sealed class AgentReleaseAcceptanceTests
 
         public Task<HttpResponseMessage> SendPreparedHeartbeatAsync(HttpRequestMessage request) => agent.SendAsync(request);
 
-        private async Task<HttpResponseMessage> SendSignedAsync<T>(string path, T body, string? enrollmentTicket = null)
+        public async Task<HttpResponseMessage> SendSignedAsync<T>(string path, T body, string? enrollmentTicket = null,
+            bool badSignature = false, string? nonce = null, long? signedSecond = null)
         {
-            using var request = PrepareSigned(path, body, enrollmentTicket);
+            using var request = PrepareSigned(path, body, enrollmentTicket, badSignature, nonce, signedSecond);
             return await agent.SendAsync(request);
         }
 
-        private HttpRequestMessage PrepareSigned<T>(string path, T body, string? enrollmentTicket = null)
+        private HttpRequestMessage PrepareSigned<T>(string path, T body, string? enrollmentTicket = null, bool badSignature = false,
+            string? nonce = null, long? signedSecond = null)
         {
             var json = JsonSerializer.Serialize(body, new JsonSerializerOptions(JsonSerializerDefaults.Web));
-            var timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-            var nonce = Guid.NewGuid().ToString("N");
+            var timestamp = signedSecond ?? Clock.Now.ToUnixTimeSeconds();
+            nonce ??= Guid.NewGuid().ToString("N");
             var request = new HttpRequestMessage(HttpMethod.Post, path) { Content = new StringContent(json, Encoding.UTF8, "application/json") };
             request.Headers.Add("X-Agent-Id", MachineId);
             request.Headers.Add("X-Agent-Timestamp", timestamp.ToString());
             request.Headers.Add("X-Agent-Nonce", nonce);
-            request.Headers.Add("X-Agent-Signature", Convert.ToBase64String(key.SignData(
-                Encoding.UTF8.GetBytes($"{MachineId}\nPOST\n{path}\n{timestamp}\n{nonce}\n{Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(json)))}"), HashAlgorithmName.SHA256)));
+            var signature = Convert.ToBase64String(key.SignData(
+                Encoding.UTF8.GetBytes($"{MachineId}\nPOST\n{path}\n{timestamp}\n{nonce}\n{Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(json)))}"), HashAlgorithmName.SHA256));
+            request.Headers.Add("X-Agent-Signature", badSignature ? "not-a-signature" : signature);
             if (enrollmentTicket is not null) request.Headers.Add("X-Enrollment-Ticket", enrollmentTicket);
             return request;
         }
@@ -1096,7 +1184,7 @@ public sealed class AgentReleaseAcceptanceTests
             Assert.False((await MachineAsync()).CanRent);
         }
 
-        private static string UpdatePath(AgentUpdateTicketResponse ticket, string action) =>
+        public static string UpdatePath(AgentUpdateTicketResponse ticket, string action) =>
             $"/agent/machines/{MachineId}/agent-updates/{ticket.OperationId}/{action}";
 
         public async ValueTask DisposeAsync()
