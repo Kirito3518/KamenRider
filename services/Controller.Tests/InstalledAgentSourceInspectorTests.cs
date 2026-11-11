@@ -223,7 +223,11 @@ public sealed class InstalledAgentSourceInspectorTests : IDisposable
         var inspector = new InstalledAgentSourceInspector(sourceRoot, new BackupSecurity(sourceRoot, backupRoot, rejectSource: true));
         var host = new WindowsAgentMaintenanceCommandHost(new LocalUpdateEngine(new UnusedWorkStore()), inspector);
 
-        Assert.Throws<UnauthorizedAccessException>(() => host.Execute("inspect"));
+        var result = host.Execute("inspect");
+
+        Assert.Equal("rejected", result.Status);
+        Assert.Equal("sourceUntrusted", result.Category);
+        Assert.Null(result.Source);
         Assert.True(File.Exists(Path.Combine(sourceRoot, "Agent.dll")));
     }
 

@@ -28,7 +28,19 @@ public sealed class WindowsAgentMaintenanceCommandHost(
         {
             if (sourceInspector is null)
                 return new("unavailable", "sourceInspectorUnavailable", null, null, null, null, null, null);
-            var source = sourceInspector.Inspect();
+            InstalledAgentSourceSnapshot source;
+            try
+            {
+                source = sourceInspector.Inspect();
+            }
+            catch (UnauthorizedAccessException)
+            {
+                return new("rejected", "sourceUntrusted", null, null, null, null, null, null);
+            }
+            catch (InvalidDataException)
+            {
+                return new("rejected", "sourceUnverifiable", null, null, null, null, null, null);
+            }
             return new("ok", null, null, source.Version, null, null, null, null,
                 new AgentMaintenanceSourceResult(source.Version, source.AssemblyInformationalVersion,
                     source.AgentUpdateChallengeProtocol, source.DepsSha256, source.AgentAssemblySha256));
