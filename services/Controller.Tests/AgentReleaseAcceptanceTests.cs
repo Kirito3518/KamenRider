@@ -164,6 +164,34 @@ public sealed class AgentReleaseAcceptanceTests
     }
 
     [Fact]
+    public async Task CurrentRuntimeMismatchIsGenericConflictAndDoesNotConsumeChallenge()
+    {
+        await using var fixture = await AcceptanceFixture.CreateAsync();
+        var ticket = await fixture.PublishAndReserveAsync();
+        var operation = await fixture.StartAndDownloadAsync(ticket);
+        var challengeRequest = new AgentUpdateSourceChallengeRequest(ticket.Ticket, ticket.ReleaseVersion,
+            ticket.TargetVersion, ticket.TargetPackageSha256, "source-runtime-mismatch", new string('a', 64), "win-x64", 1);
+        using var challengeResponse = await fixture.SendSignedAsync(AcceptanceFixture.UpdatePath(ticket, "source-challenge"),
+            challengeRequest, nonce: "source-runtime-mismatch-challenge");
+        Assert.Equal(HttpStatusCode.OK, challengeResponse.StatusCode);
+        var challenge = Assert.IsType<AgentUpdateSourceChallengeResponse>(
+            await challengeResponse.Content.ReadFromJsonAsync<AgentUpdateSourceChallengeResponse>());
+        var binding = fixture.CreateSignedSourceBinding(ticket, operation, challengeRequest, challenge,
+            "source-runtime-mismatch-bind", "boot-runtime-mismatch");
+
+        using var wrongRuntime = await fixture.SendSignedAsync(AcceptanceFixture.UpdatePath(ticket, "source-binding"),
+            binding with { RuntimeEpoch = challenge.RuntimeEpoch + "-wrong" }, nonce: "source-runtime-mismatch-bind-wrong");
+        Assert.Equal(HttpStatusCode.Conflict, wrongRuntime.StatusCode);
+        Assert.DoesNotContain("sourceChallengeRenewalRequired", await wrongRuntime.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+
+        using var validBinding = await fixture.SendSignedAsync(AcceptanceFixture.UpdatePath(ticket, "source-binding"),
+            binding, nonce: "source-runtime-mismatch-bind-valid");
+        Assert.Equal(HttpStatusCode.OK, validBinding.StatusCode);
+        var result = Assert.IsType<AgentUpdateOperationDto>(await validBinding.Content.ReadFromJsonAsync<AgentUpdateOperationDto>());
+        Assert.Equal("1.2.3", result.SourceVersion);
+    }
+
+    [Fact]
     public async Task PersistedBindIntentRotatesAfterControllerRestartBeforeCommit()
     {
         await using var fixture = await AcceptanceFixture.CreateAsync();
