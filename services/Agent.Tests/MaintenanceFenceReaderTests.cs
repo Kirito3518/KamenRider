@@ -95,6 +95,33 @@ public sealed class MaintenanceFenceReaderTests
     }
 
     [Fact]
+    public void FreshInstallerMayPublishOnlyTheExplicitFreshInstallClearPhase()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "kr-fence-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var path = Path.Combine(root, "maintenance-fence.json");
+            File.WriteAllText(path, """
+                {"schemaVersion":1,"state":"clear","operationId":"fresh-0123456789abcdef0123456789abcdef","chainId":"fresh-0123456789abcdef0123456789abcdef","headOperationId":"fresh-0123456789abcdef0123456789abcdef","generation":1,"phase":"freshInstall"}
+                """);
+
+            var freshClear = new WindowsMaintenanceFenceReader(path).Read();
+
+            Assert.True(freshClear.IsKnown);
+            Assert.False(freshClear.IsHeld);
+            Assert.Equal("freshInstall", freshClear.Phase);
+            File.WriteAllText(path, """
+                {"schemaVersion":1,"state":"clear","operationId":"fresh-0123456789abcdef0123456789abcdef","chainId":"fresh-0123456789abcdef0123456789abcdef","headOperationId":"fresh-0123456789abcdef0123456789abcdef","generation":1,"phase":"legacyImported"}
+                """);
+            var unrelatedClear = new WindowsMaintenanceFenceReader(path).Read();
+            Assert.False(unrelatedClear.IsKnown);
+            Assert.True(unrelatedClear.IsHeld);
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
     public void HardLinkedFenceIsUnknownAndHeld()
     {
         var root = Path.Combine(Path.GetTempPath(), "kr-fence-" + Guid.NewGuid().ToString("N"));

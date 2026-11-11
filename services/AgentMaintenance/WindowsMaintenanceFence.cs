@@ -27,7 +27,7 @@ public sealed record AgentMaintenanceFenceRecord(
             !IsSafeIdentifier(HeadOperationId) ||
             Generation <= 0 ||
             !WindowsMaintenanceFence.KnownPhases.Contains(Phase) ||
-            (State == "clear" && Phase != "controllerConfirmed"))
+            (State == "clear" && Phase is not ("controllerConfirmed" or "freshInstall")))
             throw new InvalidDataException("The maintenance fence record is invalid.");
 
         return this;
@@ -70,6 +70,7 @@ public sealed class WindowsMaintenanceFence(
         "servicesStarted",
         "outcomeReported",
         "controllerConfirmed",
+        "freshInstall",
         "legacyImported"
     };
 

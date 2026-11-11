@@ -105,7 +105,7 @@ function Assert-BootstrapTrustedPath {
 }
 
 function New-BootstrapPrivateDirectory {
-    param([Parameter(Mandatory)][string]$Path,[Parameter(Mandatory)][Security.Principal.SecurityIdentifier]$ServiceSid)
+    param([Parameter(Mandatory)][string]$Path,[Parameter(Mandatory)][Security.Principal.SecurityIdentifier]$ServiceSid,[switch]$MachineProtected)
     $parent = [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($Path))
     Assert-BootstrapTrustedPath $parent
     if (-not ('KamenRaider.Install.BootstrapDirectories' -as [type])) {
@@ -131,8 +131,9 @@ namespace KamenRaider.Install {
     $systemSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-18')
     $adminSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
     $installerSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
-    $acl.SetOwner($installerSid)
-    foreach ($sid in @($systemSid, $adminSid, $installerSid)) {
+    $acl.SetOwner($(if ($MachineProtected) { $adminSid } else { $installerSid }))
+    $ownerSids = if ($MachineProtected) { @($systemSid, $adminSid) } else { @($systemSid, $adminSid, $installerSid) }
+    foreach ($sid in $ownerSids) {
         $rule = [Security.AccessControl.FileSystemAccessRule]::new($sid, [Security.AccessControl.FileSystemRights]::FullControl, [Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit', [Security.AccessControl.PropagationFlags]::None, [Security.AccessControl.AccessControlType]::Allow)
         $acl.AddAccessRule($rule)
     }
@@ -210,7 +211,7 @@ Assert-BootstrapTrustedPath $env:ProgramFiles
 if (Test-Path -LiteralPath $productDirectory) {
     Assert-BootstrapTrustedPath $productDirectory
 } else {
-    New-BootstrapPrivateDirectory $productDirectory $serviceSid
+    New-BootstrapPrivateDirectory $productDirectory $serviceSid -MachineProtected
 }
 New-BootstrapPrivateDirectory $stage $serviceSid
 try {
@@ -222,10 +223,26 @@ try {
     Expand-Archive -LiteralPath $archive -DestinationPath $expanded -ErrorAction Stop
     $installer = Join-Path $expanded 'Install-AgentPackage.ps1'
     if (-not (Test-Path -LiteralPath $installer -PathType Leaf)) { throw 'Agent package has no qualified installer.' }
+    $proofId = [Guid]::NewGuid().ToString('N')
+    $issuedUtc = [DateTimeOffset]::UtcNow
+    $provenancePath = Join-Path $stage 'bootstrap-provenance.json'
+    $provenance = [ordered]@{
+        schemaVersion = 1
+        proofId = $proofId
+        stageId = [IO.Path]::GetFileName($stage).Substring('.agent-bootstrap-'.Length)
+        issuedUtcTicks = $issuedUtc.UtcDateTime.Ticks
+        expiresUtcTicks = $issuedUtc.AddMinutes(15).UtcDateTime.Ticks
+        archiveFile = 'agent.zip'
+        packageDirectory = 'package'
+        packageSha256 = $verifiedHash
+    }
+    [IO.File]::WriteAllText($provenancePath, (ConvertTo-Json -InputObject $provenance -Depth 3 -Compress), [Text.UTF8Encoding]::new($false))
+    Assert-BootstrapTrustedPath $provenancePath
     $installerBlock = [ScriptBlock]::Create([IO.File]::ReadAllText($installer))
     & $installerBlock -PackageRoot $expanded -ControllerUrl $normalizedController `
         -TrustedRootThumbprint $TrustedRootThumbprint -EnrollmentTicket $EnrollmentTicket `
-        -InstallReturnUrl $returnUri.AbsoluteUri -VncAllowedSourceAddress $normalizedVncSourceAddress
+        -InstallReturnUrl $returnUri.AbsoluteUri -VncAllowedSourceAddress $normalizedVncSourceAddress `
+        -BootstrapProvenancePath $provenancePath
 } finally {
     $resolved = [IO.Path]::GetFullPath($stage)
     if (-not [string]::Equals([IO.Path]::GetDirectoryName($resolved), [IO.Path]::GetFullPath($productDirectory), [StringComparison]::OrdinalIgnoreCase) -or [IO.Path]::GetFileName($resolved) -notlike '.agent-bootstrap-*') {

@@ -43,6 +43,7 @@ public sealed class WindowsMaintenanceFenceReader : IMaintenanceFenceReader
         "servicesStarted",
         "outcomeReported",
         "controllerConfirmed",
+        "freshInstall",
         "legacyImported"
     };
     private static readonly JsonSerializerOptions JsonOptions = new()
@@ -125,7 +126,7 @@ public sealed class WindowsMaintenanceFenceReader : IMaintenanceFenceReader
                 document.Phase is null || !KnownPhases.Contains(document.Phase))
                 return MaintenanceFenceSnapshot.UnknownHeld;
 
-            if (document.State == "clear" && document.Phase != "controllerConfirmed")
+            if (document.State == "clear" && document.Phase is not ("controllerConfirmed" or "freshInstall"))
                 return MaintenanceFenceSnapshot.UnknownHeld;
 
             return new(

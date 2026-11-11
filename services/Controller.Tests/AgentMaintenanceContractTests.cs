@@ -69,6 +69,17 @@ public sealed class AgentMaintenanceContractTests
         new(1, "held", "op-1", "chain-1", "op-1", 4, phase);
 
     [Fact]
+    public void FreshInstallerClearRecordHasAnExplicitBoundedPhase()
+    {
+        var operationId = "fresh-0123456789abcdef0123456789abcdef";
+
+        var fresh = new AgentMaintenanceFenceRecord(1, "clear", operationId, operationId, operationId, 1, "freshInstall").Validate();
+
+        Assert.Equal("freshInstall", fresh.Phase);
+        Assert.Throws<InvalidDataException>(() => (fresh with { Phase = "servicesStarted" }).Validate());
+    }
+
+    [Fact]
     public void HoldVerifiesIndependentOperatingSystemBlockBeforePublishingMarker()
     {
         var f = new Fixture();

@@ -26,6 +26,9 @@ Work resumed in the existing main checkout at baseline `e7cabcf`. Partial implem
 - Added a fakeable source-binding coordinator. It accepts only the exact `servicesQuiesced` or later recoverable journal head; from `servicesQuiesced` it publishes and journals the immutable backup before requesting a Controller challenge. It verifies the backup on retry, signs canonical source evidence with the existing read-only enrollment identity, persists the exact signed bind intent before sending it, validates the Controller acknowledgement against the same held head/generation and body digest, and advances to `sourceBound` only after the ACK. Request IDs are stable per persisted attempt. Controller returns a typed renewal conflict only for an expired or previous-runtime unconsumed challenge. The journal records each challenge body digest before sending, preserves rejected attempt evidence, and permits a new attempt only after that typed response; other conflicts, transport errors, and altered parameters leave the original signed intent intact. A committed exact bind retry returns its durable response before runtime checks, including after Controller restart. The coordinator is not wired to the CLI, so there is no deployed helper command flow.
 - Addressed the scoped source-coordinator re-review: an unconsumed challenge from an earlier Controller runtime now produces the typed renewal response in the bind path, while a bind claiming an epoch different from its current challenge remains a generic conflict. A TestServer regression runs the actual helper coordinator and HTTP client, durably records the bind intent, restarts Controller before commit, then verifies one safe attempt rotation and a successful bind with unchanged source and backup facts. The endpoint exact-retry test now also reconnects after Controller restart to cover a lost committed response.
 - Wired the fixed `inspect` CLI verb to the canonical installed Agent source inspector. Its typed result contains only version/protocol metadata and the deps/DLL digests; unsafe ACLs return the bounded `sourceUntrusted` category and malformed metadata returns `sourceUnverifiable`. No source path, ticket, or enrollment key is returned. The current interactive-user-writable installed tree still fails the production ACL check and is not treated as trusted.
+- Added fresh-install-only fence initialization through the existing bootstrap hash boundary. Bootstrap writes a 15-minute, single-use proof in its protected Program Files stage only after verifying the ZIP hash and extracting it; the proof contains only a proof ID, stage ID, UTC tick window, fixed archive/package names, and package SHA-256. The installer independently validates the proof path and ACL, rehashes the archive, re-extracts it inside that protected stage, and compares the complete extracted file/directory inventory before considering initialization. No `PackageRoot` by itself is trusted.
+- Fresh initialization requires Agent and Guard services, the installed tree, Agent data/identity, and the complete maintenance-fence directory to be absent. The new Program Files product directory is created machine-protected without an interactive-user ACE; the installer requires that policy before initialization, then publishes a fresh clear marker with the exact SYSTEM/Administrators/Agent-service ACL before Guard or Agent service start. Freshly copied Agent files/directories receive machine-protected ACLs before that marker is created. Existing product directories that are not machine-protected, direct installer calls, existing clear/held fences, repair, and empty identity residue do not receive a new clear marker or ACL repair; those paths retain existing behavior and stay held when the marker is missing/invalid. If a failure occurs after the new marker is attempted but before service installation completes, the installer attempts an atomic held rewrite and retains the protected tree/evidence if that rewrite fails.
+- Added the explicit `freshInstall` phase to the helper record validator and Agent/Guard readers. The helper still only releases a maintenance operation after Controller confirmation; this new phase is accepted solely for the verified fresh-installer path. PowerShell tests exercise archive/tree equality, changed extracted bytes, wrong package root, expiration, proof replay, and exact fence ACL descriptors. The actual elevated fence directory/file writer and end-to-end service start were not exercised on this host.
 - The current host's `C:\Program Files\KamenRaider\Agent` tree is owned by the interactive user and grants that SID FullControl. The source ACL predicate therefore rejects this tree; no ACL repair was made and these bytes are not accepted as trusted update source. A trusted installer must establish protection only while installing independently verified bytes, or maintenance must remain held with recovery instructions.
 
 The firewall policy command, Windows Service Control Manager adapter, helper journal filesystem store, and ACL behavior were not exercised against the live host. The tests use fakes for all firewall and service operations.
@@ -104,6 +107,30 @@ Passed under PowerShell 7 with fake HTTP, fake services and temporary files.
 
 The public updater fake workflow was rerun under both Windows PowerShell 5.1 and PowerShell 7 after the source/runtime changes; both runs passed.
 
+`powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File scripts/agent/Test-AgentPackageInstallPlan.ps1`
+
+Passed under Windows PowerShell 5.1. Includes trusted bootstrap proof/archive/tree validation, extracted-tree substitution rejection, wrong package-root rejection, expired/replayed proof rejection, no-ticket proof shape, exact fence ACL descriptor policy, and fresh-clear-before-service ordering. No services changed.
+
+`pwsh.exe -NoLogo -NoProfile -File scripts/agent/Test-AgentPackageInstallPlan.ps1`
+
+Passed under PowerShell 7.6.9 with the same proof, expiry/replay, tree substitution, and ACL descriptor checks. No services changed.
+
+`powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File scripts/agent/Test-BootstrapAgentPlan.ps1`
+
+Passed under Windows PowerShell 5.1.
+
+`pwsh.exe -NoLogo -NoProfile -File scripts/agent/Test-BootstrapAgentPlan.ps1`
+
+Passed under PowerShell 7.6.9.
+
+`dotnet test services/Controller.Tests/Controller.Tests.csproj --configuration Release --no-restore -p:BaseOutputPath=C:\Users\User\AppData\Local\Temp\kr-task6-freshinit-20261112\bin\ --filter FullyQualifiedName~AgentMaintenanceContractTests.FreshInstallerClearRecordHasAnExplicitBoundedPhase --logger "console;verbosity=minimal"`
+
+Passed: 1, failed: 0.
+
+`dotnet test services/Agent.Tests/Agent.Tests.csproj --configuration Release --no-restore -p:BaseOutputPath=C:\Users\User\AppData\Local\Temp\kr-task6-freshinit-20261112\bin\ --filter FullyQualifiedName~MaintenanceFenceReaderTests --logger "console;verbosity=minimal"`
+
+Passed: 6, failed: 0. Includes `freshInstall` acceptance and rejection of unrelated clear phases.
+
 `& 'C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe' -NoLogo -NoProfile -ExecutionPolicy Bypass -File scripts\agent\Test-AgentMaintenancePublish.ps1 -RepositoryRoot (Get-Location).Path`
 
 Passed under Windows PowerShell `5.1.22621.6133`.
@@ -128,21 +155,21 @@ Passed under PowerShell 7.6.9 against real x64/arm64 helper publish outputs; wro
 
 Passed before commit `acf2df1`; Git printed line-ending conversion notices for existing working files, with no whitespace errors.
 
-## Production impact of the missing-marker rule
+## Production impact and initializer limits
 
-The new Agent/Guard deliberately treats a missing or invalid fence as held. Therefore an installation that starts these new binaries without a verified marker will fail closed and cannot stream. Fresh-install initialization and a safe legacy-upgrade migration have not been implemented or wired into trusted installers. This can leave fresh installs and older installations unavailable until trusted initialization or a complete maintenance operation publishes a verified clear/terminal marker. Do not weaken the reader to treat absence as clear.
+The new Agent/Guard deliberately treats a missing or invalid fence as held. A clean first install through the verified bootstrap can now publish the explicit `freshInstall` clear marker after proving the exact package bytes and machine-protecting the new install tree. A direct install without that proof, an install beneath an existing user-writable product directory, an existing clear/held marker, repair, or identity residue does not get a new clear marker; streaming remains held when its marker is absent or invalid. Do not weaken the reader to treat absence as clear.
 
-For an upgrade, a clear marker must not be minted until a trusted path has proved no held current or pending lease and no conflicting Controller update hold. The old Agent cannot provide the new exact current/pending snapshot, and that migration proof is not available yet. The production update gate stays closed while this is unresolved.
+No safe legacy-upgrade migration has been implemented. An old Agent cannot provide the new exact current/pending lease snapshot, so a clear marker must not be minted for an upgrade until a trusted path proves there is no held current or pending lease and no conflicting Controller update hold. The production update gate stays closed while this is unresolved.
 
 ## Remaining blockers
 
 - `services/AgentMaintenance/Program.cs` dispatches fixed CLI verbs; `inspect`, `validate-archive`, and `extract` are implemented. There is no native architecture selection for the bootstrap or end-to-end orchestration. The read-only identity component is still not consumed by a helper command.
-- There is no trusted installer initializer for a fresh install and no proven legacy upgrade migration. No safe clear marker is currently provisioned by the installer.
+- There is no proven legacy-upgrade migration. The installer fresh path has not had an elevated production-store writer test or an actual service-start qualification; an existing user-writable product parent intentionally prevents fresh marker creation.
 - `IMaintenanceStopPrerequisites` has only a test fake. No production implementation verifies the installation lock, current plus pending Agent lease state, Controller held allocations, independently effective fence, and target architecture continuously before and through stop. Controller's durable start ACK exists, but it is not wired into helper orchestration.
 - The firewall ActiveStore probe is source code only and was not run. Its profile/rule checks are not yet qualified as a complete positive packet-enforcement proof for supported Windows/GPO configurations.
 - The journal currently supports only one operation entry. Multi-operation recovery chains, `legacyImported`, intent-before-move integration, tree digest reconciliation after each crash boundary, report retries, and held-preserving recovery are not implemented. Cross-process journal locking is also not implemented, so concurrent helpers remain blocked from production use.
 - The local archive engine implements only `validate-archive` and `extract`; `inspect` is wired as a read-only command. Helper CLI operations `start`, `bind-source`, `backup`, `apply`, `report`, and `reconcile` remain unavailable. The request work store's production ACL/hardlink behavior has not had an elevated real writer/reader integration test. The helper signing API and source-binding coordinator are not integrated into a running CLI flow.
-- No trusted installer initializer provisions a safe clear fence for fresh installs or proven legacy upgrades. Missing/corrupt still fails closed, so starting new Agent/Guard binaries without a verified marker leaves streaming unavailable.
+- Direct/repair/residue paths do not initialize or clear the fence; missing/corrupt still fails closed, so these paths can leave streaming unavailable pending a reviewed recovery operation.
 - The backup publisher and journal-aware backup operation create and verify a protected backup tree in isolation, but no production held/quiesced authorization is wired. The tested source-binding coordinator composes these seams in-process, but the helper does not call it; no protected source-tree swap, crash reconciliation, or outcome report orchestration exists. The Controller accepts source digests only after the separate enrollment-key signature; the coordinator computes those digests locally, but there is no trusted CLI path yet. The inspected installed tree is user-writable and remains held; no in-place ACL repair is authorized as proof of byte provenance.
 - The public wrapper/ZIP-script execution path is not replaced. The publisher manifest is not consumed by the deployed wrapper or a trusted command route. Package/install wiring for the helper assets is missing.
 - No full Task 6 acceptance suite or independent review of the full change has passed. Commits `acf2df1`, `0c02db9`, `51c38b5`, `3d2791b`, `fe6a1ae`, `95d6f1d`, `5ba4553`, and `52762ed` are partial implementation only, not Task 6 completion.

@@ -9,6 +9,7 @@ param(
     [string]$InstallReturnUrl,
     [string]$VncAllowedSourceAddress,
     [string]$PackageRoot,
+    [string]$BootstrapProvenancePath,
     [switch]$Plan
 )
 
@@ -139,17 +140,50 @@ $serviceAccount = "NT SERVICE\$serviceName"
 $serviceSid = Get-ServiceSid -ServiceName $serviceName
 $existingService = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
 $existingGuardService = Get-Service -Name $guardServiceName -ErrorAction SilentlyContinue
+$installDirectoryExists = Test-Path -LiteralPath $installDirectory
+$dataDirectoryExists = Test-Path -LiteralPath $dataDirectory
 $emptyIdentityDirectoryResidue = $false
-if (-not $existingService -and -not $existingGuardService -and -not (Test-Path -LiteralPath $installDirectory) -and (Test-Path -LiteralPath $dataDirectory)) {
+if (-not $existingService -and -not $existingGuardService -and -not $installDirectoryExists -and $dataDirectoryExists) {
     Assert-TrustedInstallParent $dataDirectory -ServiceSid $serviceSid
     $emptyIdentityDirectoryResidue = Test-EmptyAgentIdentityDirectoryResidue -DataDirectory $dataDirectory -ServiceSid $serviceSid
 }
 $installMode = Get-AgentInstallMode `
     -ServiceExists ([bool]$existingService) `
-    -InstallDirectoryExists (Test-Path -LiteralPath $installDirectory) `
-    -DataDirectoryExists (Test-Path -LiteralPath $dataDirectory) `
+    -InstallDirectoryExists $installDirectoryExists `
+    -DataDirectoryExists $dataDirectoryExists `
     -GuardServiceExists ([bool]$existingGuardService) `
     -EmptyIdentityDirectoryResidue $emptyIdentityDirectoryResidue
+
+$maintenanceDirectory = Join-Path $env:ProgramData 'KamenRaider.AgentMaintenance'
+$maintenanceMarker = Join-Path $maintenanceDirectory 'maintenance-fence.json'
+if ($installMode -eq 'install' -and (Test-Path -LiteralPath $maintenanceMarker -PathType Leaf)) {
+    $existingClearFence = $false
+    try { $existingFence = [IO.File]::ReadAllText($maintenanceMarker) | ConvertFrom-Json -ErrorAction Stop; $existingClearFence = $existingFence.state -ceq 'clear' } catch { }
+    if ($existingClearFence) { throw 'A pre-existing clear maintenance fence cannot authorize newly installed package bytes; reviewed recovery is required.' }
+}
+$freshInstallCandidate = $installMode -eq 'install' -and
+    -not $existingService -and -not $existingGuardService -and
+    -not $installDirectoryExists -and -not $dataDirectoryExists -and
+    -not (Test-Path -LiteralPath $maintenanceDirectory)
+$verifiedBootstrapProvenance = $false
+$bootstrapProofId = $null
+if ($freshInstallCandidate -and -not [string]::IsNullOrWhiteSpace($BootstrapProvenancePath)) {
+    $productDirectory = Join-Path $env:ProgramFiles 'KamenRaider'
+    $machineProtectedProductParent = $false
+    try {
+        Assert-TrustedInstallParent $productDirectory -ServiceSid $serviceSid -MachineProtected
+        $machineProtectedProductParent = $true
+    } catch {
+        Write-Warning 'The existing Program Files product directory is not machine-protected. Fresh fence initialization was skipped; streaming remains held until the administrator secures a new install path.'
+    }
+    if ($machineProtectedProductParent) {
+        $bootstrapProofId = Test-AgentBootstrapProvenance `
+            -Path $BootstrapProvenancePath -PackageRoot $effectivePackageRoot `
+            -ProductDirectory $productDirectory -ServiceSid $serviceSid
+        $verifiedBootstrapProvenance = -not [string]::IsNullOrWhiteSpace($bootstrapProofId)
+    }
+}
+$initializeFreshFence = $freshInstallCandidate -and $verifiedBootstrapProvenance
 
 if (-not (Test-Path -LiteralPath "Cert:\LocalMachine\Root\$TrustedRootThumbprint")) {
     throw 'Provision and verify the certificate trust chain before installation.'
@@ -211,12 +245,14 @@ $publishMoved = $false
 $serviceCreatedByThisRun = $false
 $streamGateTransaction = $null
 $streamGateCommitted = $false
+$freshFencePublished = $false
+$freshFenceHoldFailed = $false
 $vncSetupAttempted = $false
 $dataParentCreatedByThisRun = $false
 $publishParentExisted = Test-Path -LiteralPath $publishParent
 $publishParentCreatedByThisRun = $false
 
-Assert-TrustedInstallParent $publishParent
+Assert-TrustedInstallParent $publishParent -ServiceSid $serviceSid -MachineProtected:$initializeFreshFence
 Assert-TrustedInstallParent $dataDirectory -ServiceSid $serviceSid
 Assert-AgentDataDirectoryReady -Path $dataDirectory -ServiceSid $serviceSid -AllowEmptyIdentityDirectory:$emptyIdentityDirectoryResidue
 if (Test-Path -LiteralPath $installDirectory) { throw 'Agent installation directory already exists; reviewed upgrade or repair is required.' }
@@ -235,7 +271,7 @@ try {
         New-PrivateInstallDirectory $publishParent $serviceSid -ReadOnly | Out-Null
         $publishParentCreatedByThisRun = $true
     }
-    New-PrivateInstallDirectory $publishStage $serviceSid -ReadOnly | Out-Null
+    New-PrivateInstallDirectory $publishStage $serviceSid -ReadOnly -MachineProtected:$initializeFreshFence | Out-Null
     $sourceRoot = [IO.Path]::GetFullPath($sourceDirectory).TrimEnd('\')
     foreach ($item in @(Get-ChildItem -LiteralPath $sourceRoot -Force -Recurse | Sort-Object { $_.FullName.Length })) {
         if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Agent package must not contain reparse points.' }
@@ -243,13 +279,15 @@ try {
         $destination = Join-Path $publishStage $relative
         if ($item.PSIsContainer) {
             New-Item -ItemType Directory -Path $destination -Force | Out-Null
+            if ($initializeFreshFence) { Set-PrivateAgentBinaryAcl -Path $destination -ServiceSid $serviceSid -Directory }
         } else {
             $destinationParent = Split-Path -Parent $destination
             if (-not (Test-Path -LiteralPath $destinationParent)) { New-Item -ItemType Directory -Path $destinationParent -Force | Out-Null }
             [IO.File]::Copy($item.FullName, $destination, $false)
+            if ($initializeFreshFence) { Set-PrivateAgentBinaryAcl -Path $destination -ServiceSid $serviceSid }
         }
     }
-    Assert-TrustedPublishTree $publishStage
+    Assert-TrustedPublishTree $publishStage -ServiceSid $serviceSid -MachineProtected:$initializeFreshFence
     [IO.Directory]::Move($publishStage, $installDirectory)
     $publishStage = $null
     $publishMoved = $true
@@ -262,6 +300,16 @@ try {
     $configuration = New-AgentInstallConfiguration -ControllerUrl $controllerUrlNormalized -DataDirectory $dataDirectory `
         -MoonlightPort $MoonlightPort -SunshinePort $SunshinePort -NetworkAdapterId $normalizedAdapterId
     [IO.File]::WriteAllText($configSource, $configuration, [Text.UTF8Encoding]::new($false))
+
+    if ($initializeFreshFence) {
+        $freshFencePublished = $true
+        Initialize-FreshAgentMaintenanceFence -DirectoryPath $maintenanceDirectory -ServiceSid $serviceSid | Out-Null
+        Consume-AgentBootstrapProvenance -Path $BootstrapProvenancePath -ProofId $bootstrapProofId
+    } elseif ($freshInstallCandidate) {
+        Write-Warning 'This fresh install did not arrive through the verified protected bootstrap. Installation may complete, but the missing maintenance fence keeps streaming held; rerun the Controller-provided administrator install command to initialize it.'
+    } elseif ($emptyIdentityDirectoryResidue) {
+        Write-Warning 'An interrupted identity-directory residue was preserved. No fresh clear maintenance fence was created; streaming remains held until a verified recovery operation completes.'
+    }
 
     $streamGateTransaction = & $streamGateInstallerBlock -Action Apply `
         -GuardExecutablePath (Join-Path $installDirectory 'Agent.exe') -ContentRoot $installDirectory `
@@ -312,6 +360,13 @@ try {
 } catch {
     $original = $_
     $streamGateRollbackError = $null
+    if ($freshFencePublished -and -not $serviceCreatedByThisRun) {
+        try { Set-FreshAgentMaintenanceFenceHeld -DirectoryPath $maintenanceDirectory -ServiceSid $serviceSid }
+        catch {
+            $freshFenceHoldFailed = $true
+            Write-Warning 'Fresh Agent initialization failed; the maintenance fence could not be changed to held. The protected installation and evidence were retained; use the administrator recovery path.'
+        }
+    }
     if ($streamGateTransaction -and -not $streamGateCommitted) {
         try {
             & $streamGateInstallerBlock -Action Rollback -GuardExecutablePath (Join-Path $installDirectory 'Agent.exe') `
@@ -334,7 +389,7 @@ try {
     }
     $serviceExists = [bool](Get-Service -Name $serviceName -ErrorAction SilentlyContinue)
     $guardExists = [bool](Get-Service -Name $guardServiceName -ErrorAction SilentlyContinue)
-    if (-not $serviceExists -and -not $guardExists -and -not $streamGateRollbackError -and $publishMoved -and (Test-Path -LiteralPath $installDirectory)) {
+    if (-not $serviceExists -and -not $guardExists -and -not $streamGateRollbackError -and -not $freshFenceHoldFailed -and $publishMoved -and (Test-Path -LiteralPath $installDirectory)) {
         $safeInstall = [IO.Path]::GetFullPath($installDirectory)
         $expectedInstall = [IO.Path]::GetFullPath((Join-Path $env:ProgramFiles 'KamenRaider\Agent'))
         if ($safeInstall -eq $expectedInstall) { Remove-Item -LiteralPath $safeInstall -Recurse -Force }

@@ -17,6 +17,122 @@ try {
     [IO.File]::WriteAllText((Join-Path $agentDirectory 'Agent.exe'), 'test fixture')
 
     $installerSource = [IO.File]::ReadAllText((Join-Path $package 'Install-AgentPackage.ps1'))
+    if (-not $installerSource.Contains('[string]$BootstrapProvenancePath') -or
+        -not $installerSource.Contains('Test-AgentBootstrapProvenance') -or
+        -not $installerSource.Contains('Initialize-FreshAgentMaintenanceFence') -or
+        -not $installerSource.Contains('Set-FreshAgentMaintenanceFenceHeld') -or
+        -not $installerSource.Contains('MachineProtected:$initializeFreshFence')) {
+        throw 'Only a verified clean bootstrap install may initialize a fresh clear fence and machine-protect its published bytes.'
+    }
+    if (-not $installerSource.Contains('-not $dataDirectoryExists') -or
+        -not $installerSource.Contains('-not (Test-Path -LiteralPath $maintenanceDirectory)') -or
+        -not $installerSource.Contains('A pre-existing clear maintenance fence cannot authorize newly installed package bytes') -or
+        -not $installerSource.Contains('This fresh install did not arrive through the verified protected bootstrap') -or
+        -not $installerSource.Contains('An interrupted identity-directory residue was preserved')) {
+        throw 'Direct, repair, residue, or pre-existing-fence paths must not receive fresh trusted initialization.'
+    }
+    $initializePosition = $installerSource.IndexOf('Initialize-FreshAgentMaintenanceFence -DirectoryPath', [StringComparison]::Ordinal)
+    $guardApplyPosition = $installerSource.IndexOf('$streamGateTransaction = & $streamGateInstallerBlock -Action Apply', [StringComparison]::Ordinal)
+    if ($initializePosition -lt 0 -or $guardApplyPosition -lt $initializePosition) {
+        throw 'The fresh clear fence must be published before Guard setup or Agent service start.'
+    }
+    $holdFailurePosition = $installerSource.IndexOf('Set-FreshAgentMaintenanceFenceHeld -DirectoryPath', [StringComparison]::Ordinal)
+    $deletePublishedTreePosition = $installerSource.IndexOf('Remove-Item -LiteralPath $safeInstall -Recurse -Force', [StringComparison]::Ordinal)
+    if ($holdFailurePosition -lt 0 -or $deletePublishedTreePosition -lt $holdFailurePosition -or -not $installerSource.Contains('-not $freshFenceHoldFailed')) {
+        throw 'Failure after fresh marker publication must attempt held state and preserve the protected install if held publication fails.'
+    }
+    $bootstrapSource = [IO.File]::ReadAllText((Join-Path $PSScriptRoot '..\..\public\agent\Bootstrap-Agent.ps1'))
+    $hashBoundary = $bootstrapSource.IndexOf('$null = Assert-AgentPackageHash -Path $archive', [StringComparison]::Ordinal)
+    $expandBoundary = $bootstrapSource.IndexOf('Expand-Archive -LiteralPath $archive', [StringComparison]::Ordinal)
+    $proofBoundary = $bootstrapSource.IndexOf("'bootstrap-provenance.json'", [StringComparison]::Ordinal)
+    $invokeBoundary = $bootstrapSource.IndexOf('-BootstrapProvenancePath $provenancePath', [StringComparison]::Ordinal)
+    if ($hashBoundary -lt 0 -or $expandBoundary -lt $hashBoundary -or $proofBoundary -lt $expandBoundary -or $invokeBoundary -lt $proofBoundary -or
+        -not $bootstrapSource.Contains('proofId = $proofId') -or -not $bootstrapSource.Contains('packageSha256 = $verifiedHash') -or
+        -not $bootstrapSource.Contains('New-BootstrapPrivateDirectory $productDirectory $serviceSid -MachineProtected')) {
+        throw 'Bootstrap provenance must be created only after archive hash verification and extraction, then passed to the installer.'
+    }
+    $proofObjectStart = $bootstrapSource.IndexOf('$provenance = [ordered]@{', [StringComparison]::Ordinal)
+    $proofObjectEnd = $bootstrapSource.IndexOf('}', $proofObjectStart, [StringComparison]::Ordinal)
+    if ($proofObjectStart -lt 0 -or $proofObjectEnd -lt $proofObjectStart -or $bootstrapSource.Substring($proofObjectStart, $proofObjectEnd - $proofObjectStart).Contains('EnrollmentTicket')) {
+        throw 'Bootstrap proof must not contain the enrollment ticket.'
+    }
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $testServiceSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+    if (-not (Test-Path -LiteralPath $env:ProgramFiles -PathType Container)) { New-Item -ItemType Directory -Path $env:ProgramFiles | Out-Null }
+    $proofProduct = Join-Path $env:ProgramFiles 'KamenRaider'
+    New-PrivateInstallDirectory -Path $proofProduct -ServiceSid $testServiceSid -ReadOnly | Out-Null
+    $proofStageId = [Guid]::NewGuid().ToString('N')
+    $proofId = [Guid]::NewGuid().ToString('N')
+    $proofStage = Join-Path $proofProduct ('.agent-bootstrap-' + $proofStageId)
+    New-PrivateInstallDirectory -Path $proofStage -ServiceSid $testServiceSid -ReadOnly | Out-Null
+    $proofPackage = Join-Path $proofStage 'package'
+    $proofAgent = Join-Path $proofPackage 'Agent'
+    New-Item -ItemType Directory -Path $proofAgent | Out-Null
+    $proofAgentFile = Join-Path $proofAgent 'Agent.exe'
+    [IO.File]::WriteAllText($proofAgentFile, 'hash-verified agent bytes')
+    $proofArchive = Join-Path $proofStage 'agent.zip'
+    [IO.Compression.ZipFile]::CreateFromDirectory($proofPackage, $proofArchive)
+    $proofIssued = [DateTimeOffset]::UtcNow
+    $proofDocument = [ordered]@{
+        schemaVersion = 1; proofId = $proofId; stageId = $proofStageId
+        issuedUtcTicks = $proofIssued.UtcDateTime.Ticks
+        expiresUtcTicks = $proofIssued.AddMinutes(15).UtcDateTime.Ticks
+        archiveFile = 'agent.zip'; packageDirectory = 'package'
+        packageSha256 = (Get-FileHash -LiteralPath $proofArchive -Algorithm SHA256).Hash.ToUpperInvariant()
+    }
+    $proofPath = Join-Path $proofStage 'bootstrap-provenance.json'
+    [IO.File]::WriteAllText($proofPath, (ConvertTo-Json -InputObject $proofDocument -Depth 3 -Compress), [Text.UTF8Encoding]::new($false))
+    $parentAssertion = (Get-Item Function:\Assert-TrustedInstallParent).ScriptBlock
+    Set-Item Function:\Assert-TrustedInstallParent -Value { param([string]$Path,[Security.Principal.SecurityIdentifier]$ServiceSid,[switch]$MachineProtected) }
+    try {
+        $acceptedProofId = Test-AgentBootstrapProvenance -Path $proofPath -PackageRoot $proofPackage -ProductDirectory $proofProduct -ServiceSid $testServiceSid
+        if ($acceptedProofId -cne $proofId) { throw 'Fresh stage proof did not bind to its exact archive and extracted tree.' }
+        $originalPackageBytes = [IO.File]::ReadAllText($proofAgentFile)
+        [IO.File]::WriteAllText($proofAgentFile, 'substituted extracted bytes')
+        $substitutionRejected = $false
+        try { Test-AgentBootstrapProvenance -Path $proofPath -PackageRoot $proofPackage -ProductDirectory $proofProduct -ServiceSid $testServiceSid | Out-Null } catch { $substitutionRejected = $_.Exception.Message -like '*does not exactly match*' }
+        [IO.File]::WriteAllText($proofAgentFile, $originalPackageBytes)
+        if (-not $substitutionRejected) { throw 'A changed extracted package tree must not inherit the verified archive proof.' }
+        $wrongRootRejected = $false
+        try { Test-AgentBootstrapProvenance -Path $proofPath -PackageRoot $package -ProductDirectory $proofProduct -ServiceSid $testServiceSid | Out-Null } catch { $wrongRootRejected = $true }
+        if (-not $wrongRootRejected) { throw 'A proof must not be reused with a different PackageRoot.' }
+        $expiredProof = [ordered]@{}
+        foreach ($proofField in $proofDocument.Keys) { $expiredProof[$proofField] = $proofDocument[$proofField] }
+        $expiredProof.expiresUtcTicks = $proofIssued.AddMinutes(-1).UtcDateTime.Ticks
+        [IO.File]::WriteAllText($proofPath, (ConvertTo-Json -InputObject $expiredProof -Depth 3 -Compress), [Text.UTF8Encoding]::new($false))
+        $expiredRejected = $false
+        try { Test-AgentBootstrapProvenance -Path $proofPath -PackageRoot $proofPackage -ProductDirectory $proofProduct -ServiceSid $testServiceSid | Out-Null } catch { $expiredRejected = $_.Exception.Message -like '*expired*' }
+        if (-not $expiredRejected) { throw 'Expired bootstrap provenance must be rejected.' }
+        $reusedProof = [ordered]@{}
+        foreach ($proofField in $proofDocument.Keys) { $reusedProof[$proofField] = $proofDocument[$proofField] }
+        [IO.File]::WriteAllText($proofPath, (ConvertTo-Json -InputObject $reusedProof -Depth 3 -Compress), [Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllText((Join-Path $proofStage ('.bootstrap-provenance-' + $proofId + '.consumed')), '')
+        $reuseRejected = $false
+        try { Test-AgentBootstrapProvenance -Path $proofPath -PackageRoot $proofPackage -ProductDirectory $proofProduct -ServiceSid $testServiceSid | Out-Null } catch { $reuseRejected = $_.Exception.Message -like '*already been consumed*' }
+        if (-not $reuseRejected) { throw 'Consumed bootstrap provenance must not be replayed.' }
+    } finally { Set-Item Function:\Assert-TrustedInstallParent -Value $parentAssertion }
+    $agentFenceServiceSid = Get-ServiceSid 'KamenRaider Agent'
+    foreach ($fenceSecurityCase in @(
+        @{ Security = (New-AgentMaintenanceFenceSecurity -ServiceSid $agentFenceServiceSid -Directory); Directory = $true },
+        @{ Security = (New-AgentMaintenanceFenceSecurity -ServiceSid $agentFenceServiceSid); Directory = $false }
+    )) {
+        $security = $fenceSecurityCase.Security
+        $expectedInheritance = if ($fenceSecurityCase.Directory) { [Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit' } else { [Security.AccessControl.InheritanceFlags]::None }
+        $rules = @($security.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
+        $expectedIds = @('S-1-5-18', 'S-1-5-32-544', $agentFenceServiceSid.Value)
+        if (-not $security.AreAccessRulesProtected -or $security.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne 'S-1-5-32-544' -or $rules.Count -ne 3) {
+            throw 'Fresh fence ACL descriptor must be protected and owned by Administrators with exactly three principals.'
+        }
+        foreach ($rule in $rules) {
+            $expectedRights = if ($rule.IdentityReference.Value -eq $agentFenceServiceSid.Value) { [Security.AccessControl.FileSystemRights]::ReadAndExecute -bor [Security.AccessControl.FileSystemRights]::Synchronize } else { [Security.AccessControl.FileSystemRights]::FullControl }
+            if ($rule.IdentityReference.Value -notin $expectedIds -or $rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow -or
+                $rule.InheritanceFlags -ne $expectedInheritance -or $rule.PropagationFlags -ne [Security.AccessControl.PropagationFlags]::None -or
+                $rule.IsInherited -or $rule.FileSystemRights -ne $expectedRights) {
+                throw 'Fresh fence ACL descriptor differs from the Agent reader policy.'
+            }
+        }
+        if ($expectedIds -contains $testServiceSid.Value -and $agentFenceServiceSid.Value -ne $testServiceSid.Value) { throw 'Fresh fence descriptor unexpectedly grants the interactive user SID.' }
+    }
     if (-not $installerSource.Contains('[string]$EnrollmentTicket') -or -not $installerSource.Contains('-EnrollmentTicket $EnrollmentTicket')) { throw 'Agent installer must pass the issued ticket to the service installer without putting it in appsettings.' }
     if (-not $installerSource.Contains('Get-AgentInstallMode') -or -not $installerSource.Contains('Invoke-AgentEnrollmentRepair')) { throw 'An existing protected Agent installation must have a ticket-renewal recovery path.' }
     $privateInstallFilesSource = [IO.File]::ReadAllText((Join-Path $package 'PrivateInstallFiles.ps1'))
@@ -193,7 +309,7 @@ try {
     if ($servicePlan.Startup -ne 'auto' -or -not $servicePlan.StartAfterInstall) { throw 'Service Plan did not describe automatic start.' }
 
     if (Test-Path -LiteralPath $root) {
-        $unexpected = @(Get-ChildItem -LiteralPath $root -Force -Recurse | Where-Object { $_.FullName -notlike ($root + '\package*') })
+        $unexpected = @(Get-ChildItem -LiteralPath $root -Force -Recurse | Where-Object { $_.FullName -notlike ($root + '\package*') -and $_.FullName -notlike ($root + '\ProgramFiles*') })
         if ($unexpected.Count) { throw 'Install plan created unexpected files outside its test fixture.' }
     }
     # Keep real tree/link checks, but substitute ACL reads for external ancestors

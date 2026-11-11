@@ -273,6 +273,191 @@ function Get-AgentInstallMode {
  if($ServiceExists -and $InstallDirectoryExists -and $DataDirectoryExists -and $GuardServiceExists){return 'repair-enrollment'}
  throw 'Agent installation is incomplete or inconsistent; refusing to overwrite service, binaries or identity data.'
 }
+function Get-AgentBootstrapTreeInventory {
+ param([Parameter(Mandatory)][string]$Path)
+ $root=[IO.Path]::GetFullPath($Path).TrimEnd([IO.Path]::DirectorySeparatorChar)+[IO.Path]::DirectorySeparatorChar
+ $rootItem=Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+ if(-not $rootItem.PSIsContainer -or ($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint)){throw 'Bootstrap package tree must be a real directory.'}
+ $pending=[Collections.Generic.Stack[string]]::new()
+ $pending.Push($rootItem.FullName)
+ $records=[Collections.Generic.List[string]]::new()
+ while($pending.Count -gt 0){
+  $directory=$pending.Pop()
+  foreach($item in @(Get-ChildItem -LiteralPath $directory -Force -ErrorAction Stop)){
+   if($item.Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'Bootstrap package tree must not contain reparse points.'}
+   $relative=$item.FullName.Substring($root.Length).Replace('\','/')
+   if($item.PSIsContainer){$records.Add("D|$relative");$pending.Push($item.FullName);continue}
+   if((Get-InstallFileLinkCount $item.FullName) -ne 1){throw 'Bootstrap package files must have exactly one hard link.'}
+   $hash=(Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash.ToUpperInvariant()
+   $records.Add("F|$relative|$($item.Length)|$hash")
+  }
+ }
+ $inventory=$records.ToArray()
+ [Array]::Sort($inventory,[StringComparer]::Ordinal)
+ return ,$inventory
+}
+function Test-AgentBootstrapProvenance {
+ param(
+  [Parameter(Mandatory)][string]$Path,
+  [Parameter(Mandatory)][string]$PackageRoot,
+  [Parameter(Mandatory)][string]$ProductDirectory,
+  [Parameter(Mandatory)][Security.Principal.SecurityIdentifier]$ServiceSid
+ )
+ if(-not (Test-Path -LiteralPath $Path -PathType Leaf)){throw 'Verified bootstrap provenance is missing.'}
+ $proofPath=[IO.Path]::GetFullPath($Path)
+ $proofItem=Get-Item -LiteralPath $proofPath -Force
+ if($proofItem.Attributes -band [IO.FileAttributes]::ReparsePoint -or (Get-InstallFileLinkCount $proofPath) -ne 1 -or $proofItem.Length -gt 4096){throw 'Verified bootstrap provenance file is unsafe.'}
+ $proof=[IO.File]::ReadAllText($proofPath) | ConvertFrom-Json -ErrorAction Stop
+ $expectedFields=@('schemaVersion','proofId','stageId','issuedUtcTicks','expiresUtcTicks','archiveFile','packageDirectory','packageSha256')
+ $actualFields=@($proof.PSObject.Properties | ForEach-Object {$_.Name})
+ if($proof -isnot [pscustomobject] -or $actualFields.Count -ne $expectedFields.Count -or @($expectedFields | Where-Object {$_ -cnotin $actualFields}).Count -ne 0 -or
+    $proof.schemaVersion -ne 1 -or $proof.proofId -cnotmatch '\A[0-9a-f]{32}\z' -or $proof.stageId -cnotmatch '\A[0-9a-f]{32}\z' -or
+    $proof.archiveFile -cne 'agent.zip' -or $proof.packageDirectory -cne 'package' -or $proof.packageSha256 -cnotmatch '\A[0-9A-F]{64}\z'){
+  throw 'Verified bootstrap provenance has an unsupported shape.'
+ }
+ $product=[IO.Path]::GetFullPath($ProductDirectory).TrimEnd([IO.Path]::DirectorySeparatorChar)
+ $stage=Join-Path $product ('.agent-bootstrap-'+$proof.stageId)
+ $expectedProof=Join-Path $stage 'bootstrap-provenance.json'
+ if(-not [string]::Equals($proofPath,$expectedProof,[StringComparison]::OrdinalIgnoreCase) -or
+    -not [string]::Equals([IO.Path]::GetFullPath($PackageRoot),(Join-Path $stage 'package'),[StringComparison]::OrdinalIgnoreCase)){
+  throw 'Verified bootstrap provenance does not name this fixed package stage.'
+ }
+ $consumedPath=Join-Path $stage ('.bootstrap-provenance-'+$proof.proofId+'.consumed')
+ if(Test-Path -LiteralPath $consumedPath){throw 'Verified bootstrap provenance has already been consumed.'}
+ try{
+  $issued=[DateTimeOffset]::new([long]$proof.issuedUtcTicks,[TimeSpan]::Zero)
+  $expires=[DateTimeOffset]::new([long]$proof.expiresUtcTicks,[TimeSpan]::Zero)
+ }catch{throw 'Verified bootstrap provenance has an invalid lifetime.'}
+ $now=[DateTimeOffset]::UtcNow
+ $lifetime=($expires-$issued).TotalMinutes
+ if($lifetime -le 0 -or $lifetime -gt 15 -or $issued -gt $now.AddMinutes(1) -or $expires -lt $now){throw 'Verified bootstrap provenance is expired or outside its validity window.'}
+
+ Assert-TrustedInstallParent $stage -ServiceSid $ServiceSid
+ Assert-TrustedInstallFile $proofPath -ServiceSid $ServiceSid
+ $archive=Join-Path $stage $proof.archiveFile
+ Assert-TrustedInstallFile $archive -ServiceSid $ServiceSid
+ $archiveHash=(Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToUpperInvariant()
+ if($archiveHash -cne $proof.packageSha256){throw 'Verified bootstrap archive hash no longer matches its proof.'}
+ $package=[IO.Path]::GetFullPath((Join-Path $stage $proof.packageDirectory))
+ Assert-TrustedPublishTree $package -ServiceSid $ServiceSid
+
+ $verifyRoot=Join-Path $stage ('.verify-'+$proof.proofId)
+ if(Test-Path -LiteralPath $verifyRoot){throw 'Verified bootstrap re-extraction path already exists.'}
+ try{
+  New-Item -ItemType Directory -Path $verifyRoot -ErrorAction Stop | Out-Null
+  Expand-Archive -LiteralPath $archive -DestinationPath $verifyRoot -ErrorAction Stop
+  Assert-TrustedPublishTree $verifyRoot -ServiceSid $ServiceSid
+  $actualInventory=Get-AgentBootstrapTreeInventory $package
+  $archiveInventory=Get-AgentBootstrapTreeInventory $verifyRoot
+  if(-not [string]::Equals(($actualInventory -join "`n"),($archiveInventory -join "`n"),[StringComparison]::Ordinal)){
+   throw 'Extracted package tree does not exactly match the re-verified archive.'
+  }
+ }finally{
+  if(Test-Path -LiteralPath $verifyRoot){
+   $resolved=[IO.Path]::GetFullPath($verifyRoot)
+   if(-not [string]::Equals([IO.Path]::GetDirectoryName($resolved),[IO.Path]::GetFullPath($stage),[StringComparison]::OrdinalIgnoreCase) -or [IO.Path]::GetFileName($resolved) -cne ('.verify-'+$proof.proofId)){throw 'Unsafe bootstrap verification cleanup path.'}
+   Remove-Item -LiteralPath $resolved -Recurse -Force
+  }
+ }
+ return [string]$proof.proofId
+}
+function Consume-AgentBootstrapProvenance {
+ param([Parameter(Mandatory)][string]$Path,[Parameter(Mandatory)][string]$ProofId)
+ if($ProofId -cnotmatch '\A[0-9a-f]{32}\z'){throw 'Bootstrap proof identifier is invalid.'}
+ $consumedPath=Join-Path ([IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($Path))) ('.bootstrap-provenance-'+$ProofId+'.consumed')
+ $stream=[IO.File]::Open($consumedPath,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+ try{$stream.Flush($true)}finally{$stream.Dispose()}
+}
+function New-AgentMaintenanceFenceSecurity {
+ param([Parameter(Mandatory)][Security.Principal.SecurityIdentifier]$ServiceSid,[switch]$Directory)
+ $security=if($Directory){[Security.AccessControl.DirectorySecurity]::new()}else{[Security.AccessControl.FileSecurity]::new()}
+ $security.SetAccessRuleProtection($true,$false)
+ $systemSid=[Security.Principal.SecurityIdentifier]::new('S-1-5-18')
+ $administratorsSid=[Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
+ $security.SetOwner($administratorsSid)
+ $inheritance=if($Directory){[Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit'}else{[Security.AccessControl.InheritanceFlags]::None}
+ foreach($sid in @($systemSid,$administratorsSid,$ServiceSid)){
+  $rights=if($sid -eq $ServiceSid){[Security.AccessControl.FileSystemRights]::ReadAndExecute -bor [Security.AccessControl.FileSystemRights]::Synchronize}else{[Security.AccessControl.FileSystemRights]::FullControl}
+  $rule=[Security.AccessControl.FileSystemAccessRule]::new($sid,$rights,$inheritance,[Security.AccessControl.PropagationFlags]::None,[Security.AccessControl.AccessControlType]::Allow)
+  $security.AddAccessRule($rule)
+ }
+ return $security
+}
+function Test-AgentMaintenanceFenceSecurity {
+ param([Parameter(Mandatory)][string]$Path,[Parameter(Mandatory)][Security.Principal.SecurityIdentifier]$ServiceSid,[switch]$Directory)
+ $security=if($Directory){Get-Acl -LiteralPath $Path}else{Get-Acl -LiteralPath $Path}
+ $systemSid=[Security.Principal.SecurityIdentifier]::new('S-1-5-18')
+ $administratorsSid=[Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
+ $owner=$security.GetOwner([Security.Principal.SecurityIdentifier])
+ if(-not $security.AreAccessRulesProtected -or ($owner -ne $systemSid -and $owner -ne $administratorsSid)){return $false}
+ $inheritance=if($Directory){[Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit'}else{[Security.AccessControl.InheritanceFlags]::None}
+ $rules=@($security.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier]))
+ if($rules.Count -ne 3){return $false}
+ $identities=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+ foreach($rule in $rules){
+  if($rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow -or $rule.IsInherited -or
+     $rule.PropagationFlags -ne [Security.AccessControl.PropagationFlags]::None -or $rule.InheritanceFlags -ne $inheritance -or
+     -not $identities.Add($rule.IdentityReference.Value)){return $false}
+  $expected=if($rule.IdentityReference.Value -eq $systemSid.Value -or $rule.IdentityReference.Value -eq $administratorsSid.Value){[Security.AccessControl.FileSystemRights]::FullControl}elseif($rule.IdentityReference.Value -eq $ServiceSid.Value){[Security.AccessControl.FileSystemRights]::ReadAndExecute -bor [Security.AccessControl.FileSystemRights]::Synchronize}else{$null}
+  if($null -eq $expected -or $rule.FileSystemRights -ne $expected){return $false}
+ }
+ return $identities.SetEquals(@($systemSid.Value,$administratorsSid.Value,$ServiceSid.Value))
+}
+function Initialize-FreshAgentMaintenanceFence {
+ param([Parameter(Mandatory)][string]$DirectoryPath,[Parameter(Mandatory)][Security.Principal.SecurityIdentifier]$ServiceSid)
+ $directory=[IO.Path]::GetFullPath($DirectoryPath)
+ $parent=[IO.Path]::GetDirectoryName($directory)
+ if(-not $parent -or -not (Test-Path -LiteralPath $parent -PathType Container) -or (Test-Path -LiteralPath $directory)){throw 'Fresh Agent fence location is not absent beneath an existing protected parent.'}
+ Assert-TrustedInstallParent $parent -ServiceSid $ServiceSid -MachineProtected
+ Initialize-PrivateDirectoryNativeType
+ $directorySecurity=New-AgentMaintenanceFenceSecurity -ServiceSid $ServiceSid -Directory
+ [KamenRaider.Install.NativeDirectories]::CreateDirectoryWithSecurity($directory,$directorySecurity.GetSecurityDescriptorBinaryForm())
+ if(-not (Test-AgentMaintenanceFenceSecurity -Path $directory -ServiceSid $ServiceSid -Directory)){throw 'Fresh Agent fence directory security could not be verified.'}
+ $operationId='fresh-'+[Guid]::NewGuid().ToString('N')
+ $document=[ordered]@{schemaVersion=1;state='clear';operationId=$operationId;chainId=$operationId;headOperationId=$operationId;generation=1;phase='freshInstall'}
+ $bytes=[Text.UTF8Encoding]::new($false).GetBytes((ConvertTo-Json -InputObject $document -Depth 3 -Compress))
+ $marker=Join-Path $directory 'maintenance-fence.json'
+ $temporary=Join-Path $directory ('.maintenance-fence-'+[Guid]::NewGuid().ToString('N')+'.tmp')
+ try{
+  $stream=[IO.File]::Open($temporary,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+  $stream.Dispose()
+  Set-Acl -LiteralPath $temporary -AclObject (New-AgentMaintenanceFenceSecurity -ServiceSid $ServiceSid)
+  $stream=[IO.File]::Open($temporary,[IO.FileMode]::Open,[IO.FileAccess]::Write,[IO.FileShare]::None)
+  try{$stream.Write($bytes,0,$bytes.Length);$stream.Flush($true)}finally{$stream.Dispose()}
+  if(-not (Test-AgentMaintenanceFenceSecurity -Path $temporary -ServiceSid $ServiceSid) -or (Get-InstallFileLinkCount $temporary) -ne 1){throw 'Fresh Agent fence file security could not be verified.'}
+  [IO.File]::Move($temporary,$marker)
+  if(-not (Test-AgentMaintenanceFenceSecurity -Path $marker -ServiceSid $ServiceSid) -or (Get-InstallFileLinkCount $marker) -ne 1){throw 'Fresh Agent fence marker could not be verified after publication.'}
+  return $marker
+ }finally{if(Test-Path -LiteralPath $temporary){Remove-Item -LiteralPath $temporary -Force}}
+}
+function Set-FreshAgentMaintenanceFenceHeld {
+ param([Parameter(Mandatory)][string]$DirectoryPath,[Parameter(Mandatory)][Security.Principal.SecurityIdentifier]$ServiceSid)
+ $directory=[IO.Path]::GetFullPath($DirectoryPath)
+ $marker=Join-Path $directory 'maintenance-fence.json'
+ if(-not (Test-Path -LiteralPath $marker -PathType Leaf) -or -not (Test-AgentMaintenanceFenceSecurity -Path $directory -ServiceSid $ServiceSid -Directory) -or
+    -not (Test-AgentMaintenanceFenceSecurity -Path $marker -ServiceSid $ServiceSid) -or (Get-InstallFileLinkCount $marker) -ne 1){
+  throw 'Existing fresh Agent maintenance fence is unsafe; refusing to rewrite it.'
+ }
+ $document=[IO.File]::ReadAllText($marker) | ConvertFrom-Json -ErrorAction Stop
+ if($document.schemaVersion -ne 1 -or $document.state -cne 'clear' -or $document.phase -cne 'freshInstall' -or
+    $document.operationId -cnotmatch '\Afresh-[0-9a-f]{32}\z' -or $document.chainId -cne $document.operationId -or
+    $document.headOperationId -cne $document.operationId -or $document.generation -ne 1){
+  throw 'Existing fence is not the fresh-install marker created by this installer.'
+ }
+ $document.state='held'
+ $bytes=[Text.UTF8Encoding]::new($false).GetBytes((ConvertTo-Json -InputObject $document -Depth 3 -Compress))
+ $temporary=Join-Path $directory ('.maintenance-fence-'+[Guid]::NewGuid().ToString('N')+'.tmp')
+ try{
+  $stream=[IO.File]::Open($temporary,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+  $stream.Dispose()
+  Set-Acl -LiteralPath $temporary -AclObject (New-AgentMaintenanceFenceSecurity -ServiceSid $ServiceSid)
+  $stream=[IO.File]::Open($temporary,[IO.FileMode]::Open,[IO.FileAccess]::Write,[IO.FileShare]::None)
+  try{$stream.Write($bytes,0,$bytes.Length);$stream.Flush($true)}finally{$stream.Dispose()}
+  if(-not (Test-AgentMaintenanceFenceSecurity -Path $temporary -ServiceSid $ServiceSid) -or (Get-InstallFileLinkCount $temporary) -ne 1){throw 'Held fence temporary file security could not be verified.'}
+  [IO.File]::Replace($temporary,$marker,$null,$false)
+  if(-not (Test-AgentMaintenanceFenceSecurity -Path $marker -ServiceSid $ServiceSid) -or (Get-InstallFileLinkCount $marker) -ne 1){throw 'Held fresh-install fence could not be verified after publication.'}
+ }finally{if(Test-Path -LiteralPath $temporary){Remove-Item -LiteralPath $temporary -Force}}
+}
 function Get-TrustedInstallSids {
  param([Security.Principal.SecurityIdentifier[]]$AdditionalSid=@())
  $known=@(
@@ -281,6 +466,16 @@ function Get-TrustedInstallSids {
   [Security.Principal.SecurityIdentifier]::new('S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'),
   [Security.Principal.SecurityIdentifier]::new('S-1-3-0'),
   [Security.Principal.WindowsIdentity]::GetCurrent().User
+ )
+ return @($known + $AdditionalSid | Sort-Object -Property Value -Unique)
+}
+function Get-TrustedMachineInstallSids {
+ param([Security.Principal.SecurityIdentifier[]]$AdditionalSid=@())
+ $known=@(
+  [Security.Principal.SecurityIdentifier]::new('S-1-5-18'),
+  [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'),
+  [Security.Principal.SecurityIdentifier]::new('S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'),
+  [Security.Principal.SecurityIdentifier]::new('S-1-3-0')
  )
  return @($known + $AdditionalSid | Sort-Object -Property Value -Unique)
 }
@@ -322,7 +517,7 @@ function Test-TrustedSystemRootAcl {
  $trustedInstallerSid='S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'
  if($Acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $trustedInstallerSid){return $false}
  $authenticatedUsersSid='S-1-5-11'
- $trusted=@(Get-TrustedInstallSids | ForEach-Object {$_.Value})
+ $trusted=@(Get-TrustedMachineInstallSids | ForEach-Object {$_.Value})
  foreach($rule in $Acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])){
   if($rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow){continue}
   if($rule.IdentityReference.Value -in $trusted){continue}
@@ -358,10 +553,10 @@ function Test-TrustedSystemRootAcl {
  return $createDirectory.Count -eq 1 -and $childInheritance.Count -eq 1
 }
 function Assert-TrustedInstallParent {
- param([Parameter(Mandatory)][string]$Path,[Security.Principal.SecurityIdentifier]$ServiceSid)
+ param([Parameter(Mandatory)][string]$Path,[Security.Principal.SecurityIdentifier]$ServiceSid,[switch]$MachineProtected)
  $full=[IO.Path]::GetFullPath($Path)
  if($full.StartsWith('\\')){throw 'Network installation paths are not supported.'}
- $trusted=Get-TrustedInstallSids @($ServiceSid)
+ $trusted=if($MachineProtected){Get-TrustedMachineInstallSids @($ServiceSid)}else{Get-TrustedInstallSids @($ServiceSid)}
  $programData=[IO.Path]::GetFullPath($env:ProgramData).TrimEnd([IO.Path]::DirectorySeparatorChar)
  $systemRoot=[IO.Path]::GetPathRoot($full).TrimEnd([IO.Path]::DirectorySeparatorChar)
  $current=$full
@@ -407,16 +602,16 @@ namespace KamenRaider.Install {
  } finally {$stream.Dispose()}
 }
 function Assert-TrustedInstallFile {
- param([Parameter(Mandatory)][string]$Path,[Security.Principal.SecurityIdentifier]$ServiceSid,[switch]$Private)
- Assert-TrustedInstallParent $Path -ServiceSid $ServiceSid
+ param([Parameter(Mandatory)][string]$Path,[Security.Principal.SecurityIdentifier]$ServiceSid,[switch]$Private,[switch]$MachineProtected)
+ Assert-TrustedInstallParent $Path -ServiceSid $ServiceSid -MachineProtected:$MachineProtected
  $file=Get-Item -LiteralPath $Path -Force
  if($file.PSIsContainer -or ($file.Attributes -band [IO.FileAttributes]::ReparsePoint)){throw 'Installation file must be a regular file, not a reparse point.'}
  if((Get-InstallFileLinkCount $Path) -ne 1){throw 'Installation file must not have multiple hard links.'}
- $trusted=Get-TrustedInstallSids @($ServiceSid)
+ $trusted=if($MachineProtected){Get-TrustedMachineInstallSids @($ServiceSid)}else{Get-TrustedInstallSids @($ServiceSid)}
  if(-not (Test-TrustedInstallAcl (Get-Acl -LiteralPath $Path) $trusted -Private:$Private)){throw 'Installation file has untrusted access or ownership.'}
 }
 function Assert-TrustedPublishTree {
- param([Parameter(Mandatory)][string]$Path,[Security.Principal.SecurityIdentifier]$ServiceSid,[switch]$Private)
+ param([Parameter(Mandatory)][string]$Path,[Security.Principal.SecurityIdentifier]$ServiceSid,[switch]$Private,[switch]$MachineProtected)
  # Walk one directory at a time so a junction is rejected before traversal.
  $root=Get-Item -LiteralPath $Path -Force -ErrorAction Stop
  if(-not $root.PSIsContainer -or ($root.Attributes -band [IO.FileAttributes]::ReparsePoint)){throw 'Publish directory must be a real directory.'}
@@ -424,13 +619,15 @@ function Assert-TrustedPublishTree {
  $pending.Push($root.FullName)
  while($pending.Count -gt 0){
   $directory=$pending.Pop()
-  Assert-TrustedInstallParent $directory -ServiceSid $ServiceSid
-  if($Private -and -not (Test-TrustedInstallAcl (Get-Acl -LiteralPath $directory) (Get-TrustedInstallSids @($ServiceSid)) -IncludeInheritedChildRules -Private)){throw 'Private tree directory has untrusted access or ownership.'}
+  Assert-TrustedInstallParent $directory -ServiceSid $ServiceSid -MachineProtected:$MachineProtected
+  $trusted=if($MachineProtected){Get-TrustedMachineInstallSids @($ServiceSid)}else{Get-TrustedInstallSids @($ServiceSid)}
+  if($Private -and -not (Test-TrustedInstallAcl (Get-Acl -LiteralPath $directory) $trusted -IncludeInheritedChildRules -Private)){throw 'Private tree directory has untrusted access or ownership.'}
+  if($MachineProtected -and -not (Test-TrustedInstallAcl (Get-Acl -LiteralPath $directory) $trusted -IncludeInheritedChildRules)){throw 'Machine-protected Agent tree directory has untrusted access or ownership.'}
   foreach($item in @(Get-ChildItem -LiteralPath $directory -Force -ErrorAction Stop)){
    if($item.Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'Publish tree must not contain reparse points.'}
    if($item.PSIsContainer){$pending.Push($item.FullName);continue}
    if((Get-InstallFileLinkCount $item.FullName) -ne 1){throw 'Publish tree files must not have multiple hard links.'}
-   Assert-TrustedInstallFile $item.FullName -ServiceSid $ServiceSid -Private:$Private
+   Assert-TrustedInstallFile $item.FullName -ServiceSid $ServiceSid -Private:$Private -MachineProtected:$MachineProtected
   }
  }
 }
@@ -574,6 +771,31 @@ function New-PrivateInstallSecurity {
   $acl.AddAccessRule($rule)
  }
  return $acl
+}
+function New-PrivateAgentBinarySecurity {
+ param([Parameter(Mandatory)][Security.Principal.SecurityIdentifier]$ServiceSid,[switch]$Directory)
+ $acl=if($Directory){[Security.AccessControl.DirectorySecurity]::new()}else{[Security.AccessControl.FileSecurity]::new()}
+ $acl.SetAccessRuleProtection($true,$false)
+ $systemSid=[Security.Principal.SecurityIdentifier]::new('S-1-5-18')
+ $adminSid=[Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
+ $acl.SetOwner($adminSid)
+ $inheritance=if($Directory){[Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit'}else{[Security.AccessControl.InheritanceFlags]::None}
+ foreach($sid in @($systemSid,$adminSid,$ServiceSid)){
+  $rights=if($sid -eq $ServiceSid){[Security.AccessControl.FileSystemRights]::ReadAndExecute}else{[Security.AccessControl.FileSystemRights]::FullControl}
+  $rule=[Security.AccessControl.FileSystemAccessRule]::new($sid,$rights,$inheritance,[Security.AccessControl.PropagationFlags]::None,[Security.AccessControl.AccessControlType]::Allow)
+  $acl.AddAccessRule($rule)
+ }
+ return $acl
+}
+function Set-PrivateAgentBinaryAcl {
+ param([Parameter(Mandatory)][string]$Path,[Parameter(Mandatory)][Security.Principal.SecurityIdentifier]$ServiceSid,[switch]$Directory)
+ $acl=New-PrivateAgentBinarySecurity -ServiceSid $ServiceSid -Directory:$Directory
+ Set-Acl -LiteralPath $Path -AclObject $acl
+ $actual=Get-Acl -LiteralPath $Path
+ $trusted=Get-TrustedMachineInstallSids @($ServiceSid)
+ if(-not $actual.AreAccessRulesProtected -or -not (Test-TrustedInstallAcl $actual $trusted -IncludeInheritedChildRules)){
+  throw 'Machine-protected Agent binary ACL could not be verified.'
+ }
 }
 function Set-PrivateInstallAcl {
  param([string]$Path,[Security.Principal.SecurityIdentifier]$ServiceSid,[switch]$Directory,[switch]$ReadOnly,[switch]$AllowDelete)
@@ -765,18 +987,19 @@ namespace KamenRaider.Install {
  }
 }
 function New-PrivateInstallDirectory {
- param([Parameter(Mandatory)][string]$Path,[Parameter(Mandatory)][Security.Principal.SecurityIdentifier]$ServiceSid,[switch]$ReadOnly)
+ param([Parameter(Mandatory)][string]$Path,[Parameter(Mandatory)][Security.Principal.SecurityIdentifier]$ServiceSid,[switch]$ReadOnly,[switch]$MachineProtected)
+ if($MachineProtected -and -not $ReadOnly){throw 'Machine-protected Agent binary directories must remain read-only to the service.'}
  if(-not [IO.Path]::IsPathRooted($Path)){throw 'Private directory path must be absolute.'}
  $parent=[IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($Path))
  if(-not (Test-Path -LiteralPath $parent -PathType Container)){throw 'Private directory parent must already exist.'}
- $acl=New-PrivateInstallSecurity $ServiceSid -Directory -ReadOnly:$ReadOnly
+ $acl=if($MachineProtected){New-PrivateAgentBinarySecurity -ServiceSid $ServiceSid -Directory}else{New-PrivateInstallSecurity $ServiceSid -Directory -ReadOnly:$ReadOnly}
  Initialize-PrivateDirectoryNativeType
  [KamenRaider.Install.NativeDirectories]::CreateDirectoryWithSecurity([IO.Path]::GetFullPath($Path),$acl.GetSecurityDescriptorBinaryForm())
  $item=Get-Item -LiteralPath $Path -Force
  if(-not $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)){throw 'Private directory must be a real directory.'}
  $actual=Get-Acl -LiteralPath $Path
- $trusted=Get-TrustedInstallSids @($ServiceSid)
- $secure=if($ReadOnly){Test-TrustedInstallAcl $actual $trusted -IncludeInheritedChildRules}else{Test-TrustedInstallAcl $actual $trusted -IncludeInheritedChildRules -Private -RequireModifySid $ServiceSid}
+ $trusted=if($MachineProtected){Get-TrustedMachineInstallSids @($ServiceSid)}else{Get-TrustedInstallSids @($ServiceSid)}
+ $secure=if($MachineProtected){Test-TrustedInstallAcl $actual $trusted -IncludeInheritedChildRules}elseif($ReadOnly){Test-TrustedInstallAcl $actual $trusted -IncludeInheritedChildRules}else{Test-TrustedInstallAcl $actual $trusted -IncludeInheritedChildRules -Private -RequireModifySid $ServiceSid}
  if(-not $actual.AreAccessRulesProtected -or -not $secure){throw 'Private directory was already present with unsafe access, ownership or service rights.'}
  return $item
 }
