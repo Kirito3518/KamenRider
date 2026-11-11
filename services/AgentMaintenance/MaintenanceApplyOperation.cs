@@ -16,6 +16,7 @@ public interface IMaintenanceApplyFileSystem
     bool DirectoryExists(string path);
     void PrepareTargetInstallTree(string extractedTree, string destination, PackageInventory expected);
     void ValidateTargetInstallTree(string path, PackageInventory expected);
+    void EnsureOwnedInstallTree(string path);
     void VerifyBackupTree(string path, MaintenanceBackupResult backup);
     void PrepareBackupInstallTree(string backupPath, string destination, MaintenanceBackupResult backup);
     void MoveDirectory(string source, string destination);
@@ -121,32 +122,49 @@ public sealed class MaintenanceApplyOperation(
 
         if (operation.Phase == "sourceMoved")
         {
-            var backup = backupOperation.VerifyPublishedBackup(operationId);
-            VerifyBackupBinding(operation, backup);
-            authorization.VerifyHeldAndQuiesced(operationId);
-            if (fileSystem.DirectoryExists(installDirectory))
+            try
             {
-                PackageVerifier.ValidateExtracted(installDirectory, expectedTarget);
-                fileSystem.ValidateTargetInstallTree(installDirectory, expectedTarget);
+                var backup = backupOperation.VerifyPublishedBackup(operationId);
+                VerifyBackupBinding(operation, backup);
+                authorization.VerifyHeldAndQuiesced(operationId);
+                if (fileSystem.DirectoryExists(installDirectory))
+                {
+                    PackageVerifier.ValidateExtracted(installDirectory, expectedTarget);
+                    fileSystem.ValidateTargetInstallTree(installDirectory, expectedTarget);
+                }
+                else
+                {
+                    if (!fileSystem.DirectoryExists(targetStage))
+                        throw new InvalidDataException("The verified target stage is missing after the source move.");
+                    PackageVerifier.ValidateExtracted(targetStage, expectedTarget);
+                    fileSystem.ValidateTargetInstallTree(targetStage, expectedTarget);
+                    fileSystem.MoveDirectory(targetStage, installDirectory);
+                    fileSystem.FlushParent(installDirectory);
+                    PackageVerifier.ValidateExtracted(installDirectory, expectedTarget);
+                    fileSystem.ValidateTargetInstallTree(installDirectory, expectedTarget);
+                }
+                operation = journal.Advance(operationId, "targetPlaced").Operations.Single();
             }
-            else
+            catch
             {
-                if (!fileSystem.DirectoryExists(targetStage))
-                    throw new InvalidDataException("The verified target stage is missing after the source move.");
-                PackageVerifier.ValidateExtracted(targetStage, expectedTarget);
-                fileSystem.ValidateTargetInstallTree(targetStage, expectedTarget);
-                fileSystem.MoveDirectory(targetStage, installDirectory);
-                fileSystem.FlushParent(installDirectory);
-                PackageVerifier.ValidateExtracted(installDirectory, expectedTarget);
-                fileSystem.ValidateTargetInstallTree(installDirectory, expectedTarget);
+                var current = ReadOperation(operationId);
+                if (current.Phase != "sourceMoved")
+                    throw;
+                _ = journal.Advance(operationId, "rollbackIntent", new MaintenanceJournalEvidence(
+                    BackupDigest: current.BackupDigest,
+                    TargetInventoryDigest: current.TargetInventoryDigest,
+                    RollbackReason: "applyFailed"));
+                return await ContinueRollbackAsync(operationId, expectedTarget, failedTarget,
+                    restoreStage, CancellationToken.None).ConfigureAwait(false);
             }
-            operation = journal.Advance(operationId, "targetPlaced").Operations.Single();
         }
 
         if (operation.Phase == "targetPlaced")
         {
             PackageVerifier.ValidateExtracted(installDirectory, expectedTarget);
             fileSystem.ValidateTargetInstallTree(installDirectory, expectedTarget);
+            authorization.VerifyHeld(operationId);
+            await services.EnsureStoppedAndVerifyQuiescedAsync(cancellationToken).ConfigureAwait(false);
             authorization.VerifyHeldAndQuiesced(operationId);
             try
             {
@@ -155,14 +173,14 @@ public sealed class MaintenanceApplyOperation(
             catch
             {
                 var current = ReadOperation(operationId);
-                var backup = backupOperation.VerifyPublishedBackup(operationId);
-                VerifyBackupBinding(current, backup);
+                if (current.BackupDigest is null)
+                    throw new InvalidDataException("The journaled immutable backup digest is missing.");
                 _ = journal.Advance(operationId, "rollbackIntent", new MaintenanceJournalEvidence(
-                    BackupDigest: backup.BackupDigest,
+                    BackupDigest: current.BackupDigest,
                     TargetInventoryDigest: current.TargetInventoryDigest,
                     RollbackReason: "targetStartFailed"));
-                return await ContinueRollbackAsync(operationId, expectedTarget, backup, failedTarget,
-                    restoreStage, cancellationToken).ConfigureAwait(false);
+                return await ContinueRollbackAsync(operationId, expectedTarget, failedTarget,
+                    restoreStage, CancellationToken.None).ConfigureAwait(false);
             }
             authorization.VerifyHeld(operationId);
             _ = journal.Advance(operationId, "servicesStarted");
@@ -171,9 +189,7 @@ public sealed class MaintenanceApplyOperation(
 
         if (operation.Phase is "rollbackIntent" or "targetMovedToFailed" or "sourceRestored")
         {
-            var backup = backupOperation.VerifyPublishedBackup(operationId);
-            VerifyBackupBinding(operation, backup);
-            return await ContinueRollbackAsync(operationId, expectedTarget, backup, failedTarget,
+            return await ContinueRollbackAsync(operationId, expectedTarget, failedTarget,
                 restoreStage, cancellationToken).ConfigureAwait(false);
         }
 
@@ -187,24 +203,25 @@ public sealed class MaintenanceApplyOperation(
     private async Task<MaintenanceApplyResult> ContinueRollbackAsync(
         string operationId,
         PackageInventory expectedTarget,
-        MaintenanceBackupResult backup,
         string failedTarget,
         string restoreStage,
         CancellationToken cancellationToken)
     {
         var operation = ReadOperation(operationId);
+        authorization.VerifyHeld(operationId);
         // A failed start can leave some services running. Stop and verify them before
         // any rename, and repeat this check after a process restart during recovery.
         await services.EnsureStoppedAndVerifyQuiescedAsync(cancellationToken).ConfigureAwait(false);
         authorization.VerifyHeldAndQuiesced(operationId);
+        var backup = backupOperation.VerifyPublishedBackup(operationId);
+        VerifyBackupBinding(operation, backup);
         if (operation.Phase == "rollbackIntent")
         {
             var hasInstall = fileSystem.DirectoryExists(installDirectory);
             var hasFailed = fileSystem.DirectoryExists(failedTarget);
             if (hasInstall && !hasFailed)
             {
-                PackageVerifier.ValidateExtracted(installDirectory, expectedTarget);
-                fileSystem.ValidateTargetInstallTree(installDirectory, expectedTarget);
+                fileSystem.EnsureOwnedInstallTree(installDirectory);
                 fileSystem.MoveDirectory(installDirectory, failedTarget);
                 fileSystem.FlushParent(installDirectory);
             }

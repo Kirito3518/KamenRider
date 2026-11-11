@@ -206,8 +206,10 @@ The rollback path records a reason and binds the target inventory and immutable 
 
 Verification for this checkpoint:
 
-- `dotnet build services/AgentMaintenance/AgentMaintenance.csproj --configuration Release --no-restore -p:BaseOutputPath=C:\Users\User\AppData\Local\Temp\kr-task6-apply-20261112\bin\` — passed, 0 warnings and 0 errors.
-- `dotnet test services/Controller.Tests/Controller.Tests.csproj --configuration Release --no-restore -p:BaseOutputPath=C:\Users\User\AppData\Local\Temp\kr-task6-apply-20261112\testbin\ --filter "FullyQualifiedName~InstalledAgentSourceInspectorTests|FullyQualifiedName~MaintenanceJournalTests" --logger "console;verbosity=minimal"` — passed, 24 tests, 0 failed, 0 skipped.
+- `dotnet build services/AgentMaintenance/AgentMaintenance.csproj --configuration Release --no-restore -p:BaseOutputPath=C:\Users\User\AppData\Local\Temp\kr-task6-apply-reviewfix-20261112\bin\` — passed, 0 warnings and 0 errors.
+- `dotnet test services/Controller.Tests/Controller.Tests.csproj --configuration Release --no-restore -p:BaseOutputPath=C:\Users\User\AppData\Local\Temp\kr-task6-apply-reviewfix-20261112\testbin\ --filter "FullyQualifiedName~InstalledAgentSourceInspectorTests|FullyQualifiedName~MaintenanceJournalTests" --logger "console;verbosity=minimal"` — passed, 28 tests, 0 failed, 0 skipped.
 - `git diff --check` — passed; Git emitted only line-ending conversion notices for existing files.
 
 This remains a partial implementation. There is still no production apply filesystem/service adapter, CLI wiring for `apply`/`report`/`reconcile`, production start/bind/fence authorization orchestration, or wrapper migration away from ZIP-supplied updater scripts. The production gate remains closed, and no live service, firewall, database, or reboot path was exercised.
+
+The follow-up tests also cover three recovery boundaries: if starting the target leaves a service running but throws, rollback records its intent before stopping and does not read the quiescence-gated backup until stop is verified; if the `servicesStarted` journal write fails after a successful start, retry stops and verifies services before starting again; and if the target stage disappears or placement fails after `sourceMoved`, the coordinator journals rollback and restores the immutable backup. Persisted `rollbackIntent` recovery is tested with a service left running across the simulated restart. These tests use dynamic service state in both authorization fakes, so backup verification cannot pass while a service is running.
