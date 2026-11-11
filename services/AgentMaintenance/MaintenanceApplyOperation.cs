@@ -231,8 +231,9 @@ public sealed class MaintenanceApplyOperation(
             }
             else if (hasFailed)
             {
-                PackageVerifier.ValidateExtracted(failedTarget, expectedTarget);
-                fileSystem.ValidateTargetInstallTree(failedTarget, expectedTarget);
+                // A failed target can be the reason rollback began. Recovery only
+                // needs to prove it is the operation-owned protected quarantine.
+                fileSystem.EnsureOwnedInstallTree(failedTarget);
             }
             _ = journal.Advance(operationId, "targetMovedToFailed");
             operation = ReadOperation(operationId);

@@ -486,6 +486,43 @@ public sealed class InstalledAgentSourceInspectorTests : IDisposable
         fileSystem.VerifyBackupTree(sourceRoot, backup);
     }
 
+    [Fact]
+    public async Task ApplyRetryReconcilesQuarantinedInvalidTargetAfterJournalFlushFailure()
+    {
+        var setup = await PrepareApplySetupAsync();
+        setup.JournalStore.FailOnPhase = "targetMovedToFailed";
+        var events = new List<string>();
+        var services = new ApplyServices(events);
+        setup.BackupAuthorization.IsQuiesced = () => !services.IsRunning;
+        var backup = setup.BackupOperation.VerifyPublishedBackup("operation-1");
+        var fileSystem = new ApplyFileSystem(events)
+        {
+            AfterMove = (source, destination) =>
+            {
+                if (Path.GetFileName(source) == ".Agent-stage-operation-1" &&
+                    string.Equals(Path.GetFullPath(destination), Path.GetFullPath(sourceRoot), StringComparison.OrdinalIgnoreCase))
+                    File.WriteAllText(Path.Combine(destination, "tampered-after-placement.bin"), "invalid target contents");
+            }
+        };
+        var apply = new MaintenanceApplyOperation(sourceRoot, setup.ExtractedTarget, setup.Journal,
+            setup.BackupOperation, new ApplyAuthorization(events, () => !services.IsRunning), fileSystem, services);
+
+        await Assert.ThrowsAsync<IOException>(() => apply.ApplyAsync("operation-1", setup.ExpectedTarget, CancellationToken.None));
+
+        var held = setup.Journal.Read()!.Operations.Single();
+        var failedTarget = Path.Combine(Path.GetDirectoryName(sourceRoot)!, ".Agent-failed-operation-1");
+        Assert.Equal("rollbackIntent", held.Phase);
+        Assert.False(Directory.Exists(sourceRoot));
+        Assert.True(File.Exists(Path.Combine(failedTarget, "tampered-after-placement.bin")));
+
+        var result = await apply.ApplyAsync("operation-1", setup.ExpectedTarget, CancellationToken.None);
+
+        Assert.Equal("rolledBack", result.Outcome);
+        Assert.Equal("rollbackServicesStarted", setup.Journal.Read()!.Operations.Single().Phase);
+        fileSystem.VerifyBackupTree(sourceRoot, backup);
+        Assert.True(File.Exists(Path.Combine(failedTarget, "tampered-after-placement.bin")));
+    }
+
     private readonly string root = Path.Combine(Path.GetTempPath(), "kr-source-inspector-" + Guid.NewGuid().ToString("N"));
     private readonly string sourceRoot;
     private readonly string backupRoot;
