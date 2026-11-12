@@ -13,6 +13,7 @@ namespace KamenRaider.AgentPackage;
 public static class PackageVerifier
 {
     private const int MaxArchive = 104857600;
+    private const int MaxInstallNodes = 5000;
     private const long MaxExpanded = 524288000;
     private static readonly string[] Required =
     [
@@ -56,6 +57,29 @@ public static class PackageVerifier
         return new PackageInventory(package.ArchiveHash, package.Version, package.TargetRuntime, nodes, totalBytes,
             InventoryDigest(nodes), package.SourceCommit, package.SourceDirty, package.ReleaseBuild,
             package.AgentUpdateChallengeProtocol);
+    }
+
+    public static PackageInventory IncludePreservedAppSettings(PackageInventory agentInstallInventory, long length, string sha256)
+    {
+        ArgumentNullException.ThrowIfNull(agentInstallInventory);
+        if (length < 0 || length > MaxExpanded || !Regex.IsMatch(sha256 ?? string.Empty, @"\A[0-9a-f]{64}\z", RegexOptions.CultureInvariant))
+            throw new PackageValidationException("inventory", "Preserved Agent configuration metadata is invalid.");
+        if (agentInstallInventory.Nodes.Any(node => string.Equals(node.Path, "appsettings.json", StringComparison.OrdinalIgnoreCase)))
+            throw new PackageValidationException("inventory", "The package inventory already contains preserved Agent configuration.");
+        if (agentInstallInventory.Nodes.Count >= MaxInstallNodes)
+            throw new PackageValidationException("limit", "The installed Agent tree exceeds the supported node count.");
+
+        var totalBytes = checked(agentInstallInventory.TotalBytes + length);
+        if (totalBytes > MaxExpanded)
+            throw new PackageValidationException("limit", "The installed Agent tree exceeds the supported size limit.");
+        var nodes = agentInstallInventory.Nodes
+            .Append(new PackageNode("appsettings.json", false, length, sha256))
+            .OrderBy(node => node.Path, StringComparer.Ordinal)
+            .ToArray();
+        return new PackageInventory(agentInstallInventory.ArchiveHash, agentInstallInventory.Version,
+            agentInstallInventory.TargetRuntime, nodes, totalBytes, InventoryDigest(nodes),
+            agentInstallInventory.SourceCommit, agentInstallInventory.SourceDirty, agentInstallInventory.ReleaseBuild,
+            agentInstallInventory.AgentUpdateChallengeProtocol);
     }
 
     public static PackageInventory Extract(Stream archive, string freshOwnedRoot, PackageInventory expected)

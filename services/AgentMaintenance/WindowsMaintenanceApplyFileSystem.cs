@@ -68,16 +68,28 @@ public sealed class WindowsMaintenanceApplyFileSystem : IMaintenanceApplyFileSys
         return false;
     }
 
-    public void PrepareTargetInstallTree(string extractedTree, string destination, PackageInventory expected)
+    public void PrepareTargetInstallTree(
+        string extractedTree,
+        string destination,
+        PackageInventory expected,
+        MaintenanceBackupResult backup)
     {
         ArgumentNullException.ThrowIfNull(expected);
+        ArgumentNullException.ThrowIfNull(backup);
         EnsureExtractedPath(extractedTree);
         EnsureInstallSibling(destination, allowInstallDirectory: false, requiredPrefix: ".Agent-stage-");
         EnsureProtectedInstallParent(installDirectory);
         EnsureSafeTree(extractedTargetRoot);
         PackageVerifier.ValidateExtracted(extractedTargetRoot, expected);
-        var installInventory = PackageVerifier.CreateAgentInstallInventory(expected);
-        EnsureAbsent(destination);
+        var backupPath = GetVerifiedBackupPath(backup);
+        var config = RequirePreservedAppSettings(backup);
+        EnsureNoReparseAncestors(backupPath);
+        EnsureTrustedAncestors(Path.GetDirectoryName(backupPath)!);
+        EnsurePrivateTree(backupPath, includeAgentService: false);
+        VerifyBackupSourceNodes(backupPath, backup);
+        var installInventory = PackageVerifier.IncludePreservedAppSettings(
+            PackageVerifier.CreateAgentInstallInventory(expected), config.Length, config.Sha256!);
+        RemoveExistingOwnedStage(destination, ".Agent-stage-");
 
         CreatePrivateDirectory(destination);
         foreach (var node in installInventory.Nodes.Where(node => node.IsDirectory)
@@ -90,7 +102,9 @@ public sealed class WindowsMaintenanceApplyFileSystem : IMaintenanceApplyFileSys
 
         foreach (var node in installInventory.Nodes.Where(node => !node.IsDirectory))
         {
-            var source = LocalPath(extractedTargetRoot, "Agent/" + node.Path);
+            var source = string.Equals(node.Path, "appsettings.json", StringComparison.Ordinal)
+                ? LocalPath(backupPath, node.Path)
+                : LocalPath(extractedTargetRoot, "Agent/" + node.Path);
             var target = LocalPath(destination, node.Path);
             CopyVerifiedFile(source, target, node.Length, node.Sha256!);
         }
@@ -136,7 +150,7 @@ public sealed class WindowsMaintenanceApplyFileSystem : IMaintenanceApplyFileSys
         EnsureTrustedAncestors(Path.GetDirectoryName(backupPath)!);
         EnsurePrivateTree(backupPath, includeAgentService: false);
         VerifyBackupSourceNodes(backupPath, backup);
-        EnsureAbsent(destination);
+        RemoveExistingOwnedStage(destination, ".Agent-restore-");
 
         CreatePrivateDirectory(destination);
         foreach (var node in backup.Nodes.Where(node => node.IsDirectory)
@@ -183,6 +197,42 @@ public sealed class WindowsMaintenanceApplyFileSystem : IMaintenanceApplyFileSys
         var expected = backup.Nodes.OrderBy(node => node.RelativePath, StringComparer.Ordinal).ToArray();
         if (!actual.SequenceEqual(expected))
             throw new InvalidDataException("The immutable backup directory does not match its published manifest inventory.");
+    }
+
+    private string GetVerifiedBackupPath(MaintenanceBackupResult backup)
+    {
+        if (!OperationIdPattern.IsMatch(backup.BackupOwnerOperationId))
+            throw new UnauthorizedAccessException("The preserved Agent configuration is not bound to a valid backup owner.");
+        var expectedBackupPath = Path.Combine(backupRoot, backup.BackupOwnerOperationId);
+        if (!PathEquals(backup.DirectoryPath, expectedBackupPath))
+            throw new UnauthorizedAccessException("The preserved Agent configuration is not from the operation-owned protected backup.");
+        return expectedBackupPath;
+    }
+
+    private static MaintenanceBackupNode RequirePreservedAppSettings(MaintenanceBackupResult backup) =>
+        backup.Nodes.SingleOrDefault(node => !node.IsDirectory &&
+            string.Equals(node.RelativePath, "appsettings.json", StringComparison.Ordinal))
+        ?? throw new InvalidDataException("The immutable Agent backup is missing the required machine configuration.");
+
+    private void RemoveExistingOwnedStage(string path, string requiredPrefix)
+    {
+        EnsureInstallSibling(path, allowInstallDirectory: false, requiredPrefix: requiredPrefix);
+        EnsureNoReparseAncestors(path);
+        if (!TryGetAttributes(path, out var attributes))
+            return;
+        if ((attributes & FileAttributes.Directory) == 0 || (attributes & FileAttributes.ReparsePoint) != 0)
+            throw new UnauthorizedAccessException("An operation-owned Agent stage is not a regular directory.");
+
+        // Only protected, non-reparse trees at the exact operation-owned sibling
+        // path can be discarded and rebuilt from the verified package or backup.
+        // A process can stop after FileMode.CreateNew and before CopyVerifiedFile
+        // tightens the new file's ACL. The stage root still blocks untrusted writes,
+        // so accept inherited-but-safe child ACLs while checking every node for
+        // reparse points, hard links, and untrusted write access before removal.
+        EnsureDirectorySecurity(path, requirePrivateAcl: true, includeAgentService: true);
+        EnsureSafeTree(path);
+        Directory.Delete(path, recursive: true);
+        WindowsMaintenanceBackupSecurity.FlushDirectoryToDisk(installParent);
     }
 
     private void EnsurePrivateTree(string root, bool includeAgentService) =>

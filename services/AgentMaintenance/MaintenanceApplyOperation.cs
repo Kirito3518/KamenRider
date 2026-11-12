@@ -14,7 +14,7 @@ public interface IMaintenanceApplyFileSystem
 {
     void EnsureProtectedInstallParent(string installDirectory);
     bool DirectoryExists(string path);
-    void PrepareTargetInstallTree(string extractedTree, string destination, PackageInventory expected);
+    void PrepareTargetInstallTree(string extractedTree, string destination, PackageInventory expected, MaintenanceBackupResult backup);
     void ValidateTargetInstallTree(string path, PackageInventory expected);
     void EnsureOwnedInstallTree(string path);
     void VerifyBackupTree(string path, MaintenanceBackupResult backup);
@@ -25,8 +25,8 @@ public interface IMaintenanceApplyFileSystem
 
 public interface IMaintenanceApplyServiceLifecycle
 {
-    Task EnsureStoppedAndVerifyQuiescedAsync(CancellationToken cancellationToken);
-    Task StartAndVerifyAsync(string installDirectory, string expectedVersion, CancellationToken cancellationToken);
+    Task EnsureStoppedAndVerifyQuiescedAsync(string operationId, CancellationToken cancellationToken);
+    Task StartAndVerifyAsync(string operationId, string installDirectory, string expectedVersion, CancellationToken cancellationToken);
 }
 
 public sealed record MaintenanceApplyResult(string Outcome, string InstalledVersion, string? RollbackReason);
@@ -58,7 +58,7 @@ public sealed class MaintenanceApplyOperation(
         if (expectedTarget.Version != binding.TargetVersion || expectedTarget.TargetRuntime != binding.TargetRuntime ||
             !FixedHexEquals(expectedTarget.ArchiveHash, binding.TargetSha256))
             throw new InvalidDataException("The verified target archive does not match the immutable journal binding.");
-        var expectedInstallTree = PackageVerifier.CreateAgentInstallInventory(expectedTarget);
+        var packageInstallTree = PackageVerifier.CreateAgentInstallInventory(expectedTarget);
 
         var parent = Path.GetDirectoryName(Path.GetFullPath(installDirectory))
             ?? throw new InvalidDataException("The installed Agent path has no parent.");
@@ -71,27 +71,41 @@ public sealed class MaintenanceApplyOperation(
             throw new InvalidOperationException("A signed source binding is required before target apply.");
         if (operation.Phase is "controllerConfirmed" or "outcomeReported")
             throw new InvalidOperationException("The maintenance outcome is already reported or confirmed.");
+        if (operation.Phase == "servicesStarted")
+            return new("applied", binding.TargetVersion, null);
+        if (operation.Phase == "rollbackServicesStarted")
+            return new("rolledBack", operation.SourceVersion!, operation.RollbackReason);
+        if (operation.Phase is "rollbackIntent" or "targetMovedToFailed" or "sourceRestored")
+        {
+            return await ContinueRollbackAsync(operationId, expectedTarget, failedTarget,
+                restoreStage, cancellationToken).ConfigureAwait(false);
+        }
+        if (operation.Phase == "targetPlaced")
+        {
+            authorization.VerifyHeld(operationId);
+            await services.EnsureStoppedAndVerifyQuiescedAsync(operationId, cancellationToken).ConfigureAwait(false);
+            authorization.VerifyHeldAndQuiesced(operationId);
+        }
+
+        var publishedBackup = backupOperation.VerifyPublishedBackup(operationId);
+        VerifyBackupBinding(operation, publishedBackup);
+        var preservedConfiguration = publishedBackup.Nodes.SingleOrDefault(node =>
+            !node.IsDirectory && string.Equals(node.RelativePath, "appsettings.json", StringComparison.Ordinal));
+        if (operation.Phase == "sourceBound" && preservedConfiguration is null)
+            throw new InvalidDataException("The immutable Agent backup is missing the required machine configuration.");
+        var expectedInstallTree = preservedConfiguration is null
+            ? packageInstallTree
+            : PackageVerifier.IncludePreservedAppSettings(packageInstallTree,
+                preservedConfiguration.Length, preservedConfiguration.Sha256!);
 
         if (operation.Phase == "sourceBound")
         {
             PackageVerifier.ValidateExtracted(extractedTargetDirectory, expectedTarget);
-            var backup = backupOperation.VerifyPublishedBackup(operationId);
-            VerifyBackupBinding(operation, backup);
+            authorization.VerifyHeldAndQuiesced(operationId);
             fileSystem.EnsureProtectedInstallParent(installDirectory);
-            if (fileSystem.DirectoryExists(targetStage))
-            {
-                PackageVerifier.ValidateExtracted(targetStage, expectedInstallTree);
-                fileSystem.ValidateTargetInstallTree(targetStage, expectedInstallTree);
-            }
-            else
-            {
-                if (File.Exists(targetStage))
-                    throw new InvalidDataException("The target stage path is a file instead of an owned directory.");
-                fileSystem.PrepareTargetInstallTree(extractedTargetDirectory, targetStage, expectedTarget);
-            }
+            fileSystem.PrepareTargetInstallTree(extractedTargetDirectory, targetStage, expectedTarget, publishedBackup);
             PackageVerifier.ValidateExtracted(targetStage, expectedInstallTree);
             fileSystem.ValidateTargetInstallTree(targetStage, expectedInstallTree);
-            authorization.VerifyHeldAndQuiesced(operationId);
             operation = journal.Advance(operationId, "swapIntent",
                 new MaintenanceJournalEvidence(TargetInventoryDigest: expectedTarget.InventoryDigest)).Operations.Single();
         }
@@ -125,7 +139,7 @@ public sealed class MaintenanceApplyOperation(
         {
             try
             {
-                var backup = backupOperation.VerifyPublishedBackup(operationId);
+                var backup = publishedBackup;
                 VerifyBackupBinding(operation, backup);
                 authorization.VerifyHeldAndQuiesced(operationId);
                 if (fileSystem.DirectoryExists(installDirectory))
@@ -164,12 +178,10 @@ public sealed class MaintenanceApplyOperation(
         {
             PackageVerifier.ValidateExtracted(installDirectory, expectedInstallTree);
             fileSystem.ValidateTargetInstallTree(installDirectory, expectedInstallTree);
-            authorization.VerifyHeld(operationId);
-            await services.EnsureStoppedAndVerifyQuiescedAsync(cancellationToken).ConfigureAwait(false);
             authorization.VerifyHeldAndQuiesced(operationId);
             try
             {
-                await services.StartAndVerifyAsync(installDirectory, binding.TargetVersion, cancellationToken).ConfigureAwait(false);
+                await services.StartAndVerifyAsync(operationId, installDirectory, binding.TargetVersion, cancellationToken).ConfigureAwait(false);
             }
             catch
             {
@@ -186,12 +198,6 @@ public sealed class MaintenanceApplyOperation(
             authorization.VerifyHeld(operationId);
             _ = journal.Advance(operationId, "servicesStarted");
             return new("applied", binding.TargetVersion, null);
-        }
-
-        if (operation.Phase is "rollbackIntent" or "targetMovedToFailed" or "sourceRestored")
-        {
-            return await ContinueRollbackAsync(operationId, expectedTarget, failedTarget,
-                restoreStage, cancellationToken).ConfigureAwait(false);
         }
 
         if (operation.Phase == "rollbackServicesStarted")
@@ -212,7 +218,7 @@ public sealed class MaintenanceApplyOperation(
         authorization.VerifyHeld(operationId);
         // A failed start can leave some services running. Stop and verify them before
         // any rename, and repeat this check after a process restart during recovery.
-        await services.EnsureStoppedAndVerifyQuiescedAsync(cancellationToken).ConfigureAwait(false);
+        await services.EnsureStoppedAndVerifyQuiescedAsync(operationId, cancellationToken).ConfigureAwait(false);
         authorization.VerifyHeldAndQuiesced(operationId);
         var backup = backupOperation.VerifyPublishedBackup(operationId);
         VerifyBackupBinding(operation, backup);
@@ -249,8 +255,7 @@ public sealed class MaintenanceApplyOperation(
             }
             else
             {
-                if (!fileSystem.DirectoryExists(restoreStage))
-                    fileSystem.PrepareBackupInstallTree(backup.DirectoryPath, restoreStage, backup);
+                fileSystem.PrepareBackupInstallTree(backup.DirectoryPath, restoreStage, backup);
                 fileSystem.VerifyBackupTree(restoreStage, backup);
                 fileSystem.MoveDirectory(restoreStage, installDirectory);
                 fileSystem.FlushParent(installDirectory);
@@ -265,7 +270,7 @@ public sealed class MaintenanceApplyOperation(
         {
             fileSystem.VerifyBackupTree(installDirectory, backup);
             authorization.VerifyHeldAndQuiesced(operationId);
-            await services.StartAndVerifyAsync(installDirectory, operation.SourceVersion!, cancellationToken).ConfigureAwait(false);
+            await services.StartAndVerifyAsync(operationId, installDirectory, operation.SourceVersion!, cancellationToken).ConfigureAwait(false);
             authorization.VerifyHeld(operationId);
             _ = journal.Advance(operationId, "rollbackServicesStarted");
             return new("rolledBack", operation.SourceVersion!, operation.RollbackReason);

@@ -189,8 +189,9 @@ public sealed class InstalledAgentSourceInspectorTests : IDisposable
         public int FailStopOnCall { get; set; }
         public int StopChecks { get; private set; }
 
-        public Task EnsureStoppedAndVerifyQuiescedAsync(CancellationToken cancellationToken)
+        public Task EnsureStoppedAndVerifyQuiescedAsync(string operationId, CancellationToken cancellationToken)
         {
+            Assert.Equal("operation-1", operationId);
             cancellationToken.ThrowIfCancellationRequested();
             StopChecks++;
             events.Add("stop-quiesced");
@@ -202,8 +203,9 @@ public sealed class InstalledAgentSourceInspectorTests : IDisposable
             return Task.CompletedTask;
         }
 
-        public Task StartAndVerifyAsync(string installDirectory, string expectedVersion, CancellationToken cancellationToken)
+        public Task StartAndVerifyAsync(string operationId, string installDirectory, string expectedVersion, CancellationToken cancellationToken)
         {
+            Assert.Equal("operation-1", operationId);
             cancellationToken.ThrowIfCancellationRequested();
             events.Add("start:" + expectedVersion);
             IsRunning = true;
@@ -218,6 +220,8 @@ public sealed class InstalledAgentSourceInspectorTests : IDisposable
         public string? FailMoveSource { get; set; }
         public string? FailMoveDestination { get; set; }
         public Action<string, string>? AfterMove { get; set; }
+        public bool FailTargetCopyOnce { get; set; }
+        public bool FailBackupCopyOnce { get; set; }
 
         public void EnsureProtectedInstallParent(string installDirectory)
         {
@@ -228,16 +232,33 @@ public sealed class InstalledAgentSourceInspectorTests : IDisposable
 
         public bool DirectoryExists(string path) => Directory.Exists(path);
 
-        public void PrepareTargetInstallTree(string extractedTree, string destination, PackageInventory expected)
+        public void PrepareTargetInstallTree(
+            string extractedTree,
+            string destination,
+            PackageInventory expected,
+            MaintenanceBackupResult backup)
         {
             PackageVerifier.ValidateExtracted(extractedTree, expected);
-            var installInventory = PackageVerifier.CreateAgentInstallInventory(expected);
+            var config = backup.Nodes.Single(node => !node.IsDirectory && node.RelativePath == "appsettings.json");
+            var installInventory = PackageVerifier.IncludePreservedAppSettings(
+                PackageVerifier.CreateAgentInstallInventory(expected), config.Length, config.Sha256!);
+            if (Directory.Exists(destination)) Directory.Delete(destination, recursive: true);
             Directory.CreateDirectory(destination);
             foreach (var node in installInventory.Nodes.Where(node => node.IsDirectory)
                          .OrderBy(node => node.Path.Count(character => character == '/')))
                 Directory.CreateDirectory(Local(destination, node.Path));
             foreach (var node in installInventory.Nodes.Where(node => !node.IsDirectory))
-                File.Copy(Local(extractedTree, "Agent/" + node.Path), Local(destination, node.Path));
+            {
+                var source = node.Path == "appsettings.json"
+                    ? Local(backup.DirectoryPath, node.Path)
+                    : Local(extractedTree, "Agent/" + node.Path);
+                File.Copy(source, Local(destination, node.Path));
+                if (FailTargetCopyOnce)
+                {
+                    FailTargetCopyOnce = false;
+                    throw new IOException("simulated target stage interruption after partial copy");
+                }
+            }
             events.Add("target-staged");
         }
 
@@ -257,8 +278,22 @@ public sealed class InstalledAgentSourceInspectorTests : IDisposable
                 actual.OrderBy(node => node.RelativePath, StringComparer.Ordinal));
         }
 
-        public void PrepareBackupInstallTree(string backupPath, string destination, MaintenanceBackupResult backup) =>
-            CopyNodes(backupPath, destination, backup.Nodes);
+        public void PrepareBackupInstallTree(string backupPath, string destination, MaintenanceBackupResult backup)
+        {
+            if (Directory.Exists(destination)) Directory.Delete(destination, recursive: true);
+            Directory.CreateDirectory(destination);
+            foreach (var node in backup.Nodes.Where(node => node.IsDirectory).OrderBy(node => node.RelativePath.Count(character => character == '/')))
+                Directory.CreateDirectory(Local(destination, node.RelativePath));
+            foreach (var node in backup.Nodes.Where(node => !node.IsDirectory))
+            {
+                File.Copy(Local(backupPath, node.RelativePath), Local(destination, node.RelativePath));
+                if (FailBackupCopyOnce)
+                {
+                    FailBackupCopyOnce = false;
+                    throw new IOException("simulated restore stage interruption after partial copy");
+                }
+            }
+        }
 
         public void MoveDirectory(string source, string destination)
         {
@@ -304,6 +339,9 @@ public sealed class InstalledAgentSourceInspectorTests : IDisposable
     public async Task ApplyPublishesVerifiedTargetOnlyAfterSourceMoveAndKeepsOriginalBackup()
     {
         var setup = await PrepareApplySetupAsync();
+        var originalAppSettings = File.ReadAllBytes(Path.Combine(sourceRoot, "appsettings.json"));
+        var backup = setup.BackupOperation.VerifyPublishedBackup("operation-1");
+        var config = backup.Nodes.Single(node => !node.IsDirectory && node.RelativePath == "appsettings.json");
         var events = new List<string>();
         var fileSystem = new ApplyFileSystem(events);
         var services = new ApplyServices(events);
@@ -318,18 +356,107 @@ public sealed class InstalledAgentSourceInspectorTests : IDisposable
         Assert.Equal("servicesStarted", setup.Journal.Read()!.Operations.Single().Phase);
         Assert.Equal(["swapIntent", "sourceMoved", "targetPlaced", "servicesStarted"],
             setup.Journal.Read()!.Operations.Single().PhaseHistory.TakeLast(4));
-        PackageVerifier.ValidateExtracted(sourceRoot, PackageVerifier.CreateAgentInstallInventory(setup.ExpectedTarget));
+        var targetInventory = PackageVerifier.IncludePreservedAppSettings(
+            PackageVerifier.CreateAgentInstallInventory(setup.ExpectedTarget), config.Length, config.Sha256!);
+        PackageVerifier.ValidateExtracted(sourceRoot, targetInventory);
         Assert.True(File.Exists(Path.Combine(sourceRoot, "Agent.exe")));
         Assert.False(File.Exists(Path.Combine(sourceRoot, "Update-AgentPackage.ps1")));
+        Assert.Equal(originalAppSettings, File.ReadAllBytes(Path.Combine(sourceRoot, "appsettings.json")));
+        Assert.Equal(config.Sha256, Convert.ToHexStringLower(SHA256.HashData(originalAppSettings)));
+        var unexpected = Path.Combine(sourceRoot, "unapproved-local-extra.txt");
+        File.WriteAllText(unexpected, "must not be part of the target inventory");
+        Assert.Throws<PackageValidationException>(() => PackageVerifier.ValidateExtracted(sourceRoot, targetInventory));
+        File.Delete(unexpected);
         Assert.True(Directory.Exists(Path.Combine(Path.GetDirectoryName(sourceRoot)!, ".Agent-prior-operation-1")));
-        Assert.Equal(1, services.StopChecks);
+        Assert.Equal(0, services.StopChecks);
         Assert.True(events.IndexOf("target-staged") < events.FindIndex(value => value.StartsWith("move:.Agent-prior-", StringComparison.Ordinal)));
+
+        var repeated = await apply.ApplyAsync("operation-1", setup.ExpectedTarget, CancellationToken.None);
+
+        Assert.Equal("applied", repeated.Outcome);
+        Assert.Equal(0, services.StopChecks);
+    }
+
+    [Fact]
+    public async Task ApplyRetryRebuildsOperationOwnedPartialTargetStageWithoutChangingSource()
+    {
+        var setup = await PrepareApplySetupAsync();
+        var events = new List<string>();
+        var services = new ApplyServices(events);
+        var fileSystem = new ApplyFileSystem(events) { FailTargetCopyOnce = true };
+        setup.BackupAuthorization.IsQuiesced = () => !services.IsRunning;
+        var apply = new MaintenanceApplyOperation(sourceRoot, setup.ExtractedTarget, setup.Journal,
+            setup.BackupOperation, new ApplyAuthorization(events, () => !services.IsRunning), fileSystem, services);
+        var targetStage = Path.Combine(Path.GetDirectoryName(sourceRoot)!, ".Agent-stage-operation-1");
+
+        await Assert.ThrowsAsync<IOException>(() => apply.ApplyAsync("operation-1", setup.ExpectedTarget, CancellationToken.None));
+
+        Assert.True(Directory.Exists(targetStage));
+        Assert.True(File.Exists(Path.Combine(targetStage, "Agent.deps.json")));
+        Assert.False(File.Exists(Path.Combine(targetStage, "Agent.exe")));
+        Assert.True(File.Exists(Path.Combine(sourceRoot, "Agent.exe")));
+        Assert.Equal("sourceBound", setup.Journal.Read()!.Operations.Single().Phase);
+
+        var result = await apply.ApplyAsync("operation-1", setup.ExpectedTarget, CancellationToken.None);
+
+        Assert.Equal("applied", result.Outcome);
+        Assert.Equal("servicesStarted", setup.Journal.Read()!.Operations.Single().Phase);
+        Assert.True(Directory.Exists(Path.Combine(Path.GetDirectoryName(sourceRoot)!, ".Agent-prior-operation-1")));
+    }
+
+    [Fact]
+    public async Task ApplyKeepsMissingMachineConfigurationHeldBeforeSwap()
+    {
+        File.Delete(Path.Combine(sourceRoot, "appsettings.json"));
+        var setup = await PrepareApplySetupAsync();
+        var events = new List<string>();
+        var services = new ApplyServices(events);
+        setup.BackupAuthorization.IsQuiesced = () => !services.IsRunning;
+        var apply = new MaintenanceApplyOperation(sourceRoot, setup.ExtractedTarget, setup.Journal,
+            setup.BackupOperation, new ApplyAuthorization(events, () => !services.IsRunning),
+            new ApplyFileSystem(events), services);
+
+        await Assert.ThrowsAsync<InvalidDataException>(() =>
+            apply.ApplyAsync("operation-1", setup.ExpectedTarget, CancellationToken.None));
+
+        Assert.Equal("sourceBound", setup.Journal.Read()!.Operations.Single().Phase);
+        Assert.True(File.Exists(Path.Combine(sourceRoot, "Agent.exe")));
+        Assert.False(Directory.Exists(Path.Combine(Path.GetDirectoryName(sourceRoot)!, ".Agent-stage-operation-1")));
+        Assert.False(Directory.Exists(Path.Combine(Path.GetDirectoryName(sourceRoot)!, ".Agent-prior-operation-1")));
+    }
+
+    [Fact]
+    public async Task ApplyRetryRebuildsOperationOwnedPartialRestoreStageFromImmutableBackup()
+    {
+        var setup = await PrepareApplySetupAsync();
+        var events = new List<string>();
+        var services = new ApplyServices(events) { FailedVersion = setup.ExpectedTarget.Version };
+        var fileSystem = new ApplyFileSystem(events) { FailBackupCopyOnce = true };
+        setup.BackupAuthorization.IsQuiesced = () => !services.IsRunning;
+        var backup = setup.BackupOperation.VerifyPublishedBackup("operation-1");
+        var apply = new MaintenanceApplyOperation(sourceRoot, setup.ExtractedTarget, setup.Journal,
+            setup.BackupOperation, new ApplyAuthorization(events, () => !services.IsRunning), fileSystem, services);
+        var restoreStage = Path.Combine(Path.GetDirectoryName(sourceRoot)!, ".Agent-restore-operation-1");
+
+        await Assert.ThrowsAsync<IOException>(() => apply.ApplyAsync("operation-1", setup.ExpectedTarget, CancellationToken.None));
+
+        Assert.Equal("targetMovedToFailed", setup.Journal.Read()!.Operations.Single().Phase);
+        Assert.True(Directory.Exists(restoreStage));
+        Assert.False(Directory.Exists(sourceRoot));
+
+        var result = await apply.ApplyAsync("operation-1", setup.ExpectedTarget, CancellationToken.None);
+
+        Assert.Equal("rolledBack", result.Outcome);
+        Assert.Equal("rollbackServicesStarted", setup.Journal.Read()!.Operations.Single().Phase);
+        fileSystem.VerifyBackupTree(sourceRoot, backup);
+        Assert.True(Directory.Exists(Path.Combine(Path.GetDirectoryName(sourceRoot)!, ".Agent-failed-operation-1")));
     }
 
     [Fact]
     public async Task ApplyRetryRecoversWhenJournalFlushFailsAfterOriginalTreeMove()
     {
         var setup = await PrepareApplySetupAsync();
+        var backup = setup.BackupOperation.VerifyPublishedBackup("operation-1");
         setup.JournalStore.FailOnPhase = "sourceMoved";
         var events = new List<string>();
         var services = new ApplyServices(events);
@@ -348,7 +475,9 @@ public sealed class InstalledAgentSourceInspectorTests : IDisposable
 
         Assert.Equal("applied", result.Outcome);
         Assert.Equal("servicesStarted", setup.Journal.Read()!.Operations.Single().Phase);
-        PackageVerifier.ValidateExtracted(sourceRoot, PackageVerifier.CreateAgentInstallInventory(setup.ExpectedTarget));
+        var config = backup.Nodes.Single(node => !node.IsDirectory && node.RelativePath == "appsettings.json");
+        PackageVerifier.ValidateExtracted(sourceRoot, PackageVerifier.IncludePreservedAppSettings(
+            PackageVerifier.CreateAgentInstallInventory(setup.ExpectedTarget), config.Length, config.Sha256!));
         Assert.True(Directory.Exists(prior));
     }
 
@@ -375,7 +504,7 @@ public sealed class InstalledAgentSourceInspectorTests : IDisposable
             recorded.PhaseHistory.TakeLast(4));
         fileSystem.VerifyBackupTree(sourceRoot, backup);
         Assert.True(Directory.Exists(Path.Combine(Path.GetDirectoryName(sourceRoot)!, ".Agent-failed-operation-1")));
-        Assert.Equal(2, services.StopChecks);
+        Assert.Equal(1, services.StopChecks);
     }
 
     [Fact]
@@ -416,7 +545,7 @@ public sealed class InstalledAgentSourceInspectorTests : IDisposable
         var firstServices = new ApplyServices(events)
         {
             FailedVersion = setup.ExpectedTarget.Version,
-            FailStopOnCall = 2
+            FailStopOnCall = 1
         };
         setup.BackupAuthorization.IsQuiesced = () => !firstServices.IsRunning;
         var firstApply = new MaintenanceApplyOperation(sourceRoot, setup.ExtractedTarget, setup.Journal,
@@ -951,6 +1080,7 @@ public sealed class InstalledAgentSourceInspectorTests : IDisposable
         Directory.CreateDirectory(sourceRoot);
         foreach (var file in Directory.EnumerateFiles(fixtureOutputPath))
             File.Copy(file, Path.Combine(sourceRoot, Path.GetFileName(file)));
+        File.WriteAllText(Path.Combine(sourceRoot, "appsettings.json"), "{\"MachineConfiguration\":\"preserve\"}");
     }
 
     private void AddSecondAgentLibrary(string key)
