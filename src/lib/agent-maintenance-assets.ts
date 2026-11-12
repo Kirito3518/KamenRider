@@ -19,6 +19,8 @@ export type VerifiedAgentMaintenanceAssets = Readonly<{
   wrapper: VerifiedMaintenanceAsset;
 }>;
 
+export const MAX_AGENT_MAINTENANCE_HELPER_BYTES = 157_286_400;
+
 export class AgentMaintenanceAssetsUnavailableError extends Error {
   constructor() {
     super("Agent maintenance assets are unavailable.");
@@ -28,7 +30,7 @@ export class AgentMaintenanceAssetsUnavailableError extends Error {
 
 const manifestName = "agent-maintenance-assets.json";
 const maximumManifestBytes = 64 * 1024;
-const maximumAssetBytes = 512 * 1024 * 1024;
+const maximumWrapperBytes = 2 * 1024 * 1024;
 const hashPattern = /^[0-9a-fA-F]{64}$/;
 
 type ParsedAsset = {
@@ -101,7 +103,11 @@ function assertNoDuplicateJsonKeys(jsonText: string) {
   }
 }
 
-function parseAsset(value: unknown, expectedUrl: (hash: string) => string): ParsedAsset {
+function parseAsset(
+  value: unknown,
+  expectedUrl: (hash: string) => string,
+  maximumLength: number,
+): ParsedAsset {
   if (!isRecord(value)) throw new Error("Invalid asset entry.");
   assertExactKeys(value, ["relativeUrl", "length", "sha256"]);
 
@@ -111,7 +117,7 @@ function parseAsset(value: unknown, expectedUrl: (hash: string) => string): Pars
     typeof length !== "number" ||
     !Number.isSafeInteger(length) ||
     length < 1 ||
-    length > maximumAssetBytes ||
+    length > maximumLength ||
     typeof sha256 !== "string" ||
     !hashPattern.test(sha256)
   ) {
@@ -134,10 +140,10 @@ function parseManifest(jsonText: string): ParsedManifest {
   assertExactKeys(value.helpers, ["win-x64", "win-arm64"]);
 
   const helperUrl = (hash: string) => `/agent/maintenance/sha256/${hash}/AgentMaintenance.exe`;
-  const wrapper = parseAsset(value.wrapper, () => "/agent/Update-Agent.ps1");
+  const wrapper = parseAsset(value.wrapper, () => "/agent/Update-Agent.ps1", maximumWrapperBytes);
   const helpers: Record<AgentMaintenanceRuntime, ParsedAsset> = {
-    "win-x64": parseAsset(value.helpers["win-x64"], helperUrl),
-    "win-arm64": parseAsset(value.helpers["win-arm64"], helperUrl),
+    "win-x64": parseAsset(value.helpers["win-x64"], helperUrl, MAX_AGENT_MAINTENANCE_HELPER_BYTES),
+    "win-arm64": parseAsset(value.helpers["win-arm64"], helperUrl, MAX_AGENT_MAINTENANCE_HELPER_BYTES),
   };
 
   return { schemaVersion: 1, helperProtocol: 1, helpers, wrapper };
@@ -250,7 +256,7 @@ async function verifyAssetFile(
       !info.isFile() ||
       info.nlink !== 1 ||
       info.size !== expected.length ||
-      info.size > maximumAssetBytes
+      info.size > (helperRuntime ? MAX_AGENT_MAINTENANCE_HELPER_BYTES : maximumWrapperBytes)
     ) {
       throw new Error("Asset size or file type does not match the manifest.");
     }

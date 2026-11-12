@@ -571,62 +571,10 @@ test("agent update release and command routes enforce Admin origin and forward e
 
     const beforeCommand = requests.length;
     const command = await call("/admin/machines/pc/agent-update-command", { releaseVersion: "2.0.0" }, adminCookie);
-    if (process.env.TEST_AGENT_UPDATE_EXPECTED === "generic-conflict") {
-      assert.equal(command.status, 409);
-      assert.equal((await command.json()).error, "Operation rejected");
-      assert.equal(requests.length, beforeCommand + 1, "generic conflicts retain the existing HTTP conflict behavior");
-      return;
-    }
-    assert.equal(command.status, 200);
+    assert.equal(command.status, 503);
     assert.equal(command.headers.get("cache-control"), "no-store");
-    const commandResult = await command.json();
-    if (process.env.TEST_AGENT_UPDATE_EXPECTED === "unavailable") {
-      assert.equal(commandResult.available, false);
-      assert.match(commandResult.reason, /HTTPS/);
-      assert.equal(requests.length, beforeCommand, "invalid URL must fail before reserving a maintenance lock");
-      const recovery = await call("/admin/machines/pc/agent-update-command", { operationId: "operation-1" }, adminCookie);
-      assert.equal((await recovery.json()).available, false);
-      assert.equal(requests.length, beforeCommand, "invalid URL must not rotate a recovery ticket");
-      return;
-    }
-    if (process.env.TEST_AGENT_UPDATE_EXPECTED === "retained-release-unavailable") {
-      assert.equal(commandResult.available, false);
-      assert.equal(commandResult.reason, "Stored package does not match its published SHA-256.");
-      assert.equal(requests.length, beforeCommand + 1, "only the authenticated reservation request is forwarded");
-      const unavailableRequest = requests.at(-1);
-      assert.equal(unavailableRequest.headers["x-authenticated-actor-id"], adminId);
-      assert.equal(unavailableRequest.headers["x-authenticated-actor-role"], "admin");
-      assert.equal(unavailableRequest.headers["x-service-credential"], "test-only");
-      assert.equal(commandResult.command, undefined);
-      return;
-    }
-    assert.match(commandResult.command, /-OperationId 'operation-1'/);
-    assert.match(commandResult.command, /-UpdateTicket 'U{43}'/);
-    assert.match(commandResult.command, /-PackageSha256 'B{64}'/);
-    assert.equal(commandResult.releaseVersion, "2.0.0");
-    const commandBase = process.env.AGENT_INSTALL_BASE_URL || process.env.BETTER_AUTH_URL;
-    assert.equal(commandResult.scriptUrl, new URL("/agent/Update-Agent.ps1", commandBase).toString());
-    assert.ok(commandResult.command.includes(`-ControllerUrl '${new URL(process.env.AGENT_CONTROLLER_URL).toString()}'`));
-    assert.ok(commandResult.command.includes(`-TrustedRootThumbprint '${process.env.AGENT_TRUST_ROOT_THUMBPRINT.toUpperCase()}'`));
-    assert.ok(commandResult.command.includes(`-AdminReturnUrl '${new URL("/admin/agent-releases", commandBase).toString()}'`));
-    const commandRequest = requests.at(-1);
-    assert.equal(commandRequest.method, "POST");
-    assert.equal(commandRequest.url, "/internal/machines/pc/agent-updates");
-    assert.deepEqual(commandRequest.body, { releaseVersion: "2.0.0" });
-    assert.equal(commandRequest.headers["x-authenticated-actor-id"], adminId);
-    assert.equal(commandRequest.headers["x-authenticated-actor-role"], "admin");
-    assert.equal(commandRequest.headers["x-service-credential"], "test-only");
-
-    const recoveryCommand = await call("/admin/machines/pc/agent-update-command", { operationId: "operation-1" }, adminCookie);
-    assert.equal(recoveryCommand.status, 200);
-    const recoveryResult = await recoveryCommand.json();
-    assert.match(recoveryResult.command, /-UpdateTicket 'R{43}'/);
-    assert.equal(recoveryResult.operationId, "operation-1");
-    const recoveryRequest = requests.at(-1);
-    assert.equal(recoveryRequest.method, "POST");
-    assert.equal(recoveryRequest.url, "/internal/machines/pc/agent-updates/operation-1/recovery-ticket");
-    assert.equal(recoveryRequest.headers["x-authenticated-actor-id"], adminId);
-    assert.equal(recoveryRequest.headers["x-service-credential"], "test-only");
+    assert.deepEqual(await command.json(), { error: "Controller unavailable" });
+    assert.equal(requests.length, beforeCommand, "command issuance remains disabled until the trusted helper workflow is complete");
   } finally {
     if (!scriptWasPresent) unlinkSync(scriptPath);
     else writeFileSync(scriptPath, originalScript);

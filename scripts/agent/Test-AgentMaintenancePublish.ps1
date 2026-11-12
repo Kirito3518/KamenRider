@@ -1,9 +1,18 @@
 [CmdletBinding()]
 param(
-    [string]$RepositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
+    [string]$RepositoryRoot
 )
 
 $ErrorActionPreference = 'Stop'
+if ([string]::IsNullOrWhiteSpace($RepositoryRoot)) {
+    $testScriptDirectory = $PSScriptRoot
+    if ([string]::IsNullOrWhiteSpace($testScriptDirectory)) {
+        $testScriptPath = $MyInvocation.MyCommand.Path
+        if ([string]::IsNullOrWhiteSpace($testScriptPath)) { throw 'Unable to resolve the publisher test script location.' }
+        $testScriptDirectory = Split-Path -Parent $testScriptPath
+    }
+    $RepositoryRoot = (Resolve-Path (Join-Path $testScriptDirectory '..\..')).Path
+}
 $repository = [IO.Path]::GetFullPath($RepositoryRoot)
 $temporaryRoot = [IO.Path]::GetFullPath((Join-Path ([IO.Path]::GetTempPath()) ('kr-maintenance-publish-' + [guid]::NewGuid().ToString('N'))))
 $fixtureRepository = Join-Path $temporaryRoot 'repo'
@@ -28,7 +37,7 @@ try {
     $fixtureScripts = Join-Path $fixtureRepository 'scripts\agent'
     $fixtureProject = Join-Path $fixtureRepository 'services\AgentMaintenance'
     New-Item -ItemType Directory -Path $fixturePublicAgent,$fixtureScripts,$fixtureProject -Force | Out-Null
-    New-Item -ItemType Directory -Path $outputRoot -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $outputRoot 'public\agent') -Force | Out-Null
 
     $publisherSource = Join-Path $repository 'scripts\agent\Publish-AgentMaintenance.ps1'
     $wrapperSource = Join-Path $repository 'public\agent\Update-Agent.ps1'
@@ -36,6 +45,7 @@ try {
     if (-not (Test-Path -LiteralPath $wrapperSource -PathType Leaf)) { throw 'Deployment wrapper is missing.' }
     Copy-Item -LiteralPath $publisherSource -Destination (Join-Path $fixtureScripts 'Publish-AgentMaintenance.ps1')
     Copy-Item -LiteralPath $wrapperSource -Destination (Join-Path $fixturePublicAgent 'Update-Agent.ps1')
+    Copy-Item -LiteralPath $wrapperSource -Destination (Join-Path $outputRoot 'public\agent\Update-Agent.ps1')
     [IO.File]::WriteAllText((Join-Path $fixtureProject 'AgentMaintenance.csproj'), '<Project />')
 
     $fakeDotNet = Join-Path $temporaryRoot 'Fake-DotNet.ps1'
@@ -55,12 +65,35 @@ $bytes[1] = [byte]0x5a
 [Array]::Copy([BitConverter]::GetBytes([uint32]0x00004550),0,$bytes,0x80,4)
 $machine = if ($runtime -eq 'win-x64') { [uint16]0x8664 } else { [uint16]0xAA64 }
 [Array]::Copy([BitConverter]::GetBytes($machine),0,$bytes,0x84,2)
-[IO.File]::WriteAllBytes((Join-Path $output 'AgentMaintenance.exe'),$bytes)
+$helperPath = Join-Path $output 'AgentMaintenance.exe'
+if ($env:KR_AGENT_MAINTENANCE_TEST_OVERSIZE -eq '1') {
+    $helperStream = [IO.File]::Open($helperPath,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+    try {
+        $helperStream.SetLength(157286401)
+        $helperStream.Position = 0
+        $helperStream.Write($bytes,0,$bytes.Length)
+    }
+    finally { $helperStream.Dispose() }
+}
+else { [IO.File]::WriteAllBytes($helperPath,$bytes) }
 $global:LASTEXITCODE = 0
 '@
     [IO.File]::WriteAllText($fakeDotNet,$fakeDotNetScript)
 
     $publisher = Join-Path $fixtureScripts 'Publish-AgentMaintenance.ps1'
+
+    $servedWrapperPath = Join-Path $outputRoot 'public\agent\Update-Agent.ps1'
+    $originalServedWrapper = [IO.File]::ReadAllBytes($servedWrapperPath)
+    $tamperedServedWrapper = New-Object byte[] ($originalServedWrapper.Length + 1)
+    [Array]::Copy($originalServedWrapper,$tamperedServedWrapper,$originalServedWrapper.Length)
+    $tamperedServedWrapper[$tamperedServedWrapper.Length - 1] = [byte]0x41
+    [IO.File]::WriteAllBytes($servedWrapperPath,$tamperedServedWrapper)
+    $rejectedServedWrapper = $false
+    try { & $publisher -RepositoryRoot $fixtureRepository -OutputRoot $outputRoot -DotNetPath $fakeDotNet }
+    catch { $rejectedServedWrapper = $true }
+    finally { [IO.File]::WriteAllBytes($servedWrapperPath,$originalServedWrapper) }
+    Assert-True $rejectedServedWrapper 'Publisher accepted a web-served wrapper that differs from the pinned repository source.'
+
     & $publisher -RepositoryRoot $fixtureRepository -OutputRoot $outputRoot -DotNetPath $fakeDotNet
 
     $manifestPath = Join-Path $outputRoot 'public\agent\agent-maintenance-assets.json'
@@ -96,8 +129,62 @@ $global:LASTEXITCODE = 0
         [IO.File]::WriteAllBytes($tamperedPath,$changedBytes)
         $changedHash = Get-TestSha256Hex ([IO.File]::ReadAllBytes($tamperedPath))
         Assert-True ($changedBytes.Length -ne $tamperedAsset.length -or $changedHash -cne $tamperedAsset.sha256) 'Tampered helper unexpectedly matched the pinned length and digest.'
+
+        $manifestBeforeRejectedPublish = [IO.File]::ReadAllBytes($manifestPath)
+        $publishFailure = $null
+        try { & $publisher -RepositoryRoot $fixtureRepository -OutputRoot $outputRoot -DotNetPath $fakeDotNet }
+        catch { $publishFailure = $_.Exception.Message }
+        Assert-True ($publishFailure -match 'Existing content-addressed asset is invalid') 'Publisher did not reject a corrupt existing content-addressed helper.'
+        $manifestAfterRejectedPublish = [IO.File]::ReadAllBytes($manifestPath)
+        Assert-True ((Get-TestSha256Hex $manifestAfterRejectedPublish) -ceq (Get-TestSha256Hex $manifestBeforeRejectedPublish)) 'Rejected republish changed the existing deployment manifest.'
     }
     finally { [IO.File]::WriteAllBytes($tamperedPath,$originalBytes) }
+
+    $manifestBeforeRejectedPublish = [IO.File]::ReadAllBytes($manifestPath)
+    $hardLinkPath = $tamperedPath + '.hard-link-probe'
+    New-Item -ItemType HardLink -Path $hardLinkPath -Target $tamperedPath | Out-Null
+    try {
+        $hardLinkFailure = $null
+        try { & $publisher -RepositoryRoot $fixtureRepository -OutputRoot $outputRoot -DotNetPath $fakeDotNet }
+        catch { $hardLinkFailure = $_.Exception.Message }
+        Assert-True ($hardLinkFailure -match 'exactly one hard link') 'Publisher accepted a hard-linked existing content-addressed helper.'
+        $manifestAfterRejectedPublish = [IO.File]::ReadAllBytes($manifestPath)
+        Assert-True ((Get-TestSha256Hex $manifestAfterRejectedPublish) -ceq (Get-TestSha256Hex $manifestBeforeRejectedPublish)) 'Hard-link rejection changed the existing deployment manifest.'
+    }
+    finally { if (Test-Path -LiteralPath $hardLinkPath) { Remove-Item -LiteralPath $hardLinkPath -Force } }
+
+    $hashDirectory = Split-Path -Parent $tamperedPath
+    $hashDirectoryBackup = $hashDirectory + '.junction-backup'
+    Move-Item -LiteralPath $hashDirectory -Destination $hashDirectoryBackup
+    try {
+        New-Item -ItemType Junction -Path $hashDirectory -Target $hashDirectoryBackup | Out-Null
+        $junctionFailure = $null
+        try { & $publisher -RepositoryRoot $fixtureRepository -OutputRoot $outputRoot -DotNetPath $fakeDotNet }
+        catch { $junctionFailure = $_.Exception.Message }
+        Assert-True ($junctionFailure -match 'reparse point') 'Publisher accepted a junction in the content-addressed helper path.'
+        $manifestAfterRejectedPublish = [IO.File]::ReadAllBytes($manifestPath)
+        Assert-True ((Get-TestSha256Hex $manifestAfterRejectedPublish) -ceq (Get-TestSha256Hex $manifestBeforeRejectedPublish)) 'Junction rejection changed the existing deployment manifest.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $hashDirectory) { [IO.Directory]::Delete($hashDirectory) }
+        if (Test-Path -LiteralPath $hashDirectoryBackup) { Move-Item -LiteralPath $hashDirectoryBackup -Destination $hashDirectory }
+    }
+
+    $manifestBeforeOversizedPublish = [IO.File]::ReadAllBytes($manifestPath)
+    $previousOversizeFlag = $env:KR_AGENT_MAINTENANCE_TEST_OVERSIZE
+    $env:KR_AGENT_MAINTENANCE_TEST_OVERSIZE = '1'
+    try {
+        $oversizedFailure = $null
+        try { & $publisher -RepositoryRoot $fixtureRepository -OutputRoot $outputRoot -DotNetPath $fakeDotNet }
+        catch { $oversizedFailure = $_.Exception.Message }
+        Assert-True ($oversizedFailure -match 'declared 157286400-byte helper limit') 'Publisher accepted a helper above the shared 150 MiB limit.'
+        $manifestAfterRejectedPublish = [IO.File]::ReadAllBytes($manifestPath)
+        Assert-True ((Get-TestSha256Hex $manifestAfterRejectedPublish) -ceq (Get-TestSha256Hex $manifestBeforeOversizedPublish)) 'Oversized-helper rejection changed the existing deployment manifest.'
+    }
+    finally {
+        if ($null -eq $previousOversizeFlag) { Remove-Item Env:\KR_AGENT_MAINTENANCE_TEST_OVERSIZE -ErrorAction SilentlyContinue }
+        else { $env:KR_AGENT_MAINTENANCE_TEST_OVERSIZE = $previousOversizeFlag }
+    }
 
     $missingAssetPath = Join-Path $outputRoot ('public\agent' + $manifest.helpers.'win-arm64'.relativeUrl.Substring('/agent'.Length).Replace('/','\'))
     $missingAssetBackup = $missingAssetPath + '.missing'

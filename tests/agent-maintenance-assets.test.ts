@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   AgentMaintenanceAssetsUnavailableError,
+  MAX_AGENT_MAINTENANCE_HELPER_BYTES,
   verifyDeploymentAgentMaintenanceAssets,
 } from "../src/lib/agent-maintenance-assets";
 
@@ -109,6 +110,15 @@ describe("deployment-local Agent maintenance assets", () => {
     writeFileSync(join(publicAgentRoot, "agent-maintenance-assets.json"), JSON.stringify(manifest));
 
     await expect(verifyDeploymentAgentMaintenanceAssets("win-x64")).rejects.toThrow();
+  });
+
+  it("rejects helper metadata above the publisher and bootstrap 150 MiB cap", async () => {
+    manifest.helpers["win-x64"].length = MAX_AGENT_MAINTENANCE_HELPER_BYTES + 1;
+    writeFileSync(join(publicAgentRoot, "agent-maintenance-assets.json"), JSON.stringify(manifest));
+
+    await expect(verifyDeploymentAgentMaintenanceAssets("win-x64")).rejects.toBeInstanceOf(
+      AgentMaintenanceAssetsUnavailableError,
+    );
   });
 
   it("rejects duplicate manifest keys even when their values agree", async () => {
