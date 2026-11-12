@@ -1,6 +1,15 @@
 import "server-only";
+import {
+  recoveryHeadFromConflict,
+  type SafeRecoveryHead,
+} from "./controller-safe-responses";
+export type { SafeRecoveryHead } from "./controller-safe-responses";
 export class ControllerError extends Error {
-  constructor(public status: number, public safeReleaseReason: string | null = null) {
+  constructor(
+    public status: number,
+    public safeReleaseReason: string | null = null,
+    public safeRecoveryHead: SafeRecoveryHead | null = null,
+  ) {
     super("Controller unavailable");
   }
 }
@@ -53,12 +62,14 @@ export async function controllerRequest<T>(
       },
     });
     if (!response.ok) {
+      const safeRecoveryHead = await recoveryHeadFromConflict(response);
       const safeReleaseReason = await rejectedReleaseReason(response);
       throw new ControllerError(
         [400, 403, 404, 409, 413, 429].includes(response.status)
           ? response.status
           : 503,
         safeReleaseReason,
+        safeRecoveryHead,
       );
     }
     return (await response.json()) as T;

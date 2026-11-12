@@ -8,6 +8,7 @@ export async function machineApi(
     call: <T>(path: string, init?: RequestInit) => Promise<T>,
   ) => Promise<unknown>,
   publicAccess = false,
+  errorResponse?: (error: unknown) => Response | null,
 ) {
   try {
     const session = publicAccess
@@ -39,6 +40,8 @@ export async function machineApi(
     });
     return Response.json(result, { headers: { "Cache-Control": "no-store" } });
   } catch (error) {
+    const mappedError = errorResponse?.(error);
+    if (mappedError) return mappedError;
     const status =
       error instanceof ControllerError
         ? error.status
