@@ -1,10 +1,287 @@
 using KamenRaider.Contracts;
+using KamenRaider.Controller.Agents;
+using KamenRaider.Controller.Data;
+using KamenRaider.Controller.Security;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.TestHost;
+using Microsoft.Data.Sqlite;
+using Microsoft.Extensions.DependencyInjection;
+using System.Net.Http.Json;
+using System.Reflection;
+using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 
 namespace Controller.Tests;
 
 public sealed class AgentRecoveryTests
 {
+    [Fact]
+    public void ControllerDatabaseMigratesToVersionTwentyRecoverySchema()
+    {
+        using var fixture = new LeaseFixture();
+        using var connection = Open(fixture.Path);
+        using var version = connection.CreateCommand();
+        version.CommandText = "PRAGMA user_version";
+
+        Assert.Equal(20L, Convert.ToInt64(version.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture));
+        ControllerDatabaseMaintenance.ValidateCanonicalSchema(connection, 20);
+        ControllerDatabaseMaintenance.ValidateRecoverySchema(connection);
+    }
+
+    [Fact]
+    public void RecoveryIntentDurablyAdvancesFenceAndExactRetryDoesNotAdvanceItAgain()
+    {
+        using var fixture = new LeaseFixture(agentReleaseRemediationEnabled: true);
+        AddRelease(fixture.Path, "2.0.0");
+        var oldTicket = fixture.Db.ReserveAgentUpdate("pc", "2.0.0", "admin", "recovery-seed");
+        var oldOperation = fixture.Db.StartAgentUpdate("pc", oldTicket.OperationId, oldTicket.Ticket,
+            oldTicket.ReleaseVersion, oldTicket.TargetVersion, oldTicket.TargetPackageSha256, "recovery-seed-start");
+        var initialGeneration = oldOperation.Generation;
+
+        var first = CreateIntent(fixture.Db, oldOperation, initialGeneration, "recovery-request-1");
+        Assert.Equal(oldOperation.ChainId, Get<string>(first, "ChainId"));
+        Assert.Equal(oldOperation.CurrentHeadOperationId, Get<string>(first, "PreviousHeadOperationId"));
+        Assert.Equal(initialGeneration + 1, Get<long>(first, "Generation"));
+        Assert.True(Get<bool>(first, "Held"));
+        Assert.False(Assert.Single(fixture.Db.List()).CanRent);
+        Assert.Throws<UnauthorizedAccessException>(() => fixture.Db.StartAgentUpdate("pc", oldTicket.OperationId,
+            oldTicket.Ticket, oldTicket.ReleaseVersion, oldTicket.TargetVersion, oldTicket.TargetPackageSha256, "recovery-seed-start"));
+
+        fixture.Reopen();
+        var retried = CreateIntent(fixture.Db, oldOperation, initialGeneration, "recovery-request-1");
+        Assert.Equal(Get<string>(first, "IntentId"), Get<string>(retried, "IntentId"));
+        Assert.Equal(initialGeneration + 1, Get<long>(retried, "Generation"));
+        var competing = Record.Exception(() => CreateIntent(fixture.Db, oldOperation, initialGeneration,
+            "recovery-competing-request"));
+        Assert.IsAssignableFrom<InvalidOperationException>(competing);
+        Assert.Equal(1L, Scalar(fixture.Path, "SELECT COUNT(*) FROM agent_update_recovery_intents"));
+        Assert.Equal(0L, Scalar(fixture.Path, "SELECT COUNT(*) FROM agent_update_operations WHERE status='superseded'"));
+    }
+
+    [Fact]
+    public void RecoveryInspectionAuthenticatesEnrolledKeyAndPersistsBlockedEvidenceWithoutSupersession()
+    {
+        using var fixture = new LeaseFixture(agentReleaseRemediationEnabled: true);
+        AddRelease(fixture.Path, "2.0.0");
+        var ticket = fixture.Db.ReserveAgentUpdate("pc", "2.0.0", "admin", "recovery-proof-seed");
+        var operation = fixture.Db.StartAgentUpdate("pc", ticket.OperationId, ticket.Ticket,
+            ticket.ReleaseVersion, ticket.TargetVersion, ticket.TargetPackageSha256, "recovery-proof-start");
+        var intent = CreateIntent(fixture.Db, operation, operation.Generation, "recovery-proof-intent");
+        var fingerprint = Convert.ToHexString(SHA256.HashData(Convert.FromBase64String(fixture.Db.PublicKey("pc")!)));
+        const string requestId = "inspection-request-1";
+        var path = $"/agent/machines/pc/agent-update-recovery/{Get<string>(intent, "IntentId")}/inspection";
+        var inspection = CreateSignedInspection(intent, operation, fingerprint, requestId, fixture.AgentKey);
+        var badSignature = inspection with { EvidenceSignature = Convert.ToBase64String(new byte[64]) };
+        var challenge = CreateRecoveryChallenge(fixture, intent, inspection);
+        var challengeToken = Get<string>(challenge, "Challenge");
+
+        var wrongHeadInspection = SignRecoveryInspection(inspection with { HeadOperationId = "another-head" }, fixture.AgentKey);
+        var wrongHead = Record.Exception(() => InvokeRequired(fixture.Db, "CommitRecoveryInspection",
+            VerifiedAgentRequestFixture.CreateWithNonce(fixture.Db, "pc", path, wrongHeadInspection, challengeToken),
+            Get<string>(intent, "IntentId"), requestId, wrongHeadInspection));
+        Assert.IsAssignableFrom<UnauthorizedAccessException>(wrongHead);
+        Assert.Equal(0L, Scalar(fixture.Path, "SELECT COUNT(*) FROM agent_update_recovery_inspections"));
+
+        var wrongGenerationInspection = SignRecoveryInspection(inspection with { Generation = inspection.Generation + 1 }, fixture.AgentKey);
+        var wrongGeneration = Record.Exception(() => InvokeRequired(fixture.Db, "CommitRecoveryInspection",
+            VerifiedAgentRequestFixture.CreateWithNonce(fixture.Db, "pc", path, wrongGenerationInspection, challengeToken),
+            Get<string>(intent, "IntentId"), requestId, wrongGenerationInspection));
+        Assert.IsAssignableFrom<UnauthorizedAccessException>(wrongGeneration);
+        Assert.Equal(0L, Scalar(fixture.Path, "SELECT COUNT(*) FROM agent_update_recovery_inspections"));
+
+        var wrongChallenge = Record.Exception(() => InvokeRequired(fixture.Db, "CommitRecoveryInspection",
+            VerifiedAgentRequestFixture.CreateWithNonce(fixture.Db, "pc", path, inspection, "not-the-issued-challenge"),
+            Get<string>(intent, "IntentId"), requestId, inspection));
+        Assert.IsAssignableFrom<UnauthorizedAccessException>(wrongChallenge);
+        Assert.Equal(0L, Scalar(fixture.Path, "SELECT COUNT(*) FROM agent_update_recovery_inspections"));
+
+        var invalid = Record.Exception(() => InvokeRequired(fixture.Db, "CommitRecoveryInspection",
+            VerifiedAgentRequestFixture.CreateWithNonce(fixture.Db, "pc", path, badSignature, challengeToken),
+            Get<string>(intent, "IntentId"), requestId, badSignature));
+
+        Assert.IsAssignableFrom<UnauthorizedAccessException>(invalid);
+        Assert.Equal(0L, Scalar(fixture.Path, "SELECT COUNT(*) FROM agent_update_recovery_inspections"));
+
+        var blocked = Record.Exception(() => InvokeRequired(fixture.Db, "CommitRecoveryInspection",
+            VerifiedAgentRequestFixture.CreateWithNonce(fixture.Db, "pc", path, inspection, challengeToken),
+            Get<string>(intent, "IntentId"), requestId, inspection));
+        Assert.NotNull(blocked);
+        Assert.Equal("AgentRecoveryQualificationUnavailableException", blocked!.GetType().Name);
+        Assert.Equal("originalBackupBindingUnavailable", Get<string>(blocked, "BlockReason"));
+        Assert.Equal(1L, Scalar(fixture.Path, "SELECT COUNT(*) FROM agent_update_recovery_inspections"));
+        Assert.Equal(1L, Scalar(fixture.Path, "SELECT COUNT(*) FROM agent_update_evidence_challenges WHERE purpose='recoveryInspection' AND consumed_at_unix_ms IS NOT NULL AND request_id='inspection-request-1'"));
+        Assert.Equal(0L, Scalar(fixture.Path, "SELECT COUNT(*) FROM agent_update_operations WHERE status='superseded'"));
+        Assert.False(Assert.Single(fixture.Db.List()).CanRent);
+
+        var differentRequest = CreateSignedInspection(intent, operation, fingerprint, "inspection-request-2", fixture.AgentKey);
+        var replay = Record.Exception(() => InvokeRequired(fixture.Db, "CommitRecoveryInspection",
+            VerifiedAgentRequestFixture.CreateWithNonce(fixture.Db, "pc", path, differentRequest, challengeToken),
+            Get<string>(intent, "IntentId"), "inspection-request-2", differentRequest));
+        Assert.IsAssignableFrom<UnauthorizedAccessException>(replay);
+        Assert.Equal(1L, Scalar(fixture.Path, "SELECT COUNT(*) FROM agent_update_recovery_inspections"));
+
+        fixture.Reopen();
+        var retried = Record.Exception(() => InvokeRequired(fixture.Db, "CommitRecoveryInspection",
+            VerifiedAgentRequestFixture.Create(fixture.Db, "pc", path, inspection),
+            Get<string>(intent, "IntentId"), requestId, inspection));
+        Assert.NotNull(retried);
+        Assert.Equal("AgentRecoveryQualificationUnavailableException", retried!.GetType().Name);
+        Assert.Equal(1L, Scalar(fixture.Path, "SELECT COUNT(*) FROM agent_update_recovery_inspections"));
+    }
+
+    [Fact]
+    public void RecoveryInspectionWithoutAnIntentBoundChallengeIsRejectedBeforePersistence()
+    {
+        using var fixture = new LeaseFixture(agentReleaseRemediationEnabled: true);
+        AddRelease(fixture.Path, "2.0.0");
+        var ticket = fixture.Db.ReserveAgentUpdate("pc", "2.0.0", "admin", "recovery-no-challenge-seed");
+        var operation = fixture.Db.StartAgentUpdate("pc", ticket.OperationId, ticket.Ticket,
+            ticket.ReleaseVersion, ticket.TargetVersion, ticket.TargetPackageSha256, "recovery-no-challenge-start");
+        var intent = CreateIntent(fixture.Db, operation, operation.Generation, "recovery-no-challenge-intent");
+        var fingerprint = Convert.ToHexString(SHA256.HashData(Convert.FromBase64String(fixture.Db.PublicKey("pc")!)));
+        const string requestId = "inspection-without-challenge";
+        var path = $"/agent/machines/pc/agent-update-recovery/{Get<string>(intent, "IntentId")}/inspection";
+        var inspection = CreateSignedInspection(intent, operation, fingerprint, requestId, fixture.AgentKey);
+
+        var rejected = Record.Exception(() => InvokeRequired(fixture.Db, "CommitRecoveryInspection",
+            VerifiedAgentRequestFixture.Create(fixture.Db, "pc", path, inspection),
+            Get<string>(intent, "IntentId"), requestId, inspection));
+
+        Assert.IsAssignableFrom<UnauthorizedAccessException>(rejected);
+        Assert.Equal(0L, Scalar(fixture.Path, "SELECT COUNT(*) FROM agent_update_recovery_inspections"));
+    }
+
+    [Fact]
+    public void RecoveryChallengeIssuanceRejectsPrunedEnvelopeReplayAndClockRollbackButAllowsFreshRetry()
+    {
+        using var fixture = new LeaseFixture(agentReleaseRemediationEnabled: true);
+        AddRelease(fixture.Path, "2.0.0");
+        var ticket = fixture.Db.ReserveAgentUpdate("pc", "2.0.0", "admin", "recovery-freshness-seed");
+        var operation = fixture.Db.StartAgentUpdate("pc", ticket.OperationId, ticket.Ticket,
+            ticket.ReleaseVersion, ticket.TargetVersion, ticket.TargetPackageSha256, "recovery-freshness-start");
+        var intent = CreateIntent(fixture.Db, operation, operation.Generation, "recovery-freshness-intent");
+        var fingerprint = Convert.ToHexString(SHA256.HashData(Convert.FromBase64String(fixture.Db.PublicKey("pc")!)));
+        var inspection = CreateSignedInspection(intent, operation, fingerprint, "recovery-freshness-request", fixture.AgentKey);
+        var request = new AgentUpdateRecoveryInspectionChallengeRequest(inspection);
+        var intentId = Get<string>(intent, "IntentId");
+        var path = $"/agent/machines/pc/agent-update-recovery/{intentId}/challenge";
+        var publicKey = fixture.Db.PublicKey("pc")!;
+        var body = JsonSerializer.Serialize(request, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        VerifiedAgentRequest Envelope(DateTimeOffset signedAt, string nonce)
+            => VerifiedAgentRequest.CreateForTest("pc", publicKey, "POST", path,
+                signedAt.ToUnixTimeSeconds(), nonce, body);
+
+        var issuedAt = fixture.Time.Now;
+        var originalEnvelope = Envelope(issuedAt, "recovery-freshness-original");
+        var originalChallenge = fixture.Db.IssueAgentUpdateRecoveryInspectionChallenge(
+            originalEnvelope, intentId, request);
+
+        fixture.Time.Now = issuedAt.AddSeconds(121);
+        var freshRetryEnvelope = Envelope(fixture.Time.Now, "recovery-freshness-retry");
+        var freshRetry = fixture.Db.IssueAgentUpdateRecoveryInspectionChallenge(
+            freshRetryEnvelope, intentId, request);
+        var freshRetryDigest = Convert.ToHexString(SHA256.HashData(Encoding.ASCII.GetBytes(freshRetry.Challenge)));
+
+        Assert.NotEqual(originalChallenge.Challenge, freshRetry.Challenge);
+        Assert.Equal(0L, Scalar(fixture.Path,
+            "SELECT COUNT(*) FROM agent_signed_request_nonces WHERE machine_id='pc' AND path=$path AND nonce_digest=$nonce",
+            ("$path", path), ("$nonce", originalEnvelope.NonceDigest)));
+
+        var replay = Record.Exception(() => fixture.Db.IssueAgentUpdateRecoveryInspectionChallenge(
+            originalEnvelope, intentId, request));
+        Assert.IsAssignableFrom<UnauthorizedAccessException>(replay);
+        Assert.Equal(1L, Scalar(fixture.Path,
+            "SELECT COUNT(*) FROM agent_update_evidence_challenges WHERE purpose='recoveryInspection' AND challenge_request_id=$request AND nonce_digest=$digest",
+            ("$request", inspection.RequestId), ("$digest", freshRetryDigest)));
+
+        fixture.Reopen();
+        fixture.Time.Now = issuedAt.AddSeconds(30);
+        var clockRolledBackEnvelope = Envelope(fixture.Time.Now, "recovery-freshness-rollback");
+        var rollback = Record.Exception(() => fixture.Db.IssueAgentUpdateRecoveryInspectionChallenge(
+            clockRolledBackEnvelope, intentId, request));
+        Assert.IsAssignableFrom<UnauthorizedAccessException>(rollback);
+        Assert.Equal(1L, Scalar(fixture.Path,
+            "SELECT COUNT(*) FROM agent_update_evidence_challenges WHERE purpose='recoveryInspection' AND challenge_request_id=$request AND nonce_digest=$digest",
+            ("$request", inspection.RequestId), ("$digest", freshRetryDigest)));
+
+        var futureEnvelope = Envelope(issuedAt.AddMinutes(5), "recovery-freshness-future");
+        var future = Record.Exception(() => fixture.Db.IssueAgentUpdateRecoveryInspectionChallenge(
+            futureEnvelope, intentId, request));
+        Assert.IsAssignableFrom<UnauthorizedAccessException>(future);
+    }
+
+    [Fact]
+    public async Task RecoveryEndpointsRequireEnrolledAgentSignatureAndReturnBlockedWithoutSuccessor()
+    {
+        using var fixture = new LeaseFixture(agentReleaseRemediationEnabled: true);
+        AddRelease(fixture.Path, "2.0.0");
+        var ticket = fixture.Db.ReserveAgentUpdate("pc", "2.0.0", "admin", "recovery-http-seed");
+        var operation = fixture.Db.StartAgentUpdate("pc", ticket.OperationId, ticket.Ticket,
+            ticket.ReleaseVersion, ticket.TargetVersion, ticket.TargetPackageSha256, "recovery-http-start");
+        var intent = CreateIntent(fixture.Db, operation, operation.Generation, "recovery-http-intent");
+        var keyFingerprint = Convert.ToHexString(SHA256.HashData(Convert.FromBase64String(fixture.Db.PublicKey("pc")!)));
+        var inspection = CreateSignedInspection(intent, operation, keyFingerprint, "recovery-http-inspection", fixture.AgentKey);
+        var challengeRequest = new AgentUpdateRecoveryInspectionChallengeRequest(inspection);
+        var intentId = Get<string>(intent, "IntentId");
+        var challengePath = $"/agent/machines/pc/agent-update-recovery/{intentId}/challenge";
+        var inspectionPath = $"/agent/machines/pc/agent-update-recovery/{intentId}/inspection";
+
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer();
+        builder.Services.AddSingleton(fixture.Db);
+        builder.Services.AddSingleton<AgentAuthentication>();
+        builder.Services.AddSingleton(new AgentReleaseStore(
+            Path.Combine(Path.GetDirectoryName(fixture.Path)!, "agent-release-http")));
+        await using var app = builder.Build();
+        app.MapAgentReleases();
+        await app.StartAsync();
+        using var client = app.GetTestServer().CreateClient();
+
+        using (var unsigned = new HttpRequestMessage(HttpMethod.Post, challengePath)
+        {
+            Content = new StringContent(JsonSerializer.Serialize(challengeRequest, new JsonSerializerOptions(JsonSerializerDefaults.Web)), Encoding.UTF8, "application/json"),
+        })
+        using (var rejected = await client.SendAsync(unsigned))
+        {
+            Assert.Equal(System.Net.HttpStatusCode.Unauthorized, rejected.StatusCode);
+        }
+        Assert.Equal(0L, Scalar(fixture.Path, "SELECT COUNT(*) FROM agent_update_evidence_challenges WHERE purpose='recoveryInspection'"));
+
+        using var signedChallengeRequest = CreateSignedAgentRequest(fixture, challengePath, challengeRequest, "http-challenge-request");
+        using var challengeResponse = await client.SendAsync(signedChallengeRequest);
+        Assert.Equal(System.Net.HttpStatusCode.OK, challengeResponse.StatusCode);
+        Assert.Equal("no-store", challengeResponse.Headers.CacheControl?.ToString());
+        var challenge = await challengeResponse.Content.ReadFromJsonAsync<AgentUpdateRecoveryInspectionChallengeResponse>();
+        Assert.NotNull(challenge);
+        var challengeDigest = Convert.ToHexString(SHA256.HashData(Encoding.ASCII.GetBytes(challenge!.Challenge)));
+        Assert.Equal(1L, Scalar(fixture.Path,
+            "SELECT COUNT(*) FROM agent_update_evidence_challenges WHERE purpose='recoveryInspection' AND nonce_digest=$digest",
+            ("$digest", challengeDigest)));
+        Assert.Equal(0L, Scalar(fixture.Path,
+            "SELECT COUNT(*) FROM agent_update_evidence_challenges WHERE purpose='recoveryInspection' AND nonce_digest=$raw",
+            ("$raw", challenge.Challenge)));
+
+        var differentRequest = CreateSignedInspection(intent, operation, keyFingerprint, "recovery-http-other-inspection", fixture.AgentKey);
+        using (var replayRequest = CreateSignedAgentRequest(fixture, inspectionPath, differentRequest, challenge!.Challenge))
+        using (var replayResponse = await client.SendAsync(replayRequest))
+        {
+            Assert.Equal(System.Net.HttpStatusCode.Unauthorized, replayResponse.StatusCode);
+        }
+        Assert.Equal(0L, Scalar(fixture.Path, "SELECT COUNT(*) FROM agent_update_recovery_inspections"));
+
+        using var signedInspectionRequest = CreateSignedAgentRequest(fixture, inspectionPath, inspection, challenge.Challenge);
+        using var blockedResponse = await client.SendAsync(signedInspectionRequest);
+        Assert.Equal(System.Net.HttpStatusCode.ServiceUnavailable, blockedResponse.StatusCode);
+        using var blockedJson = JsonDocument.Parse(await blockedResponse.Content.ReadAsStringAsync());
+        Assert.Equal("recoveryQualificationUnavailable", blockedJson.RootElement.GetProperty("code").GetString());
+        Assert.Equal(1L, Scalar(fixture.Path, "SELECT COUNT(*) FROM agent_update_recovery_inspections"));
+        Assert.Equal(1L, Scalar(fixture.Path, "SELECT COUNT(*) FROM agent_update_evidence_challenges WHERE purpose='recoveryInspection' AND consumed_at_unix_ms IS NOT NULL AND request_id='recovery-http-inspection'"));
+        Assert.Equal(0L, Scalar(fixture.Path, "SELECT COUNT(*) FROM agent_update_operations WHERE status='superseded'"));
+        Assert.False(Assert.Single(fixture.Db.List()).CanRent);
+    }
+
     [Fact]
     public void RecoveryInspectionCanonicalPayloadBindsBackupSourceAndInstalledInventory()
     {
@@ -179,4 +456,144 @@ public sealed class AgentRecoveryTests
         true,
         "qualifiedDisabled",
         true);
+
+    private static object CreateIntent(ControllerDatabase database, AgentUpdateOperationDto operation,
+        long expectedGeneration, string requestId)
+        => InvokeRequired(database, "CreateRecoveryIntent", "pc", operation.ChainId,
+            operation.CurrentHeadOperationId, expectedGeneration, "2.0.0", "test recovery", requestId, "admin");
+
+    private static object CreateRecoveryChallenge(LeaseFixture fixture, object intent,
+        SignedRecoveryInspection inspection)
+    {
+        var database = fixture.Db;
+        var requestType = typeof(SignedRecoveryInspection).Assembly.GetType("KamenRaider.Contracts.AgentUpdateRecoveryInspectionChallengeRequest");
+        Assert.NotNull(requestType);
+        var request = Activator.CreateInstance(requestType!, inspection);
+        Assert.NotNull(request);
+        var intentId = Get<string>(intent, "IntentId");
+        var path = $"/agent/machines/pc/agent-update-recovery/{intentId}/challenge";
+        var body = JsonSerializer.Serialize(request, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        var verified = VerifiedAgentRequest.CreateForTest("pc", database.PublicKey("pc")!, "POST", path,
+            fixture.Time.Now.ToUnixTimeSeconds(), Guid.NewGuid().ToString("N"), body);
+        return InvokeRequired(database, "IssueAgentUpdateRecoveryInspectionChallenge", verified, intentId, request!);
+    }
+
+    private static SignedRecoveryInspection CreateSignedInspection(object intent, AgentUpdateOperationDto operation,
+        string keyFingerprint, string requestId, System.Security.Cryptography.ECDsa agentKey)
+    {
+        var bootId = Guid.NewGuid().ToString("N");
+        var inspection = new SignedRecoveryInspection(
+            "pc",
+            keyFingerprint,
+            Get<string>(intent, "IntentId"),
+            Get<string>(intent, "ChainId"),
+            Get<string>(intent, "PreviousHeadOperationId"),
+            Get<long>(intent, "Generation"),
+            requestId,
+            Get<string>(intent, "TargetVersion"),
+            Get<string>(intent, "TargetPackageSha256"),
+            "1.0.0",
+            "verifiedOriginalBackup",
+            null,
+            null,
+            operation.OperationId,
+            new string('C', 64),
+            new string('D', 64),
+            bootId,
+            bootId,
+            "continuousSharedLock",
+            "qualifiedNotApplicable",
+            new string('E', 64),
+            "win-x64",
+            1,
+            string.Empty);
+        return SignRecoveryInspection(inspection, agentKey);
+    }
+
+    private static SignedRecoveryInspection SignRecoveryInspection(SignedRecoveryInspection inspection,
+        System.Security.Cryptography.ECDsa agentKey)
+    {
+        var signature = agentKey.SignData(AgentUpdateRecoveryInspectionCanonicalizer.CanonicalBytes(inspection),
+            HashAlgorithmName.SHA256);
+        return inspection with { EvidenceSignature = Convert.ToBase64String(signature) };
+    }
+
+    private static HttpRequestMessage CreateSignedAgentRequest(LeaseFixture fixture, string path, object body, string nonce)
+    {
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(body, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        var signedSeconds = fixture.Time.GetUtcNow().ToUnixTimeSeconds().ToString(System.Globalization.CultureInfo.InvariantCulture);
+        var bodyDigest = Convert.ToHexString(SHA256.HashData(bytes));
+        var canonical = Encoding.UTF8.GetBytes($"pc\nPOST\n{path}\n{signedSeconds}\n{nonce}\n{bodyDigest}");
+        var signature = Convert.ToBase64String(fixture.AgentKey.SignData(canonical, HashAlgorithmName.SHA256));
+        var request = new HttpRequestMessage(HttpMethod.Post, path)
+        {
+            Content = new ByteArrayContent(bytes),
+        };
+        request.Content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
+        request.Headers.TryAddWithoutValidation("X-Agent-Id", "pc");
+        request.Headers.TryAddWithoutValidation("X-Agent-Timestamp", signedSeconds);
+        request.Headers.TryAddWithoutValidation("X-Agent-Nonce", nonce);
+        request.Headers.TryAddWithoutValidation("X-Agent-Signature", signature);
+        return request;
+    }
+
+    private static object InvokeRequired(object target, string methodName, params object[] arguments)
+    {
+        var parameterTypes = arguments.Select(argument => argument.GetType()).ToArray();
+        var method = target.GetType().GetMethod(methodName, BindingFlags.Instance | BindingFlags.Public,
+            binder: null, types: parameterTypes, modifiers: null);
+        Assert.NotNull(method);
+        try { return method!.Invoke(target, arguments)!; }
+        catch (TargetInvocationException exception) when (exception.InnerException is not null)
+        {
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(exception.InnerException).Throw();
+            throw;
+        }
+    }
+
+    private static T Get<T>(object value, string propertyName)
+    {
+        var property = value.GetType().GetProperty(propertyName, BindingFlags.Instance | BindingFlags.Public);
+        Assert.NotNull(property);
+        return Assert.IsType<T>(property!.GetValue(value));
+    }
+
+    private static void AddRelease(string databasePath, string version)
+    {
+        var bytes = AgentUpdateTestPackage.Create(version);
+        var hash = Convert.ToHexString(SHA256.HashData(bytes));
+        var packagePath = Path.Combine(Path.GetDirectoryName(databasePath)!, "agent-releases", "sha256",
+            hash[..2].ToLowerInvariant(), hash.ToLowerInvariant() + ".zip");
+        Directory.CreateDirectory(Path.GetDirectoryName(packagePath)!);
+        File.WriteAllBytes(packagePath, bytes);
+        using var connection = Open(databasePath);
+        using var insert = connection.CreateCommand();
+        insert.CommandText = "INSERT INTO agent_releases(version,channel,release_notes,package_sha256,package_path,package_size_bytes,source_commit,source_dirty,release_build,package_format,published_at_unix_ms,target_runtime,agent_update_challenge_protocol) VALUES($version,'stable','release notes',$hash,$path,$size,'0123456789ab',0,1,'AgentPackage.zip',1,'win-x64',2)";
+        insert.Parameters.AddWithValue("$version", version);
+        insert.Parameters.AddWithValue("$hash", hash);
+        insert.Parameters.AddWithValue("$path", packagePath);
+        insert.Parameters.AddWithValue("$size", bytes.Length);
+        insert.ExecuteNonQuery();
+    }
+
+    private static long Scalar(string databasePath, string sql, params (string Name, object? Value)[] parameters)
+    {
+        using var connection = Open(databasePath);
+        using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        foreach (var (name, value) in parameters) command.Parameters.AddWithValue(name, value ?? DBNull.Value);
+        return Convert.ToInt64(command.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    private static SqliteConnection Open(string databasePath)
+    {
+        var connection = new SqliteConnection(new SqliteConnectionStringBuilder
+        {
+            DataSource = databasePath,
+            ForeignKeys = true,
+            Pooling = false,
+        }.ToString());
+        connection.Open();
+        return connection;
+    }
 }

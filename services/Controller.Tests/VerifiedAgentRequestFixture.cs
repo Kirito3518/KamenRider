@@ -17,6 +17,15 @@ internal static class VerifiedAgentRequestFixture
     internal static VerifiedAgentRequest Create(ControllerDatabase database, string machineId, string path, object body)
         => Create(database, machineId, path, JsonSerializer.Serialize(body, new JsonSerializerOptions(JsonSerializerDefaults.Web)));
 
+    internal static VerifiedAgentRequest CreateWithNonce(ControllerDatabase database, string machineId, string path,
+        object body, string nonce)
+    {
+        var publicKey = database.PublicKey(machineId) ?? throw new InvalidOperationException("The test machine is not enrolled.");
+        var serializedBody = JsonSerializer.Serialize(body, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        return VerifiedAgentRequest.CreateForTest(machineId, publicKey, "POST", path,
+            DateTimeOffset.UtcNow.ToUnixTimeSeconds(), nonce, serializedBody);
+    }
+
     internal static VerifiedAgentRequest CreateEnrollment(EnrollmentRequest request)
     {
         var body = JsonSerializer.Serialize(request, new JsonSerializerOptions(JsonSerializerDefaults.Web));

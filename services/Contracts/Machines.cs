@@ -139,6 +139,12 @@ public sealed record SignedRecoveryInspection(
     int HelperProtocol,
     string EvidenceSignature);
 
+public sealed record AgentUpdateRecoveryInspectionChallengeRequest(SignedRecoveryInspection Inspection);
+
+public sealed record AgentUpdateRecoveryInspectionChallengeResponse(
+    string Challenge,
+    DateTimeOffset ExpiresAtUtc);
+
 public sealed record AgentUpdateRecoveryInspectionExpectation(
     string MachineId,
     string IntentId,

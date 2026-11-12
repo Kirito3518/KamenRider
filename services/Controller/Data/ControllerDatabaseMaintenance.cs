@@ -503,6 +503,7 @@ public static class ControllerDatabaseMaintenance
             if (userVersion >= 14) ValidateMaintenanceChainSchema(connection);
             if (userVersion >= 15) ValidateSyncProofSchema(connection);
             if (userVersion >= 19) ValidateRestoreStateSchema(connection);
+            if (userVersion >= 20) ValidateRecoverySchema(connection);
             // These uniqueness constraints enforce allocation and command-revision invariants.
             ValidateIndex(connection, "leases", "leases_machine_allocation", ["machine_id"], "allocation_held=1", required: true);
             var hasCommandRevisionIndex = HasIndex(connection, "command_outbox", "lease_command_revision");
@@ -674,6 +675,135 @@ public static class ControllerDatabaseMaintenance
         return result;
     });
 
+    private static readonly Lazy<IReadOnlyDictionary<string, string>> recoverySchema = new(() =>
+    {
+        using var reference = new SqliteConnection("Data Source=:memory:;Foreign Keys=True");
+        reference.Open();
+        using var transaction = reference.BeginTransaction();
+        var assembly = typeof(ControllerDatabase).Assembly;
+        foreach (var resourceName in assembly.GetManifestResourceNames()
+            .Where(name => name.StartsWith("KamenRaider.Controller.Data.Migrations.", StringComparison.Ordinal)
+                && int.TryParse(name.AsSpan("KamenRaider.Controller.Data.Migrations.".Length, 3), out var version) && version <= 20)
+            .Order(StringComparer.Ordinal))
+        {
+            using var resource = assembly.GetManifestResourceStream(resourceName)
+                ?? throw new InvalidDataException("A Controller migration resource could not be loaded.");
+            using var reader = new StreamReader(resource);
+            using var migration = reference.CreateCommand();
+            migration.Transaction = transaction;
+            migration.CommandText = reader.ReadToEnd();
+            migration.ExecuteNonQuery();
+        }
+        transaction.Commit();
+        var names = new[]
+        {
+            "agent_update_recovery_intents", "agent_update_one_open_recovery_intent", "agent_update_recovery_intent_machine",
+            "agent_update_recovery_inspections", "agent_update_recovery_inspection_intent",
+            "agent_update_recovery_intent_identity_immutable", "agent_update_recovery_intent_status_guard",
+            "agent_update_recovery_intent_immutable_delete", "agent_update_recovery_inspection_immutable_update",
+            "agent_update_recovery_inspection_immutable_delete"
+        };
+        var result = new Dictionary<string, string>(StringComparer.Ordinal);
+        using var command = reference.CreateCommand();
+        command.CommandText = "SELECT sql FROM sqlite_schema WHERE name=$name";
+        var parameter = command.Parameters.Add("$name", SqliteType.Text);
+        foreach (var name in names)
+        {
+            parameter.Value = name;
+            result.Add(name, NormalizeCanonicalSql((string)command.ExecuteScalar()!));
+        }
+        return result;
+    });
+
+    internal static void ValidateRecoverySchema(SqliteConnection connection, SqliteTransaction? transaction = null)
+    {
+        long userVersion;
+        using (var version = connection.CreateCommand())
+        {
+            version.Transaction = transaction;
+            version.CommandText = "PRAGMA user_version";
+            userVersion = Convert.ToInt64(version.ExecuteScalar(), CultureInfo.InvariantCulture);
+        }
+        if (userVersion < 20)
+            throw new InvalidDataException("Controller database is missing the version 20 recovery-intent schema.");
+
+        using (var command = connection.CreateCommand())
+        {
+            command.Transaction = transaction;
+            command.CommandText = "SELECT sql FROM sqlite_schema WHERE name=$name";
+            var parameter = command.Parameters.Add("$name", SqliteType.Text);
+            foreach (var (name, expected) in recoverySchema.Value)
+            {
+                parameter.Value = name;
+                if (command.ExecuteScalar() is not string actual || NormalizeCanonicalSql(actual) != expected)
+                    throw new InvalidDataException($"Controller database has an invalid recovery-intent definition '{name}'.");
+            }
+        }
+
+        ValidateColumns(connection, "agent_update_recovery_intents", [
+            new("intent_id", "TEXT"), new("machine_id", "TEXT", true), new("chain_id", "TEXT", true),
+            new("previous_head_operation_id", "TEXT", true), new("expected_generation", "INTEGER", true),
+            new("generation", "INTEGER", true), new("target_release_version", "TEXT", true),
+            new("target_version", "TEXT", true), new("target_package_sha256", "TEXT", true),
+            new("target_runtime", "TEXT", true), new("target_protocol", "INTEGER", true), new("reason", "TEXT", true),
+            new("actor_id", "TEXT", true), new("request_id", "TEXT", true), new("request_digest", "TEXT", true),
+            new("status", "TEXT", true), new("created_at_unix_ms", "INTEGER", true), new("expires_at_unix_ms", "INTEGER", true)
+        ], ["intent_id"]);
+        ValidateColumns(connection, "agent_update_recovery_inspections", [
+            new("inspection_id", "TEXT"), new("intent_id", "TEXT", true), new("request_id", "TEXT", true),
+            new("key_fingerprint", "TEXT", true), new("request_body_digest", "TEXT", true),
+            new("evidence_digest", "TEXT", true), new("outcome", "TEXT", true), new("block_reason", "TEXT", true),
+            new("recorded_at_unix_ms", "INTEGER", true)
+        ], ["inspection_id"]);
+
+        using var integrity = connection.CreateCommand();
+        integrity.Transaction = transaction;
+        integrity.CommandText = """
+            SELECT EXISTS(
+                SELECT 1 FROM agent_update_recovery_intents i
+                LEFT JOIN agent_maintenance_chains c ON c.chain_id=i.chain_id AND c.machine_id=i.machine_id
+                LEFT JOIN agent_releases r ON r.version=i.target_release_version
+                WHERE i.expected_generation<=0 OR i.generation!=i.expected_generation+1
+                   OR length(i.target_package_sha256)!=64 OR i.target_package_sha256 GLOB '*[^0-9A-Fa-f]*'
+                   OR length(i.request_digest)!=64 OR i.request_digest GLOB '*[^0-9A-Fa-f]*'
+                   OR i.status NOT IN ('awaitingInspection','expired','superseded')
+                   OR i.created_at_unix_ms<0 OR i.expires_at_unix_ms<=i.created_at_unix_ms
+                   OR r.version IS NULL OR r.version!=i.target_version OR upper(r.package_sha256)!=upper(i.target_package_sha256)
+                   OR r.target_runtime!=i.target_runtime OR r.agent_update_challenge_protocol!=2
+                   OR (i.status='awaitingInspection' AND (c.chain_id IS NULL OR c.current_head_operation_id!=i.previous_head_operation_id
+                       OR c.generation!=i.generation OR c.held!=1))
+            ) OR EXISTS(
+                SELECT 1 FROM agent_update_recovery_inspections e
+                JOIN agent_update_recovery_intents i ON i.intent_id=e.intent_id
+                JOIN machines m ON m.machine_id=i.machine_id
+                WHERE length(e.key_fingerprint)!=64 OR e.key_fingerprint GLOB '*[^0-9A-Fa-f]*'
+                   OR length(e.request_body_digest)!=64 OR e.request_body_digest GLOB '*[^0-9A-Fa-f]*'
+                   OR length(e.evidence_digest)!=64 OR e.evidence_digest GLOB '*[^0-9A-Fa-f]*'
+                   OR e.outcome!='blocked' OR e.recorded_at_unix_ms<0
+            )
+            """;
+        if (Convert.ToInt64(integrity.ExecuteScalar(), CultureInfo.InvariantCulture) != 0)
+            throw new InvalidDataException("Controller database has inconsistent Agent recovery intent or inspection state.");
+
+        using var fingerprints = connection.CreateCommand();
+        fingerprints.Transaction = transaction;
+        fingerprints.CommandText = "SELECT e.key_fingerprint,m.public_key FROM agent_update_recovery_inspections e JOIN agent_update_recovery_intents i ON i.intent_id=e.intent_id JOIN machines m ON m.machine_id=i.machine_id";
+        using var rows = fingerprints.ExecuteReader();
+        while (rows.Read())
+        {
+            try
+            {
+                var publicKey = Convert.FromBase64String(rows.GetString(1));
+                if (!string.Equals(rows.GetString(0), Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(publicKey)), StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidDataException("Controller database contains recovery evidence from a different enrolled key.");
+            }
+            catch (FormatException exception)
+            {
+                throw new InvalidDataException("Controller database contains an invalid enrolled key for recovery evidence.", exception);
+            }
+        }
+    }
+
     internal static void ValidateSyncProofSchema(SqliteConnection connection, SqliteTransaction? transaction = null)
     {
         long userVersion;
@@ -754,7 +884,14 @@ public static class ControllerDatabaseMaintenance
 
     internal static void ValidateRestoreStateSchema(SqliteConnection connection, SqliteTransaction? transaction = null)
     {
-        ValidateCanonicalSchema(connection, 19, transaction);
+        long userVersion;
+        using (var version = connection.CreateCommand())
+        {
+            version.Transaction = transaction;
+            version.CommandText = "PRAGMA user_version";
+            userVersion = Convert.ToInt64(version.ExecuteScalar(), CultureInfo.InvariantCulture);
+        }
+        ValidateCanonicalSchema(connection, userVersion, transaction);
         ValidateColumns(connection, "controller_restore_state", [
             new("singleton", "INTEGER"), new("quarantine_active", "INTEGER", true),
             new("quarantine_reason", "TEXT", true), new("quarantine_epoch", "INTEGER", true),
@@ -777,7 +914,7 @@ public static class ControllerDatabaseMaintenance
 
     internal static void ValidateCanonicalSchema(SqliteConnection connection, long expectedVersion, SqliteTransaction? transaction = null)
     {
-        if (expectedVersion is < 0 or > 19)
+        if (expectedVersion is < 0 or > 20)
             throw new InvalidDataException("Controller database version is outside the supported migration range.");
 
         var checkpoints = expectedSchemas.GetOrAdd(expectedVersion, BuildCanonicalSchemas);
@@ -860,7 +997,7 @@ public static class ControllerDatabaseMaintenance
 
     private static IReadOnlyList<IReadOnlyDictionary<string, SchemaObject>> BuildCanonicalSchemas(long version)
     {
-        if (version is not (0 or 2 or 3 or >= 4 and <= 19))
+        if (version is not (0 or 2 or 3 or >= 4 and <= 20))
             return [];
 
         var connectionString = new SqliteConnectionStringBuilder { DataSource = ":memory:", ForeignKeys = true, Pooling = false }.ToString();

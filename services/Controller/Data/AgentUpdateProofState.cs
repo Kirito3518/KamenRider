@@ -10,6 +10,7 @@ public sealed partial class ControllerDatabase
     private static readonly TimeSpan SyncTokenLifetime = TimeSpan.FromMinutes(5);
     private static readonly TimeSpan ProvenHeartbeatLifetime = TimeSpan.FromSeconds(60);
     private static readonly TimeSpan LegacySignedRequestWindow = TimeSpan.FromSeconds(60);
+    private static readonly TimeSpan SignedChallengeIssuanceClockSkew = TimeSpan.FromSeconds(60);
     private static readonly TimeSpan SignedNonceRetention = TimeSpan.FromMinutes(2);
     private static readonly TimeSpan SyncChallengeRateWindow = TimeSpan.FromSeconds(10);
     private const int MaximumSignedRequestNoncesPerScope = 4096;
@@ -131,6 +132,24 @@ public sealed partial class ControllerDatabase
             return leftBytes.Length == rightBytes.Length && CryptographicOperations.FixedTimeEquals(leftBytes, rightBytes);
         }
         catch (FormatException) { return false; }
+    }
+
+    private bool IsFreshSignedIssuanceEnvelope(SqliteTransaction tx, VerifiedAgentRequest verified)
+    {
+        var serverNow = clock.GetUtcNow().ToUnixTimeSeconds();
+        var serverTimeHighWater = serverNow;
+        using (var cutoffQuery = Command("SELECT cutoff_second FROM agent_signed_request_scopes WHERE machine_id=$machine AND key_fingerprint=$fingerprint AND path=$path",
+            ("$machine", verified.MachineId), ("$fingerprint", verified.KeyFingerprint), ("$path", verified.Path)))
+        {
+            cutoffQuery.Transaction = tx;
+            if (cutoffQuery.ExecuteScalar() is long durableCutoff)
+                serverTimeHighWater = Math.Max(serverTimeHighWater,
+                    checked(durableCutoff + (long)SignedNonceRetention.TotalSeconds));
+        }
+
+        var allowedSkewSeconds = (long)SignedChallengeIssuanceClockSkew.TotalSeconds;
+        return verified.SignedSeconds >= serverTimeHighWater - allowedSkewSeconds
+            && verified.SignedSeconds <= serverTimeHighWater + allowedSkewSeconds;
     }
 
     private bool IsRecentProvenHeartbeat(string? runtimeEpoch, long? proofTick)

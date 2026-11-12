@@ -26,6 +26,8 @@ public static class AgentReleaseEndpoints
         app.MapPost("/agent/machines/{machineId}/agent-updates/{operationId}/start", StartUpdateAsync);
         app.MapPost("/agent/machines/{machineId}/agent-updates/{operationId}/source-challenge", IssueSourceChallengeAsync);
         app.MapPost("/agent/machines/{machineId}/agent-updates/{operationId}/source-binding", BindSourceAsync);
+        app.MapPost("/agent/machines/{machineId}/agent-update-recovery/{intentId}/challenge", IssueRecoveryInspectionChallengeAsync);
+        app.MapPost("/agent/machines/{machineId}/agent-update-recovery/{intentId}/inspection", CommitRecoveryInspectionAsync);
         app.MapPost("/agent/machines/{machineId}/agent-updates/{operationId}/status", ReportUpdateStatusAsync);
         app.MapGet("/agent/machines/{machineId}/agent-updates/{operationId}/package", DownloadUpdatePackageAsync);
     }
@@ -76,6 +78,73 @@ public static class AgentReleaseEndpoints
         catch (AgentUpdateSourceChallengeRenewalRequiredException) { return Results.Conflict(new { code = "sourceChallengeRenewalRequired" }); }
         catch (InvalidOperationException) { return Results.Conflict(); }
         catch (KeyNotFoundException) { return Results.NotFound(); }
+        catch (Exception exception) when (exception is ArgumentException or JsonException or DecoderFallbackException) { return Results.BadRequest(); }
+        catch (Exception exception) when (exception is IOException or Microsoft.Data.Sqlite.SqliteException) { return Results.StatusCode(StatusCodes.Status503ServiceUnavailable); }
+    }
+
+    private static async Task<IResult> IssueRecoveryInspectionChallengeAsync(string machineId, string intentId,
+        HttpContext context, ControllerDatabase database, AgentAuthentication authentication,
+        CancellationToken cancellationToken)
+    {
+        context.Response.Headers.CacheControl = "no-store";
+        context.Response.Headers.Pragma = "no-cache";
+        var path = $"/agent/machines/{machineId}/agent-update-recovery/{intentId}/challenge";
+        var signedBody = await ReadSignedBodyAsync(context, database, authentication, path, cancellationToken);
+        if (signedBody.StatusCode != StatusCodes.Status200OK) return Results.StatusCode(signedBody.StatusCode);
+        try
+        {
+            var body = new UTF8Encoding(false, true).GetString(signedBody.Body!);
+            var request = JsonSerializer.Deserialize<AgentUpdateRecoveryInspectionChallengeRequest>(body, SignedAgentJsonOptions);
+            if (request is null) return Results.BadRequest();
+            return Results.Ok(database.IssueAgentUpdateRecoveryInspectionChallenge(signedBody.Verified!, intentId, request));
+        }
+        catch (UnauthorizedAccessException) { return Results.Unauthorized(); }
+        catch (AgentUpdateRecoveryInspectionChallengeRenewalRequiredException)
+        {
+            return Results.Conflict(new { code = "recoveryInspectionChallengeRenewalRequired" });
+        }
+        catch (AgentRecoveryIntentConflictException exception)
+        {
+            return Results.Conflict(new { currentHeadOperationId = exception.CurrentHeadOperationId, currentGeneration = exception.CurrentGeneration });
+        }
+        catch (KeyNotFoundException) { return Results.NotFound(); }
+        catch (InvalidOperationException) { return Results.Conflict(); }
+        catch (Exception exception) when (exception is ArgumentException or JsonException or DecoderFallbackException) { return Results.BadRequest(); }
+        catch (Exception exception) when (exception is IOException or Microsoft.Data.Sqlite.SqliteException) { return Results.StatusCode(StatusCodes.Status503ServiceUnavailable); }
+    }
+
+    private static async Task<IResult> CommitRecoveryInspectionAsync(string machineId, string intentId,
+        HttpContext context, ControllerDatabase database, AgentAuthentication authentication,
+        CancellationToken cancellationToken)
+    {
+        context.Response.Headers.CacheControl = "no-store";
+        context.Response.Headers.Pragma = "no-cache";
+        var path = $"/agent/machines/{machineId}/agent-update-recovery/{intentId}/inspection";
+        var signedBody = await ReadSignedBodyAsync(context, database, authentication, path, cancellationToken);
+        if (signedBody.StatusCode != StatusCodes.Status200OK) return Results.StatusCode(signedBody.StatusCode);
+        try
+        {
+            var body = new UTF8Encoding(false, true).GetString(signedBody.Body!);
+            var inspection = JsonSerializer.Deserialize<SignedRecoveryInspection>(body, SignedAgentJsonOptions);
+            if (inspection is null) return Results.BadRequest();
+            return Results.Ok(database.CommitRecoveryInspection(signedBody.Verified!, intentId, inspection.RequestId, inspection));
+        }
+        catch (UnauthorizedAccessException) { return Results.Unauthorized(); }
+        catch (AgentUpdateRecoveryInspectionChallengeRenewalRequiredException)
+        {
+            return Results.Conflict(new { code = "recoveryInspectionChallengeRenewalRequired" });
+        }
+        catch (AgentRecoveryQualificationUnavailableException exception)
+        {
+            return Results.Json(new { code = "recoveryQualificationUnavailable", reason = exception.BlockReason },
+                statusCode: StatusCodes.Status503ServiceUnavailable);
+        }
+        catch (AgentRecoveryIntentConflictException exception)
+        {
+            return Results.Conflict(new { currentHeadOperationId = exception.CurrentHeadOperationId, currentGeneration = exception.CurrentGeneration });
+        }
+        catch (KeyNotFoundException) { return Results.NotFound(); }
+        catch (InvalidOperationException) { return Results.Conflict(); }
         catch (Exception exception) when (exception is ArgumentException or JsonException or DecoderFallbackException) { return Results.BadRequest(); }
         catch (Exception exception) when (exception is IOException or Microsoft.Data.Sqlite.SqliteException) { return Results.StatusCode(StatusCodes.Status503ServiceUnavailable); }
     }
