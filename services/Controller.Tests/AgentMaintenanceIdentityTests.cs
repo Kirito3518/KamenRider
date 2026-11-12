@@ -60,6 +60,28 @@ public sealed class AgentMaintenanceIdentityTests
     }
 
     [Fact]
+    public void SourceEvidenceCanonicalizationRejectsUnpairedSurrogates()
+    {
+        var validReplacementCharacter = ValidSourceEvidence() with { RuntimeEpoch = "runtime-\uFFFD" };
+        var validBytes = AgentUpdateSourceEvidenceCanonicalizer.CanonicalBytes(validReplacementCharacter);
+
+        foreach (var unpairedSurrogate in new[] { '\uD800', '\uDC00' })
+        {
+            var malformed = ValidSourceEvidence() with { RuntimeEpoch = $"runtime-{unpairedSurrogate}" };
+            Assert.ThrowsAny<ArgumentException>(() => AgentUpdateSourceEvidenceCanonicalizer.CanonicalBytes(malformed));
+        }
+
+        Assert.Contains("runtime-\uFFFD", Encoding.UTF8.GetString(validBytes));
+        Assert.Equal(Encoding.UTF8.GetBytes(Encoding.UTF8.GetString(validBytes)), validBytes);
+
+        var validUnicodeBytes = AgentUpdateSourceEvidenceCanonicalizer.CanonicalBytes(
+            ValidSourceEvidence() with { RuntimeEpoch = "runtime-λ-🚀" });
+        var validUnicodeText = Encoding.UTF8.GetString(validUnicodeBytes);
+        Assert.Contains("runtime-λ-🚀", validUnicodeText);
+        Assert.Equal(Encoding.UTF8.GetBytes(validUnicodeText), validUnicodeBytes);
+    }
+
+    [Fact]
     public void MissingExistingIdentityFailsWithoutGeneratingOne()
     {
         var source = new MemoryIdentitySource(null);
@@ -84,4 +106,10 @@ public sealed class AgentMaintenanceIdentityTests
 
         Assert.ThrowsAny<CryptographicException>(() => TrustedIdentity.ReadExisting(source));
     }
+
+    private static AgentUpdateSourceEvidence ValidSourceEvidence() => new(
+        "0123456789abcdef0123456789abcdef", new string('A', 64), "operation-1", "chain-1", "operation-1", 1,
+        "2.0.0", new string('B', 64), "challenge-1", "challenge-request-1", "binding-request-1", new string('C', 64),
+        "win-x64", 1, "runtime-epoch-1", "1.0.0", "operation-1", new string('D', 64), new string('E', 64),
+        new string('F', 64), "native-boot-1", "backupPublished");
 }
