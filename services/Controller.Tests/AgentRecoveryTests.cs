@@ -1,6 +1,7 @@
 using KamenRaider.Contracts;
 using KamenRaider.Controller.Agents;
 using KamenRaider.Controller.Data;
+using KamenRaider.Controller.Machines;
 using KamenRaider.Controller.Security;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
@@ -283,6 +284,220 @@ public sealed class AgentRecoveryTests
     }
 
     [Fact]
+    public async Task AdminRecoveryIntentHttpSurfaceUsesTrustedActorAndReturnsSameIntentForRetryAndLookup()
+    {
+        using var fixture = new LeaseFixture(agentReleaseRemediationEnabled: true);
+        AddRelease(fixture.Path, "2.0.0");
+        var ticket = fixture.Db.ReserveAgentUpdate("pc", "2.0.0", "admin", "recovery-admin-seed");
+        var operation = fixture.Db.StartAgentUpdate("pc", ticket.OperationId, ticket.Ticket,
+            ticket.ReleaseVersion, ticket.TargetVersion, ticket.TargetPackageSha256, "recovery-admin-start");
+        await using var app = BuildRecoveryAdminApi(fixture.Db);
+        await app.StartAsync();
+        using var client = app.GetTestServer().CreateClient();
+        AddAdminActor(client, "trusted-admin", "admin");
+
+        var request = new
+        {
+            expectedChainId = operation.ChainId,
+            expectedHeadId = operation.CurrentHeadOperationId,
+            expectedGeneration = operation.Generation,
+            targetReleaseVersion = "2.0.0",
+            reason = "recover the held update",
+            requestId = "admin-recovery-request-1",
+        };
+
+        using var createdResponse = await client.PostAsJsonAsync(
+            "/internal/machines/pc/agent-update-recovery-intents", request);
+        Assert.Equal(System.Net.HttpStatusCode.OK, createdResponse.StatusCode);
+        using var createdJson = JsonDocument.Parse(await createdResponse.Content.ReadAsStringAsync());
+        var created = createdJson.RootElement;
+        Assert.Equal("trusted-admin", created.GetProperty("actorId").GetString());
+        Assert.Equal("admin-recovery-request-1", created.GetProperty("requestId").GetString());
+        Assert.Equal(operation.ChainId, created.GetProperty("chainId").GetString());
+        Assert.Equal(operation.CurrentHeadOperationId, created.GetProperty("previousHeadOperationId").GetString());
+        Assert.Equal(operation.Generation, created.GetProperty("expectedGeneration").GetInt64());
+        Assert.Equal(operation.Generation + 1, created.GetProperty("generation").GetInt64());
+        Assert.Equal("2.0.0", created.GetProperty("targetReleaseVersion").GetString());
+        Assert.Equal("recover the held update", created.GetProperty("reason").GetString());
+        Assert.True(created.GetProperty("held").GetBoolean());
+        var intentId = created.GetProperty("intentId").GetString();
+        Assert.False(Assert.Single(fixture.Db.List()).CanRent);
+        Assert.Equal(1L, Scalar(fixture.Path, "SELECT COUNT(*) FROM agent_update_operations"));
+
+        using var retryResponse = await client.PostAsJsonAsync(
+            "/internal/machines/pc/agent-update-recovery-intents", request);
+        Assert.Equal(System.Net.HttpStatusCode.OK, retryResponse.StatusCode);
+        using var retryJson = JsonDocument.Parse(await retryResponse.Content.ReadAsStringAsync());
+        Assert.Equal(intentId, retryJson.RootElement.GetProperty("intentId").GetString());
+
+        using var lookupResponse = await client.GetAsync(
+            "/internal/machines/pc/agent-update-recovery-intents?requestId=admin-recovery-request-1");
+        Assert.Equal(System.Net.HttpStatusCode.OK, lookupResponse.StatusCode);
+        using var lookupJson = JsonDocument.Parse(await lookupResponse.Content.ReadAsStringAsync());
+        Assert.Equal(intentId, lookupJson.RootElement.GetProperty("intentId").GetString());
+        Assert.Equal("trusted-admin", lookupJson.RootElement.GetProperty("actorId").GetString());
+
+        client.DefaultRequestHeaders.Remove("X-Authenticated-Actor-Id");
+        client.DefaultRequestHeaders.Add("X-Authenticated-Actor-Id", "another-admin");
+        using var otherActorLookup = await client.GetAsync(
+            "/internal/machines/pc/agent-update-recovery-intents?requestId=admin-recovery-request-1");
+        Assert.Equal(System.Net.HttpStatusCode.NotFound, otherActorLookup.StatusCode);
+        Assert.Equal(1L, Scalar(fixture.Path, "SELECT COUNT(*) FROM agent_update_recovery_intents"));
+    }
+
+    [Fact]
+    public async Task AdminRecoveryIntentHttpSurfaceReturnsActualHeldChainForStaleAndDifferentChainRequests()
+    {
+        using var fixture = new LeaseFixture(agentReleaseRemediationEnabled: true);
+        AddRelease(fixture.Path, "2.0.0");
+        var ticket = fixture.Db.ReserveAgentUpdate("pc", "2.0.0", "admin", "recovery-admin-stale-seed");
+        var operation = fixture.Db.StartAgentUpdate("pc", ticket.OperationId, ticket.Ticket,
+            ticket.ReleaseVersion, ticket.TargetVersion, ticket.TargetPackageSha256, "recovery-admin-stale-start");
+        await using var app = BuildRecoveryAdminApi(fixture.Db);
+        await app.StartAsync();
+        using var client = app.GetTestServer().CreateClient();
+        AddAdminActor(client, "trusted-admin", "admin");
+
+        var differentChain = new
+        {
+            expectedChainId = "stale-chain-id",
+            expectedHeadId = operation.CurrentHeadOperationId,
+            expectedGeneration = operation.Generation,
+            targetReleaseVersion = "2.0.0",
+            reason = "recover the held update",
+            requestId = "admin-recovery-stale-chain",
+        };
+        using (var response = await client.PostAsJsonAsync(
+            "/internal/machines/pc/agent-update-recovery-intents", differentChain))
+        {
+            Assert.Equal(System.Net.HttpStatusCode.Conflict, response.StatusCode);
+            using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+            Assert.Equal(operation.ChainId, json.RootElement.GetProperty("currentChainId").GetString());
+            Assert.Equal(operation.CurrentHeadOperationId, json.RootElement.GetProperty("currentHeadOperationId").GetString());
+            Assert.Equal(operation.Generation, json.RootElement.GetProperty("currentGeneration").GetInt64());
+        }
+
+        var created = new
+        {
+            expectedChainId = operation.ChainId,
+            expectedHeadId = operation.CurrentHeadOperationId,
+            expectedGeneration = operation.Generation,
+            targetReleaseVersion = "2.0.0",
+            reason = "recover the held update",
+            requestId = "admin-recovery-fence-advance",
+        };
+        using (var response = await client.PostAsJsonAsync(
+            "/internal/machines/pc/agent-update-recovery-intents", created))
+            Assert.Equal(System.Net.HttpStatusCode.OK, response.StatusCode);
+
+        var staleGeneration = new
+        {
+            expectedChainId = operation.ChainId,
+            expectedHeadId = operation.CurrentHeadOperationId,
+            expectedGeneration = operation.Generation,
+            targetReleaseVersion = "2.0.0",
+            reason = "another stale recovery attempt",
+            requestId = "admin-recovery-stale-generation",
+        };
+        using (var response = await client.PostAsJsonAsync(
+            "/internal/machines/pc/agent-update-recovery-intents", staleGeneration))
+        {
+            Assert.Equal(System.Net.HttpStatusCode.Conflict, response.StatusCode);
+            using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+            Assert.Equal(operation.ChainId, json.RootElement.GetProperty("currentChainId").GetString());
+            Assert.Equal(operation.CurrentHeadOperationId, json.RootElement.GetProperty("currentHeadOperationId").GetString());
+            Assert.Equal(operation.Generation + 1, json.RootElement.GetProperty("currentGeneration").GetInt64());
+        }
+
+        Assert.False(Assert.Single(fixture.Db.List()).CanRent);
+        Assert.Equal(1L, Scalar(fixture.Path, "SELECT COUNT(*) FROM agent_update_recovery_intents"));
+        Assert.Equal(1L, Scalar(fixture.Path, "SELECT COUNT(*) FROM agent_update_operations"));
+    }
+
+    [Theory]
+    [InlineData(null, "admin")]
+    [InlineData("untrusted-user", "user")]
+    public async Task AdminRecoveryIntentHttpSurfaceRejectsMissingOrNonAdminForwardedActor(string? actorId, string role)
+    {
+        using var fixture = new LeaseFixture(agentReleaseRemediationEnabled: true);
+        await using var app = BuildRecoveryAdminApi(fixture.Db);
+        await app.StartAsync();
+        using var client = app.GetTestServer().CreateClient();
+        if (actorId is not null) client.DefaultRequestHeaders.Add("X-Authenticated-Actor-Id", actorId);
+        client.DefaultRequestHeaders.Add("X-Authenticated-Actor-Role", role);
+
+        using var response = await client.PostAsJsonAsync("/internal/machines/pc/agent-update-recovery-intents", new
+        {
+            expectedChainId = "chain",
+            expectedHeadId = "head",
+            expectedGeneration = 1,
+            targetReleaseVersion = "2.0.0",
+            reason = "test",
+            requestId = "untrusted-recovery-request",
+        });
+
+        Assert.Equal(System.Net.HttpStatusCode.Forbidden, response.StatusCode);
+        using var lookupResponse = await client.GetAsync(
+            "/internal/machines/pc/agent-update-recovery-intents?requestId=untrusted-recovery-request");
+        Assert.Equal(System.Net.HttpStatusCode.Forbidden, lookupResponse.StatusCode);
+        Assert.Equal(0L, Scalar(fixture.Path, "SELECT COUNT(*) FROM agent_update_recovery_intents"));
+    }
+
+    [Fact]
+    public async Task AdminRecoveryIntentHttpSurfaceRejectsActorProvidedInRequestBody()
+    {
+        using var fixture = new LeaseFixture(agentReleaseRemediationEnabled: true);
+        await using var app = BuildRecoveryAdminApi(fixture.Db);
+        await app.StartAsync();
+        using var client = app.GetTestServer().CreateClient();
+        AddAdminActor(client, "trusted-admin", "admin");
+
+        using var response = await client.PostAsJsonAsync("/internal/machines/pc/agent-update-recovery-intents", new
+        {
+            expectedChainId = "chain",
+            expectedHeadId = "head",
+            expectedGeneration = 1,
+            targetReleaseVersion = "2.0.0",
+            reason = "test",
+            requestId = "body-actor-recovery-request",
+            actorId = "forged-body-actor",
+        });
+
+        Assert.Equal(System.Net.HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal(0L, Scalar(fixture.Path, "SELECT COUNT(*) FROM agent_update_recovery_intents"));
+    }
+
+    [Fact]
+    public async Task AdminRecoveryIntentHttpSurfaceDoesNotCreateIntentDuringGlobalRestoreQuarantine()
+    {
+        using var fixture = new LeaseFixture(agentReleaseRemediationEnabled: true);
+        AddRelease(fixture.Path, "2.0.0");
+        var ticket = fixture.Db.ReserveAgentUpdate("pc", "2.0.0", "admin", "recovery-admin-quarantine-seed");
+        var operation = fixture.Db.StartAgentUpdate("pc", ticket.OperationId, ticket.Ticket,
+            ticket.ReleaseVersion, ticket.TargetVersion, ticket.TargetPackageSha256, "recovery-admin-quarantine-start");
+        fixture.Db.ActivateRestoreQuarantine("task7-http-test", 1);
+        await using var app = BuildRecoveryAdminApi(fixture.Db);
+        await app.StartAsync();
+        using var client = app.GetTestServer().CreateClient();
+        AddAdminActor(client, "trusted-admin", "admin");
+
+        using var response = await client.PostAsJsonAsync("/internal/machines/pc/agent-update-recovery-intents", new
+        {
+            expectedChainId = operation.ChainId,
+            expectedHeadId = operation.CurrentHeadOperationId,
+            expectedGeneration = operation.Generation,
+            targetReleaseVersion = "2.0.0",
+            reason = "recovery during restore quarantine",
+            requestId = "admin-recovery-quarantine",
+        });
+
+        Assert.Equal(System.Net.HttpStatusCode.Conflict, response.StatusCode);
+        Assert.Equal(0L, Scalar(fixture.Path, "SELECT COUNT(*) FROM agent_update_recovery_intents"));
+        Assert.False(Assert.Single(fixture.Db.List()).CanRent);
+        Assert.Equal(1L, Scalar(fixture.Path, "SELECT COUNT(*) FROM agent_update_operations"));
+    }
+
+    [Fact]
     public void RecoveryInspectionCanonicalPayloadBindsBackupSourceAndInstalledInventory()
     {
         var inspection = ValidInspection();
@@ -556,6 +771,22 @@ public sealed class AgentRecoveryTests
         var property = value.GetType().GetProperty(propertyName, BindingFlags.Instance | BindingFlags.Public);
         Assert.NotNull(property);
         return Assert.IsType<T>(property!.GetValue(value));
+    }
+
+    private static WebApplication BuildRecoveryAdminApi(ControllerDatabase database)
+    {
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer();
+        builder.Services.AddSingleton(database);
+        var app = builder.Build();
+        app.MapMachines();
+        return app;
+    }
+
+    private static void AddAdminActor(HttpClient client, string actorId, string role)
+    {
+        client.DefaultRequestHeaders.Add("X-Authenticated-Actor-Id", actorId);
+        client.DefaultRequestHeaders.Add("X-Authenticated-Actor-Role", role);
     }
 
     private static void AddRelease(string databasePath, string version)

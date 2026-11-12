@@ -2,6 +2,7 @@ using KamenRaider.Contracts;
 using KamenRaider.Controller.Data;
 using KamenRaider.Controller.Security;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Text;
 namespace KamenRaider.Controller.Machines;
 public static class MachineEndpoints
@@ -14,6 +15,31 @@ public static class MachineEndpoints
         app.MapPost("/internal/agent-enrollment-tickets",(ControllerDatabase db)=>Results.Ok(db.CreateEnrollmentTicket()));
         app.MapPost("/internal/machines/{id}/agent-updates",(string id,AgentUpdateReservationRequest request,HttpContext context,ControllerDatabase db)=>
             IsAdmin(context)?Execute(()=>db.ReserveAgentUpdate(id,request.ReleaseVersion,context.Request.Headers["X-Authenticated-Actor-Id"].ToString(),request.RequestId ?? context.TraceIdentifier)):Results.StatusCode(StatusCodes.Status403Forbidden));
+        app.MapPost("/internal/machines/{id}/agent-update-recovery-intents",(string id,AgentRecoveryIntentRequest? request,HttpContext context,ControllerDatabase db)=>
+        {
+            context.Response.Headers.CacheControl = "no-store";
+            if (!IsAdmin(context)) return Results.StatusCode(StatusCodes.Status403Forbidden);
+            if (request is null || string.IsNullOrWhiteSpace(request.ExpectedChainId)
+                || string.IsNullOrWhiteSpace(request.ExpectedHeadId) || string.IsNullOrWhiteSpace(request.TargetReleaseVersion)
+                || string.IsNullOrWhiteSpace(request.Reason) || string.IsNullOrWhiteSpace(request.RequestId))
+                return Results.BadRequest();
+            var actorId = context.Request.Headers["X-Authenticated-Actor-Id"].ToString();
+            return Execute(() => db.CreateRecoveryIntent(id, request.ExpectedChainId, request.ExpectedHeadId,
+                request.ExpectedGeneration, request.TargetReleaseVersion, request.Reason, request.RequestId, actorId));
+        });
+        app.MapGet("/internal/machines/{id}/agent-update-recovery-intents",(string id,string? requestId,HttpContext context,ControllerDatabase db)=>
+        {
+            context.Response.Headers.CacheControl = "no-store";
+            if (!IsAdmin(context)) return Results.StatusCode(StatusCodes.Status403Forbidden);
+            try
+            {
+                var actorId = context.Request.Headers["X-Authenticated-Actor-Id"].ToString();
+                var intent = db.GetRecoveryByRequestId(id, actorId, requestId ?? string.Empty);
+                return intent is null ? Results.NotFound() : Results.Ok(intent);
+            }
+            catch (ArgumentException) { return Results.BadRequest(); }
+            catch (InvalidOperationException) { return Results.Conflict(); }
+        });
         app.MapPost("/internal/machines/{id}/agent-updates/{operationId}/recovery-ticket",(string id,string operationId,HttpContext context,ControllerDatabase db)=>
             IsAdmin(context)?Execute(()=>db.RenewAgentUpdateTicket(id,operationId)):Results.StatusCode(StatusCodes.Status403Forbidden));
         app.MapPatch("/internal/machines/{id}",(string id,MachineUpdate update,long expectedRevision,ControllerDatabase db)=>Execute(()=>db.Update(id,update,expectedRevision)));
@@ -40,6 +66,16 @@ public static class MachineEndpoints
         catch(System.Security.Cryptography.CryptographicException){return Results.BadRequest();}
         catch(KeyNotFoundException){return Results.NotFound();}
         catch(AgentReleaseUnavailableException exception){return Results.Conflict(new { code=AgentReleaseUnavailableException.ResponseCode, available=false, reason=exception.SafeReason });}
+        catch(AgentRecoveryIntentConflictException exception){return Results.Conflict(new { currentChainId=exception.CurrentChainId, currentHeadOperationId=exception.CurrentHeadOperationId, currentGeneration=exception.CurrentGeneration });}
         catch(InvalidOperationException){return Results.Conflict();}
     }
 }
+
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+public sealed record AgentRecoveryIntentRequest(
+    string ExpectedChainId,
+    string ExpectedHeadId,
+    long ExpectedGeneration,
+    string TargetReleaseVersion,
+    string Reason,
+    string RequestId);

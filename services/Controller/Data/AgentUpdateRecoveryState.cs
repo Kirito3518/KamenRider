@@ -27,9 +27,11 @@ public sealed record AgentUpdateRecoveryIntentDto(
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset ExpiresAtUtc);
 
-public sealed class AgentRecoveryIntentConflictException(string currentHeadOperationId, long currentGeneration, string message)
+public sealed class AgentRecoveryIntentConflictException(string currentChainId, string currentHeadOperationId,
+    long currentGeneration, string message)
     : InvalidOperationException(message)
 {
+    public string CurrentChainId { get; } = currentChainId;
     public string CurrentHeadOperationId { get; } = currentHeadOperationId;
     public long CurrentGeneration { get; } = currentGeneration;
 }
@@ -111,21 +113,21 @@ public sealed partial class ControllerDatabase
                 return prior.Dto;
             }
 
+            string currentChainId;
             string currentHead;
             long currentGeneration;
-            bool held;
-            using (var chain = Command("SELECT current_head_operation_id,generation,held FROM agent_maintenance_chains WHERE chain_id=$chain AND machine_id=$machine",
-                ("$chain", expectedChainId), ("$machine", machineId)))
+            using (var chain = Command("SELECT chain_id,current_head_operation_id,generation FROM agent_maintenance_chains WHERE machine_id=$machine AND held=1",
+                ("$machine", machineId)))
             {
                 chain.Transaction = tx;
                 using var row = chain.ExecuteReader();
-                if (!row.Read()) throw new KeyNotFoundException("Maintenance chain was not found.");
-                currentHead = row.GetString(0);
-                currentGeneration = row.GetInt64(1);
-                held = row.GetInt32(2) != 0;
+                if (!row.Read()) throw new KeyNotFoundException("Held maintenance chain was not found.");
+                currentChainId = row.GetString(0);
+                currentHead = row.GetString(1);
+                currentGeneration = row.GetInt64(2);
             }
-            if (!held || currentHead != expectedHeadId || currentGeneration != expectedGeneration)
-                throw new AgentRecoveryIntentConflictException(currentHead, currentGeneration,
+            if (currentChainId != expectedChainId || currentHead != expectedHeadId || currentGeneration != expectedGeneration)
+                throw new AgentRecoveryIntentConflictException(currentChainId, currentHead, currentGeneration,
                     "Recovery intent is stale; refresh the current maintenance head and generation.");
 
             using (var allocation = Command("SELECT EXISTS(SELECT 1 FROM leases WHERE machine_id=$machine AND allocation_held=1)",
@@ -161,7 +163,7 @@ public sealed partial class ControllerDatabase
                     var expiresAt = row.GetInt64(1);
                     row.Close();
                     if (expiresAt > nowMs)
-                        throw new AgentRecoveryIntentConflictException(currentHead, currentGeneration,
+                        throw new AgentRecoveryIntentConflictException(currentChainId, currentHead, currentGeneration,
                             "A recovery intent is already open for this maintenance chain.");
                     using var expire = Command("UPDATE agent_update_recovery_intents SET status='expired' WHERE intent_id=$id AND status='awaitingInspection' AND expires_at_unix_ms<=$now",
                         ("$id", activeIntentId), ("$now", nowMs));
@@ -226,7 +228,7 @@ public sealed partial class ControllerDatabase
             {
                 fence.Transaction = tx;
                 if (fence.ExecuteNonQuery() != 1)
-                    throw new AgentRecoveryIntentConflictException(currentHead, currentGeneration,
+                    throw new AgentRecoveryIntentConflictException(currentChainId, currentHead, currentGeneration,
                         "Recovery intent lost its maintenance-chain compare-and-swap.");
             }
 
@@ -573,7 +575,7 @@ public sealed partial class ControllerDatabase
             throw new InvalidOperationException("Recovery intent is expired or no longer awaiting inspection.");
         if (!scope.Held || scope.CurrentHeadOperationId != scope.PreviousHeadOperationId
             || scope.CurrentGeneration != scope.Generation)
-            throw new AgentRecoveryIntentConflictException(scope.CurrentHeadOperationId, scope.CurrentGeneration,
+            throw new AgentRecoveryIntentConflictException(scope.ChainId, scope.CurrentHeadOperationId, scope.CurrentGeneration,
                 "Recovery inspection is stale; refresh the current maintenance head and generation.");
         if (scope.TargetProtocol != 2 || scope.PreviousOperationStatus is "completed" or "rolledBack" or "expired" or "superseded")
             throw new InvalidOperationException("Recovery intent is not attached to an eligible held update operation.");

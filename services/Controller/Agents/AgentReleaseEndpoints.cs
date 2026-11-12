@@ -105,7 +105,7 @@ public static class AgentReleaseEndpoints
         }
         catch (AgentRecoveryIntentConflictException exception)
         {
-            return Results.Conflict(new { currentHeadOperationId = exception.CurrentHeadOperationId, currentGeneration = exception.CurrentGeneration });
+            return Results.Conflict(new { currentChainId = exception.CurrentChainId, currentHeadOperationId = exception.CurrentHeadOperationId, currentGeneration = exception.CurrentGeneration });
         }
         catch (KeyNotFoundException) { return Results.NotFound(); }
         catch (InvalidOperationException) { return Results.Conflict(); }
@@ -141,7 +141,7 @@ public static class AgentReleaseEndpoints
         }
         catch (AgentRecoveryIntentConflictException exception)
         {
-            return Results.Conflict(new { currentHeadOperationId = exception.CurrentHeadOperationId, currentGeneration = exception.CurrentGeneration });
+            return Results.Conflict(new { currentChainId = exception.CurrentChainId, currentHeadOperationId = exception.CurrentHeadOperationId, currentGeneration = exception.CurrentGeneration });
         }
         catch (KeyNotFoundException) { return Results.NotFound(); }
         catch (InvalidOperationException) { return Results.Conflict(); }
