@@ -1,10 +1,15 @@
 using System.Security.Cryptography;
+using System.Security.AccessControl;
+using System.Security.Principal;
+using System.Reflection;
+using System.Runtime.Versioning;
 using Microsoft.Data.Sqlite;
 using KamenRaider.Contracts;
 using KamenRaider.Controller.Data;
 
 namespace Controller.Tests;
 
+[SupportedOSPlatform("windows")]
 public class DatabaseMaintenanceTests
 {
     [Fact]
@@ -21,9 +26,9 @@ public class DatabaseMaintenanceTests
             var previous = AddReleaseArtifact(destination, "3.0.0", "previous protected release");
             ControllerDatabaseMaintenance.Backup(source, backup);
 
-            var recovery = ControllerDatabaseMaintenance.Restore(backup, destination);
+            var recovery = Restore(backup, destination);
             Assert.NotNull(recovery);
-            ControllerDatabaseMaintenance.Restore(recovery!, recovered);
+            Restore(recovery!, recovered);
 
             Assert.Equal("previous protected release", File.ReadAllText(ArtifactPath(recovered, previous)));
             Assert.Equal("incoming release", File.ReadAllText(ArtifactPath(destination, incoming)));
@@ -57,7 +62,7 @@ public class DatabaseMaintenanceTests
             })!) { junction.WaitForExit(); Assert.Equal(0, junction.ExitCode); }
             var original = File.ReadAllBytes(destination);
 
-            Assert.Throws<InvalidDataException>(() => ControllerDatabaseMaintenance.Restore(backup, destination));
+            Assert.Throws<InvalidDataException>(() => Restore(backup, destination));
 
             Assert.Equal(original, File.ReadAllBytes(destination));
             Assert.Equal("keep.txt", Assert.Single(Directory.GetFileSystemEntries(protectedDirectory)).Split(Path.DirectorySeparatorChar).Last());
@@ -90,7 +95,7 @@ public class DatabaseMaintenanceTests
             if (failure == "conflict") { Directory.CreateDirectory(Path.GetDirectoryName(conflict)!); File.WriteAllText(conflict, "protected existing bytes"); }
             if (failure == "directory") Directory.CreateDirectory(conflict);
 
-            Assert.Throws<InvalidDataException>(() => ControllerDatabaseMaintenance.Restore(backup, destination));
+            Assert.Throws<InvalidDataException>(() => Restore(backup, destination));
 
             Assert.Equal(original, File.ReadAllBytes(destination));
             Assert.False(File.Exists(ArtifactPath(destination, first)));
@@ -99,6 +104,102 @@ public class DatabaseMaintenanceTests
             if (failure == "conflict") Assert.Equal("protected existing bytes", File.ReadAllText(conflict));
         }
         finally { DeleteRoot(root); }
+    }
+
+    [Theory]
+    [InlineData(5)]
+    [InlineData(32)]
+    public void ArtifactDirectoryMoveRetriesATransientWindowsLockWithoutPartialPublication(int win32Error)
+    {
+        var root = NewRoot();
+        try
+        {
+            var source = Path.Combine(root, "staged-agent-releases");
+            var destination = Path.Combine(root, "backup-agent-releases");
+            Directory.CreateDirectory(source);
+            File.WriteAllText(Path.Combine(source, "artifact.zip"), "verified artifact");
+            var attempts = 0;
+            var waits = new List<TimeSpan>();
+
+            ControllerDatabaseMaintenance.MoveDirectoryNoOverwriteWithRetry(source, destination, (from, to) =>
+            {
+                attempts++;
+                if (attempts == 1) throw new Win32MoveIOException(win32Error);
+                Directory.Move(from, to);
+            }, waits.Add);
+
+            Assert.Equal(2, attempts);
+            Assert.Equal([TimeSpan.FromMilliseconds(25)], waits);
+            Assert.False(Directory.Exists(source));
+            Assert.Equal("verified artifact", File.ReadAllText(Path.Combine(destination, "artifact.zip")));
+            Assert.Equal(new[] { "artifact.zip" }, Directory.GetFileSystemEntries(destination).Select(Path.GetFileName));
+        }
+        finally { DeleteRoot(root); }
+    }
+
+    [Fact]
+    public void ArtifactDirectoryMoveStopsAfterBoundedPermanentAccessDeniedWithoutPublishing()
+    {
+        var root = NewRoot();
+        try
+        {
+            var source = Path.Combine(root, "staged-agent-releases");
+            var destination = Path.Combine(root, "backup-agent-releases");
+            Directory.CreateDirectory(source);
+            File.WriteAllText(Path.Combine(source, "artifact.zip"), "verified artifact");
+            var attempts = 0;
+            var waits = new List<TimeSpan>();
+
+            var error = Assert.Throws<Win32MoveIOException>(() =>
+                ControllerDatabaseMaintenance.MoveDirectoryNoOverwriteWithRetry(source, destination, (_, _) =>
+                {
+                    attempts++;
+                    throw new Win32MoveIOException(5);
+                }, waits.Add));
+
+            Assert.Equal(5, error.HResult & 0xFFFF);
+            Assert.Equal(4, attempts);
+            Assert.Equal([TimeSpan.FromMilliseconds(25), TimeSpan.FromMilliseconds(50), TimeSpan.FromMilliseconds(100)], waits);
+            Assert.True(Directory.Exists(source));
+            Assert.Equal("verified artifact", File.ReadAllText(Path.Combine(source, "artifact.zip")));
+            Assert.False(Directory.Exists(destination));
+        }
+        finally { DeleteRoot(root); }
+    }
+
+    [Fact]
+    public void ArtifactDirectoryMoveDoesNotRetryWhenDestinationAlreadyExists()
+    {
+        var root = NewRoot();
+        try
+        {
+            var source = Path.Combine(root, "staged-agent-releases");
+            var destination = Path.Combine(root, "backup-agent-releases");
+            Directory.CreateDirectory(source);
+            Directory.CreateDirectory(destination);
+            File.WriteAllText(Path.Combine(source, "artifact.zip"), "source artifact");
+            File.WriteAllText(Path.Combine(destination, "keep.txt"), "existing destination");
+            var attempts = 0;
+            var waits = new List<TimeSpan>();
+
+            Assert.Throws<IOException>(() => ControllerDatabaseMaintenance.MoveDirectoryNoOverwriteWithRetry(source, destination, (from, to) =>
+            {
+                attempts++;
+                Directory.Move(from, to);
+            }, waits.Add));
+
+            Assert.Equal(1, attempts);
+            Assert.Empty(waits);
+            Assert.Equal("source artifact", File.ReadAllText(Path.Combine(source, "artifact.zip")));
+            Assert.Equal("existing destination", File.ReadAllText(Path.Combine(destination, "keep.txt")));
+        }
+        finally { DeleteRoot(root); }
+    }
+
+    private sealed class Win32MoveIOException : IOException
+    {
+        public Win32MoveIOException(int win32Error) : base("Injected directory move failure.") =>
+            HResult = unchecked((int)(0x80070000u | (uint)win32Error));
     }
 
     [Fact]
@@ -112,13 +213,13 @@ public class DatabaseMaintenanceTests
             var destination = Path.Combine(root, "destination", "controller.db");
             var hash = AddReleaseArtifact(source, "2.0.0", "legacy immutable release");
             File.Copy(source, legacy);
-            Assert.Throws<InvalidDataException>(() => ControllerDatabaseMaintenance.Restore(legacy, destination));
+            Assert.Throws<InvalidDataException>(() => Restore(legacy, destination));
             Assert.False(File.Exists(destination));
             var sidecar = Path.Combine(legacy + ".agent-releases", "sha256", hash[..2].ToLowerInvariant(), hash.ToLowerInvariant() + ".zip");
             Directory.CreateDirectory(Path.GetDirectoryName(sidecar)!);
             File.Copy(ArtifactPath(source, hash), sidecar);
 
-            ControllerDatabaseMaintenance.Restore(legacy, destination);
+            Restore(legacy, destination);
 
             Assert.Equal(File.ReadAllBytes(ArtifactPath(source, hash)), File.ReadAllBytes(ArtifactPath(destination, hash)));
         }
@@ -176,7 +277,7 @@ public class DatabaseMaintenanceTests
                 database.PublishAgentRelease(new("2.0.0", "stable", "release", hash, sourceArtifact, bytes.Length, "0123456789ab", false, true));
 
             ControllerDatabaseMaintenance.Backup(source, backup);
-            ControllerDatabaseMaintenance.Restore(backup, restored);
+            Restore(backup, restored);
 
             Assert.Equal(bytes, File.ReadAllBytes(ArtifactPath(restored, hash)));
             using var databaseAfterRestore = new ControllerDatabase(restored);
@@ -288,7 +389,7 @@ public class DatabaseMaintenanceTests
             var destination = Path.Combine(root, "restored", "controller.db");
             var hash = CreateLegacyReleaseWithOperation(source, version, "failed", false);
             ControllerDatabaseMaintenance.Backup(source, backup);
-            ControllerDatabaseMaintenance.Restore(backup, destination);
+            Restore(backup, destination);
             using (var database = new ControllerDatabase(destination))
             {
                 var machine = Assert.Single(database.List());
@@ -339,7 +440,7 @@ public class DatabaseMaintenanceTests
             var hash = CreateLegacyReleaseWithOperation(source, 13, "failed", false);
             using (new ControllerDatabase(source)) { }
             ControllerDatabaseMaintenance.Backup(source, backup);
-            ControllerDatabaseMaintenance.Restore(backup, destination);
+            Restore(backup, destination);
             using var restored = new ControllerDatabase(destination);
             var machine = Assert.Single(restored.List());
             Assert.Equal("legacy-op", machine.AgentUpdateOperationId);
@@ -405,11 +506,11 @@ public class DatabaseMaintenanceTests
             }
 
             ControllerDatabaseMaintenance.Backup(source, backup);
-            ControllerDatabaseMaintenance.Restore(backup, destination);
+            Restore(backup, destination);
 
             using (var snapshot = OpenDatabase(destination))
             {
-                Assert.Equal(18L, Scalar(snapshot, "PRAGMA user_version"));
+                Assert.Equal(19L, Scalar(snapshot, "PRAGMA user_version"));
                 Assert.Equal(1L, Scalar(snapshot, $"SELECT COUNT(*) FROM agent_sync_proof_state WHERE machine_id='source-machine' AND sequence=8 AND token_sequence=8 AND token_digest='{tokenDigest}' AND last_proven_sequence=7 AND last_proven_version='1.2.3'"));
                 Assert.Equal(1L, Scalar(snapshot, "SELECT COUNT(*) FROM agent_signed_request_scopes WHERE machine_id='source-machine' AND key_fingerprint='" + fingerprint + "' AND path='/agent/sync' AND cutoff_second=1000"));
                 Assert.Equal(1L, Scalar(snapshot, $"SELECT COUNT(*) FROM agent_signed_request_nonces WHERE machine_id='source-machine' AND nonce_digest='{syncNonceDigest}' AND signed_second=1001 AND retention_second=1001"));
@@ -537,7 +638,7 @@ public class DatabaseMaintenanceTests
             var destination = Path.Combine(root, "destination", "controller.db");
             var hash = CreateLegacyReleaseWithOperation(source, version, status, true);
             ControllerDatabaseMaintenance.Backup(source, backup);
-            ControllerDatabaseMaintenance.Restore(backup, destination);
+            Restore(backup, destination);
             using var database = new ControllerDatabase(destination);
             var machine = Assert.Single(database.List());
             Assert.Equal(status, machine.AgentUpdateStatus);
@@ -801,7 +902,7 @@ public class DatabaseMaintenanceTests
                 tx.Commit();
             }
             ControllerDatabaseMaintenance.Backup(source, backup);
-            ControllerDatabaseMaintenance.Restore(backup, destination);
+            Restore(backup, destination);
             using var restored = new ControllerDatabase(destination);
             var machine = Assert.Single(restored.List());
             Assert.Equal("head", machine.AgentUpdateOperationId);
@@ -989,22 +1090,15 @@ public class DatabaseMaintenanceTests
         var destinationPath = Path.Combine(root, "destination.db");
         try
         {
-            using (var database = new ControllerDatabase(databasePath)) AddMachine(database, "source-machine");
-            using (var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = databasePath, Pooling = false }.ToString()))
-            {
-                connection.Open();
-                using var command = connection.CreateCommand();
-                command.CommandText = "DROP TABLE IF EXISTS machine_readiness_diagnostics; PRAGMA user_version=10";
-                command.ExecuteNonQuery();
-            }
+            CreateLegacyReleaseDatabase(databasePath, 10);
 
             ControllerDatabaseMaintenance.Backup(databasePath, backupPath);
-            ControllerDatabaseMaintenance.Restore(backupPath, destinationPath);
+            Restore(backupPath, destinationPath);
             using var restored = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = destinationPath, Pooling = false }.ToString());
             restored.Open();
             using var version = restored.CreateCommand();
             version.CommandText = "PRAGMA user_version";
-            Assert.Equal(10L, version.ExecuteScalar());
+            Assert.Equal(19L, version.ExecuteScalar());
         }
         finally { DeleteRoot(root); }
     }
@@ -1022,7 +1116,7 @@ public class DatabaseMaintenanceTests
             ControllerDatabaseMaintenance.Backup(sourcePath, backupPath);
             using (var destination = new ControllerDatabase(destinationPath)) AddMachine(destination, "old-machine");
 
-            var recoveryPath = ControllerDatabaseMaintenance.Restore(backupPath, destinationPath);
+            var recoveryPath = Restore(backupPath, destinationPath);
 
             using var restored = new ControllerDatabase(destinationPath);
             Assert.Equal("restored-machine", Assert.Single(restored.List()).MachineId);
@@ -1044,7 +1138,7 @@ public class DatabaseMaintenanceTests
             CreateLegacyVersionTwoDatabase(backupPath);
             using (var destination = new ControllerDatabase(destinationPath)) AddMachine(destination, "preserved-machine");
 
-            var recoveryPath = ControllerDatabaseMaintenance.Restore(backupPath, destinationPath);
+            var recoveryPath = Restore(backupPath, destinationPath);
 
             Assert.NotNull(recoveryPath);
             using (var restored = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = destinationPath, Mode = SqliteOpenMode.ReadOnly, Pooling = false }.ToString()))
@@ -1052,7 +1146,7 @@ public class DatabaseMaintenanceTests
                 restored.Open();
                 using var version = restored.CreateCommand();
                 version.CommandText = "PRAGMA user_version";
-                Assert.Equal(2L, version.ExecuteScalar());
+                Assert.Equal(19L, version.ExecuteScalar());
             }
             using var recovery = new ControllerDatabase(recoveryPath!);
             Assert.Equal("preserved-machine", Assert.Single(recovery.List()).MachineId);
@@ -1072,7 +1166,7 @@ public class DatabaseMaintenanceTests
             ReplaceLegacyCommandRevisionConstraintWithIndex(backupPath, "rental_id,type,lease_revision,lower(payload)");
             using (var destination = new ControllerDatabase(destinationPath)) AddMachine(destination, "preserved-machine");
 
-            Assert.Throws<InvalidDataException>(() => ControllerDatabaseMaintenance.Restore(backupPath, destinationPath));
+            Assert.Throws<InvalidDataException>(() => Restore(backupPath, destinationPath));
 
             using var preserved = new ControllerDatabase(destinationPath);
             Assert.Equal("preserved-machine", Assert.Single(preserved.List()).MachineId);
@@ -1092,7 +1186,7 @@ public class DatabaseMaintenanceTests
             ReplaceLegacyCommandRevisionConstraintWithIndex(backupPath, "rental_id,type,lease_revision,payload");
             using (var destination = new ControllerDatabase(destinationPath)) AddMachine(destination, "preserved-machine");
 
-            Assert.Throws<InvalidDataException>(() => ControllerDatabaseMaintenance.Restore(backupPath, destinationPath));
+            Assert.Throws<InvalidDataException>(() => Restore(backupPath, destinationPath));
 
             using var preserved = new ControllerDatabase(destinationPath);
             Assert.Equal("preserved-machine", Assert.Single(preserved.List()).MachineId);
@@ -1113,7 +1207,7 @@ public class DatabaseMaintenanceTests
             using var active = new ControllerDatabaseActivityLock(destinationPath);
             await active.StartAsync(default);
 
-            Assert.Throws<InvalidOperationException>(() => ControllerDatabaseMaintenance.Restore(backupPath, destinationPath));
+            Assert.Throws<InvalidOperationException>(() => Restore(backupPath, destinationPath));
             using var unchanged = new ControllerDatabase(destinationPath);
             Assert.Equal("live-machine", Assert.Single(unchanged.List()).MachineId);
         }
@@ -1131,7 +1225,7 @@ public class DatabaseMaintenanceTests
             File.WriteAllText(backupPath, "not a sqlite database");
             using (var destination = new ControllerDatabase(destinationPath)) AddMachine(destination, "preserved-machine");
 
-            Assert.Throws<InvalidDataException>(() => ControllerDatabaseMaintenance.Restore(backupPath, destinationPath));
+            Assert.Throws<InvalidDataException>(() => Restore(backupPath, destinationPath));
             using var preserved = new ControllerDatabase(destinationPath);
             Assert.Equal("preserved-machine", Assert.Single(preserved.List()).MachineId);
         }
@@ -1167,7 +1261,7 @@ public class DatabaseMaintenanceTests
 
             using (var destination = new ControllerDatabase(destinationPath)) AddMachine(destination, "preserved-machine");
 
-            Assert.Throws<InvalidDataException>(() => ControllerDatabaseMaintenance.Restore(backupPath, destinationPath));
+            Assert.Throws<InvalidDataException>(() => Restore(backupPath, destinationPath));
 
             using var preserved = new ControllerDatabase(destinationPath);
             Assert.Equal("preserved-machine", Assert.Single(preserved.List()).MachineId);
@@ -1187,7 +1281,7 @@ public class DatabaseMaintenanceTests
             ReplaceHeartbeatTable(backupPath, "CREATE TABLE machine_heartbeats(machine_id TEXT PRIMARY KEY,last_seen TEXT NOT NULL,boot_id TEXT NOT NULL);");
             using (var destination = new ControllerDatabase(destinationPath)) AddMachine(destination, "preserved-machine");
 
-            Assert.Throws<InvalidDataException>(() => ControllerDatabaseMaintenance.Restore(backupPath, destinationPath));
+            Assert.Throws<InvalidDataException>(() => Restore(backupPath, destinationPath));
 
             using var preserved = new ControllerDatabase(destinationPath);
             Assert.Equal("preserved-machine", Assert.Single(preserved.List()).MachineId);
@@ -1248,7 +1342,7 @@ public class DatabaseMaintenanceTests
             ReplaceHeartbeatTable(backupPath, "CREATE TABLE machine_heartbeats(machine_id TEXT NOT NULL,last_seen TEXT NOT NULL,boot_id TEXT NOT NULL,readiness TEXT NOT NULL);");
             using (var destination = new ControllerDatabase(destinationPath)) AddMachine(destination, "preserved-machine");
 
-            Assert.Throws<InvalidDataException>(() => ControllerDatabaseMaintenance.Restore(backupPath, destinationPath));
+            Assert.Throws<InvalidDataException>(() => Restore(backupPath, destinationPath));
 
             using var preserved = new ControllerDatabase(destinationPath);
             Assert.Equal("preserved-machine", Assert.Single(preserved.List()).MachineId);
@@ -1268,7 +1362,7 @@ public class DatabaseMaintenanceTests
             ReplaceHeartbeatTable(backupPath, "CREATE TABLE machine_heartbeats(machine_id TEXT PRIMARY KEY,last_seen INTEGER NOT NULL,boot_id TEXT NOT NULL,readiness TEXT NOT NULL);");
             using (var destination = new ControllerDatabase(destinationPath)) AddMachine(destination, "preserved-machine");
 
-            Assert.Throws<InvalidDataException>(() => ControllerDatabaseMaintenance.Restore(backupPath, destinationPath));
+            Assert.Throws<InvalidDataException>(() => Restore(backupPath, destinationPath));
 
             using var preserved = new ControllerDatabase(destinationPath);
             Assert.Equal("preserved-machine", Assert.Single(preserved.List()).MachineId);
@@ -1295,7 +1389,7 @@ public class DatabaseMaintenanceTests
 
             using (var destination = new ControllerDatabase(destinationPath)) AddMachine(destination, "preserved-machine");
 
-            Assert.Throws<InvalidDataException>(() => ControllerDatabaseMaintenance.Restore(backupPath, destinationPath));
+            Assert.Throws<InvalidDataException>(() => Restore(backupPath, destinationPath));
 
             using var preserved = new ControllerDatabase(destinationPath);
             Assert.Equal("preserved-machine", Assert.Single(preserved.List()).MachineId);
@@ -1322,7 +1416,7 @@ public class DatabaseMaintenanceTests
 
             using (var destination = new ControllerDatabase(destinationPath)) AddMachine(destination, "preserved-machine");
 
-            Assert.Throws<InvalidDataException>(() => ControllerDatabaseMaintenance.Restore(backupPath, destinationPath));
+            Assert.Throws<InvalidDataException>(() => Restore(backupPath, destinationPath));
 
             using var preserved = new ControllerDatabase(destinationPath);
             Assert.Equal("preserved-machine", Assert.Single(preserved.List()).MachineId);
@@ -1349,7 +1443,7 @@ public class DatabaseMaintenanceTests
 
             using (var destination = new ControllerDatabase(destinationPath)) AddMachine(destination, "preserved-machine");
 
-            Assert.Throws<InvalidDataException>(() => ControllerDatabaseMaintenance.Restore(backupPath, destinationPath));
+            Assert.Throws<InvalidDataException>(() => Restore(backupPath, destinationPath));
 
             using var preserved = new ControllerDatabase(destinationPath);
             Assert.Equal("preserved-machine", Assert.Single(preserved.List()).MachineId);
@@ -1376,7 +1470,7 @@ public class DatabaseMaintenanceTests
 
             using (var destination = new ControllerDatabase(destinationPath)) AddMachine(destination, "preserved-machine");
 
-            Assert.Throws<InvalidDataException>(() => ControllerDatabaseMaintenance.Restore(backupPath, destinationPath));
+            Assert.Throws<InvalidDataException>(() => Restore(backupPath, destinationPath));
 
             using var preserved = new ControllerDatabase(destinationPath);
             Assert.Equal("preserved-machine", Assert.Single(preserved.List()).MachineId);
@@ -1415,7 +1509,7 @@ public class DatabaseMaintenanceTests
             File.WriteAllText(destinationPath, "corrupt database contents");
             File.WriteAllText(destinationPath + "-wal", "uncheckpointed bytes");
 
-            var recoveryPath = ControllerDatabaseMaintenance.Restore(backupPath, destinationPath);
+            var recoveryPath = Restore(backupPath, destinationPath);
 
             Assert.NotNull(recoveryPath);
             Assert.Equal("corrupt database contents", File.ReadAllText(recoveryPath!));
@@ -1495,7 +1589,7 @@ public class DatabaseMaintenanceTests
         using (var database = new ControllerDatabase(destination)) AddMachine(database, "preserved-machine");
         var original = File.ReadAllBytes(destination);
         var backupError = Record.Exception(() => ControllerDatabaseMaintenance.Backup(source, backup));
-        var restoreError = Record.Exception(() => ControllerDatabaseMaintenance.Restore(source, destination));
+        var restoreError = Record.Exception(() => Restore(source, destination));
         Assert.IsType<InvalidDataException>(backupError);
         Assert.IsType<InvalidDataException>(restoreError);
         Assert.False(File.Exists(backup));
@@ -1580,19 +1674,50 @@ public class DatabaseMaintenanceTests
         command.ExecuteNonQuery();
     }
 
+    private static string? Restore(string backupPath, string destinationPath)
+    {
+        var directory = Path.GetDirectoryName(destinationPath)!;
+        Directory.CreateDirectory(directory);
+        ProtectDirectory(directory);
+        return ControllerDatabaseMaintenance.Restore(backupPath, destinationPath);
+    }
+
     private static string NewRoot()
     {
-        var path = Path.GetFullPath(Path.Combine(Path.GetTempPath(), "kr-controller-db-maintenance-" + Guid.NewGuid().ToString("N")));
+        var path = Path.Combine(RepositoryDirectory(), ".restore-epoch-tests", "kr-controller-db-maintenance-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(path);
+        ProtectDirectory(path);
         return path;
+    }
+
+    private static string RepositoryDirectory()
+    {
+        var projectPath = Assembly.GetExecutingAssembly().GetCustomAttributes<AssemblyMetadataAttribute>()
+            .SingleOrDefault(attribute => attribute.Key == "ControllerProjectPath")?.Value
+            ?? throw new InvalidOperationException("Controller.Tests is missing its ControllerProjectPath metadata.");
+        var controllerProjectDirectory = Path.GetDirectoryName(projectPath)!;
+        return Directory.GetParent(Directory.GetParent(controllerProjectDirectory)!.FullName)!.FullName;
+    }
+
+    private static void ProtectDirectory(string path)
+    {
+        var currentUser = WindowsIdentity.GetCurrent().User ?? throw new InvalidOperationException("The test process has no Windows user SID.");
+        var security = new DirectorySecurity();
+        security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+        security.SetOwner(currentUser);
+        var inheritance = InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit;
+        security.AddAccessRule(new FileSystemAccessRule(currentUser, FileSystemRights.FullControl, inheritance, PropagationFlags.None, AccessControlType.Allow));
+        security.AddAccessRule(new FileSystemAccessRule(new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null), FileSystemRights.FullControl, inheritance, PropagationFlags.None, AccessControlType.Allow));
+        security.AddAccessRule(new FileSystemAccessRule(new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null), FileSystemRights.FullControl, inheritance, PropagationFlags.None, AccessControlType.Allow));
+        FileSystemAclExtensions.SetAccessControl(new DirectoryInfo(path), security);
     }
 
     private static void DeleteRoot(string path)
     {
-        var temp = Path.GetFullPath(Path.GetTempPath()).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
         var resolved = Path.GetFullPath(path);
-        if (!resolved.StartsWith(temp, StringComparison.OrdinalIgnoreCase) || Path.GetFileName(resolved).StartsWith("kr-controller-db-maintenance-", StringComparison.OrdinalIgnoreCase) is false)
-            throw new InvalidOperationException("Refusing to remove a path outside this test's temporary directory.");
+        var testRoot = Path.Combine(RepositoryDirectory(), ".restore-epoch-tests").TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        if (!resolved.StartsWith(testRoot, StringComparison.OrdinalIgnoreCase) || Path.GetFileName(resolved).StartsWith("kr-controller-db-maintenance-", StringComparison.OrdinalIgnoreCase) is false)
+            throw new InvalidOperationException("Refusing to remove a path outside this test's protected repository fixture directory.");
         if (Directory.Exists(resolved)) Directory.Delete(resolved, recursive: true);
     }
 }

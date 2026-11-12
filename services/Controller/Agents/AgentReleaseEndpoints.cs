@@ -187,6 +187,8 @@ public static class AgentReleaseEndpoints
         if (!IsAdmin(context)) return Results.StatusCode(StatusCodes.Status403Forbidden);
         var actorId = context.Request.Headers["X-Authenticated-Actor-Id"].ToString();
         if (string.IsNullOrWhiteSpace(actorId)) return Results.StatusCode(StatusCodes.Status403Forbidden);
+        if (database.IsRestoreQuarantined())
+            return Results.Conflict(new { error = "Agent release publication is unavailable while the Controller is globally quarantined after restore" });
         if (context.Request.ContentLength is > MaximumMultipartRequestBytes)
             return Results.StatusCode(StatusCodes.Status413PayloadTooLarge);
         if (context.Features.Get<IHttpMaxRequestBodySizeFeature>() is { IsReadOnly: false } sizeFeature)

@@ -6,7 +6,7 @@ namespace Controller.Tests;
 public sealed class LeaseCompletionMigrationTests
 {
     [Fact]
-    public void ExistingVersionNineDatabaseAddsCompletedStateAndPreservesLeaseReferences()
+    public void ExistingVersionNineDatabaseMigratesAndRejectsUnknownTriggersOnStartup()
     {
         var path = Path.Combine(Path.GetTempPath(), $"lease-completion-{Guid.NewGuid():N}.db");
         try
@@ -27,7 +27,7 @@ public sealed class LeaseCompletionMigrationTests
                 Assert.Equal("extend-once", Scalar(verify, "SELECT request_key FROM lease_requests WHERE rental_id='expired'"));
                 Assert.Equal(42L, Scalar(verify, "SELECT rowid FROM command_outbox WHERE command_id='command'"));
                 Assert.Equal("pair-once", Scalar(verify, "SELECT request_key FROM pairing_requests WHERE rental_id='expired'"));
-                Assert.Equal(18L, Scalar(verify, "PRAGMA user_version"));
+                Assert.Equal(19L, Scalar(verify, "PRAGMA user_version"));
 
                 using var foreignKeys = verify.CreateCommand();
                 foreignKeys.CommandText = "PRAGMA foreign_key_check";
@@ -39,10 +39,10 @@ public sealed class LeaseCompletionMigrationTests
                 marker.ExecuteNonQuery();
             }
 
-            using (new ControllerDatabase(path)) { }
+            Assert.Throws<InvalidDataException>(() => new ControllerDatabase(path));
             using (var restarted = Open(path))
             {
-                Assert.Equal(18L, Scalar(restarted, "PRAGMA user_version"));
+                Assert.Equal(19L, Scalar(restarted, "PRAGMA user_version"));
                 Assert.Equal(1L, Scalar(restarted, "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name='migration_restart_marker'"));
             }
         }

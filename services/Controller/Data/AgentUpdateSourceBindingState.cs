@@ -36,6 +36,7 @@ public sealed partial class ControllerDatabase
         lock (gate)
         {
             using var tx = connection.BeginTransaction();
+            EnsureNotRestoreQuarantined(tx);
             if (!ValidateVerifiedRequest(tx, verified, expectedPath))
                 throw new UnauthorizedAccessException("Signed source challenge request has an invalid identity or path.");
             if (!AcceptScopedNonce(tx, verified, enforceCutoff: false))
@@ -128,6 +129,7 @@ public sealed partial class ControllerDatabase
         lock (gate)
         {
             using var tx = connection.BeginTransaction();
+            EnsureNotRestoreQuarantined(tx);
             if (!ValidateVerifiedRequest(tx, verified, expectedPath))
                 throw new UnauthorizedAccessException("Signed source binding request has an invalid identity or path.");
             if (!AcceptScopedNonce(tx, verified, enforceCutoff: false))

@@ -11,6 +11,7 @@ public sealed partial class ControllerDatabase {
         AddCommand(tx,lease,"PrepareMachine",1,boot,lease.PreparationDeadline,new {});
     }
     private CommandEnvelope[] PendingCommands(SqliteTransaction tx,string machineId,string boot) {
+        if (IsRestoreQuarantined(tx)) return [];
         using var cmd=LeaseCommand(tx,"SELECT command_id,type,rental_id,lease_revision,boot_id,valid_until,payload FROM command_outbox WHERE machine_id=$id AND boot_id=$boot AND status='pending' ORDER BY rowid",("$id",machineId),("$boot",boot));
         using var r=cmd.ExecuteReader();var commands=new List<CommandEnvelope>();
         while(r.Read()) commands.Add(new(r.GetString(0),r.GetString(1),r.GetString(2),r.GetInt64(3),r.GetString(4),DateTimeOffset.FromUnixTimeMilliseconds(r.GetInt64(5)),JsonSerializer.Deserialize<JsonElement>(r.GetString(6))));
@@ -28,6 +29,7 @@ public sealed partial class ControllerDatabase {
         ExecuteLease(tx,"UPDATE command_outbox SET status='invalidated' WHERE machine_id=$id AND boot_id<>$boot AND status='pending'",("$id",machineId),("$boot",boot));
     }
     private void ApplyResults(SqliteTransaction tx,string machineId,SyncRequest request,long now) {
+        if (IsRestoreQuarantined(tx)) return;
         foreach(var result in request.CommandResults) {
             // A result can affect only its persisted pending command, current boot and exact revision.
             var command=PendingCommands(tx,machineId,request.BootId).SingleOrDefault(c=>c.CommandId==result.CommandId);
@@ -59,7 +61,7 @@ public sealed partial class ControllerDatabase {
         }
     }
     private ActiveLeaseConfirmation? ConfirmLease(SqliteTransaction tx,string machineId,string boot,string readiness) {
-        if(readiness!="ready") return null;
+        if(readiness!="ready" || IsRestoreQuarantined(tx)) return null;
         using var cmd=LeaseCommand(tx,"SELECT id,revision,expires_at FROM leases WHERE machine_id=$id AND boot_id=$boot AND state='active'",("$id",machineId),("$boot",boot));
         using var r=cmd.ExecuteReader();return r.Read()?new(r.GetString(0),r.GetInt64(1),boot,DateTimeOffset.FromUnixTimeMilliseconds(r.GetInt64(2))):null;
     }

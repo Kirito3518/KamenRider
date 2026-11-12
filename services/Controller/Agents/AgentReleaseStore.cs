@@ -72,9 +72,21 @@ public sealed class AgentReleaseStore
         string channel,
         string releaseNotes,
         string adminActorId)
+        => PublishStaged(database, staged, version, channel, releaseNotes, adminActorId, afterArtifactRetained: null);
+
+    internal AgentReleaseDto PublishStaged(
+        ControllerDatabase database,
+        StagedAgentPackage staged,
+        string version,
+        string channel,
+        string releaseNotes,
+        string adminActorId,
+        Action? afterArtifactRetained)
     {
         ArgumentNullException.ThrowIfNull(database);
         ArgumentNullException.ThrowIfNull(staged);
+        if (database.IsRestoreQuarantined())
+            throw new AgentReleaseConflictException("Agent release publication is unavailable while the Controller is globally quarantined after restore");
         if (string.IsNullOrWhiteSpace(adminActorId) || adminActorId.Length > 128)
             throw new AgentReleaseValidationException("Authenticated Admin actor metadata is required");
         if (string.IsNullOrWhiteSpace(version) || version.Length > 64 || !SupportedVersion.IsMatch(version))
@@ -108,14 +120,25 @@ public sealed class AgentReleaseStore
         var packageDirectory = Path.Combine(artifactRoot, "sha256", sha256[..2].ToLowerInvariant());
         Directory.CreateDirectory(packageDirectory);
         var packagePath = Path.Combine(packageDirectory, sha256.ToLowerInvariant() + ".zip");
-        RetainImmutableArtifact(staged.FilePath, packagePath, sha256, staged.SizeBytes);
+        var createdArtifact = RetainImmutableArtifact(staged.FilePath, packagePath, sha256, staged.SizeBytes);
 
         try
         {
+            afterArtifactRetained?.Invoke();
             return database.PublishAgentRelease(new AgentReleasePublication(
                 version, channel, releaseNotes, sha256, packagePath, staged.SizeBytes,
                 inventory.SourceCommit, inventory.SourceDirty, inventory.ReleaseBuild,
                 inventory.TargetRuntime, inventory.AgentUpdateChallengeProtocol));
+        }
+        catch (InvalidOperationException exception)
+        {
+            if (!database.IsRestoreQuarantined()) throw;
+            // PublishAgentRelease repeats the quarantine check inside its write transaction.
+            // If quarantine won the race after this staged file was retained, remove only our
+            // unreferenced artifact; a concurrent successful publication may share its hash.
+            if (createdArtifact && !database.ListAgentReleases().Any(release => string.Equals(release.PackageSha256, sha256, StringComparison.OrdinalIgnoreCase)))
+                TryDelete(packagePath);
+            throw new AgentReleaseConflictException("Agent release publication is unavailable while the Controller is globally quarantined after restore", exception);
         }
         catch (SqliteException exception) when (exception.SqliteErrorCode == 19)
         {
@@ -196,23 +219,25 @@ public sealed class AgentReleaseStore
             throw new AgentReleaseValidationException("Agent package is not a valid supported ZIP archive", exception);
         }
     }
-    private static void RetainImmutableArtifact(string stagedPath, string finalPath, string expectedHash, long expectedSize)
+    private static bool RetainImmutableArtifact(string stagedPath, string finalPath, string expectedHash, long expectedSize)
     {
         if (File.Exists(finalPath))
         {
             VerifyExistingArtifact(finalPath, expectedHash, expectedSize);
             File.Delete(stagedPath);
-            return;
+            return false;
         }
 
         try
         {
             File.Move(stagedPath, finalPath, overwrite: false);
+            return true;
         }
         catch (IOException) when (File.Exists(finalPath))
         {
             VerifyExistingArtifact(finalPath, expectedHash, expectedSize);
             File.Delete(stagedPath);
+            return false;
         }
     }
 

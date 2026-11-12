@@ -2,9 +2,14 @@ using KamenRaider.Controller.Data;
 using Microsoft.Data.Sqlite;
 using System.Security.Cryptography;
 using System.Text;
+using System.Security.AccessControl;
+using System.Security.Principal;
+using System.Reflection;
+using System.Runtime.Versioning;
 
 namespace Controller.Tests;
 
+[SupportedOSPlatform("windows")]
 public sealed class AgentUpdateMigrationTests
 {
     [Fact]
@@ -54,14 +59,14 @@ public sealed class AgentUpdateMigrationTests
             Assert.Equal(hash, listed.PackageSha256);
             using (var migrated = Open(path))
             {
-                Assert.Equal(18L, Scalar(migrated, "PRAGMA user_version"));
+                Assert.Equal(19L, Scalar(migrated, "PRAGMA user_version"));
                 Assert.Equal("unknown", Scalar(migrated, "SELECT target_runtime FROM agent_releases WHERE version='2.3.4'"));
                 Assert.Equal(1L, Scalar(migrated, "SELECT agent_update_challenge_protocol FROM agent_releases WHERE version='2.3.4'"));
                 Assert.Equal(1L, Scalar(migrated, "SELECT COUNT(*) FROM agent_releases WHERE version='2.3.4'"));
             }
 
-            var unavailable = Assert.Throws<AgentReleaseUnavailableException>(() => database.ReserveAgentUpdate("pc", "2.3.4", "admin", "migrated-release"));
-            Assert.Equal(AgentReleaseUnavailableKind.UnsupportedProtocolOrRuntime, unavailable.Kind);
+            var quarantined = Assert.Throws<InvalidOperationException>(() => database.ReserveAgentUpdate("pc", "2.3.4", "admin", "migrated-release"));
+            Assert.Contains("globally quarantined", quarantined.Message, StringComparison.Ordinal);
             using var afterReservation = Open(path);
             Assert.Equal(0L, Scalar(afterReservation, "SELECT COUNT(*) FROM agent_maintenance_chains WHERE held=1"));
             Assert.Equal(0L, Scalar(afterReservation, "SELECT COUNT(*) FROM agent_update_operations"));
@@ -73,8 +78,7 @@ public sealed class AgentUpdateMigrationTests
     [Fact]
     public void StartupAndSnapshotOperationsRejectWeakenedProofSchema()
     {
-        var root = Path.Combine(Path.GetTempPath(), "agent-proof-schema-" + Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(root);
+        var root = NewProtectedRoot("agent-proof-schema-");
         var source = Path.Combine(root, "source.db");
         var destination = Path.Combine(root, "destination.db");
         var backup = Path.Combine(root, "backup.db");
@@ -84,7 +88,7 @@ public sealed class AgentUpdateMigrationTests
             using (new ControllerDatabase(destination)) { }
             using (var connection = Open(source))
             {
-                Assert.Equal(18L, Scalar(connection, "PRAGMA user_version"));
+                Assert.Equal(19L, Scalar(connection, "PRAGMA user_version"));
                 using var weaken = connection.CreateCommand();
                 weaken.CommandText = "DROP TRIGGER agent_update_reports_immutable_delete";
                 weaken.ExecuteNonQuery();
@@ -157,7 +161,7 @@ public sealed class AgentUpdateMigrationTests
             CreateVersionElevenDatabase(path);
             using (new ControllerDatabase(path)) { }
             using var verify = Open(path);
-            Assert.Equal(18L, Scalar(verify, "PRAGMA user_version"));
+            Assert.Equal(19L, Scalar(verify, "PRAGMA user_version"));
             Assert.Equal("pc", Scalar(verify, "SELECT machine_id FROM machines"));
             using (var seed = verify.CreateCommand())
             {
@@ -180,7 +184,7 @@ public sealed class AgentUpdateMigrationTests
                 Assert.Throws<SqliteException>(() => duplicate.ExecuteNonQuery());
             }
             using (new ControllerDatabase(path)) { }
-            Assert.Equal(18L, Scalar(verify, "PRAGMA user_version"));
+            Assert.Equal(19L, Scalar(verify, "PRAGMA user_version"));
             Assert.Equal(1L, Scalar(verify, "SELECT COUNT(*) FROM agent_update_operations"));
         }
         finally { if (File.Exists(path)) File.Delete(path); }
@@ -216,7 +220,7 @@ public sealed class AgentUpdateMigrationTests
             using (var source = Open(path)) Assert.Equal(14L, Scalar(source, "PRAGMA user_version"));
             using (var database = new ControllerDatabase(path))
             {
-                using (var migrated = Open(path)) Assert.Equal(18L, Scalar(migrated, "PRAGMA user_version"));
+                using (var migrated = Open(path)) Assert.Equal(19L, Scalar(migrated, "PRAGMA user_version"));
                 var machine = Assert.Single(database.List());
                 Assert.False(machine.CanRent);
                 Assert.Null(machine.AgentVersion);
@@ -236,8 +240,7 @@ public sealed class AgentUpdateMigrationTests
     [Fact]
     public void VersionFifteenFutureSyncNonceSurvivesBackupRestoreAndRateLimitMigration()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"agent-proof-v15-future-{Guid.NewGuid():N}");
-        Directory.CreateDirectory(root);
+        var root = NewProtectedRoot("agent-proof-v15-future-");
         var path = Path.Combine(root, "source.db");
         var backup = Path.Combine(root, "backup.db");
         var restored = Path.Combine(root, "restored.db");
@@ -275,13 +278,13 @@ public sealed class AgentUpdateMigrationTests
             ControllerDatabaseMaintenance.Restore(backup, restored);
             using (var restoredV15 = Open(restored))
             {
-                Assert.Equal(15L, Scalar(restoredV15, "PRAGMA user_version"));
+                Assert.Equal(19L, Scalar(restoredV15, "PRAGMA user_version"));
                 Assert.Equal(1L, Scalar(restoredV15, $"SELECT COUNT(*) FROM agent_signed_request_nonces WHERE nonce_digest='{nonceDigest}' AND signed_second={futureSecond}"));
             }
 
             using (new ControllerDatabase(restored)) { }
             using var migrated = Open(restored);
-            Assert.Equal(18L, Scalar(migrated, "PRAGMA user_version"));
+            Assert.Equal(19L, Scalar(migrated, "PRAGMA user_version"));
             Assert.Equal(1L, Scalar(migrated, $"SELECT COUNT(*) FROM agent_signed_request_nonces WHERE machine_id='pc' AND key_fingerprint='{fingerprint}' AND path='/agent/sync' AND nonce_digest='{nonceDigest}' AND signed_second={futureSecond}"));
             Assert.Equal(futureSecond, Scalar(migrated, $"SELECT retention_second FROM agent_signed_request_nonces WHERE machine_id='pc' AND nonce_digest='{nonceDigest}'"));
             Assert.Equal(0L, Scalar(migrated, "SELECT challenge_response_count FROM agent_sync_proof_state WHERE machine_id='pc'"));
@@ -318,6 +321,36 @@ public sealed class AgentUpdateMigrationTests
             seed.ExecuteNonQuery();
         }
         transaction.Commit();
+    }
+
+    private static string NewProtectedRoot(string prefix)
+    {
+        var path = Path.Combine(RepositoryDirectory(), ".restore-epoch-tests", prefix + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(path);
+        ProtectDirectory(path);
+        return path;
+    }
+
+    private static string RepositoryDirectory()
+    {
+        var projectPath = Assembly.GetExecutingAssembly().GetCustomAttributes<AssemblyMetadataAttribute>()
+            .SingleOrDefault(attribute => attribute.Key == "ControllerProjectPath")?.Value
+            ?? throw new InvalidOperationException("Controller.Tests is missing its ControllerProjectPath metadata.");
+        var controllerProjectDirectory = Path.GetDirectoryName(projectPath)!;
+        return Directory.GetParent(Directory.GetParent(controllerProjectDirectory)!.FullName)!.FullName;
+    }
+
+    private static void ProtectDirectory(string path)
+    {
+        var currentUser = WindowsIdentity.GetCurrent().User ?? throw new InvalidOperationException("The test process has no Windows user SID.");
+        var security = new DirectorySecurity();
+        security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+        security.SetOwner(currentUser);
+        var inheritance = InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit;
+        security.AddAccessRule(new FileSystemAccessRule(currentUser, FileSystemRights.FullControl, inheritance, PropagationFlags.None, AccessControlType.Allow));
+        security.AddAccessRule(new FileSystemAccessRule(new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null), FileSystemRights.FullControl, inheritance, PropagationFlags.None, AccessControlType.Allow));
+        security.AddAccessRule(new FileSystemAccessRule(new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null), FileSystemRights.FullControl, inheritance, PropagationFlags.None, AccessControlType.Allow));
+        FileSystemAclExtensions.SetAccessControl(new DirectoryInfo(path), security);
     }
 
     private static SqliteConnection Open(string path)

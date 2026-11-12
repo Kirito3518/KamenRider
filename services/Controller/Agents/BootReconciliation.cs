@@ -18,19 +18,23 @@ public sealed partial class ControllerDatabase
             using var tx = connection.BeginTransaction();
             if (!ValidateVerifiedRequest(tx, verified, "/agent/reconcile") || !IsWithinLegacyWindow(verified))
                 throw new UnauthorizedAccessException("Signed Agent request is invalid or outside the allowed window.");
+            var machine = ReadSyncMachine(tx, verified.MachineId) ?? throw new KeyNotFoundException();
+            var now = clock.GetUtcNow();
+            var config = new ConfigurationDto(machine.ConfigRevision, machine.MoonlightPort, machine.SunshinePort);
+            if (IsRestoreQuarantined(tx))
+            {
+                tx.Commit();
+                return new(now, config, null, "Hold");
+            }
             var proofState = ReadSyncProofState(tx, verified.MachineId);
             if (!SyncProofKeyMatches(proofState, verified.KeyFingerprint) || !AcceptScopedNonce(tx, verified))
                 throw new UnauthorizedAccessException("Signed Agent request was replayed or invalidated.");
             ExecuteLease(tx, "UPDATE agent_sync_proof_state SET key_fingerprint=$fingerprint WHERE machine_id=$machine AND key_fingerprint IS NULL",
                 ("$fingerprint", verified.KeyFingerprint), ("$machine", verified.MachineId));
-
-            var machine = ReadSyncMachine(tx, verified.MachineId) ?? throw new KeyNotFoundException();
-            var now = clock.GetUtcNow();
             ExpireLeases(tx, now.ToUnixTimeMilliseconds());
             using (var retired = LeaseCommand(tx, "SELECT retired FROM machine_boots WHERE machine_id=$id AND boot_id=$boot",
                 ("$id", verified.MachineId), ("$boot", request.BootId)))
                 if (retired.ExecuteScalar() is long value && value == 1) throw new ArgumentException("Retired boot");
-            var config = new ConfigurationDto(machine.ConfigRevision, machine.MoonlightPort, machine.SunshinePort);
             LeaseRow? allocation = null;
             using (var find = LeaseCommand(tx, $"SELECT {LeaseColumns} FROM leases WHERE machine_id=$id AND allocation_held=1", ("$id", verified.MachineId)))
             using (var row = find.ExecuteReader()) if (row.Read()) allocation = ReadLease(row);

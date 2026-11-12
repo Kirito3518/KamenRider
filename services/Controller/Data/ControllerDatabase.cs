@@ -16,18 +16,30 @@ public sealed partial class ControllerDatabase : IDisposable
     private readonly TimeProvider clock;
     private readonly string agentReleaseRoot;
     private readonly bool agentReleaseRemediationEnabled;
+    private readonly string databasePath;
     private readonly string syncProofRuntimeEpoch = Guid.NewGuid().ToString("N");
     private readonly byte[] syncProofHmacKey = RandomNumberGenerator.GetBytes(32);
-    public ControllerDatabase(string path, EnrollmentPolicy? policy = null, TimeProvider? clock = null, bool agentReleaseRemediationEnabled = false) {
+    public ControllerDatabase(string path, EnrollmentPolicy? policy = null, TimeProvider? clock = null, bool agentReleaseRemediationEnabled = false)
+        : this(path, policy, clock, agentReleaseRemediationEnabled, invalidateRuntimeProofsOnOpen: true) { }
+
+    internal ControllerDatabase(string path, EnrollmentPolicy? policy, TimeProvider? clock, bool agentReleaseRemediationEnabled, bool invalidateRuntimeProofsOnOpen) {
         this.policy = policy ?? new(); this.clock = clock ?? TimeProvider.System;
         this.agentReleaseRemediationEnabled = agentReleaseRemediationEnabled;
-        agentReleaseRoot=Path.Combine(Path.GetDirectoryName(Path.GetFullPath(path))!,"agent-releases");
+        databasePath = Path.GetFullPath(path);
+        var databaseExistedBeforeOpen = File.Exists(databasePath);
+        agentReleaseRoot=Path.Combine(Path.GetDirectoryName(databasePath)!,"agent-releases");
         if (this.policy.MaxPending <= 0 || this.policy.NewPerMinute <= 0) throw new ArgumentException("Positive enrollment limits required");
-        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
-        connection=new SqliteConnection(new SqliteConnectionStringBuilder {DataSource=path, ForeignKeys=true, Pooling=false}.ToString()); connection.Open();
+        Directory.CreateDirectory(Path.GetDirectoryName(databasePath)!);
+        connection=new SqliteConnection(new SqliteConnectionStringBuilder {DataSource=databasePath, ForeignKeys=true, Pooling=false}.ToString()); connection.Open();
         try {
+            var startingUserVersion = 0L;
+            using (var version = connection.CreateCommand()) {
+                version.CommandText = "PRAGMA user_version";
+                startingUserVersion = Convert.ToInt64(version.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture);
+            }
+            ControllerDatabaseMaintenance.ValidateCanonicalSchema(connection, startingUserVersion);
             using var transaction=connection.BeginTransaction();
-            foreach (var name in new[] { "001-machines.sql", "002-leases-commands.sql", "003-pairing.sql", "004-boot-challenges.sql", "005-config-acks.sql", "006-enrollment-tickets.sql", "007-admin-vnc-sessions.sql", "008-vnc-approved-target.sql", "009-agent-version.sql", "010-completed-leases.sql", "011-readiness-diagnostics.sql", "012-agent-releases.sql", "013-agent-update-downloads.sql", "014-agent-maintenance-chains.sql", "015-agent-sync-proof.sql", "016-agent-sync-challenge-rate-limit.sql", "017-agent-release-contract.sql", "018-agent-update-source-binding.sql" }) {
+            foreach (var name in new[] { "001-machines.sql", "002-leases-commands.sql", "003-pairing.sql", "004-boot-challenges.sql", "005-config-acks.sql", "006-enrollment-tickets.sql", "007-admin-vnc-sessions.sql", "008-vnc-approved-target.sql", "009-agent-version.sql", "010-completed-leases.sql", "011-readiness-diagnostics.sql", "012-agent-releases.sql", "013-agent-update-downloads.sql", "014-agent-maintenance-chains.sql", "015-agent-sync-proof.sql", "016-agent-sync-challenge-rate-limit.sql", "017-agent-release-contract.sql", "018-agent-update-source-binding.sql", "019-controller-restore-quarantine.sql" }) {
                 if(name=="003-pairing.sql"){using var version=connection.CreateCommand();version.Transaction=transaction;version.CommandText="PRAGMA user_version";if((long)version.ExecuteScalar()!>=3)continue;}
                 if(name=="004-boot-challenges.sql"){using var version=connection.CreateCommand();version.Transaction=transaction;version.CommandText="PRAGMA user_version";if((long)version.ExecuteScalar()!>=4)continue;}
                 if(name=="010-completed-leases.sql"){using var version=connection.CreateCommand();version.Transaction=transaction;version.CommandText="PRAGMA user_version";if((long)version.ExecuteScalar()!>=10)continue;}
@@ -39,6 +51,7 @@ public sealed partial class ControllerDatabase : IDisposable
                 if(name=="016-agent-sync-challenge-rate-limit.sql"){using var version=connection.CreateCommand();version.Transaction=transaction;version.CommandText="PRAGMA user_version";if((long)version.ExecuteScalar()!>=16)continue;}
                 if(name=="017-agent-release-contract.sql"){using var version=connection.CreateCommand();version.Transaction=transaction;version.CommandText="PRAGMA user_version";if((long)version.ExecuteScalar()!>=17)continue;}
                 if(name=="018-agent-update-source-binding.sql"){using var version=connection.CreateCommand();version.Transaction=transaction;version.CommandText="PRAGMA user_version";if((long)version.ExecuteScalar()!>=18)continue;}
+                if(name=="019-controller-restore-quarantine.sql"){using var version=connection.CreateCommand();version.Transaction=transaction;version.CommandText="PRAGMA user_version";if((long)version.ExecuteScalar()!>=19)continue;}
                 if(name=="008-vnc-approved-target.sql") {
                     using var columns=connection.CreateCommand();columns.Transaction=transaction;columns.CommandText="PRAGMA table_info(machines)";using var rows=columns.ExecuteReader();
                     var hasVncLocalIp=false;while(rows.Read())if(rows.GetString(1)=="vnc_local_ip")hasVncLocalIp=true;
@@ -53,18 +66,130 @@ public sealed partial class ControllerDatabase : IDisposable
                 using var reader=new StreamReader(resource);
                 using var cmd=connection.CreateCommand(); cmd.Transaction=transaction; cmd.CommandText=reader.ReadToEnd(); cmd.ExecuteNonQuery();
             }
+            ControllerDatabaseMaintenance.ValidateCanonicalSchema(connection, 19, transaction);
             ControllerDatabaseMaintenance.ValidateMaintenanceChainSchema(connection,transaction);
             ControllerDatabaseMaintenance.ValidateSyncProofSchema(connection,transaction);
-            using (var invalidateRuntimeProofs = connection.CreateCommand())
+            ControllerDatabaseMaintenance.ValidateRestoreStateSchema(connection, transaction);
+            if (databaseExistedBeforeOpen && startingUserVersion < 19)
+                SetRestoreQuarantine(transaction, "legacy-upgrade-requires-independent-history", 0, this.clock.GetUtcNow().ToUnixTimeMilliseconds());
+            if (invalidateRuntimeProofsOnOpen)
             {
+                using var invalidateRuntimeProofs = connection.CreateCommand();
                 invalidateRuntimeProofs.Transaction = transaction;
                 invalidateRuntimeProofs.CommandText = "UPDATE agent_sync_proof_state SET token_sequence=NULL,token_digest=NULL,token_epoch=NULL,token_issued_tick=NULL,last_proven_runtime_epoch=NULL,last_proven_tick=NULL,challenge_window_tick=NULL,challenge_response_count=0";
                 invalidateRuntimeProofs.ExecuteNonQuery();
             }
             transaction.Commit();
+            ControllerDatabaseMaintenance.ValidateCanonicalSchema(connection, 19);
+            ControllerDatabaseMaintenance.ValidateRestoreStateSchema(connection);
         } catch { connection.Dispose(); throw; }
     }
     private bool disposed;
+    private void SetRestoreQuarantine(SqliteTransaction transaction, string reason, long restoreEpoch, long nowUnixMs)
+    {
+        using var update = connection.CreateCommand();
+        update.Transaction = transaction;
+        update.CommandText = "UPDATE controller_restore_state SET quarantine_active=1,quarantine_reason=$reason,quarantine_epoch=MAX(quarantine_epoch,$epoch),quarantined_at_unix_ms=CASE WHEN quarantine_active=0 THEN $now ELSE quarantined_at_unix_ms END,updated_at_unix_ms=$now WHERE singleton=1";
+        update.Parameters.AddWithValue("$reason", reason);
+        update.Parameters.AddWithValue("$epoch", restoreEpoch);
+        update.Parameters.AddWithValue("$now", nowUnixMs);
+        if (update.ExecuteNonQuery() != 1) throw new InvalidDataException("The Controller restore quarantine marker is missing or malformed.");
+        if (!IsRestoreQuarantined(transaction))
+            throw new InvalidDataException("Controller restore quarantine did not remain active after its update.");
+    }
+
+    internal void ActivateRestoreQuarantine(string reason, long restoreEpoch = 0)
+    {
+        if (string.IsNullOrWhiteSpace(reason) || reason.Length > 128) throw new ArgumentException("A restore quarantine reason is required.", nameof(reason));
+        if (restoreEpoch < 0) throw new ArgumentOutOfRangeException(nameof(restoreEpoch));
+        lock (gate)
+        {
+            using var transaction = connection.BeginTransaction();
+            SetRestoreQuarantine(transaction, reason, restoreEpoch, clock.GetUtcNow().ToUnixTimeMilliseconds());
+            transaction.Commit();
+            if (!IsRestoreQuarantined())
+                throw new InvalidDataException("Controller restore quarantine was not durable after commit.");
+        }
+    }
+
+    internal bool IsRestoreQuarantined(SqliteTransaction? transaction = null)
+    {
+        if (transaction is null)
+        {
+            lock (gate) return IsRestoreQuarantinedCore(null);
+        }
+        return IsRestoreQuarantinedCore(transaction);
+    }
+
+    private bool IsRestoreQuarantinedCore(SqliteTransaction? transaction)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT quarantine_active FROM controller_restore_state WHERE singleton=1";
+        var active = command.ExecuteScalar();
+        if (active is null or DBNull) throw new InvalidDataException("The Controller restore quarantine marker is missing or malformed.");
+        return Convert.ToInt64(active, System.Globalization.CultureInfo.InvariantCulture) == 1;
+    }
+
+    internal long GetPersistedRestoreEpoch(SqliteTransaction? transaction = null)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT database_epoch FROM controller_restore_state WHERE singleton=1";
+        var value = command.ExecuteScalar();
+        if (value is null or DBNull) throw new InvalidDataException("The Controller restore epoch binding is missing or malformed.");
+        var epoch = Convert.ToInt64(value, System.Globalization.CultureInfo.InvariantCulture);
+        if (epoch < 0) throw new InvalidDataException("The Controller restore epoch binding is invalid.");
+        return epoch;
+    }
+
+    internal void ReconcileRestoreEpoch(long sidecarEpoch)
+    {
+        if (sidecarEpoch < 1) throw new InvalidDataException("The external Controller restore epoch is invalid.");
+        lock (gate)
+        {
+            using var transaction = connection.BeginTransaction();
+            var databaseEpoch = GetPersistedRestoreEpoch(transaction);
+            var reason = databaseEpoch == sidecarEpoch
+                ? "existing-database-startup-requires-independent-history"
+                : "external-restore-epoch-mismatch";
+            // Epoch comparison detects rollback across completed admissions, but cannot prove
+            // that the database was not replaced with a snapshot from the same running epoch.
+            // Until complete independent history exists, every existing database starts held.
+            SetRestoreQuarantine(transaction, reason, sidecarEpoch, clock.GetUtcNow().ToUnixTimeMilliseconds());
+            transaction.Commit();
+            if (!IsRestoreQuarantined())
+                throw new InvalidDataException("The existing Controller database was not durably quarantined before admission.");
+        }
+    }
+
+    internal void PersistRestoreEpoch(long epoch, bool requireUninitialized = false)
+    {
+        if (epoch < 1) throw new ArgumentOutOfRangeException(nameof(epoch));
+        lock (gate)
+        {
+            using var transaction = connection.BeginTransaction();
+            if (requireUninitialized && (GetPersistedRestoreEpoch(transaction) != 0 || IsRestoreQuarantined(transaction)))
+                throw new InvalidDataException("The new Controller database has unexpected restore history.");
+            using var update = connection.CreateCommand();
+            update.Transaction = transaction;
+            update.CommandText = "UPDATE controller_restore_state SET database_epoch=$epoch,updated_at_unix_ms=$now WHERE singleton=1";
+            update.Parameters.AddWithValue("$epoch", epoch);
+            update.Parameters.AddWithValue("$now", clock.GetUtcNow().ToUnixTimeMilliseconds());
+            if (update.ExecuteNonQuery() != 1 || GetPersistedRestoreEpoch(transaction) != epoch)
+                throw new InvalidDataException("The Controller restore epoch binding could not be persisted.");
+            transaction.Commit();
+            if (GetPersistedRestoreEpoch() != epoch)
+                throw new InvalidDataException("The Controller restore epoch binding was not durable after commit.");
+        }
+    }
+
+    internal void EnsureNotRestoreQuarantined(SqliteTransaction? transaction = null)
+    {
+        if (IsRestoreQuarantined(transaction))
+            throw new InvalidOperationException("The Controller is globally quarantined after restore; independent complete recovery history is unavailable.");
+    }
+
     public void Dispose(){lock(gate){if(disposed)return;disposed=true;foreach(var timer in pairingPinTimers.Values)timer.Dispose();pairingPinTimers.Clear();pairingPins.Clear();CryptographicOperations.ZeroMemory(syncProofHmacKey);connection.Dispose();}}
     private SqliteCommand Command(string sql, params (string,object?)[] values) { var cmd=connection.CreateCommand();cmd.CommandText=sql; foreach(var (name,value) in values) cmd.Parameters.AddWithValue(name,value??DBNull.Value); return cmd; }
     public string? PublicKey(string id) { lock(gate) {using var cmd=Command("SELECT public_key FROM machines WHERE machine_id=$id",("$id",id)); return cmd.ExecuteScalar() as string;} }
@@ -205,17 +330,21 @@ public sealed partial class ControllerDatabase : IDisposable
             throw new ArgumentException("Invalid MAC address");
     }
     private static void Ports(int moon,int sun) {if(moon is <1 or >65535 || sun is <1 or >65535)throw new ArgumentException("Invalid port");}
-    private static (string Readiness,bool CanRent) EvaluateRentability(string approvalStatus,long revision,DateTimeOffset now,DateTimeOffset? lastSeen,string? reportedReadiness,bool allocationHeld,bool maintenanceLocked,long? appliedRevision,bool currentProof) {
+    private static (string Readiness,bool CanRent) EvaluateRentability(string approvalStatus,long revision,DateTimeOffset now,DateTimeOffset? lastSeen,string? reportedReadiness,bool allocationHeld,bool maintenanceLocked,long? appliedRevision,bool currentProof,bool restoreQuarantined) {
         var readiness=lastSeen is null?"unknown":now-lastSeen.Value>TimeSpan.FromSeconds(20)?"unreachable":reportedReadiness??"unknown";
-        var canRent=approvalStatus=="approved" && readiness=="ready" && !allocationHeld && !maintenanceLocked && appliedRevision==revision && currentProof;
+        var canRent=approvalStatus=="approved" && readiness=="ready" && !allocationHeld && !maintenanceLocked && appliedRevision==revision && currentProof && !restoreQuarantined;
         return (readiness,canRent);
     }
     public MachineDto[] List() => List(null);
     private MachineDto[] List(SqliteTransaction? existingTransaction) {lock(gate) {
         // Read heartbeat, configuration acknowledgment and allocation from the same SQLite snapshot.
         var now=clock.GetUtcNow();
-        if(existingTransaction is null) {using var tx=connection.BeginTransaction();ExpireUnstartedAgentUpdates(tx,now.ToUnixTimeMilliseconds());tx.Commit();}
-        else ExpireUnstartedAgentUpdates(existingTransaction,now.ToUnixTimeMilliseconds());
+        var restoreQuarantined = IsRestoreQuarantined(existingTransaction);
+        if(!restoreQuarantined)
+        {
+            if(existingTransaction is null) {using var tx=connection.BeginTransaction();ExpireUnstartedAgentUpdates(tx,now.ToUnixTimeMilliseconds());tx.Commit();}
+            else ExpireUnstartedAgentUpdates(existingTransaction,now.ToUnixTimeMilliseconds());
+        }
         using var cmd=Command("SELECT m.machine_id,m.approval_status,m.display_name,m.hourly_price,m.local_ip,m.mac_address,m.moonlight_port,m.sunshine_port,m.revision,m.approved_by,m.approved_at,h.last_seen,h.boot_id,h.readiness,EXISTS(SELECT 1 FROM leases l WHERE l.machine_id=m.machine_id AND l.allocation_held=1),a.applied_revision,m.vnc_local_ip,p.last_proven_version,(SELECT COUNT(*) FROM admin_vnc_sessions v WHERE v.machine_id=m.machine_id AND v.used_at_unix_ms IS NOT NULL AND v.ended_at_unix_ms IS NULL AND v.used_at_unix_ms > $activeVncSince),d.diagnostics_json,COALESCE(c.held,0),o.operation_id,o.target_version,o.status,p.last_proven_runtime_epoch,p.last_proven_tick FROM machines m LEFT JOIN machine_heartbeats h ON h.machine_id=m.machine_id LEFT JOIN machine_config_acks a ON a.machine_id=m.machine_id LEFT JOIN machine_readiness_diagnostics d ON d.machine_id=m.machine_id LEFT JOIN agent_sync_proof_state p ON p.machine_id=m.machine_id LEFT JOIN agent_maintenance_chains c ON c.chain_id=(SELECT c1.chain_id FROM agent_maintenance_chains c1 WHERE c1.machine_id=m.machine_id ORDER BY c1.held DESC,c1.rowid DESC LIMIT 1) LEFT JOIN agent_update_operations o ON o.operation_id=c.current_head_operation_id ORDER BY m.machine_id",("$activeVncSince",now.AddHours(-1).ToUnixTimeMilliseconds()));
         cmd.Transaction=existingTransaction;
         using var r=cmd.ExecuteReader(); var rows=new List<MachineDto>();
@@ -223,7 +352,7 @@ public sealed partial class ControllerDatabase : IDisposable
             DateTimeOffset? seen=r.IsDBNull(11)?null:DateTimeOffset.Parse(r.GetString(11));
             long? appliedRevision=r.IsDBNull(15)?null:r.GetInt64(15);
             var currentProof=IsRecentProvenHeartbeat(r.IsDBNull(24)?null:r.GetString(24),r.IsDBNull(25)?null:r.GetInt64(25));
-            var rentability=EvaluateRentability(r.GetString(1),r.GetInt64(8),now,seen,r.IsDBNull(13)?null:r.GetString(13),r.GetInt64(14)!=0,r.GetInt64(20)!=0,appliedRevision,currentProof);
+            var rentability=EvaluateRentability(r.GetString(1),r.GetInt64(8),now,seen,r.IsDBNull(13)?null:r.GetString(13),r.GetInt64(14)!=0,r.GetInt64(20)!=0,appliedRevision,currentProof,restoreQuarantined);
             rows.Add(new MachineDto(r.GetString(0),r.GetString(1),r.GetString(2),r.GetInt64(3),r.GetString(4),r.GetString(5),r.GetInt32(6),r.GetInt32(7),r.GetInt64(8),seen,r.IsDBNull(12)?null:r.GetString(12),rentability.Readiness,r.IsDBNull(17)?null:r.GetString(17),r.IsDBNull(9)?null:r.GetString(9),r.IsDBNull(10)?null:DateTimeOffset.Parse(r.GetString(10))) {AppliedConfigRevision=appliedRevision,VncLocalIp=r.IsDBNull(16)?null:r.GetString(16),ActiveAdminVncSessions=r.GetInt32(18),CanRent=rentability.CanRent,AllocationHeld=r.GetInt64(14)!=0,ReadinessDiagnostics=r.IsDBNull(19)?null:JsonSerializer.Deserialize<ReadinessDiagnostic[]>(r.GetString(19)),AgentUpdateOperationId=r.IsDBNull(21)?null:r.GetString(21),AgentUpdateTargetVersion=r.IsDBNull(22)?null:r.GetString(22),AgentUpdateStatus=r.IsDBNull(23)?null:r.GetString(23)});
         }
         r.Close();

@@ -36,6 +36,32 @@ public sealed class AgentReleaseStoreTests
     }
 
     [Fact]
+    public async Task QuarantineRejectsReleaseUploadBeforeStagingOrRetainingArtifact()
+    {
+        using var fixture = new ReleaseFixture();
+        fixture.Db.ActivateRestoreQuarantine("test-restore", 1);
+        await using var host = await fixture.StartHost();
+
+        using var response = await Publish(host.Client, fixture.CreatePackage("2.3.4"), "2.3.4");
+
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        Assert.Empty(fixture.ListReleaseVersions());
+        Assert.Empty(Directory.EnumerateFiles(fixture.ArtifactRoot, "*", SearchOption.AllDirectories));
+    }
+
+    [Fact]
+    public async Task QuarantineRaceAfterArtifactRetentionRemovesNewUnreferencedBytes()
+    {
+        using var fixture = new ReleaseFixture();
+        var store = new AgentReleaseStore(fixture.ArtifactRoot);
+        using var staged = await store.StageAsync(new MemoryStream(fixture.CreatePackage("2.3.4")));
+        Assert.Throws<AgentReleaseConflictException>(() => store.PublishStaged(fixture.Db, staged, "2.3.4", "stable", "release notes", "admin-user",
+            afterArtifactRetained: () => fixture.Db.ActivateRestoreQuarantine("test-restore-race", 1)));
+        Assert.Empty(fixture.ListReleaseVersions());
+        Assert.Empty(Directory.EnumerateFiles(fixture.ArtifactRoot, "*", SearchOption.AllDirectories));
+    }
+
+    [Fact]
     public async Task RejectsDirtyVersionTokensBeforePackageValidationBecauseUpdaterCannotStartThem()
     {
         using var fixture = new ReleaseFixture();

@@ -141,11 +141,20 @@ internal static class ControllerReleaseArtifacts
         if (artifacts.Count == 0) return;
         using var connection = Open(database, SqliteOpenMode.ReadWrite);
         using var tx = connection.BeginTransaction();
+        using (var version = connection.CreateCommand())
+        {
+            version.Transaction = tx;
+            version.CommandText = "PRAGMA user_version";
+            var userVersion = Convert.ToInt64(version.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture);
+            ControllerDatabaseMaintenance.ValidateCanonicalSchema(connection, userVersion, tx);
+        }
+        string immutableTriggerSql;
         using (var trigger = connection.CreateCommand())
         {
             trigger.Transaction = tx;
-            trigger.CommandText = "SELECT COUNT(*) FROM sqlite_schema WHERE type='trigger' AND name='agent_releases_immutable_update' AND tbl_name='agent_releases'";
-            if (Convert.ToInt64(trigger.ExecuteScalar()) != 1) throw new InvalidDataException("Release immutability guard is missing.");
+            trigger.CommandText = "SELECT sql FROM sqlite_schema WHERE type='trigger' AND name='agent_releases_immutable_update' AND tbl_name='agent_releases'";
+            immutableTriggerSql = trigger.ExecuteScalar() as string
+                ?? throw new InvalidDataException("Release immutability guard is missing.");
             trigger.CommandText = "DROP TRIGGER agent_releases_immutable_update";
             trigger.ExecuteNonQuery();
         }
@@ -161,8 +170,17 @@ internal static class ControllerReleaseArtifacts
         using (var trigger = connection.CreateCommand())
         {
             trigger.Transaction = tx;
-            trigger.CommandText = "CREATE TRIGGER agent_releases_immutable_update BEFORE UPDATE ON agent_releases BEGIN SELECT RAISE(ABORT, 'Agent releases are immutable'); END";
+            // Restore the exact SQL after the temporary maintenance update. This keeps the
+            // sqlite_schema entry identical to the trusted migration definition.
+            trigger.CommandText = immutableTriggerSql;
             trigger.ExecuteNonQuery();
+        }
+        using (var version = connection.CreateCommand())
+        {
+            version.Transaction = tx;
+            version.CommandText = "PRAGMA user_version";
+            var userVersion = Convert.ToInt64(version.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture);
+            ControllerDatabaseMaintenance.ValidateCanonicalSchema(connection, userVersion, tx);
         }
         tx.Commit();
     }

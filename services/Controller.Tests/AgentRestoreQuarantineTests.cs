@@ -276,12 +276,24 @@ public sealed class AgentRestoreQuarantineTests
     {
         var epochType = typeof(ControllerDatabaseActivityLock).Assembly.GetType("KamenRaider.Controller.Data.ControllerRestoreEpoch");
         Assert.NotNull(epochType);
-        var method = epochType.GetMethod(methodName, BindingFlags.Public | BindingFlags.Static, [typeof(string)]);
+        MethodInfo? method;
+        object?[] arguments;
+        if (methodName == "AdvanceBeforeAdmission")
+        {
+            method = epochType.GetMethod(methodName, BindingFlags.NonPublic | BindingFlags.Static,
+                [typeof(string), typeof(Action<long>), typeof(Action<long>)]);
+            arguments = [databasePath, new Action<long>(_ => { }), new Action<long>(_ => { })];
+        }
+        else
+        {
+            method = epochType.GetMethod(methodName, BindingFlags.Public | BindingFlags.Static, [typeof(string)]);
+            arguments = [databasePath];
+        }
         Assert.NotNull(method);
 
         try
         {
-            return Assert.IsAssignableFrom<object>(method.Invoke(null, [databasePath]));
+            return Assert.IsAssignableFrom<object>(method.Invoke(null, arguments));
         }
         catch (TargetInvocationException exception) when (exception.InnerException is not null)
         {

@@ -38,14 +38,21 @@ public static class ControllerHost
         builder.Services.AddOptions<ControllerOptions>().Bind(builder.Configuration)
             .Validate(o => o.IsValid(), "InternalUrl (loopback HTTP), AgentUrl (separate HTTPS port), absolute DatabasePath and ServiceCredential are required.").ValidateOnStart();
         builder.Services.TryAddSingleton(TimeProvider.System);
+        builder.Services.TryAddSingleton<IExternalRecoveryHistory, UnavailableExternalRecoveryHistory>();
         var settings = builder.Configuration.Get<ControllerOptions>() ?? new();
         // Invalid configuration is rejected by startup validation before any listener starts.
         if (settings.IsValid())
         {
             var local = new Uri(settings.InternalUrl);
             var agent = new Uri(settings.AgentUrl);
-            builder.Services.AddSingleton(sp => new ControllerDatabaseActivityLock(settings.DatabasePath));
-            builder.Services.AddHostedService(sp => sp.GetRequiredService<ControllerDatabaseActivityLock>());
+            var inMemoryTestServer = builder.Services.Any(descriptor =>
+                descriptor.ServiceType.FullName == "Microsoft.AspNetCore.Hosting.Server.IServer"
+                && descriptor.ImplementationType?.FullName == "Microsoft.AspNetCore.TestHost.TestServer");
+            if (!inMemoryTestServer)
+            {
+                builder.Services.AddSingleton(sp => new ControllerDatabaseActivityLock(settings.DatabasePath, requireRestoreEpoch: true));
+                builder.Services.AddHostedService(sp => sp.GetRequiredService<ControllerDatabaseActivityLock>());
+            }
             builder.WebHost.ConfigureKestrel(server => {
                 server.Listen(IPAddress.Parse(local.Host), local.Port);
                 if (agent.Host.Equals("localhost", StringComparison.OrdinalIgnoreCase)
@@ -115,13 +122,14 @@ public static class ControllerMaintenanceCommand
     public static bool TryRun(string[] args, out int exitCode)
     {
         exitCode = 0;
-        if (args.Length == 0 || args[0] is not ("--backup-database" or "--restore-database")) return false;
+        if (args.Length == 0 || args[0] is not ("--backup-database" or "--restore-database" or "--bootstrap-restore-epoch")) return false;
 
         var invalidBackupArguments = args[0] == "--backup-database" && args.Length != 3;
         var invalidRestoreArguments = args[0] == "--restore-database" && (args.Length != 4 || args[3] != "--controller-stopped");
-        if (invalidBackupArguments || invalidRestoreArguments)
+        var invalidBootstrapArguments = args[0] == "--bootstrap-restore-epoch" && (args.Length != 3 || args[2] != "--controller-stopped");
+        if (invalidBackupArguments || invalidRestoreArguments || invalidBootstrapArguments)
         {
-            Console.Error.WriteLine("Usage: Controller.exe --backup-database <database> <backup> | --restore-database <backup> <database> --controller-stopped");
+            Console.Error.WriteLine("Usage: Controller.exe --backup-database <database> <backup> | --restore-database <backup> <database> --controller-stopped | --bootstrap-restore-epoch <database> --controller-stopped");
             exitCode = 2;
             return true;
         }
@@ -133,12 +141,17 @@ public static class ControllerMaintenanceCommand
                 var destination = ControllerDatabaseMaintenance.Backup(args[1], args[2]);
                 Console.WriteLine($"Verified database backup: {destination}");
             }
-            else
+            else if (args[0] == "--restore-database")
             {
                 var recovery = ControllerDatabaseMaintenance.Restore(args[1], args[2]);
                 Console.WriteLine(recovery is null
                     ? "Database restore completed; there was no prior database to preserve."
                     : $"Database restore completed. Prior database preserved at: {recovery}");
+            }
+            else
+            {
+                var epoch = ControllerDatabaseMaintenance.BootstrapRestoreEpochForExistingDatabase(args[1]);
+                Console.WriteLine($"Restore quarantine is active; restore epoch provisioned: {epoch}");
             }
         }
         catch (Exception exception)

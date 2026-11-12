@@ -67,22 +67,35 @@ public static class ControllerRestoreEpoch
     /// guarantee through this API. Any reported or detected ambiguous publication failure throws;
     /// callers must keep admission closed and retry the normal advance path.
     /// </remarks>
-    public static AdmissionLease AdvanceBeforeAdmission(string databasePath)
+    internal static AdmissionLease AdvanceBeforeAdmission(string databasePath, Action<long> beforeEpochAdvance, Action<long> afterEpochAdvance)
     {
         EnsureWindows();
+        ArgumentNullException.ThrowIfNull(beforeEpochAdvance);
+        ArgumentNullException.ThrowIfNull(afterEpochAdvance);
         var fullPath = NormalizeDatabasePath(databasePath);
         using var maintenanceLock = AcquireValidatedLock(
             fullPath,
             ".maintenance.lock",
             "Another database maintenance operation is already running.");
-        return AdvanceForAdmissionWithMaintenanceLockHeld(fullPath, maintenanceLock);
+        return AdvanceForAdmissionWithMaintenanceLockHeld(fullPath, maintenanceLock, beforeEpochAdvance, afterEpochAdvance);
     }
 
     /// <summary>
     /// Creates epoch 1 only for a new deployment before its SQLite database exists.
-    /// Startup and restore paths must use <see cref="AdvanceBeforeAdmission(string)"/>.
+    /// Startup and restore paths must compare and bind the database epoch before admission.
     /// </summary>
     public static long InitializeForNewDatabase(string databasePath)
+    {
+        using var admission = InitializeForNewDatabaseAdmission(databasePath);
+        return admission.Epoch;
+    }
+
+    /// <summary>
+    /// First-install provisioning for a path that has no database or restore history. It keeps the
+    /// active lock and verified sidecar handle together so a host cannot admit requests between
+    /// epoch creation and its normal database initialization.
+    /// </summary>
+    public static AdmissionLease InitializeForNewDatabaseAdmission(string databasePath)
     {
         EnsureWindows();
         var fullPath = NormalizeDatabasePath(databasePath);
@@ -94,22 +107,157 @@ public static class ControllerRestoreEpoch
             fullPath,
             ".maintenance.lock",
             "Another database maintenance operation is already running.");
-        using var activeLock = AcquireValidatedLock(
-            fullPath,
-            ".active.lock",
-            "Stop the Controller before initializing its restore epoch.");
+        FileStream? activeLock = null;
+        SafeFileHandle? sidecarHandle = null;
+        try
+        {
+            activeLock = AcquireValidatedLock(
+                fullPath,
+                ".active.lock",
+                "Stop the Controller before initializing its restore epoch.");
+            if (PathEntryExists(fullPath))
+                throw new InvalidDataException("The database appeared before initial restore epoch creation.");
+
+            var sidecarPath = fullPath + ".restore-epoch";
+            if (PathEntryExists(sidecarPath))
+                throw new InvalidDataException("A restore epoch already exists; refusing to replace its history.");
+
+            var publishedIdentity = WriteAtomically(sidecarPath, EncodeEpoch(1), replaceExisting: false);
+            sidecarHandle = OpenVerifiedSidecar(sidecarPath, out var initialEpoch, out var sidecarIdentity);
+            if (initialEpoch != 1 || sidecarIdentity != publishedIdentity)
+                throw new InvalidDataException("The initial restore epoch could not be verified after publication.");
+
+            var admission = new AdmissionLease(initialEpoch, activeLock, sidecarHandle);
+            activeLock = null;
+            sidecarHandle = null;
+            return admission;
+        }
+        finally
+        {
+            sidecarHandle?.Dispose();
+            activeLock?.Dispose();
+        }
+    }
+
+    /// <summary>Checks an existing sidecar without modifying it; maintenance callers use this before changing live state.</summary>
+    public static long ValidateExistingEpoch(string databasePath)
+    {
+        EnsureWindows();
+        var fullPath = NormalizeDatabasePath(databasePath);
+        using var verifiedDirectories = ValidateDatabaseDirectory(fullPath);
+        using var databaseHandle = ValidateDatabaseFile(fullPath);
+        using var sidecarHandle = OpenVerifiedSidecar(fullPath + ".restore-epoch", out var epoch, out _);
+        return epoch;
+    }
+
+    /// <summary>Validates and reports a protected in-progress restore marker for explicit retry.</summary>
+    internal static bool HasValidRestorePendingMarker(string databasePath)
+    {
+        EnsureWindows();
+        var fullPath = NormalizeDatabasePath(databasePath);
+        using var verifiedDirectories = ValidateDatabaseDirectory(fullPath);
+        var pendingPath = fullPath + ".restore-pending";
+        if (!PathEntryExists(pendingPath)) return false;
+        using var pending = OpenVerifiedSidecar(pendingPath, out _, out _);
+        return true;
+    }
+
+    /// <summary>
+    /// Writes a protected pending marker before restore mutations. Startup checks this marker
+    /// before admission and fails closed until a complete restore publishes and clears it.
+    /// </summary>
+    internal static void BeginRestoreWithMaintenanceLockHeld(string databasePath, FileStream maintenanceLock)
+    {
+        EnsureWindows();
+        var fullPath = NormalizeDatabasePath(databasePath);
+        using var verifiedDirectories = ValidateDatabaseDirectory(fullPath);
+        VerifyLockPathAndAcl(fullPath + ".maintenance.lock", maintenanceLock);
+        using var activeLock = AcquireValidatedLock(fullPath, ".active.lock", "Stop the Controller before restoring its database.");
+
+        var pendingPath = fullPath + ".restore-pending";
+        if (PathEntryExists(pendingPath))
+        {
+            using var existing = OpenVerifiedSidecar(pendingPath, out _, out _);
+            return;
+        }
+
+        var publishedIdentity = WriteAtomically(pendingPath, EncodeEpoch(1), replaceExisting: false);
+        using var pending = OpenVerifiedSidecar(pendingPath, out var epoch, out var identity);
+        if (epoch != 1 || identity != publishedIdentity)
+            throw new InvalidDataException("The pending restore marker could not be verified after publication.");
+    }
+
+    /// <summary>Clears the protected pending marker only after the restored database is published.</summary>
+    internal static void CompleteRestoreWithMaintenanceLockHeld(string databasePath, FileStream maintenanceLock)
+    {
+        EnsureWindows();
+        var fullPath = NormalizeDatabasePath(databasePath);
+        using var verifiedDirectories = ValidateDatabaseDirectory(fullPath);
+        VerifyLockPathAndAcl(fullPath + ".maintenance.lock", maintenanceLock);
+        using var activeLock = AcquireValidatedLock(fullPath, ".active.lock", "Stop the Controller before completing its restore.");
+
+        var pendingPath = fullPath + ".restore-pending";
+        if (!PathEntryExists(pendingPath))
+            throw new InvalidDataException("The pending restore marker is missing; refusing to complete an ambiguous restore.");
+        using (OpenVerifiedSidecar(pendingPath, out _, out _)) { }
+        File.Delete(pendingPath);
+        if (PathEntryExists(pendingPath))
+            throw new InvalidDataException("The pending restore marker remained after cleanup.");
+    }
+
+    /// <summary>
+    /// Explicit restore into a new destination. The destination must still be absent; writing the
+    /// epoch before SQLite publication makes an interrupted restore fail closed at next startup.
+    /// </summary>
+    internal static long InitializeForRestoreWithMaintenanceLockHeld(string databasePath, FileStream maintenanceLock)
+    {
+        EnsureWindows();
+        var fullPath = NormalizeDatabasePath(databasePath);
+        using var verifiedDirectories = ValidateDatabaseDirectory(fullPath);
+        VerifyLockPathAndAcl(fullPath + ".maintenance.lock", maintenanceLock);
+        using var activeLock = AcquireValidatedLock(fullPath, ".active.lock", "Stop the Controller before restoring its database.");
         if (PathEntryExists(fullPath))
-            throw new InvalidDataException("The database appeared before initial restore epoch creation.");
+            throw new InvalidDataException("The restore destination appeared before restore epoch initialization.");
 
         var sidecarPath = fullPath + ".restore-epoch";
         if (PathEntryExists(sidecarPath))
-            throw new InvalidDataException("A restore epoch already exists; refusing to replace its history.");
+        {
+            var pendingPath = fullPath + ".restore-pending";
+            if (!PathEntryExists(pendingPath))
+                throw new InvalidDataException("An epoch exists without its database; refusing to treat an interrupted restore as a new installation.");
+            _ = ReadEpoch(sidecarPath);
+            using var pending = OpenVerifiedSidecar(pendingPath, out _, out _);
+            return ReadEpoch(sidecarPath);
+        }
 
         var publishedIdentity = WriteAtomically(sidecarPath, EncodeEpoch(1), replaceExisting: false);
-        using var sidecarHandle = OpenVerifiedSidecar(sidecarPath, out var initialEpoch, out var sidecarIdentity);
-        if (initialEpoch != 1 || sidecarIdentity != publishedIdentity)
-            throw new InvalidDataException("The initial restore epoch could not be verified after publication.");
-        return 1;
+        using var sidecarHandle = OpenVerifiedSidecar(sidecarPath, out var epoch, out var identity);
+        if (epoch != 1 || identity != publishedIdentity)
+            throw new InvalidDataException("The restore epoch could not be verified before database publication.");
+        return epoch;
+    }
+
+    /// <summary>
+    /// Explicit operator bootstrap for an existing legacy deployment after its quarantine marker
+    /// has been durably set. It is idempotent: a verified existing epoch is preserved, and an
+    /// invalid entry is never overwritten.
+    /// </summary>
+    internal static long ProvisionQuarantinedExistingDatabaseWithMaintenanceLockHeld(string databasePath, FileStream maintenanceLock)
+    {
+        EnsureWindows();
+        var fullPath = NormalizeDatabasePath(databasePath);
+        using var verifiedDirectories = ValidateDatabaseDirectory(fullPath);
+        VerifyLockPathAndAcl(fullPath + ".maintenance.lock", maintenanceLock);
+        using var activeLock = AcquireValidatedLock(fullPath, ".active.lock", "Stop the Controller before provisioning its restore epoch.");
+        using var databaseHandle = ValidateDatabaseFile(fullPath);
+        var sidecarPath = fullPath + ".restore-epoch";
+        if (PathEntryExists(sidecarPath)) return ReadEpoch(sidecarPath);
+
+        var publishedIdentity = WriteAtomically(sidecarPath, EncodeEpoch(1), replaceExisting: false);
+        using var sidecarHandle = OpenVerifiedSidecar(sidecarPath, out var epoch, out var identity);
+        if (epoch != 1 || identity != publishedIdentity)
+            throw new InvalidDataException("The bootstrapped restore epoch could not be verified after publication.");
+        return epoch;
     }
 
     /// <summary>
@@ -132,10 +280,17 @@ public static class ControllerRestoreEpoch
         return AdvanceEpoch(fullPath + ".restore-epoch");
     }
 
-    private static AdmissionLease AdvanceForAdmissionWithMaintenanceLockHeld(string databasePath, FileStream maintenanceLock)
+    private static AdmissionLease AdvanceForAdmissionWithMaintenanceLockHeld(string databasePath, FileStream maintenanceLock,
+        Action<long> beforeEpochAdvance, Action<long> afterEpochAdvance)
     {
         using var verifiedDirectories = ValidateDatabaseDirectory(databasePath);
         VerifyLockPathAndAcl(databasePath + ".maintenance.lock", maintenanceLock);
+        var pendingPath = databasePath + ".restore-pending";
+        if (PathEntryExists(pendingPath))
+        {
+            using var pending = OpenVerifiedSidecar(pendingPath, out _, out _);
+            throw new InvalidDataException("A restore is incomplete; refusing Controller admission until an operator completes or retries the restore.");
+        }
 
         FileStream? activeLock = null;
         SafeFileHandle? sidecarHandle = null;
@@ -147,8 +302,12 @@ public static class ControllerRestoreEpoch
                 "Stop the Controller before advancing its restore epoch.");
             using var databaseHandle = ValidateDatabaseFile(databasePath);
 
-            var (epoch, verifiedSidecar) = AdvanceEpochAndRetainSidecar(databasePath + ".restore-epoch");
+            var sidecarPath = databasePath + ".restore-epoch";
+            var previousEpoch = ReadEpoch(sidecarPath);
+            beforeEpochAdvance(previousEpoch);
+            var (epoch, verifiedSidecar) = AdvanceEpochAndRetainSidecar(sidecarPath, expectedCurrentEpoch: previousEpoch);
             sidecarHandle = verifiedSidecar;
+            afterEpochAdvance(epoch);
 
             var admission = new AdmissionLease(epoch, activeLock, sidecarHandle);
             activeLock = null;
@@ -169,9 +328,11 @@ public static class ControllerRestoreEpoch
         return epoch;
     }
 
-    private static (long Epoch, SafeFileHandle SidecarHandle) AdvanceEpochAndRetainSidecar(string sidecarPath)
+    private static (long Epoch, SafeFileHandle SidecarHandle) AdvanceEpochAndRetainSidecar(string sidecarPath, long? expectedCurrentEpoch = null)
     {
         var currentEpoch = ReadEpoch(sidecarPath);
+        if (expectedCurrentEpoch is not null && currentEpoch != expectedCurrentEpoch)
+            throw new InvalidDataException("The Controller restore epoch changed during admission reconciliation.");
         if (currentEpoch == long.MaxValue)
             throw new InvalidDataException("The restore epoch is exhausted and cannot be safely advanced.");
 

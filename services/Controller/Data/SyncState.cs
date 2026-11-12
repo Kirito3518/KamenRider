@@ -30,6 +30,11 @@ public sealed partial class ControllerDatabase
             var storedState = ReadSyncProofState(tx, verified.MachineId);
             if (machine is null || !SyncProofKeyMatches(storedState, verified.KeyFingerprint))
                 return SyncDecision.Rejected(401);
+            if (IsRestoreQuarantined(tx))
+            {
+                tx.Commit();
+                return SyncDecision.Rejected(409);
+            }
             var state = storedState!;
             if (request.SyncProofProtocol != 2 && state.Mode == "challengeRequired")
                 return SyncDecision.Rejected(409);

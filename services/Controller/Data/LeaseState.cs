@@ -40,7 +40,7 @@ public sealed partial class ControllerDatabase {
     public LeaseDto CreateTrialLease(string userId,string machineId,int durationSeconds,string idempotencyKey) {
         Identifier(userId); Identifier(machineId); Identifier(idempotencyKey); Duration(durationSeconds);
         lock(gate) {
-            using var tx=connection.BeginTransaction(); var nowUtc=clock.GetUtcNow();var now=nowUtc.ToUnixTimeMilliseconds(); ExpireLeases(tx,now);ExpireUnstartedAgentUpdates(tx,now);
+            using var tx=connection.BeginTransaction(); EnsureNotRestoreQuarantined(tx); var nowUtc=clock.GetUtcNow();var now=nowUtc.ToUnixTimeMilliseconds(); ExpireLeases(tx,now);ExpireUnstartedAgentUpdates(tx,now);
             var scope="create:"+userId; var fp=JsonSerializer.Serialize(new {machineId,durationSeconds});
             var prior=PriorRequest(tx,scope,idempotencyKey,fp);
             if(prior is not null) {var existing=FindLease(tx,prior)!.Dto;tx.Commit();return existing;}
@@ -50,7 +50,7 @@ public sealed partial class ControllerDatabase {
                 if(!row.Read())throw new InvalidOperationException("Machine is not currently rentable");
                 currentBoot=row.IsDBNull(7)?null:row.GetString(7);
                 var currentProof=IsRecentProvenHeartbeat(row.IsDBNull(8)?null:row.GetString(8),row.IsDBNull(9)?null:row.GetInt64(9));
-                var rentability=EvaluateRentability(row.GetString(0),row.GetInt64(1),nowUtc,row.IsDBNull(2)?null:DateTimeOffset.Parse(row.GetString(2)),row.IsDBNull(3)?null:row.GetString(3),row.GetInt64(4)!=0,row.GetInt64(6)!=0,row.IsDBNull(5)?null:row.GetInt64(5),currentProof);
+                var rentability=EvaluateRentability(row.GetString(0),row.GetInt64(1),nowUtc,row.IsDBNull(2)?null:DateTimeOffset.Parse(row.GetString(2)),row.IsDBNull(3)?null:row.GetString(3),row.GetInt64(4)!=0,row.GetInt64(6)!=0,row.IsDBNull(5)?null:row.GetInt64(5),currentProof,IsRestoreQuarantined(tx));
                 if(!rentability.CanRent)throw new InvalidOperationException("Machine is not currently rentable");
             }
             var id=Guid.NewGuid().ToString("N");
@@ -63,7 +63,7 @@ public sealed partial class ControllerDatabase {
     public LeaseDto ExtendLease(string rentalId,int additionalSeconds,long expectedRevision,string idempotencyKey) {
         Identifier(rentalId); Identifier(idempotencyKey); Duration(additionalSeconds);
         lock(gate) {
-            using var tx=connection.BeginTransaction(); var now=clock.GetUtcNow().ToUnixTimeMilliseconds(); ExpireLeases(tx,now);
+            using var tx=connection.BeginTransaction(); EnsureNotRestoreQuarantined(tx); var now=clock.GetUtcNow().ToUnixTimeMilliseconds(); ExpireLeases(tx,now);
             var scope="extend:"+rentalId;var fp=JsonSerializer.Serialize(new {additionalSeconds,expectedRevision});
             var prior=PriorRequest(tx,scope,idempotencyKey,fp);
             if(prior is not null) {var existing=FindLease(tx,prior)!.Dto;tx.Commit();return existing;}
@@ -77,12 +77,12 @@ public sealed partial class ControllerDatabase {
         }
     }
     public LeaseDto? GetLease(string rentalId) {
-        lock(gate) {using var tx=connection.BeginTransaction();ExpireLeases(tx,clock.GetUtcNow().ToUnixTimeMilliseconds());var result=FindLease(tx,rentalId)?.Dto;tx.Commit();return result;}
+        lock(gate) {using var tx=connection.BeginTransaction();var restoreQuarantined=IsRestoreQuarantined(tx);if(!restoreQuarantined)ExpireLeases(tx,clock.GetUtcNow().ToUnixTimeMilliseconds());var result=restoreQuarantined?null:FindLease(tx,rentalId)?.Dto;tx.Commit();return result;}
     }
     public LeaseDto[] GetUserLeases(string userId) {
         Identifier(userId);
         lock(gate) {
-            using var tx=connection.BeginTransaction();ExpireLeases(tx,clock.GetUtcNow().ToUnixTimeMilliseconds());
+            using var tx=connection.BeginTransaction();if(IsRestoreQuarantined(tx)){tx.Commit();return [];}ExpireLeases(tx,clock.GetUtcNow().ToUnixTimeMilliseconds());
             using var cmd=LeaseCommand(tx,$"SELECT {LeaseColumns} FROM leases WHERE user_id=$id ORDER BY rowid",("$id",userId));
             var leases=new List<LeaseDto>();using(var r=cmd.ExecuteReader())while(r.Read()) leases.Add(ReadLease(r).Dto);
             tx.Commit();return leases.ToArray();

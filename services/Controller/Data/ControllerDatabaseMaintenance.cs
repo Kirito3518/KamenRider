@@ -1,18 +1,57 @@
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Hosting;
 using System.Globalization;
+using System.Collections.Concurrent;
 
 namespace KamenRaider.Controller.Data;
 
-public sealed class ControllerDatabaseActivityLock(string databasePath) : IHostedService, IDisposable
+public sealed class ControllerDatabaseActivityLock(string databasePath, bool requireRestoreEpoch = false) : IHostedService, IDisposable
 {
     private readonly string fullDatabasePath = Normalize(databasePath, nameof(databasePath));
+    private readonly bool requiresProtectedRestoreEpoch = requireRestoreEpoch;
     private FileStream? activeLock;
+    private ControllerRestoreEpoch.ControllerLifetimeLease? restoreEpochLease;
+
+    public long? RestoreEpoch => OperatingSystem.IsWindows() ? restoreEpochLease?.Epoch : null;
 
     public Task StartAsync(CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        if (activeLock is not null) return Task.CompletedTask;
+        if (activeLock is not null || restoreEpochLease is not null) return Task.CompletedTask;
+
+        if (requiresProtectedRestoreEpoch)
+        {
+            if (!OperatingSystem.IsWindows())
+                throw new PlatformNotSupportedException("Protected restore epoch admission requires Windows.");
+            if (File.Exists(fullDatabasePath) || Directory.Exists(fullDatabasePath))
+            {
+                ControllerDatabase? startupDatabase = null;
+                try
+                {
+                    using var admission = ControllerRestoreEpoch.AdvanceBeforeAdmission(fullDatabasePath,
+                        currentEpoch =>
+                        {
+                            startupDatabase = new ControllerDatabase(fullDatabasePath);
+                            startupDatabase.ReconcileRestoreEpoch(currentEpoch);
+                        },
+                        nextEpoch => (startupDatabase ?? throw new InvalidDataException("Controller epoch reconciliation did not open its database."))
+                            .PersistRestoreEpoch(nextEpoch));
+                    restoreEpochLease = admission.TakeLifetimeLease();
+                }
+                finally { startupDatabase?.Dispose(); }
+            }
+            else
+            {
+                if (HasRestoreArtifactsWithoutDatabase(fullDatabasePath))
+                    throw new InvalidDataException("The Controller database is absent but restore artifacts remain; refusing first-install epoch creation.");
+                using var admission = ControllerRestoreEpoch.InitializeForNewDatabaseAdmission(fullDatabasePath);
+                using (var startupDatabase = new ControllerDatabase(fullDatabasePath))
+                    startupDatabase.PersistRestoreEpoch(admission.Epoch, requireUninitialized: true);
+                restoreEpochLease = admission.TakeLifetimeLease();
+            }
+
+            return Task.CompletedTask;
+        }
 
         using var operationLock = ControllerDatabaseFileLocks.Acquire(fullDatabasePath, ".maintenance.lock", "A database maintenance operation is already running.");
         activeLock = ControllerDatabaseFileLocks.Acquire(fullDatabasePath, ".active.lock", "Another Controller is already using this database.");
@@ -27,8 +66,38 @@ public sealed class ControllerDatabaseActivityLock(string databasePath) : IHoste
 
     public void Dispose()
     {
+        if (OperatingSystem.IsWindows()) restoreEpochLease?.Dispose();
+        restoreEpochLease = null;
         activeLock?.Dispose();
         activeLock = null;
+    }
+
+    private static bool HasRestoreArtifactsWithoutDatabase(string databasePath)
+    {
+        var directory = Path.GetDirectoryName(databasePath)!;
+        Directory.CreateDirectory(directory);
+        var databaseName = Path.GetFileName(databasePath);
+        try
+        {
+            foreach (var entry in Directory.EnumerateFileSystemEntries(directory))
+            {
+                var name = Path.GetFileName(entry);
+                if (name.Equals(databaseName + ".restore-epoch", StringComparison.OrdinalIgnoreCase)
+                    || name.Equals(databaseName + ".restore-pending", StringComparison.OrdinalIgnoreCase)
+                    || name.StartsWith(databaseName + ".pre-restore-", StringComparison.OrdinalIgnoreCase)
+                    || name.Equals(databaseName + "-wal", StringComparison.OrdinalIgnoreCase)
+                    || name.Equals(databaseName + "-shm", StringComparison.OrdinalIgnoreCase)
+                    || name.StartsWith("." + databaseName + ".", StringComparison.OrdinalIgnoreCase) && name.EndsWith(".tmp", StringComparison.OrdinalIgnoreCase)
+                    || name.Equals("agent-releases", StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            throw new InvalidDataException("The Controller database directory could not be checked for interrupted restore artifacts.", exception);
+        }
+
+        return false;
     }
 
     internal static string Normalize(string path, string parameterName)
@@ -57,6 +126,8 @@ internal static class ControllerDatabaseFileLocks
 
 public static class ControllerDatabaseMaintenance
 {
+    private sealed record SchemaObject(string Type, string Name, string TableName, string? Sql);
+    private static readonly ConcurrentDictionary<long, IReadOnlyList<IReadOnlyDictionary<string, SchemaObject>>> expectedSchemas = new();
     private static readonly string[] requiredTables = ["machines", "machine_heartbeats", "leases", "command_outbox"];
     private sealed record RequiredColumn(string Name, string Type, bool NotNull = false);
     private static readonly IReadOnlyDictionary<string, RequiredColumn[]> requiredColumns = new Dictionary<string, RequiredColumn[]>(StringComparer.OrdinalIgnoreCase)
@@ -131,7 +202,7 @@ public static class ControllerDatabaseMaintenance
             if (artifacts.Count > 0)
             {
                 ControllerReleaseArtifacts.Copy(artifacts, Path.Combine(Path.GetDirectoryName(source)!, "agent-releases"), stagedArtifacts, requireOriginalPath: true);
-                Directory.Move(stagedArtifacts, artifactDestination);
+                MoveDirectoryNoOverwriteWithRetry(stagedArtifacts, artifactDestination);
                 artifactsPublished = true;
             }
             File.Move(staged, destination);
@@ -150,8 +221,39 @@ public static class ControllerDatabaseMaintenance
         }
     }
 
-    public static string? Restore(string backupPath, string databasePath)
+    internal static void MoveDirectoryNoOverwriteWithRetry(string source, string destination,
+        Action<string, string>? moveDirectory = null, Action<TimeSpan>? wait = null)
     {
+        ArgumentNullException.ThrowIfNull(source);
+        ArgumentNullException.ThrowIfNull(destination);
+        moveDirectory ??= Directory.Move;
+        wait ??= duration => Thread.Sleep(duration);
+        TimeSpan[] delays = [TimeSpan.FromMilliseconds(25), TimeSpan.FromMilliseconds(50), TimeSpan.FromMilliseconds(100)];
+
+        for (var attempt = 0; ; attempt++)
+        {
+            try
+            {
+                moveDirectory(source, destination);
+                return;
+            }
+            catch (Exception exception) when (attempt < delays.Length && IsTransientDirectoryMoveFailure(exception))
+            {
+                wait(delays[attempt]);
+            }
+        }
+    }
+
+    private static bool IsTransientDirectoryMoveFailure(Exception exception) =>
+        (exception.HResult & 0xFFFF) is 5 or 32;
+
+    public static string? Restore(string backupPath, string databasePath)
+        => Restore(backupPath, databasePath, beforeDatabasePublish: null);
+
+    internal static string? Restore(string backupPath, string databasePath, Action? beforeDatabasePublish)
+    {
+        if (!OperatingSystem.IsWindows())
+            throw new PlatformNotSupportedException("Protected restore epoch handling requires Windows.");
         var source = ControllerDatabaseActivityLock.Normalize(backupPath, nameof(backupPath));
         var destination = ControllerDatabaseActivityLock.Normalize(databasePath, nameof(databasePath));
         EnsureDifferentFiles(source, destination);
@@ -159,6 +261,25 @@ public static class ControllerDatabaseMaintenance
 
         using var operationLock = ControllerDatabaseFileLocks.Acquire(destination, ".maintenance.lock", "Another database maintenance operation is already running.");
         using (ControllerDatabaseFileLocks.Acquire(destination, ".active.lock", "Stop the Controller before restoring its database.")) { }
+
+        var destinationExists = File.Exists(destination);
+        if (Directory.Exists(destination)) throw new InvalidDataException("The Controller restore destination must be a database file path.");
+        if (!destinationExists && HasOrphanSqliteSidecars(destination))
+            throw new InvalidDataException("SQLite sidecars exist without the Controller restore destination; refusing to publish a database that could replay stale WAL state.");
+        var restoreAlreadyPending = ControllerRestoreEpoch.HasValidRestorePendingMarker(destination);
+        var epochSidecar = destination + ".restore-epoch";
+        long? previousEpoch = null;
+        if (destinationExists)
+        {
+            if (Directory.Exists(epochSidecar))
+                throw new InvalidDataException("The Controller restore epoch entry is not a regular protected sidecar.");
+            if (File.Exists(epochSidecar))
+                previousEpoch = ControllerRestoreEpoch.ValidateExistingEpoch(destination);
+        }
+        else if ((File.Exists(epochSidecar) || Directory.Exists(epochSidecar)) && !restoreAlreadyPending)
+        {
+            throw new InvalidDataException("The restore epoch exists without its database; refusing to treat an interrupted restore as a new deployment.");
+        }
 
         var staged = NewTemporaryPath(destination);
         var installedArtifacts = new List<string>();
@@ -172,11 +293,14 @@ public static class ControllerDatabaseMaintenance
             var artifactRoot = Path.Combine(Path.GetDirectoryName(destination)!, "agent-releases");
             ControllerReleaseArtifacts.ValidateCopy(artifacts, source + ".agent-releases", artifactRoot, requireOriginalPath: false);
             ControllerReleaseArtifacts.RebasePaths(staged, artifacts, artifactRoot);
+
+            using (var stagedDatabase = new ControllerDatabase(staged, policy: null, clock: null, agentReleaseRemediationEnabled: false, invalidateRuntimeProofsOnOpen: false))
+                stagedDatabase.ActivateRestoreQuarantine("database-restore", 0);
             ValidateDatabase(staged);
 
             string? recoveryPath = null;
             var recoveryDatabaseValidated = false;
-            if (File.Exists(destination))
+            if (destinationExists)
             {
                 recoveryPath = NewRecoveryPath(destination);
                 PreserveRawDatabaseFiles(destination, recoveryPath);
@@ -202,14 +326,47 @@ public static class ControllerDatabaseMaintenance
 
             }
 
+            ControllerRestoreEpoch.BeginRestoreWithMaintenanceLockHeld(destination, operationLock);
+
+            if (destinationExists)
+            {
+                // Make the live database fail closed before advancing the external epoch. If a later
+                // publication step fails, startup still observes the durable global hold.
+                try
+                {
+                    using var currentDatabase = new ControllerDatabase(destination);
+                    currentDatabase.ActivateRestoreQuarantine("database-restore-in-progress", previousEpoch ?? 0);
+                }
+                catch (Exception exception) when (exception is SqliteException or InvalidDataException)
+                {
+                    // The protected pending marker blocks startup if a malformed existing image
+                    // cannot accept the SQLite quarantine update before repair publication.
+                }
+            }
+
+            var restoreEpoch = destinationExists
+                ? previousEpoch is null
+                    ? ControllerRestoreEpoch.ProvisionQuarantinedExistingDatabaseWithMaintenanceLockHeld(destination, operationLock)
+                    : ControllerRestoreEpoch.AdvanceWithMaintenanceLockHeld(destination, operationLock)
+                : ControllerRestoreEpoch.InitializeForRestoreWithMaintenanceLockHeld(destination, operationLock);
+            using (var stagedDatabase = new ControllerDatabase(staged, policy: null, clock: null, agentReleaseRemediationEnabled: false, invalidateRuntimeProofsOnOpen: false))
+            {
+                stagedDatabase.ActivateRestoreQuarantine("database-restored", restoreEpoch);
+                stagedDatabase.PersistRestoreEpoch(restoreEpoch);
+            }
+            ValidateDatabase(staged);
+
+            beforeDatabasePublish?.Invoke();
+
             ControllerReleaseArtifacts.Copy(artifacts, source + ".agent-releases", artifactRoot, requireOriginalPath: false, installedArtifacts);
-            if (File.Exists(destination))
+            if (destinationExists)
             {
                 if (recoveryDatabaseValidated) CheckpointWal(destination);
                 DeleteSqliteSidecars(destination);
             }
             Publish(staged, destination);
             restorePublished = true;
+            ControllerRestoreEpoch.CompleteRestoreWithMaintenanceLockHeld(destination, operationLock);
             return recoveryPath;
         }
         finally
@@ -218,6 +375,23 @@ public static class ControllerDatabaseMaintenance
             DeleteSqliteSidecars(staged);
             if (File.Exists(staged)) File.Delete(staged);
         }
+    }
+
+    public static long BootstrapRestoreEpochForExistingDatabase(string databasePath)
+    {
+        if (!OperatingSystem.IsWindows())
+            throw new PlatformNotSupportedException("Protected restore epoch handling requires Windows.");
+        var destination = ControllerDatabaseActivityLock.Normalize(databasePath, nameof(databasePath));
+        if (!File.Exists(destination)) throw new FileNotFoundException("An existing Controller database is required for restore epoch bootstrap.", destination);
+
+        using var operationLock = ControllerDatabaseFileLocks.Acquire(destination, ".maintenance.lock", "Another database maintenance operation is already running.");
+        using (ControllerDatabaseFileLocks.Acquire(destination, ".active.lock", "Stop the Controller before bootstrapping its restore epoch.")) { }
+
+        using var database = new ControllerDatabase(destination);
+        database.ActivateRestoreQuarantine("explicit-existing-database-bootstrap", 0);
+        var epoch = ControllerRestoreEpoch.ProvisionQuarantinedExistingDatabaseWithMaintenanceLockHeld(destination, operationLock);
+        database.PersistRestoreEpoch(epoch);
+        return epoch;
     }
 
     private static string WriteVerifiedBackup(string source, string destination, bool overwriteDestination = true)
@@ -294,6 +468,7 @@ public static class ControllerDatabaseMaintenance
             using var userVersionCommand = connection.CreateCommand();
             userVersionCommand.CommandText = "PRAGMA user_version";
             var userVersion = Convert.ToInt64(userVersionCommand.ExecuteScalar(), CultureInfo.InvariantCulture);
+            ValidateCanonicalSchema(connection, userVersion);
             if (userVersion >= 11)
             {
                 const string diagnosticsTable = "machine_readiness_diagnostics";
@@ -327,6 +502,7 @@ public static class ControllerDatabaseMaintenance
                 ], ["operation_id"]);
             if (userVersion >= 14) ValidateMaintenanceChainSchema(connection);
             if (userVersion >= 15) ValidateSyncProofSchema(connection);
+            if (userVersion >= 19) ValidateRestoreStateSchema(connection);
             // These uniqueness constraints enforce allocation and command-revision invariants.
             ValidateIndex(connection, "leases", "leases_machine_allocation", ["machine_id"], "allocation_held=1", required: true);
             var hasCommandRevisionIndex = HasIndex(connection, "command_outbox", "lease_command_revision");
@@ -373,7 +549,7 @@ public static class ControllerDatabaseMaintenance
         foreach (var name in names)
         {
             parameter.Value = name;
-            result.Add(name, NormalizeSql((string)command.ExecuteScalar()!));
+            result.Add(name, NormalizeCanonicalSql((string)command.ExecuteScalar()!));
         }
         return result;
     });
@@ -387,7 +563,7 @@ public static class ControllerDatabaseMaintenance
         foreach (var (name, expected) in maintenanceSchema.Value)
         {
             parameter.Value = name;
-            if (command.ExecuteScalar() is not string actual || NormalizeSql(actual) != expected)
+            if (command.ExecuteScalar() is not string actual || NormalizeCanonicalSql(actual) != expected)
                 throw new InvalidDataException($"Controller database has an invalid maintenance-chain definition '{name}'.");
         }
         ValidateMaintenanceState(connection, transaction);
@@ -422,7 +598,7 @@ public static class ControllerDatabaseMaintenance
         foreach (var name in names)
         {
             parameter.Value = name;
-            result.Add(name, NormalizeSql((string)command.ExecuteScalar()!));
+            result.Add(name, NormalizeCanonicalSql((string)command.ExecuteScalar()!));
         }
         return result;
     });
@@ -459,7 +635,7 @@ public static class ControllerDatabaseMaintenance
         foreach (var name in names)
         {
             parameter.Value = name;
-            result.Add(name, NormalizeSql((string)command.ExecuteScalar()!));
+            result.Add(name, NormalizeCanonicalSql((string)command.ExecuteScalar()!));
         }
         return result;
     });
@@ -493,7 +669,7 @@ public static class ControllerDatabaseMaintenance
         foreach (var name in names)
         {
             parameter.Value = name;
-            result.Add(name, NormalizeSql((string)command.ExecuteScalar()!));
+            result.Add(name, NormalizeCanonicalSql((string)command.ExecuteScalar()!));
         }
         return result;
     });
@@ -517,7 +693,7 @@ public static class ControllerDatabaseMaintenance
         foreach (var (name, expected) in expectedSchema)
         {
             parameter.Value = name;
-            if (command.ExecuteScalar() is not string actual || NormalizeSql(actual) != expected)
+            if (command.ExecuteScalar() is not string actual || NormalizeCanonicalSql(actual) != expected)
                 throw new InvalidDataException($"Controller database has an invalid Agent proof definition '{name}'.");
         }
         ValidateSyncProofState(connection, transaction, userVersion >= 16, userVersion >= 18);
@@ -575,6 +751,179 @@ public static class ControllerDatabaseMaintenance
         if (Convert.ToInt64(conflict.ExecuteScalar(), CultureInfo.InvariantCulture) != 0)
             throw new InvalidDataException("Controller database contains an inconsistent Agent maintenance chain or a conflicting held lease.");
     }
+
+    internal static void ValidateRestoreStateSchema(SqliteConnection connection, SqliteTransaction? transaction = null)
+    {
+        ValidateCanonicalSchema(connection, 19, transaction);
+        ValidateColumns(connection, "controller_restore_state", [
+            new("singleton", "INTEGER"), new("quarantine_active", "INTEGER", true),
+            new("quarantine_reason", "TEXT", true), new("quarantine_epoch", "INTEGER", true),
+            new("database_epoch", "INTEGER", true),
+            new("quarantined_at_unix_ms", "INTEGER", true), new("updated_at_unix_ms", "INTEGER", true)
+        ], ["singleton"]);
+
+        using var integrity = connection.CreateCommand();
+        integrity.Transaction = transaction;
+        integrity.CommandText = "SELECT COUNT(*) FROM controller_restore_state WHERE singleton<>1 OR quarantine_active NOT IN (0,1) OR length(trim(quarantine_reason)) NOT BETWEEN 1 AND 128 OR quarantine_epoch<0 OR database_epoch<0 OR quarantined_at_unix_ms<0 OR updated_at_unix_ms<0";
+        if (Convert.ToInt64(integrity.ExecuteScalar(), CultureInfo.InvariantCulture) != 0)
+            throw new InvalidDataException("Controller database has an invalid restore quarantine marker.");
+        using var count = connection.CreateCommand();
+        count.Transaction = transaction;
+        count.CommandText = "SELECT COUNT(*) FROM controller_restore_state";
+        if (Convert.ToInt64(count.ExecuteScalar(), CultureInfo.InvariantCulture) != 1)
+            throw new InvalidDataException("Controller database must contain exactly one restore quarantine marker.");
+
+    }
+
+    internal static void ValidateCanonicalSchema(SqliteConnection connection, long expectedVersion, SqliteTransaction? transaction = null)
+    {
+        if (expectedVersion is < 0 or > 19)
+            throw new InvalidDataException("Controller database version is outside the supported migration range.");
+
+        var checkpoints = expectedSchemas.GetOrAdd(expectedVersion, BuildCanonicalSchemas);
+        var actual = ReadSchemaObjects(connection, transaction);
+        if (checkpoints.Any(expected => SchemaMatches(actual, expected))) return;
+        if (expectedVersion is 0 or 2 && checkpoints.Any(expected => MatchesKnownLegacyUnfilteredCommandRevisionSchema(connection, actual, expected))) return;
+        var difference = checkpoints.Select(expected => DescribeSchemaDifference(actual, expected)).FirstOrDefault(value => value is not null);
+        throw new InvalidDataException($"Controller database schema does not match canonical migration version {expectedVersion}.{(difference is null ? string.Empty : " " + difference)}");
+    }
+
+    private static string? DescribeSchemaDifference(IReadOnlyDictionary<string, SchemaObject> actual, IReadOnlyDictionary<string, SchemaObject> expected)
+    {
+        foreach (var pair in expected)
+        {
+            if (!actual.TryGetValue(pair.Key, out var observed)) return $"Missing schema object '{pair.Key.Replace('\0', '/')}'.";
+            if (!string.Equals(observed.Type, pair.Value.Type, StringComparison.Ordinal)
+                || !string.Equals(observed.TableName, pair.Value.TableName, StringComparison.Ordinal)
+                || !string.Equals(observed.Sql, pair.Value.Sql, StringComparison.Ordinal))
+                return $"Schema object '{pair.Key.Replace('\0', '/')}' differs from its canonical definition.";
+        }
+        var extra = actual.Keys.FirstOrDefault(key => !expected.ContainsKey(key));
+        return extra is null ? null : $"Unexpected schema object '{extra.Replace('\0', '/')}'.";
+    }
+
+    private static bool SchemaMatches(IReadOnlyDictionary<string, SchemaObject> actual, IReadOnlyDictionary<string, SchemaObject> expected)
+        => actual.Count == expected.Count && !expected.Any(pair => !actual.TryGetValue(pair.Key, out var schema)
+            || !string.Equals(schema.Type, pair.Value.Type, StringComparison.Ordinal)
+            || !string.Equals(schema.TableName, pair.Value.TableName, StringComparison.Ordinal)
+            || !string.Equals(schema.Sql, pair.Value.Sql, StringComparison.Ordinal));
+
+    private static bool MatchesKnownLegacyUnfilteredCommandRevisionSchema(SqliteConnection connection,
+        IReadOnlyDictionary<string, SchemaObject> actual, IReadOnlyDictionary<string, SchemaObject> expected)
+    {
+        const string commandTableName = "command_outbox";
+        var tableKey = "table\0" + commandTableName;
+        if (!actual.TryGetValue(tableKey, out var actualTable) || !expected.TryGetValue(tableKey, out var expectedTable)
+            || actualTable.Sql is null || expectedTable.Sql is null)
+            return false;
+
+        const string tableUniqueClause = ", UNIQUE(rental_id,type,lease_revision)";
+        if (!string.Equals(actualTable.Sql, expectedTable.Sql.Replace(tableUniqueClause, "", StringComparison.OrdinalIgnoreCase), StringComparison.Ordinal))
+            return false;
+
+        var actualWithoutCommandIndexes = actual.Where(pair => pair.Value.Type != "index"
+            || !string.Equals(pair.Value.TableName, commandTableName, StringComparison.OrdinalIgnoreCase))
+            .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
+        var expectedWithoutCommandIndexes = expected.Where(pair => pair.Value.Type != "index"
+            || !string.Equals(pair.Value.TableName, commandTableName, StringComparison.OrdinalIgnoreCase))
+            .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
+        if (!SchemaMatches(actualWithoutCommandIndexes, expectedWithoutCommandIndexes)) return false;
+
+        var uniqueIndexes = new List<(string Name, string Origin, bool Partial)>();
+        using (var indexes = connection.CreateCommand())
+        {
+            indexes.CommandText = "PRAGMA index_list('command_outbox')";
+            using var rows = indexes.ExecuteReader();
+            while (rows.Read())
+            {
+                if (rows.GetInt32(2) != 1) return false;
+                uniqueIndexes.Add((rows.GetString(1), rows.GetString(3), rows.GetInt32(4) != 0));
+            }
+        }
+
+        if (uniqueIndexes.Count != 2 || uniqueIndexes.Count(index => index.Origin == "pk" && !index.Partial) != 1
+            || uniqueIndexes.Count(index => index.Origin == "c" && !index.Partial) != 1)
+            return false;
+        var userIndex = uniqueIndexes.Single(index => index.Origin == "c");
+        var indexName = userIndex.Name.Replace("'", "''", StringComparison.Ordinal);
+        using var columns = connection.CreateCommand();
+        columns.CommandText = $"PRAGMA index_info('{indexName}')";
+        using var columnRows = columns.ExecuteReader();
+        var indexedColumns = new List<string>();
+        while (columnRows.Read())
+        {
+            if (columnRows.IsDBNull(2)) return false;
+            indexedColumns.Add(columnRows.GetString(2));
+        }
+        return indexedColumns.SequenceEqual(["rental_id", "type", "lease_revision"], StringComparer.OrdinalIgnoreCase);
+    }
+
+    private static IReadOnlyList<IReadOnlyDictionary<string, SchemaObject>> BuildCanonicalSchemas(long version)
+    {
+        if (version is not (0 or 2 or 3 or >= 4 and <= 19))
+            return [];
+
+        var connectionString = new SqliteConnectionStringBuilder { DataSource = ":memory:", ForeignKeys = true, Pooling = false }.ToString();
+        using var canonical = new SqliteConnection(connectionString);
+        canonical.Open();
+        var checkpoints = new List<IReadOnlyDictionary<string, SchemaObject>>();
+        if (version == 0) checkpoints.Add(ReadSchemaObjects(canonical, transaction: null));
+        var assembly = typeof(ControllerDatabase).Assembly;
+        var prefix = "KamenRaider.Controller.Data.Migrations.";
+        var lastMigrationNumber = version switch { 0 or 2 => 2, 3 => 3, 4 => 9, _ => checked((int)version) };
+        foreach (var resourceName in assembly.GetManifestResourceNames()
+            .Where(name => name.StartsWith(prefix, StringComparison.Ordinal) && name.EndsWith(".sql", StringComparison.Ordinal))
+            .Order(StringComparer.Ordinal))
+        {
+            var fileName = resourceName[prefix.Length..^4];
+            if (fileName.Length < 3 || !int.TryParse(fileName.AsSpan(0, 3), out var migrationVersion) || migrationVersion > lastMigrationNumber)
+                continue;
+            using var resource = assembly.GetManifestResourceStream(resourceName)
+                ?? throw new InvalidDataException("A Controller migration resource could not be loaded.");
+            using var reader = new StreamReader(resource);
+            using var migration = canonical.CreateCommand();
+            migration.CommandText = reader.ReadToEnd();
+            migration.ExecuteNonQuery();
+
+            var isCheckpoint = version switch
+            {
+                0 => migrationVersion is 1 or 2,
+                2 => migrationVersion == 2,
+                3 => migrationVersion == 3,
+                4 => migrationVersion is >= 4 and <= 9,
+                _ => migrationVersion == version,
+            };
+            if (isCheckpoint) checkpoints.Add(ReadSchemaObjects(canonical, transaction: null));
+        }
+
+        return checkpoints;
+    }
+
+    private static Dictionary<string, SchemaObject> ReadSchemaObjects(SqliteConnection connection, SqliteTransaction? transaction)
+    {
+        var schemaObjects = new Dictionary<string, SchemaObject>(StringComparer.Ordinal);
+        using (var triggers = connection.CreateCommand())
+        {
+            triggers.Transaction = transaction;
+            triggers.CommandText = "SELECT type,name,tbl_name,sql FROM sqlite_schema";
+            using var rows = triggers.ExecuteReader();
+            while (rows.Read())
+            {
+                var type = rows.GetString(0);
+                var name = rows.GetString(1);
+                var tableName = rows.GetString(2);
+                var sql = rows.IsDBNull(3) ? null : NormalizeCanonicalSql(rows.GetString(3));
+                if (!schemaObjects.TryAdd(type + "\0" + name, new(type, name, tableName, sql)))
+                    throw new InvalidDataException("Controller database contains duplicate schema objects.");
+            }
+        }
+
+        return schemaObjects;
+    }
+
+    // sqlite_schema preserves the canonical migration SQL. Compare it verbatim so comments,
+    // quoting and SQLite's ASCII tokenizer semantics cannot be changed by Unicode normalization.
+    private static string NormalizeCanonicalSql(string sql) => sql;
 
     private static void ValidateColumns(SqliteConnection connection, string table, RequiredColumn[] expectedColumns, string[] expectedPrimaryKey)
     {
@@ -650,6 +999,11 @@ public static class ControllerDatabaseMaintenance
 
     private static void ValidateIndex(SqliteConnection connection, string table, string name, string[] expectedColumns, string predicate, bool required)
     {
+        using (var version = connection.CreateCommand())
+        {
+            version.CommandText = "PRAGMA user_version";
+            ValidateCanonicalSchema(connection, Convert.ToInt64(version.ExecuteScalar(), CultureInfo.InvariantCulture));
+        }
         var found = false;
         var isUnique = false;
         var isPartial = false;
@@ -695,35 +1049,7 @@ public static class ControllerDatabaseMaintenance
         var sql = definition.ExecuteScalar()?.ToString();
         if (sql is null)
             throw new InvalidDataException($"Controller database index '{name}' has an invalid filter.");
-
-        var normalizedDefinition = NormalizeSql(sql);
-        var expectedClause = NormalizeSql($"ON {table}({string.Join(',', expectedColumns)}) WHERE {predicate}");
-        var clauseStart = normalizedDefinition.LastIndexOf(NormalizeSql($"ON {table}("), StringComparison.Ordinal);
-        if (clauseStart < 0 || !string.Equals(normalizedDefinition[clauseStart..], expectedClause, StringComparison.Ordinal))
-            throw new InvalidDataException($"Controller database index '{name}' has an invalid filter.");
-    }
-
-    private static string NormalizeSql(string sql)
-    {
-        var result = new System.Text.StringBuilder(sql.Length);
-        var literal = false;
-        for (var i = 0; i < sql.Length; i++)
-        {
-            var character = sql[i];
-            if (literal)
-            {
-                result.Append(character);
-                if (character == '\'')
-                {
-                    if (i + 1 < sql.Length && sql[i + 1] == '\'') result.Append(sql[++i]);
-                    else literal = false;
-                }
-            }
-            else if (character == '\'') { literal = true; result.Append(character); }
-            else if (!char.IsWhiteSpace(character) && character != '"' && character != '`' && character != '[' && character != ']')
-                result.Append(char.ToLowerInvariant(character));
-        }
-        return result.ToString();
+        // The versioned full-schema comparison above validates the exact canonical index SQL.
     }
 
     private static void CheckpointWal(string path)
@@ -767,6 +1093,25 @@ public static class ControllerDatabaseMaintenance
         {
             var sidecar = path + suffix;
             if (File.Exists(sidecar)) File.Delete(sidecar);
+        }
+    }
+
+    private static bool HasOrphanSqliteSidecars(string databasePath)
+    {
+        var directory = Path.GetDirectoryName(databasePath)!;
+        var databaseName = Path.GetFileName(databasePath);
+        try
+        {
+            return Directory.EnumerateFileSystemEntries(directory).Any(entry =>
+            {
+                var name = Path.GetFileName(entry);
+                return name.Equals(databaseName + "-wal", StringComparison.OrdinalIgnoreCase)
+                    || name.Equals(databaseName + "-shm", StringComparison.OrdinalIgnoreCase);
+            });
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            throw new InvalidDataException("The Controller restore destination directory could not be checked for orphan SQLite sidecars.", exception);
         }
     }
 

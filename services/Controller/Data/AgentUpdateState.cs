@@ -32,6 +32,7 @@ public sealed partial class ControllerDatabase
         {
             var publishedAt = clock.GetUtcNow();
             using var tx = connection.BeginTransaction();
+            EnsureNotRestoreQuarantined(tx);
             using (var insert = Command("INSERT INTO agent_releases(version,channel,release_notes,package_sha256,package_path,package_size_bytes,source_commit,source_dirty,release_build,package_format,published_at_unix_ms,target_runtime,agent_update_challenge_protocol) VALUES($version,$channel,$notes,$hash,$path,$size,$commit,0,1,'AgentPackage.zip',$published,$runtime,$protocol)",
                 ("$version", release.Version), ("$channel", release.Channel), ("$notes", release.ReleaseNotes), ("$hash", canonicalHash),
                 ("$path", release.PackagePath), ("$size", release.PackageSizeBytes), ("$commit", release.SourceCommit),
@@ -73,6 +74,7 @@ public sealed partial class ControllerDatabase
             var now = clock.GetUtcNow();
             var nowMs = now.ToUnixTimeMilliseconds();
             using var tx = connection.BeginTransaction();
+            EnsureNotRestoreQuarantined(tx);
             ExpireUnstartedAgentUpdates(tx, nowMs);
 
             using (var prior = Command("SELECT 1 FROM agent_update_audit WHERE actor_id=$actor AND request_id=$request", ("$actor", actorId), ("$request", requestId)))
@@ -206,6 +208,7 @@ public sealed partial class ControllerDatabase
         {
             var nowMs = clock.GetUtcNow().ToUnixTimeMilliseconds();
             using var tx = connection.BeginTransaction();
+            EnsureNotRestoreQuarantined(tx);
             string? previousRequestId = null;
             string? previousBodyDigest = null;
             using (var previous = Command("SELECT request_id,body_digest FROM agent_update_start_requests WHERE operation_id=$operation", ("$operation", operationId)))
@@ -298,6 +301,7 @@ public sealed partial class ControllerDatabase
         {
             var nowMs = clock.GetUtcNow().ToUnixTimeMilliseconds();
             using var tx = connection.BeginTransaction();
+            EnsureNotRestoreQuarantined(tx);
             using (var operation = Command("SELECT 1 FROM agent_update_operations WHERE operation_id=$operation AND machine_id=$machine AND ticket_hash=$ticket AND release_version=$release AND target_version=$target AND upper(target_package_sha256)=upper($hash) AND ticket_started_at_unix_ms IS NOT NULL AND ticket_package_downloaded_at_unix_ms IS NULL AND status IN ('installing','awaitingHeartbeat','rollingBack') AND EXISTS(SELECT 1 FROM agent_maintenance_chains c WHERE c.chain_id=agent_update_operations.chain_id AND c.current_head_operation_id=agent_update_operations.operation_id AND c.held=1 AND c.generation=agent_update_operations.ticket_generation AND agent_update_operations.ticket_purpose='apply')",
                 ("$operation", operationId), ("$machine", machineId), ("$ticket", ticketHash), ("$release", releaseVersion), ("$target", targetVersion), ("$hash", expectedHash)))
             {
@@ -335,6 +339,7 @@ public sealed partial class ControllerDatabase
         {
             var nowMs = clock.GetUtcNow().ToUnixTimeMilliseconds();
             using var tx = connection.BeginTransaction();
+            EnsureNotRestoreQuarantined(tx);
             var canonicalReport = JsonSerializer.Serialize(new { machineId, operationId, releaseVersion, targetVersion, packageHash = expectedHash, status });
             var reportDigest = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonicalReport)));
             var reportRequestId = reportDigest;
