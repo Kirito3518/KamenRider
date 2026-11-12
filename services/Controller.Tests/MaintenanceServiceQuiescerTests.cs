@@ -45,16 +45,21 @@ public sealed class MaintenanceServiceQuiescerTests
             if (!IgnoreStops && Services.TryGetValue(serviceName, out var snapshot))
                 Services[serviceName] = snapshot with { State = MaintenanceWindowsServiceState.Stopped, ProcessId = 0 };
         }
+
+        public void Start(string serviceName) => events.Add("start:" + serviceName);
     }
 
     private sealed class FakeProcesses(List<string> events) : IMaintenanceProcessInspector
     {
         public IReadOnlyList<int> Remaining = [];
+        public Dictionary<int, string> PathsByPid { get; } = [];
         public IReadOnlyList<int> FindByExecutablePath(IReadOnlyCollection<string> exactPaths)
         {
             events.Add("processes");
             return Remaining;
         }
+
+        public string GetExecutablePath(int processId) => PathsByPid[processId];
     }
 
     private sealed class Fixture
@@ -76,22 +81,25 @@ public sealed class MaintenanceServiceQuiescerTests
             Processes = new(Events);
             Services.Services[MaintenanceServiceQuiescer.AgentServiceName] = Service(
                 MaintenanceServiceQuiescer.AgentServiceName,
-                '"' + Layout.AgentExecutablePath + '"',
+                '"' + Layout.AgentExecutablePath + '"' + " --contentRoot \"C:\\Program Files\\KamenRaider\\Agent\"",
                 "NT SERVICE\\KamenRaider Agent",
-                MaintenanceServiceQuiescer.GuardServiceName,
+                [MaintenanceServiceQuiescer.GuardServiceName],
                 101);
             Services.Services[MaintenanceServiceQuiescer.GuardServiceName] = Service(
                 MaintenanceServiceQuiescer.GuardServiceName,
-                $"\"{Layout.AgentExecutablePath}\" --stream-guard",
+                '"' + Layout.AgentExecutablePath + '"' + " --contentRoot \"C:\\Program Files\\KamenRaider\\Agent\" --stream-guard",
                 "LocalSystem",
-                null,
+                [],
                 102);
             Services.Services[MaintenanceServiceQuiescer.SunshineServiceName] = Service(
                 MaintenanceServiceQuiescer.SunshineServiceName,
-                '"' + Layout.SunshineServiceExecutablePath + '"',
+                $"\"{Layout.SunshineServiceExecutablePath}\" --service",
                 "LocalSystem",
-                MaintenanceServiceQuiescer.GuardServiceName,
+                ["VendorService", MaintenanceServiceQuiescer.GuardServiceName],
                 103);
+            Processes.PathsByPid[101] = Layout.AgentExecutablePath;
+            Processes.PathsByPid[102] = Layout.AgentExecutablePath;
+            Processes.PathsByPid[103] = Layout.SunshineServiceExecutablePath;
             Quiescer = new(Services, Processes, Prerequisites, TimeSpan.FromMilliseconds(100), TimeSpan.FromMilliseconds(1));
         }
 
@@ -99,9 +107,9 @@ public sealed class MaintenanceServiceQuiescerTests
             string name,
             string imagePath,
             string account,
-            string? dependency,
-            uint pid) => new(name, imagePath, account,
-                dependency is null ? [] : [dependency], MaintenanceWindowsServiceState.Running, pid);
+            IReadOnlyList<string> dependencies,
+            uint pid) => new(name, imagePath, account, dependencies,
+                MaintenanceWindowsServiceState.Running, pid, MaintenanceWindowsServiceTypes.Win32OwnProcess);
     }
 
     [Fact]

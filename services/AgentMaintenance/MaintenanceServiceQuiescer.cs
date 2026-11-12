@@ -22,7 +22,13 @@ public sealed record MaintenanceWindowsServiceSnapshot(
     string AccountName,
     IReadOnlyList<string> Dependencies,
     MaintenanceWindowsServiceState State,
-    uint ProcessId);
+    uint ProcessId,
+    uint ServiceType);
+
+public static class MaintenanceWindowsServiceTypes
+{
+    public const uint Win32OwnProcess = 0x00000010;
+}
 
 public sealed record MaintenanceServiceLayout(
     string AgentExecutablePath,
@@ -33,11 +39,13 @@ public interface IMaintenanceWindowsServiceApi
 {
     MaintenanceWindowsServiceSnapshot? Query(string serviceName);
     void Stop(string serviceName);
+    void Start(string serviceName);
 }
 
 public interface IMaintenanceProcessInspector
 {
     IReadOnlyList<int> FindByExecutablePath(IReadOnlyCollection<string> exactPaths);
+    string GetExecutablePath(int processId);
 }
 
 public interface IMaintenanceStopPrerequisites
@@ -120,7 +128,7 @@ public sealed class MaintenanceServiceQuiescer(
         {
             cancellationToken.ThrowIfCancellationRequested();
             await prerequisites.VerifyStillHeldAsync(cancellationToken).ConfigureAwait(false);
-            var current = QueryAndValidate(definition);
+            var current = QueryAndValidate(definition, allowPending: true);
             if (current.State == MaintenanceWindowsServiceState.Stopped && current.ProcessId == 0)
                 return;
             if (current.State is not (MaintenanceWindowsServiceState.Running or MaintenanceWindowsServiceState.StopPending))
@@ -130,29 +138,67 @@ public sealed class MaintenanceServiceQuiescer(
             await Task.Delay(remaining < interval ? remaining : interval, cancellationToken).ConfigureAwait(false);
         }
 
-        var last = QueryAndValidate(definition);
+        var last = QueryAndValidate(definition, allowPending: true);
         if (last.State != MaintenanceWindowsServiceState.Stopped || last.ProcessId != 0)
             throw new TimeoutException($"Service '{definition.Name}' did not stop with process ID zero within {timeout}.");
     }
 
-    private MaintenanceWindowsServiceSnapshot QueryAndValidate(ServiceDefinition definition)
+    private MaintenanceWindowsServiceSnapshot QueryAndValidate(ServiceDefinition definition, bool allowPending = false)
     {
         var snapshot = services.Query(definition.Name)
             ?? throw new InvalidOperationException($"Required service '{definition.Name}' is missing.");
         if (!string.Equals(snapshot.ServiceName, definition.Name, StringComparison.OrdinalIgnoreCase) ||
             !string.Equals(snapshot.AccountName, definition.Account, StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException($"Service '{definition.Name}' has an unexpected identity.");
+        if (snapshot.ServiceType != MaintenanceWindowsServiceTypes.Win32OwnProcess)
+            throw new InvalidOperationException($"Service '{definition.Name}' is not a Win32 own-process service.");
 
         var (imagePath, arguments) = ParseImageCommandLine(snapshot.ImagePath);
-        if (!PathEquals(imagePath, definition.ImagePath) || !string.Equals(arguments, definition.Arguments, StringComparison.Ordinal))
+        var argumentsMatch = definition.HasContentRootArgument
+            ? ContentRootArgumentsMatch(arguments, definition.ImagePath, definition.Arguments)
+            : definition.AllowedArguments is not null
+                ? definition.AllowedArguments.Contains(arguments, StringComparer.Ordinal)
+                : string.Equals(arguments, definition.Arguments, StringComparison.Ordinal);
+        if (!PathEquals(imagePath, definition.ImagePath) || !argumentsMatch)
             throw new InvalidOperationException($"Service '{definition.Name}' executable or arguments do not match the trusted installation layout.");
 
+        if (definition.ExpectedDependencies is not null &&
+            !snapshot.Dependencies.SequenceEqual(definition.ExpectedDependencies, StringComparer.OrdinalIgnoreCase))
+            throw new InvalidOperationException($"Service '{definition.Name}' has an unexpected dependency list.");
+        if (snapshot.Dependencies.Any(string.IsNullOrWhiteSpace) ||
+            snapshot.Dependencies.Distinct(StringComparer.OrdinalIgnoreCase).Count() != snapshot.Dependencies.Count)
+            throw new InvalidOperationException($"Service '{definition.Name}' has an invalid dependency list.");
         if (definition.RequiredDependency is not null &&
-            !snapshot.Dependencies.Contains(definition.RequiredDependency, StringComparer.OrdinalIgnoreCase))
-            throw new InvalidOperationException($"Service '{definition.Name}' does not declare its required Stream Guard dependency.");
-        if (definition.RequiredDependency is null && snapshot.Dependencies.Contains(GuardServiceName, StringComparer.OrdinalIgnoreCase))
-            throw new InvalidOperationException("The Stream Guard service cannot depend on itself.");
+            snapshot.Dependencies.Count(dependency => string.Equals(dependency, definition.RequiredDependency, StringComparison.OrdinalIgnoreCase)) != 1)
+            throw new InvalidOperationException($"Service '{definition.Name}' is missing its unique required dependency.");
+
+        if (snapshot.State == MaintenanceWindowsServiceState.Stopped)
+        {
+            if (snapshot.ProcessId != 0)
+                throw new InvalidOperationException($"Stopped service '{definition.Name}' reports a nonzero process ID.");
+        }
+        else if (snapshot.State == MaintenanceWindowsServiceState.Running)
+        {
+            VerifyServiceProcess(snapshot, definition);
+        }
+        else if (!allowPending || snapshot.State is not (MaintenanceWindowsServiceState.StartPending or MaintenanceWindowsServiceState.StopPending))
+        {
+            throw new InvalidOperationException($"Service '{definition.Name}' is in an ambiguous state.");
+        }
+        else if (snapshot.ProcessId != 0)
+        {
+            VerifyServiceProcess(snapshot, definition);
+        }
         return snapshot;
+    }
+
+    private void VerifyServiceProcess(MaintenanceWindowsServiceSnapshot snapshot, ServiceDefinition definition)
+    {
+        if (snapshot.ProcessId is 0 or > int.MaxValue)
+            throw new InvalidOperationException($"Service '{definition.Name}' reports an invalid process ID.");
+        var actual = processes.GetExecutablePath((int)snapshot.ProcessId);
+        if (!PathEquals(actual, definition.ImagePath))
+            throw new InvalidOperationException($"Service '{definition.Name}' process image does not match its configured executable.");
     }
 
     private static NormalizedLayout NormalizeLayout(MaintenanceServiceLayout layout)
@@ -179,19 +225,22 @@ public sealed class MaintenanceServiceQuiescer(
 
     private static IEnumerable<ServiceDefinition> Definitions(NormalizedLayout layout)
     {
-        yield return new(AgentServiceName, layout.AgentExecutablePath, AgentServiceAccount, string.Empty, GuardServiceName);
-        yield return new(GuardServiceName, layout.AgentExecutablePath, LocalSystemAccount, "--stream-guard", null);
-        yield return new(SunshineServiceName, layout.SunshineServiceExecutablePath, LocalSystemAccount, string.Empty, GuardServiceName);
+        yield return new(AgentServiceName, layout.AgentExecutablePath, AgentServiceAccount, string.Empty, true, null, [GuardServiceName], null);
+        yield return new(GuardServiceName, layout.AgentExecutablePath, LocalSystemAccount, "--stream-guard", true, null, [], null);
+        // Sunshine keeps vendor dependencies; the managed stream gate adds exactly one Guard dependency.
+        yield return new(SunshineServiceName, layout.SunshineServiceExecutablePath, LocalSystemAccount, string.Empty, false,
+            [string.Empty, "--service"], null, GuardServiceName);
     }
 
     private static IEnumerable<ServiceDefinition> StopOrder(NormalizedLayout layout)
     {
-        yield return new(AgentServiceName, layout.AgentExecutablePath, AgentServiceAccount, string.Empty, GuardServiceName);
-        yield return new(SunshineServiceName, layout.SunshineServiceExecutablePath, LocalSystemAccount, string.Empty, GuardServiceName);
-        yield return new(GuardServiceName, layout.AgentExecutablePath, LocalSystemAccount, "--stream-guard", null);
+        var definitions = Definitions(layout).ToDictionary(definition => definition.Name, StringComparer.OrdinalIgnoreCase);
+        yield return definitions[AgentServiceName];
+        yield return definitions[SunshineServiceName];
+        yield return definitions[GuardServiceName];
     }
 
-    private static (string Executable, string Arguments) ParseImageCommandLine(string commandLine)
+    internal static (string Executable, string Arguments) ParseImageCommandLine(string commandLine)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(commandLine);
         var value = commandLine.Trim();
@@ -218,18 +267,60 @@ public sealed class MaintenanceServiceQuiescer(
         return (executable, value[exeEnd..].Trim());
     }
 
-    private static bool PathEquals(string first, string second)
+    internal static bool PathEquals(string first, string second)
     {
         try { return string.Equals(Path.GetFullPath(Environment.ExpandEnvironmentVariables(first)), second, StringComparison.OrdinalIgnoreCase); }
         catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException) { return false; }
     }
 
-    private sealed record ServiceDefinition(string Name, string ImagePath, string Account, string Arguments, string? RequiredDependency);
+    internal static bool ContentRootArgumentsMatch(string arguments, string executablePath, string trailingArguments)
+    {
+        const string prefix = "--contentRoot ";
+        if (!arguments.StartsWith(prefix, StringComparison.Ordinal))
+            return false;
+        var value = arguments[prefix.Length..];
+        if (value.Length < 3 || value[0] != '"')
+            return false;
+        var closingQuote = value.IndexOf('"', 1);
+        if (closingQuote < 0)
+            return false;
+        var contentRoot = value[1..closingQuote];
+        var trailing = value[(closingQuote + 1)..].Trim();
+        var expectedRoot = Path.GetDirectoryName(Path.GetFullPath(executablePath));
+        return !string.IsNullOrWhiteSpace(expectedRoot) && PathEquals(contentRoot, expectedRoot) &&
+            string.Equals(trailing, trailingArguments, StringComparison.Ordinal);
+    }
+
+    private sealed record ServiceDefinition(
+        string Name,
+        string ImagePath,
+        string Account,
+        string Arguments,
+        bool HasContentRootArgument,
+        IReadOnlyList<string>? AllowedArguments,
+        IReadOnlyList<string>? ExpectedDependencies,
+        string? RequiredDependency);
     private sealed record NormalizedLayout(string AgentExecutablePath, string SunshineServiceExecutablePath, string SunshineExecutablePath, IReadOnlyList<string> ProcessImagePaths);
 }
 
 public sealed class WindowsMaintenanceProcessInspector : IMaintenanceProcessInspector
 {
+    public string GetExecutablePath(int processId)
+    {
+        if (!OperatingSystem.IsWindows())
+            throw new PlatformNotSupportedException("Process image verification requires Windows.");
+        try
+        {
+            using var process = Process.GetProcessById(processId);
+            return Path.GetFullPath(process.MainModule?.FileName
+                ?? throw new InvalidOperationException("A service process has no readable executable path."));
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or Win32Exception or NotSupportedException)
+        {
+            throw new InvalidOperationException("The service process image could not be verified.", ex);
+        }
+    }
+
     public IReadOnlyList<int> FindByExecutablePath(IReadOnlyCollection<string> exactPaths)
     {
         if (!OperatingSystem.IsWindows())
@@ -266,10 +357,12 @@ public sealed class WindowsMaintenanceServiceApi : IMaintenanceWindowsServiceApi
     private const uint ScManagerConnect = 0x0001;
     private const uint ServiceQueryConfig = 0x0001;
     private const uint ServiceQueryStatus = 0x0004;
+    private const uint ServiceStartAccess = 0x0010;
     private const uint ServiceStopAccess = 0x0020;
     private const uint ErrorServiceDoesNotExist = 1060;
     private const uint ErrorInsufficientBuffer = 122;
     private const uint ErrorServiceNotActive = 1062;
+    private const uint ErrorServiceAlreadyRunning = 1056;
 
     public MaintenanceWindowsServiceSnapshot? Query(string serviceName)
     {
@@ -282,8 +375,11 @@ public sealed class WindowsMaintenanceServiceApi : IMaintenanceWindowsServiceApi
         if (service is null) return null;
         var config = QueryConfig(service);
         var status = QueryStatus(service);
+        if (config.ServiceType != MaintenanceWindowsServiceTypes.Win32OwnProcess ||
+            status.ServiceType != MaintenanceWindowsServiceTypes.Win32OwnProcess)
+            throw new InvalidOperationException($"Service '{serviceName}' is not a Win32 own-process service.");
         return new(serviceName, config.BinaryPath, config.StartName, config.Dependencies,
-            ConvertState(status.CurrentState), status.ProcessId);
+            ConvertState(status.CurrentState), status.ProcessId, config.ServiceType);
     }
 
     public void Stop(string serviceName)
@@ -299,6 +395,22 @@ public sealed class WindowsMaintenanceServiceApi : IMaintenanceWindowsServiceApi
             var error = Marshal.GetLastPInvokeError();
             if (error != ErrorServiceNotActive)
                 throw new Win32Exception(error, $"Could not stop service '{serviceName}'.");
+        }
+    }
+
+    public void Start(string serviceName)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(serviceName);
+        EnsureWindows();
+        using var manager = Native.OpenSCManager(null, null, ScManagerConnect);
+        if (manager.IsInvalid)
+            throw new Win32Exception(Marshal.GetLastPInvokeError(), "Could not open the Service Control Manager.");
+        using var service = OpenService(manager, serviceName, ServiceStartAccess, missingIsNull: false)!;
+        if (!Native.StartService(service, 0, IntPtr.Zero))
+        {
+            var error = Marshal.GetLastPInvokeError();
+            if ((uint)error != ErrorServiceAlreadyRunning)
+                throw new Win32Exception(error, $"Could not start service '{serviceName}'.");
         }
     }
 
@@ -328,6 +440,7 @@ public sealed class WindowsMaintenanceServiceApi : IMaintenanceWindowsServiceApi
             return new(
                 Marshal.PtrToStringUni(config.BinaryPathName) ?? throw new InvalidDataException("The service has no image path."),
                 Marshal.PtrToStringUni(config.ServiceStartName) ?? string.Empty,
+                config.ServiceType,
                 ReadMultiString(config.Dependencies));
         }
         finally { Marshal.FreeHGlobal(buffer); }
@@ -377,7 +490,7 @@ public sealed class WindowsMaintenanceServiceApi : IMaintenanceWindowsServiceApi
             throw new PlatformNotSupportedException("Windows Service Control Manager access is available only on Windows.");
     }
 
-    private sealed record ServiceConfiguration(string BinaryPath, string StartName, IReadOnlyList<string> Dependencies);
+    private sealed record ServiceConfiguration(string BinaryPath, string StartName, uint ServiceType, IReadOnlyList<string> Dependencies);
 
     private sealed class SafeServiceHandle() : SafeHandleZeroOrMinusOneIsInvalid(ownsHandle: true)
     {
@@ -450,5 +563,9 @@ public sealed class WindowsMaintenanceServiceApi : IMaintenanceWindowsServiceApi
         [DllImport("advapi32.dll", EntryPoint = "ControlService", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
         internal static extern bool ControlService(SafeServiceHandle service, uint control, out ServiceStatus status);
+
+        [DllImport("advapi32.dll", EntryPoint = "StartServiceW", CharSet = CharSet.Unicode, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool StartService(SafeServiceHandle service, uint argumentCount, IntPtr arguments);
     }
 }
