@@ -16,16 +16,22 @@ public sealed record MaintenanceCommandRequest(
     string TargetVersion,
     string TargetRuntime,
     string TargetPackageSha256,
-    long TargetPackageLength);
+    long TargetPackageLength,
+    string? ChainId = null,
+    string? HeadOperationId = null,
+    long? Generation = null);
 
 public static class MaintenanceCommandRequestParser
 {
     private const int MaximumRequestBytes = 16 * 1024;
-    private static readonly HashSet<string> RequiredFields = new(StringComparer.Ordinal)
+    private static readonly HashSet<string> ArchiveFields = new(StringComparer.Ordinal)
     {
         "schemaVersion", "command", "operationId", "targetVersion", "targetRuntime", "targetPackageSha256", "targetPackageLength"
     };
-    private static readonly HashSet<string> RequiredFieldsIgnoreCase = new(RequiredFields, StringComparer.OrdinalIgnoreCase);
+    private static readonly HashSet<string> ApplyFields = new(ArchiveFields, StringComparer.Ordinal)
+    {
+        "chainId", "headOperationId", "generation"
+    };
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
         PropertyNameCaseInsensitive = false,
@@ -35,7 +41,7 @@ public static class MaintenanceCommandRequestParser
     public static MaintenanceCommandRequest Parse(byte[] bytes, string expectedCommand)
     {
         ArgumentNullException.ThrowIfNull(bytes);
-        if (bytes.Length is <= 0 or > MaximumRequestBytes || expectedCommand is not ("validate-archive" or "extract"))
+        if (bytes.Length is <= 0 or > MaximumRequestBytes || expectedCommand is not ("validate-archive" or "extract" or "apply"))
             throw new InvalidDataException("The fixed maintenance request exceeds its limit or names an unsupported operation.");
 
         try
@@ -48,11 +54,12 @@ public static class MaintenanceCommandRequestParser
             });
             if (document.RootElement.ValueKind != JsonValueKind.Object)
                 throw new InvalidDataException("The fixed maintenance request must be a JSON object.");
+            var requiredFields = expectedCommand == "apply" ? ApplyFields : ArchiveFields;
             var found = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var property in document.RootElement.EnumerateObject())
-                if (!RequiredFields.Contains(property.Name) || !found.Add(property.Name))
+                if (!requiredFields.Contains(property.Name) || !found.Add(property.Name))
                     throw new InvalidDataException("The fixed maintenance request contains an unknown or duplicate field.");
-            if (!found.SetEquals(RequiredFieldsIgnoreCase))
+            if (!found.SetEquals(requiredFields))
                 throw new InvalidDataException("The fixed maintenance request is incomplete.");
 
             var request = JsonSerializer.Deserialize<MaintenanceCommandRequest>(bytes, JsonOptions)
@@ -75,7 +82,9 @@ public sealed record AgentMaintenanceCommandResult(
     string? InventoryDigest,
     long? TotalBytes,
     IReadOnlyList<PackageNode>? Nodes,
-    AgentMaintenanceSourceResult? Source = null);
+    AgentMaintenanceSourceResult? Source = null,
+    string? ApplyOutcome = null,
+    string? RollbackReason = null);
 
 public sealed record AgentMaintenanceSourceResult(
     string Version,
@@ -92,8 +101,34 @@ public interface IMaintenanceWorkStore
     void CreateExtractionRoot();
 }
 
+public sealed record MaintenanceApplyExtractionRoot(string Path, bool IsVerifiedReuse);
+
+public interface IMaintenanceApplyWorkStore
+{
+    MaintenanceApplyExtractionRoot PrepareApplyExtractionRoot(
+        MaintenanceCommandRequest request,
+        PackageInventory expectedInventory);
+}
+
 public sealed class LocalUpdateEngine(IMaintenanceWorkStore workStore)
 {
+    public string ExtractionRoot
+    {
+        get
+        {
+            ArgumentNullException.ThrowIfNull(workStore);
+            return workStore.ExtractionRoot;
+        }
+    }
+
+    public MaintenanceCommandRequest ReadRequest(string command)
+    {
+        ArgumentNullException.ThrowIfNull(workStore);
+        if (command is not ("validate-archive" or "extract" or "apply"))
+            throw new InvalidOperationException("This maintenance command does not use an archive request.");
+        return ValidateRequest(workStore.ReadRequest(command), command);
+    }
+
     public PackageInventory ValidateArchive()
     {
         var (_, archive, inventory) = OpenVerifiedArchive("validate-archive");
@@ -109,6 +144,27 @@ public sealed class LocalUpdateEngine(IMaintenanceWorkStore workStore)
             workStore.CreateExtractionRoot();
             archive.Position = 0;
             return PackageVerifier.Extract(archive, workStore.ExtractionRoot, inventory);
+        }
+    }
+
+    public (PackageInventory Inventory, string ExtractionRoot) ExtractForApply(MaintenanceCommandRequest expectedRequest)
+    {
+        ArgumentNullException.ThrowIfNull(expectedRequest);
+        var validatedRequest = ValidateRequest(expectedRequest, "apply");
+        if (workStore is not IMaintenanceApplyWorkStore applyWorkStore)
+            throw new InvalidOperationException("The protected operation-bound apply work store is unavailable.");
+        var (storedRequest, archive, inventory) = OpenVerifiedArchive("apply");
+        using (archive)
+        {
+            if (storedRequest != validatedRequest)
+                throw new InvalidOperationException("The protected apply request changed after authorization.");
+            var extraction = applyWorkStore.PrepareApplyExtractionRoot(validatedRequest, inventory);
+            if (!extraction.IsVerifiedReuse)
+            {
+                archive.Position = 0;
+                _ = PackageVerifier.Extract(archive, extraction.Path, inventory);
+            }
+            return (inventory, extraction.Path);
         }
     }
 
@@ -144,9 +200,10 @@ public sealed class LocalUpdateEngine(IMaintenanceWorkStore workStore)
 }
 
 [SupportedOSPlatform("windows")]
-public sealed class WindowsMaintenanceWorkStore : IMaintenanceWorkStore
+public sealed class WindowsMaintenanceWorkStore : IMaintenanceWorkStore, IMaintenanceApplyWorkStore
 {
     private const int MaximumRequestBytes = 16 * 1024;
+    private const int FileDispositionInfoClass = 4;
     private readonly string directory;
 
     public WindowsMaintenanceWorkStore()
@@ -171,7 +228,7 @@ public sealed class WindowsMaintenanceWorkStore : IMaintenanceWorkStore
 
     public MaintenanceCommandRequest ReadRequest(string expectedCommand)
     {
-        if (expectedCommand is not ("validate-archive" or "extract"))
+        if (expectedCommand is not ("validate-archive" or "extract" or "apply"))
             throw new InvalidOperationException("This maintenance command is not implemented by the local archive engine.");
         EnsureWorkDirectory(create: false);
         var path = Path.Combine(directory, "request.json");
@@ -220,6 +277,158 @@ public sealed class WindowsMaintenanceWorkStore : IMaintenanceWorkStore
             throw new IOException("The target extraction directory was created by another process.");
         }
         EnsurePrivateDirectory(ExtractionRoot);
+    }
+
+    public MaintenanceApplyExtractionRoot PrepareApplyExtractionRoot(
+        MaintenanceCommandRequest request,
+        PackageInventory expectedInventory)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentNullException.ThrowIfNull(expectedInventory);
+        if (request.Command != "apply" || !IsOperationIdentifier(request.OperationId))
+            throw new InvalidDataException("The operation-bound apply extraction request is invalid.");
+
+        EnsureWorkDirectory(create: true);
+        var path = GetApplyExtractionRoot(request);
+        if (TryGetAttributes(path, out var attributes))
+        {
+            if ((attributes & (FileAttributes.Directory | FileAttributes.ReparsePoint | FileAttributes.Device)) != FileAttributes.Directory)
+                throw new UnauthorizedAccessException("The operation-bound apply extraction path is not a regular directory.");
+            EnsurePrivateDirectory(path);
+            EnsureSafeApplyExtractionTree(path);
+            try
+            {
+                _ = PackageVerifier.ValidateExtracted(path, expectedInventory);
+                return new(path, IsVerifiedReuse: true);
+            }
+            catch (PackageValidationException)
+            {
+                // Only a protected, non-reparse tree can be discarded and rebuilt
+                // from the archive whose bytes and inventory were just verified.
+                DeleteSafeApplyExtractionTree(path);
+            }
+        }
+
+        try
+        {
+            new DirectoryInfo(path).Create(CreatePrivateDirectorySecurity());
+        }
+        catch (IOException) when (TryGetAttributes(path, out _))
+        {
+            throw new IOException("The operation-bound apply extraction path was created by another process.");
+        }
+        EnsurePrivateDirectory(path);
+        return new(path, IsVerifiedReuse: false);
+    }
+
+    private string GetApplyExtractionRoot(MaintenanceCommandRequest request)
+    {
+        var identity = string.Join('\n', request.ChainId, request.HeadOperationId,
+            request.Generation!.Value.ToString(System.Globalization.CultureInfo.InvariantCulture), request.OperationId,
+            request.TargetVersion, request.TargetRuntime, request.TargetPackageSha256.ToUpperInvariant());
+        var digest = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(
+            System.Text.Encoding.UTF8.GetBytes(identity)));
+        return Path.Combine(directory, "apply-target-" + digest);
+    }
+
+    private static bool IsOperationIdentifier(string value) =>
+        !string.IsNullOrWhiteSpace(value) && value.Length <= 128 &&
+        value.All(character => char.IsAsciiLetterOrDigit(character) || character is '.' or '_' or '-');
+
+    private static void EnsureSafeApplyExtractionTree(string root)
+    {
+        var pending = new Stack<string>();
+        pending.Push(root);
+        while (pending.Count > 0)
+        {
+            var directory = pending.Pop();
+            foreach (var path in Directory.EnumerateFileSystemEntries(directory))
+            {
+                var attributes = File.GetAttributes(path);
+                if ((attributes & (FileAttributes.ReparsePoint | FileAttributes.Device)) != 0)
+                    throw new UnauthorizedAccessException("The operation-bound apply extraction tree contains a reparse point or special file.");
+                if ((attributes & FileAttributes.Directory) != 0)
+                {
+                    pending.Push(path);
+                    continue;
+                }
+
+                using var handle = OpenFile(path, genericRead: true, shareRead: true);
+                if (!GetFileInformationByHandle(handle, out var information) || information.NumberOfLinks != 1 ||
+                    (information.Attributes & ((uint)FileAttributes.Directory | (uint)FileAttributes.ReparsePoint)) != 0)
+                    throw new UnauthorizedAccessException("The operation-bound apply extraction tree contains an unsafe file.");
+            }
+        }
+    }
+
+    private void DeleteSafeApplyExtractionTree(string root)
+    {
+        var pending = new Stack<(string Path, bool Visited)>();
+        pending.Push((root, false));
+        while (pending.Count > 0)
+        {
+            var (path, visited) = pending.Pop();
+            var attributes = File.GetAttributes(path);
+            if ((attributes & (FileAttributes.ReparsePoint | FileAttributes.Device)) != 0)
+                throw new UnauthorizedAccessException("The operation-bound apply extraction tree changed to an unsafe path.");
+            if ((attributes & FileAttributes.Directory) == 0)
+            {
+                DeleteVerifiedApplyExtractionFile(path);
+                continue;
+            }
+
+            if (!visited)
+            {
+                pending.Push((path, true));
+                foreach (var child in Directory.EnumerateFileSystemEntries(path))
+                    pending.Push((child, false));
+            }
+            else
+            {
+                Directory.Delete(path, recursive: false);
+            }
+        }
+        WindowsMaintenanceBackupSecurity.FlushDirectoryToDisk(directory);
+    }
+
+    private static void DeleteVerifiedApplyExtractionFile(string path)
+    {
+        const uint genericRead = 0x80000000;
+        const uint deleteAccess = 0x00010000;
+        const uint shareReadWriteDelete = 0x00000001 | 0x00000002 | 0x00000004;
+        const uint openExisting = 3;
+        const uint openReparsePoint = 0x00200000;
+        using var handle = CreateFile(path, genericRead | deleteAccess, shareReadWriteDelete, IntPtr.Zero,
+            openExisting, openReparsePoint, IntPtr.Zero);
+        if (handle.IsInvalid)
+        {
+            var error = Marshal.GetLastWin32Error();
+            throw new IOException("The verified apply extraction file could not be opened for deletion.",
+                new System.ComponentModel.Win32Exception(error));
+        }
+        if (!GetFileInformationByHandle(handle, out var information) || information.NumberOfLinks != 1 ||
+            (information.Attributes & ((uint)FileAttributes.Directory | (uint)FileAttributes.ReparsePoint | (uint)FileAttributes.Device)) != 0)
+            throw new UnauthorizedAccessException("The operation-bound apply extraction tree changed to an unsafe file.");
+
+        var disposition = new WindowsFileDispositionInfo { DeleteFile = 1 };
+        if (!SetFileInformationByHandle(handle, FileDispositionInfoClass, ref disposition,
+                (uint)Marshal.SizeOf<WindowsFileDispositionInfo>()))
+        {
+            var error = Marshal.GetLastWin32Error();
+            throw new IOException("The verified apply extraction file could not be deleted by its validated handle.",
+                new System.ComponentModel.Win32Exception(error));
+        }
+    }
+
+    private static bool TryGetAttributes(string path, out FileAttributes attributes)
+    {
+        try
+        {
+            attributes = File.GetAttributes(path);
+            return true;
+        }
+        catch (FileNotFoundException) { attributes = default; return false; }
+        catch (DirectoryNotFoundException) { attributes = default; return false; }
     }
 
     private void EnsureWorkDirectory(bool create)
@@ -356,12 +565,26 @@ public sealed class WindowsMaintenanceWorkStore : IMaintenanceWorkStore
     private static SecurityIdentifier SystemSid() => new(WellKnownSidType.LocalSystemSid, null);
     private static SecurityIdentifier AdministratorsSid() => new(WellKnownSidType.BuiltinAdministratorsSid, null);
 
+    [StructLayout(LayoutKind.Sequential)]
+    private struct WindowsFileDispositionInfo
+    {
+        internal int DeleteFile;
+    }
+
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true, EntryPoint = "CreateFileW")]
     private static extern SafeFileHandle CreateFile(string fileName, uint desiredAccess, uint shareMode, IntPtr securityAttributes, uint creationDisposition, uint flagsAndAttributes, IntPtr templateFile);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GetFileInformationByHandle(SafeFileHandle handle, out WindowsFileInformation fileInformation);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetFileInformationByHandle(
+        SafeFileHandle handle,
+        int fileInformationClass,
+        ref WindowsFileDispositionInfo fileInformation,
+        uint bufferSize);
 }
 
 internal static class LocalUpdateEngineRequestValidation
@@ -377,8 +600,14 @@ internal static class LocalUpdateEngineRequestValidation
             request.TargetRuntime is not ("win-x64" or "win-arm64") ||
             request.TargetPackageSha256 is null || request.TargetPackageSha256.Length != 64 ||
             request.TargetPackageSha256.Any(character => !Uri.IsHexDigit(character)) ||
-            request.TargetPackageLength is < 1 or > 104857600)
+            request.TargetPackageLength is < 1 or > 104857600 ||
+            (expectedCommand == "apply" &&
+                (!IsIdentifier(request.ChainId) || !IsIdentifier(request.HeadOperationId) || request.Generation is null or <= 0)))
             throw new InvalidDataException("The fixed maintenance request is malformed or does not match the requested operation.");
         return request;
     }
+
+    private static bool IsIdentifier(string? value) =>
+        !string.IsNullOrWhiteSpace(value) && value.Length <= 128 &&
+        value.All(character => char.IsAsciiLetterOrDigit(character) || character is '.' or '_' or '-');
 }

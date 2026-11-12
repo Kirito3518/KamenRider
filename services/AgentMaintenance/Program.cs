@@ -9,8 +9,9 @@ internal static class Program
         {
             var security = new WindowsMaintenanceBackupSecurity();
             var inspector = new InstalledAgentSourceInspector(security.SourceRoot, security);
+            var engine = new LocalUpdateEngine(new WindowsMaintenanceWorkStore());
             host = new WindowsAgentMaintenanceCommandHost(
-                new LocalUpdateEngine(new WindowsMaintenanceWorkStore()), inspector);
+                engine, inspector, MaintenanceApplyCommand.CreateFailClosed(engine));
         }
         else
         {

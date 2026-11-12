@@ -1,9 +1,11 @@
 using System.Security.Cryptography;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
 using System.Security.Principal;
 using System.Text;
 using KamenRaider.AgentMaintenance;
+using KamenRaider.AgentPackage;
 using Controller.Tests.Fixtures;
 
 namespace Controller.Tests;
@@ -263,6 +265,129 @@ public sealed class AgentMaintenanceCliTests
             var actual = new byte[expected.Length];
             stream.ReadExactly(actual);
             Assert.Equal(expected, actual);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [ElevatedWindowsWorkStoreFact]
+    [SupportedOSPlatform("windows")]
+    public void ProductionApplyWorkStoreReusesOnlyVerifiedOperationTreeAndRebuildsPartialTree()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "kr-maint-apply-store-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var protectedRoot = Path.Combine(root, "maintenance");
+            new WindowsMaintenanceFenceStore(protectedRoot).EnsureLocationForJournal();
+            var workRoot = Path.Combine(protectedRoot, "work");
+            new DirectoryInfo(workRoot).Create(WindowsMaintenanceWorkStore.CreatePrivateDirectorySecurity());
+            var archive = AgentPackageCorpus.Valid(RuntimeInformation.OSArchitecture switch
+            {
+                Architecture.X64 => "win-x64",
+                Architecture.Arm64 => "win-arm64",
+                _ => throw new PlatformNotSupportedException("The apply work-store test requires x64 or ARM64.")
+            });
+            var expected = PackageVerifier.ValidateArchive(new MemoryStream(archive), AgentPackageCorpus.Version);
+            var request = new MaintenanceCommandRequest(1, "apply", "operation-work-store", expected.Version,
+                expected.TargetRuntime, expected.ArchiveHash, archive.LongLength, "chain-work-store",
+                "operation-work-store", 1);
+            var store = new WindowsMaintenanceWorkStore(workRoot);
+
+            var created = store.PrepareApplyExtractionRoot(request, expected);
+
+            Assert.False(created.IsVerifiedReuse);
+            Assert.NotEqual(store.ExtractionRoot, created.Path);
+            _ = PackageVerifier.Extract(new MemoryStream(archive), created.Path, expected);
+            var reused = store.PrepareApplyExtractionRoot(request, expected);
+            Assert.True(reused.IsVerifiedReuse);
+            Assert.Equal(created.Path, reused.Path);
+
+            File.Delete(Path.Combine(reused.Path, "Agent.exe"));
+            var rebuilt = store.PrepareApplyExtractionRoot(request, expected);
+
+            Assert.False(rebuilt.IsVerifiedReuse);
+            Assert.Equal(created.Path, rebuilt.Path);
+            Assert.Empty(Directory.EnumerateFileSystemEntries(rebuilt.Path));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [ElevatedWindowsWorkStoreFact]
+    [SupportedOSPlatform("windows")]
+    public void ProductionApplyWorkStoreRejectsAnOperationRootReparsePoint()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "kr-maint-apply-link-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        var linkPath = string.Empty;
+        try
+        {
+            var protectedRoot = Path.Combine(root, "maintenance");
+            new WindowsMaintenanceFenceStore(protectedRoot).EnsureLocationForJournal();
+            var workRoot = Path.Combine(protectedRoot, "work");
+            new DirectoryInfo(workRoot).Create(WindowsMaintenanceWorkStore.CreatePrivateDirectorySecurity());
+            var archive = AgentPackageCorpus.Valid(RuntimeInformation.OSArchitecture switch
+            {
+                Architecture.X64 => "win-x64",
+                Architecture.Arm64 => "win-arm64",
+                _ => throw new PlatformNotSupportedException("The apply work-store test requires x64 or ARM64.")
+            });
+            var expected = PackageVerifier.ValidateArchive(new MemoryStream(archive), AgentPackageCorpus.Version);
+            var request = new MaintenanceCommandRequest(1, "apply", "operation-link-test", expected.Version,
+                expected.TargetRuntime, expected.ArchiveHash, archive.LongLength, "chain-link-test",
+                "operation-link-test", 1);
+            var store = new WindowsMaintenanceWorkStore(workRoot);
+            var prepared = store.PrepareApplyExtractionRoot(request, expected);
+            Directory.Delete(prepared.Path);
+            var external = Path.Combine(root, "external");
+            Directory.CreateDirectory(external);
+            var marker = Path.Combine(external, "do-not-delete.txt");
+            File.WriteAllText(marker, "outside the operation-bound work tree");
+            linkPath = prepared.Path;
+            Directory.CreateSymbolicLink(linkPath, external);
+
+            Assert.Throws<UnauthorizedAccessException>(() =>
+            {
+                _ = store.PrepareApplyExtractionRoot(request, expected);
+            });
+            Assert.Equal("outside the operation-bound work tree", File.ReadAllText(marker));
+        }
+        finally
+        {
+            if (linkPath.Length > 0 && Directory.Exists(linkPath))
+                Directory.Delete(linkPath);
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    [SupportedOSPlatform("windows")]
+    public void ApplyExtractionCleanupDeletesPartialFilesWithoutSharingViolation()
+    {
+        if (!OperatingSystem.IsWindows())
+            throw new PlatformNotSupportedException("The production apply cleanup requires Windows file handles.");
+        var root = Path.Combine(Path.GetTempPath(), "kr-maint-apply-cleanup-" + Guid.NewGuid().ToString("N"));
+        var workRoot = Path.Combine(root, "work");
+        var partialTree = Path.Combine(workRoot, "apply-target-partial");
+        Directory.CreateDirectory(Path.Combine(partialTree, "nested"));
+        try
+        {
+            File.WriteAllText(Path.Combine(partialTree, "root.bin"), "partial root file");
+            File.WriteAllText(Path.Combine(partialTree, "nested", "nested.bin"), "partial nested file");
+            var store = new WindowsMaintenanceWorkStore(workRoot);
+            var cleanup = typeof(WindowsMaintenanceWorkStore).GetMethod(
+                "DeleteSafeApplyExtractionTree", BindingFlags.Instance | BindingFlags.NonPublic);
+            Assert.NotNull(cleanup);
+
+            var error = Record.Exception(() => cleanup.Invoke(store, [partialTree]));
+
+            Assert.Null(error);
+            Assert.False(Directory.Exists(partialTree));
         }
         finally
         {

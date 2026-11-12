@@ -165,6 +165,30 @@ public sealed class MaintenanceJournal(IMaintenanceJournalStore store, string ch
 
     public MaintenanceJournalSnapshot? Read() => ReadValidated();
 
+    public MaintenanceJournalOperation VerifyApplyRequestBinding(MaintenanceCommandRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        if (request.Command != "apply" || request.ChainId != chainId ||
+            request.ChainId is null || request.HeadOperationId is null || request.Generation is null)
+            throw new InvalidOperationException("The apply request does not name this maintenance journal identity.");
+
+        var current = ReadValidated()
+            ?? throw new InvalidOperationException("The current maintenance journal is missing; the operation remains held.");
+        if (current.ChainId != request.ChainId || current.HeadOperationId != request.HeadOperationId ||
+            current.Generation != request.Generation || current.Operations.Count != 1)
+            throw new InvalidOperationException("The apply request is not bound to the current maintenance journal head and generation.");
+
+        var operation = current.Operations[0];
+        var binding = operation.Binding;
+        if (binding.OperationId != request.OperationId || binding.ChainId != request.ChainId ||
+            binding.HeadOperationId != request.HeadOperationId || binding.Generation != request.Generation ||
+            binding.TargetVersion != request.TargetVersion || binding.TargetRuntime != request.TargetRuntime ||
+            !FixedHexEquals(binding.TargetSha256, request.TargetPackageSha256))
+            throw new InvalidOperationException("The apply request differs from the immutable journal operation binding.");
+
+        return operation;
+    }
+
     public MaintenanceJournalSnapshot RecordSourceBindingIntent(
         string operationId,
         MaintenanceSourceBindingIntent intent)

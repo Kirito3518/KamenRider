@@ -9,9 +9,15 @@ public interface IAgentMaintenanceCommandHost
     AgentMaintenanceCommandResult Execute(string command);
 }
 
+public interface IMaintenanceApplyCommand
+{
+    AgentMaintenanceCommandResult Execute();
+}
+
 public sealed class WindowsAgentMaintenanceCommandHost(
     LocalUpdateEngine engine,
-    InstalledAgentSourceInspector? sourceInspector = null) : IAgentMaintenanceCommandHost
+    InstalledAgentSourceInspector? sourceInspector = null,
+    IMaintenanceApplyCommand? applyCommand = null) : IAgentMaintenanceCommandHost
 {
     private static readonly HashSet<string> KnownCommands = new(StringComparer.Ordinal)
     {
@@ -52,6 +58,9 @@ public sealed class WindowsAgentMaintenanceCommandHost(
             return new("ok", null, inventory.ArchiveHash, inventory.Version, inventory.TargetRuntime,
                 inventory.InventoryDigest, inventory.TotalBytes, inventory.Nodes);
         }
+
+        if (command == "apply")
+            return applyCommand?.Execute() ?? new("unavailable", "legacyProcessExclusionUnqualified", null, null, null, null, null, null);
 
         return new("unavailable", "operationNotImplemented", null, null, null, null, null, null);
     }

@@ -1,4 +1,5 @@
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Net;
 using System.Security.Cryptography;
 using System.Text;
@@ -11,7 +12,7 @@ using Controller.Tests.Fixtures;
 
 namespace Controller.Tests;
 
-public sealed class InstalledAgentSourceInspectorTests : IDisposable
+public sealed partial class InstalledAgentSourceInspectorTests : IDisposable
 {
     private sealed class BackupSecurity(string sourceRoot, string backupRoot, bool rejectSource = false) : IMaintenanceBackupSecurity
     {
@@ -1029,9 +1030,15 @@ public sealed class InstalledAgentSourceInspectorTests : IDisposable
         PackageInventory ExpectedTarget,
         string ExtractedTarget);
 
-    private async Task<ApplySetup> PrepareApplySetupAsync()
+    private async Task<ApplySetup> PrepareApplySetupAsync(byte[]? targetArchive = null)
     {
-        var archive = AgentPackageCorpus.Valid("win-x64");
+        var nativeRuntime = RuntimeInformation.OSArchitecture switch
+        {
+            Architecture.X64 => "win-x64",
+            Architecture.Arm64 => "win-arm64",
+            _ => throw new PlatformNotSupportedException("The apply fixtures require x64 or ARM64.")
+        };
+        var archive = targetArchive ?? AgentPackageCorpus.Valid(nativeRuntime);
         var expectedTarget = PackageVerifier.ValidateArchive(new MemoryStream(archive), AgentPackageCorpus.Version);
         using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
         using var identity = TrustedIdentity.ReadExisting(new IdentitySource(
@@ -1047,7 +1054,7 @@ public sealed class InstalledAgentSourceInspectorTests : IDisposable
         var binding = new MaintenanceSourceBindingOperation(backupOperation, journal,
             new SourceBindingClient(TimeProvider.System), identity, new BootIdentity("native-boot-1"));
         _ = await binding.BindAsync(new MaintenanceSourceBindingParameters(new string('A', 43),
-            expectedTarget.Version, new string('c', 64), "win-x64", 1), CancellationToken.None);
+            expectedTarget.Version, new string('c', 64), expectedTarget.TargetRuntime, 1), CancellationToken.None);
 
         var extractedTarget = Path.Combine(root, "target-extracted");
         Directory.CreateDirectory(extractedTarget);
