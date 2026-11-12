@@ -12,10 +12,20 @@ export function AdminVncViewerButton({ machineId }: { machineId: string }) {
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [ticket, setTicket] = useState<Ticket | null>(null);
-  const [viewerReady, setViewerReady] = useState(false);
   const [status, setStatus] = useState("");
+  const [iframeAttempt, setIframeAttempt] = useState(0);
   const frame = useRef<HTMLIFrameElement>(null);
   const connectSent = useRef(false);
+  const requestGeneration = useRef(0);
+
+  const close = useCallback(() => {
+    requestGeneration.current += 1;
+    setOpen(false);
+    setBusy(false);
+    setTicket(null);
+    connectSent.current = false;
+    setStatus("");
+  }, []);
 
   useEffect(() => {
     if (!open) return;
@@ -28,7 +38,6 @@ export function AdminVncViewerButton({ machineId }: { machineId: string }) {
       }
       if (event.data?.type === "kr-vnc-ready") {
         setStatus("กำลังเชื่อมต่อกับเครื่องลูก…");
-        setViewerReady(true);
       } else if (
         event.data?.type === "kr-vnc-status" &&
         typeof event.data.message === "string"
@@ -41,35 +50,23 @@ export function AdminVncViewerButton({ machineId }: { machineId: string }) {
   }, [open]);
 
   useEffect(() => {
-    if (!open || !ticket || !viewerReady || connectSent.current) return;
-    connectSent.current = true;
-    frame.current?.contentWindow?.postMessage(
-      {
-        type: "kr-vnc-connect",
-        ticket: ticket.ticket,
-        webSocketUrl: ticket.webSocketUrl,
-      },
-      window.location.origin,
-    );
-  }, [open, ticket, viewerReady]);
-
-  useEffect(() => {
     if (!open) return;
     function closeOnEscape(event: KeyboardEvent) {
       if (event.key === "Escape") {
-        setOpen(false);
-        setTicket(null);
-        setViewerReady(false);
-        setStatus("");
+        close();
       }
     }
     window.addEventListener("keydown", closeOnEscape);
     return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [open]);
+  }, [open, close]);
 
   async function start() {
+    const requestId = requestGeneration.current + 1;
+    requestGeneration.current = requestId;
     setOpen(true);
     setBusy(true);
+    setTicket(null);
+    setIframeAttempt(requestId);
     connectSent.current = false;
     setStatus("กำลังขอสิทธิ์ดูหน้าจอ…");
     try {
@@ -80,25 +77,27 @@ export function AdminVncViewerButton({ machineId }: { machineId: string }) {
         body: JSON.stringify({ machineId }),
       });
       const data = (await response.json()) as Ticket | { error?: string };
+      if (requestGeneration.current !== requestId) return;
       if (!response.ok) {
         throw new Error("error" in data ? data.error : undefined);
       }
-      setTicket(data as Ticket);
+      const issuedTicket = data as Ticket;
+      const expiresAt = Date.parse(issuedTicket.expiresAtUtc);
+      if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
+        setStatus("ตั๋ว VNC หมดอายุแล้ว กรุณาขอ ticket ใหม่");
+        return;
+      }
+      setTicket(issuedTicket);
       setStatus("กำลังโหลด viewer…");
     } catch (error) {
-      setStatus(`เปิด VNC ไม่สำเร็จ: ${String(error)}`);
+      if (requestGeneration.current === requestId) {
+        setTicket(null);
+        setStatus(`เปิด VNC ไม่สำเร็จ: ${String(error)}`);
+      }
     } finally {
-      setBusy(false);
+      if (requestGeneration.current === requestId) setBusy(false);
     }
   }
-
-  const close = useCallback(() => {
-    setOpen(false);
-    setTicket(null);
-    setViewerReady(false);
-    connectSent.current = false;
-    setStatus("");
-  }, []);
 
   return (
     <>
@@ -130,14 +129,43 @@ export function AdminVncViewerButton({ machineId }: { machineId: string }) {
               ปิดการเชื่อมต่อ
             </button>
           </header>
+          {open && !busy && !ticket ? (
+            <button
+              type="button"
+              className="w-fit rounded border px-3 py-2"
+              onClick={start}
+            >
+              ขอ ticket ใหม่
+            </button>
+          ) : null}
           {ticket ? (
             <iframe
+              key={iframeAttempt}
               ref={frame}
               title={`หน้าจอ VNC ของ ${machineId}`}
               src="/novnc/viewer.html"
               referrerPolicy="no-referrer"
               className="min-h-0 w-full flex-1 rounded border bg-[#111827]"
-              onLoad={() => setViewerReady(true)}
+              onLoad={() => {
+                if (requestGeneration.current !== iframeAttempt || connectSent.current) return;
+                const expiresAt = Date.parse(ticket.expiresAtUtc);
+                if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
+                  setTicket(null);
+                  setStatus("ตั๋ว VNC หมดอายุแล้ว กรุณาขอ ticket ใหม่");
+                  return;
+                }
+                const target = frame.current?.contentWindow;
+                if (!target) return;
+                connectSent.current = true;
+                target.postMessage(
+                  {
+                    type: "kr-vnc-connect",
+                    ticket: ticket.ticket,
+                    webSocketUrl: ticket.webSocketUrl,
+                  },
+                  window.location.origin,
+                );
+              }}
             />
           ) : null}
         </section>
