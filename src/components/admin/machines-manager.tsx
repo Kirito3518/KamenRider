@@ -62,7 +62,7 @@ async function request(path: string, body?: unknown, method = "POST") {
   return data;
 }
 
-export function MachinesManager() {
+export function MachinesManager({ actorId }: { actorId: string }) {
   const [machines, setMachines] = useState<Machine[]>([]);
   const [vncTargetDrafts, setVncTargetDrafts] = useState<Record<string, string>>({});
   const [vncTargetCheckStatuses, setVncTargetCheckStatuses] = useState<
@@ -79,20 +79,22 @@ export function MachinesManager() {
   const [loadStatus, setLoadStatus] = useState("กำลังโหลด…");
   const [message, setMessage] = useState("");
   const latestLoad = useRef(0);
-  const load = useCallback(async (signal?: AbortSignal) => {
+  const load = useCallback(async (signal?: AbortSignal): Promise<boolean> => {
     const run = ++latestLoad.current;
     try {
       const response = await fetch("/api/admin/machines", { cache: "no-store", signal });
       if (!response.ok) throw new Error("โหลดเครื่องไม่ได้");
       const nextMachines: Machine[] = await response.json();
-      if (signal?.aborted || run !== latestLoad.current) return;
+      if (signal?.aborted || run !== latestLoad.current) return false;
       setMachines(nextMachines);
       setVncTargetDrafts((current) =>
         mergeVncTargetDrafts(current, nextMachines),
       );
       setLoadStatus("");
+      return true;
     } catch (e) {
       if (!signal?.aborted && run === latestLoad.current) setLoadStatus(String(e));
+      return false;
     }
   }, []);
   useEffect(() => {
@@ -297,7 +299,7 @@ export function MachinesManager() {
           <p role="status">
             เซสชันผู้ดูแลที่กำลังดู VNC: {m.activeAdminVncSessions ?? 0}
           </p>
-          <AgentUpdateControl machine={m} onUpdated={() => load()} />
+          <AgentUpdateControl key={`${actorId}:${m.machineId}`} machine={m} actorId={actorId} onUpdated={() => load()} />
           <p className="break-all font-mono text-sm">
             Fingerprint: {m.publicKeyFingerprint || "ยังไม่มีข้อมูลยืนยัน"}
           </p>

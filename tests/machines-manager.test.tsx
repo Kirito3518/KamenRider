@@ -105,10 +105,60 @@ describe("MachinesManager install command interactions", () => {
       hourlyPriceMinorUnits: 100, moonlightPort: 47989, sunshinePort: 47990, configRevision: 1, appliedConfigRevision: 1,
       readiness: "notReady", canRent: false, allocationHeld: false, lastSeenAt: TEST_NOW, agentVersion: "1.0.0", activeAdminVncSessions: 0,
     }];
-    render(<MachinesManager />);
+    render(<MachinesManager actorId="test-admin" />);
     await screen.findByText("update-pc · approved");
     await waitFor(() => expect((screen.getByRole("button", { name: "Update Agent" }) as HTMLButtonElement).disabled).toBe(false));
     expectNetworkIsolation(0);
+  });
+
+  it("reports a stale recovery conflict truthfully when refreshing machines returns 503", async () => {
+    vi.spyOn(crypto, "randomUUID").mockReturnValue("stale-refresh-request");
+    const recoveryMachine = {
+      machineId: "recovery-pc", approvalStatus: "approved", displayName: "Recovery PC", localIp: "192.168.1.14", vncLocalIp: null,
+      hourlyPriceMinorUnits: 100, moonlightPort: 47989, sunshinePort: 47990, configRevision: 1, appliedConfigRevision: 1,
+      readiness: "notReady", canRent: false, allocationHeld: false, lastSeenAt: TEST_NOW, agentVersion: "1.0.0", activeAdminVncSessions: 0,
+      agentUpdateStatus: "failed", agentUpdateOperationId: "operation-4", agentUpdateTargetVersion: "2.0.0",
+    };
+    const context = {
+      machineId: "recovery-pc", chainId: "chain-1", currentHeadOperationId: "operation-4",
+      currentGeneration: 4, currentStatus: "failed", currentTargetVersion: "2.0.0", held: true, allocationHeld: false,
+    };
+    let machineReads = 0;
+    fetchSpy.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === MACHINES_URL) {
+        machineReads++;
+        return machineReads === 1
+          ? jsonResponse([recoveryMachine])
+          : { ok: false, status: 503, json: async () => ({ error: "temporarily unavailable" }) } as Response;
+      }
+      if (url.endsWith("agent-update-recovery-context")) return jsonResponse({ available: true, context });
+      if (url === "/api/admin/agent-releases") return jsonResponse([{ version: "3.0.0", channel: "stable" }]);
+      if (url.endsWith("agent-update-recovery-intents") && init?.method === "POST") return {
+        ok: false,
+        status: 409,
+        json: async () => ({
+          available: false, pending: false, error: "The maintenance head changed.",
+          currentHead: { currentChainId: "chain-2", currentHeadOperationId: "operation-5", currentGeneration: 8 },
+        }),
+      } as Response;
+      throw new Error(`Unexpected request ${url}`);
+    });
+
+    render(<MachinesManager actorId="refresh-admin" />);
+    await screen.findByText("recovery-pc · approved");
+    fireEvent.click(screen.getByRole("button", { name: "ขอ recovery intent" }));
+    await screen.findByLabelText("เหตุผล recovery");
+    fireEvent.change(screen.getByLabelText("เหตุผล recovery"), { target: { value: "Read current state after the conflict." } });
+    fireEvent.change(screen.getByLabelText("เลือก target release สำหรับ recovery-pc"), { target: { value: "3.0.0" } });
+    fireEvent.click(screen.getByRole("button", { name: "สร้าง recovery intent" }));
+
+    expect(await screen.findByText(/chain chain-2, head operation-5, generation 8/)).toBeDefined();
+    expect(screen.getByText(/Refresh the machine data and read the held context before creating another request/)).toBeDefined();
+    expect(screen.queryByText(/Latest machine data was refreshed/)).toBeNull();
+    expect(machineReads).toBe(2);
+    expect(fetchSpy.mock.calls.filter(([input, request]) => String(input).includes("agent-update-recovery-intents") && request?.method === "POST")).toHaveLength(1);
+    expect(fetchSpy.mock.calls.some(([input]) => String(input).includes("agent-update-recovery-intents?requestId="))).toBe(false);
   });
 
   it("keeps the post-command machine snapshot when an older scheduled poll finishes later", async () => {
@@ -134,7 +184,7 @@ describe("MachinesManager install command interactions", () => {
       });
       throw new Error(`Unexpected request ${input}`);
     });
-    render(<MachinesManager />);
+    render(<MachinesManager actorId="test-admin" />);
     await screen.findByText("update-pc · approved");
     await waitFor(() => expect((screen.getByRole("button", { name: "Update Agent" }) as HTMLButtonElement).disabled).toBe(false));
     const poll = intervalSpy.mock.calls.find(([, delay]) => delay === 5000)![0] as () => void;
@@ -151,7 +201,7 @@ describe("MachinesManager install command interactions", () => {
   });
 
   it("does not request an install command until the Admin clicks the install button", () => {
-    render(<MachinesManager />);
+    render(<MachinesManager actorId="test-admin" />);
 
     expect(
       fetchSpy.mock.calls.filter(([input]) => String(input) === INSTALL_COMMAND_URL),
@@ -162,7 +212,7 @@ describe("MachinesManager install command interactions", () => {
   });
 
   it("requests the install command with POST after an explicit click", async () => {
-    render(<MachinesManager />);
+    render(<MachinesManager actorId="test-admin" />);
 
     fireEvent.click(screen.getByRole("button", { name: "ขอคำสั่งติดตั้ง" }));
 
@@ -175,7 +225,7 @@ describe("MachinesManager install command interactions", () => {
   });
 
   it("shows the literal UTC expiry and copies the command before its deadline", async () => {
-    render(<MachinesManager />);
+    render(<MachinesManager actorId="test-admin" />);
     requestInitialInstallCommand();
 
     const commandField = await screen.findByLabelText("คำสั่งติดตั้ง Agent");
@@ -207,7 +257,7 @@ describe("MachinesManager install command interactions", () => {
       throw new Error(`Unexpected fetch URL: ${url}`);
     });
 
-    render(<MachinesManager />);
+    render(<MachinesManager actorId="test-admin" />);
     requestInitialInstallCommand();
 
     const refreshButton = screen.getByRole("button", {
@@ -235,7 +285,7 @@ describe("MachinesManager install command interactions", () => {
   });
 
   it("keeps an explicit install-command refresh busy until the replacement arrives", async () => {
-    render(<MachinesManager />);
+    render(<MachinesManager actorId="test-admin" />);
     requestInitialInstallCommand();
     const commandField = (await screen.findByLabelText(
       "คำสั่งติดตั้ง Agent",
@@ -283,7 +333,7 @@ describe("MachinesManager install command interactions", () => {
   });
 
   it("disables copy at the exact expiry deadline after focus", async () => {
-    render(<MachinesManager />);
+    render(<MachinesManager actorId="test-admin" />);
     requestInitialInstallCommand();
 
     const copyButton = (await screen.findByRole("button", {
@@ -304,7 +354,7 @@ describe("MachinesManager install command interactions", () => {
   });
 
   it("requests a replacement only on explicit refresh, not focus or visibility", async () => {
-    render(<MachinesManager />);
+    render(<MachinesManager actorId="test-admin" />);
     requestInitialInstallCommand();
 
     const commandField = (await screen.findByLabelText(
@@ -356,7 +406,7 @@ describe("MachinesManager install command interactions", () => {
       },
     ];
 
-    render(<MachinesManager />);
+    render(<MachinesManager actorId="test-admin" />);
 
     expect(await screen.findByText("readiness-pc · approved")).toBeDefined();
     expect(screen.getByText("ผลตรวจวินิจฉัยจาก Agent เท่านั้น ไม่ใช่การอนุมัติให้เช่า"))
@@ -390,7 +440,7 @@ describe("MachinesManager install command interactions", () => {
       },
     ];
 
-    render(<MachinesManager />);
+    render(<MachinesManager actorId="test-admin" />);
 
     expect(await screen.findByText("no-report-pc · approved")).toBeDefined();
     expect(screen.getByText("Agent ยังไม่รายงานผลตรวจวินิจฉัย"))
@@ -419,7 +469,7 @@ describe("MachinesManager install command interactions", () => {
       },
     ];
 
-    render(<MachinesManager />);
+    render(<MachinesManager actorId="test-admin" />);
 
     expect(await screen.findByText("empty-report-pc · approved")).toBeDefined();
     expect(screen.getByText("รายงานนี้ไม่มีรายการตรวจวินิจฉัย"))
@@ -447,7 +497,7 @@ describe("MachinesManager install command interactions", () => {
       },
     ];
 
-    render(<MachinesManager />);
+    render(<MachinesManager actorId="test-admin" />);
 
     const targetInput = (await screen.findByLabelText(
       "IP เป้าหมาย VNC (ตรวจสอบกับเครื่องจริงก่อนบันทึก)",
@@ -497,7 +547,7 @@ describe("MachinesManager install command interactions", () => {
       },
     ];
 
-    render(<MachinesManager />);
+    render(<MachinesManager actorId="test-admin" />);
 
     const targetInput = (await screen.findByLabelText(
       "IP เป้าหมาย VNC (ตรวจสอบกับเครื่องจริงก่อนบันทึก)",

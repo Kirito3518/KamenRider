@@ -346,6 +346,78 @@ public sealed class AgentRecoveryTests
     }
 
     [Fact]
+    public async Task AdminRecoveryContextReadsHeldHeadInOneControllerTransactionAndIsAdminOnly()
+    {
+        using var fixture = new LeaseFixture(agentReleaseRemediationEnabled: true);
+        AddRelease(fixture.Path, "2.0.0");
+        var ticket = fixture.Db.ReserveAgentUpdate("pc", "2.0.0", "admin", "recovery-context-seed");
+        var operation = fixture.Db.StartAgentUpdate("pc", ticket.OperationId, ticket.Ticket,
+            ticket.ReleaseVersion, ticket.TargetVersion, ticket.TargetPackageSha256, "recovery-context-start");
+        await using var app = BuildRecoveryAdminApi(fixture.Db);
+        await app.StartAsync();
+        using var client = app.GetTestServer().CreateClient();
+
+        using (var unauthenticated = await client.GetAsync("/internal/machines/pc/agent-update-recovery-context"))
+            Assert.Equal(System.Net.HttpStatusCode.Forbidden, unauthenticated.StatusCode);
+
+        AddAdminActor(client, "trusted-admin", "admin");
+        using var response = await client.GetAsync("/internal/machines/pc/agent-update-recovery-context");
+        Assert.Equal(System.Net.HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("no-store", response.Headers.CacheControl?.ToString());
+        var raw = await response.Content.ReadAsStringAsync();
+        using var json = JsonDocument.Parse(raw);
+        Assert.Equal("pc", json.RootElement.GetProperty("machineId").GetString());
+        Assert.Equal(operation.ChainId, json.RootElement.GetProperty("chainId").GetString());
+        Assert.Equal(operation.CurrentHeadOperationId, json.RootElement.GetProperty("currentHeadOperationId").GetString());
+        Assert.Equal(operation.Generation, json.RootElement.GetProperty("currentGeneration").GetInt64());
+        Assert.Equal("installing", json.RootElement.GetProperty("currentStatus").GetString());
+        Assert.Equal("2.0.0", json.RootElement.GetProperty("currentTargetVersion").GetString());
+        Assert.True(json.RootElement.GetProperty("held").GetBoolean());
+        Assert.False(json.RootElement.GetProperty("allocationHeld").GetBoolean());
+        Assert.DoesNotContain("targetPackageSha256", raw, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("backupDigest", raw, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("ticket", raw, StringComparison.OrdinalIgnoreCase);
+
+        _ = CreateIntent(fixture.Db, operation, operation.Generation, "recovery-context-generation-advance");
+        using var refreshed = await client.GetAsync("/internal/machines/pc/agent-update-recovery-context");
+        Assert.Equal(System.Net.HttpStatusCode.OK, refreshed.StatusCode);
+        using var refreshedJson = JsonDocument.Parse(await refreshed.Content.ReadAsStringAsync());
+        Assert.Equal(operation.CurrentHeadOperationId,
+            refreshedJson.RootElement.GetProperty("currentHeadOperationId").GetString());
+        Assert.Equal(operation.Generation + 1,
+            refreshedJson.RootElement.GetProperty("currentGeneration").GetInt64());
+        Assert.True(refreshedJson.RootElement.GetProperty("held").GetBoolean());
+        Assert.False(Assert.Single(fixture.Db.List()).CanRent);
+    }
+
+    [Fact]
+    public async Task AdminRecoveryContextFailsClosedWhenDisabledOrQuarantinedAndOmitsUnheldChains()
+    {
+        using var disabledFixture = new LeaseFixture();
+        await using (var app = BuildRecoveryAdminApi(disabledFixture.Db))
+        {
+            await app.StartAsync();
+            using var client = app.GetTestServer().CreateClient();
+            AddAdminActor(client, "trusted-admin", "admin");
+            using var response = await client.GetAsync("/internal/machines/pc/agent-update-recovery-context");
+            Assert.Equal(System.Net.HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        }
+
+        using var fixture = new LeaseFixture(agentReleaseRemediationEnabled: true);
+        await using var quarantinedApp = BuildRecoveryAdminApi(fixture.Db);
+        await quarantinedApp.StartAsync();
+        using var quarantinedClient = quarantinedApp.GetTestServer().CreateClient();
+        AddAdminActor(quarantinedClient, "trusted-admin", "admin");
+        using (var unheld = await quarantinedClient.GetAsync("/internal/machines/pc/agent-update-recovery-context"))
+            Assert.Equal(System.Net.HttpStatusCode.NotFound, unheld.StatusCode);
+
+        fixture.Db.ActivateRestoreQuarantine("test-recovery-context-quarantine", 1);
+        using var quarantined = await quarantinedClient.GetAsync("/internal/machines/pc/agent-update-recovery-context");
+        Assert.Equal(System.Net.HttpStatusCode.ServiceUnavailable, quarantined.StatusCode);
+        Assert.False(Assert.Single(fixture.Db.List()).CanRent);
+    }
+
+    [Fact]
     public async Task AdminRecoveryIntentHttpSurfaceReturnsActualHeldChainForStaleAndDifferentChainRequests()
     {
         using var fixture = new LeaseFixture(agentReleaseRemediationEnabled: true);
@@ -495,6 +567,32 @@ public sealed class AgentRecoveryTests
         Assert.Equal(0L, Scalar(fixture.Path, "SELECT COUNT(*) FROM agent_update_recovery_intents"));
         Assert.False(Assert.Single(fixture.Db.List()).CanRent);
         Assert.Equal(1L, Scalar(fixture.Path, "SELECT COUNT(*) FROM agent_update_operations"));
+    }
+
+    [Fact]
+    public async Task AdminRecoveryIntentLookupIsUnavailableDuringGlobalRestoreQuarantine()
+    {
+        using var fixture = new LeaseFixture(agentReleaseRemediationEnabled: true);
+        AddRelease(fixture.Path, "2.0.0");
+        var ticket = fixture.Db.ReserveAgentUpdate("pc", "2.0.0", "admin", "recovery-admin-lookup-quarantine-seed");
+        var operation = fixture.Db.StartAgentUpdate("pc", ticket.OperationId, ticket.Ticket,
+            ticket.ReleaseVersion, ticket.TargetVersion, ticket.TargetPackageSha256, "recovery-admin-lookup-quarantine-start");
+        fixture.Db.CreateRecoveryIntent("pc", operation.ChainId, operation.CurrentHeadOperationId,
+            operation.Generation, "2.0.0", "created before restore quarantine", "recovery-admin-lookup-quarantine",
+            "trusted-admin");
+        fixture.Db.ActivateRestoreQuarantine("task7-http-lookup-test", 1);
+
+        await using var app = BuildRecoveryAdminApi(fixture.Db);
+        await app.StartAsync();
+        using var client = app.GetTestServer().CreateClient();
+        AddAdminActor(client, "trusted-admin", "admin");
+
+        using var response = await client.GetAsync(
+            "/internal/machines/pc/agent-update-recovery-intents?requestId=recovery-admin-lookup-quarantine");
+
+        Assert.Equal(System.Net.HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        Assert.Equal(1L, Scalar(fixture.Path, "SELECT COUNT(*) FROM agent_update_recovery_intents"));
+        Assert.False(Assert.Single(fixture.Db.List()).CanRent);
     }
 
     [Fact]

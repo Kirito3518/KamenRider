@@ -27,6 +27,16 @@ public sealed record AgentUpdateRecoveryIntentDto(
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset ExpiresAtUtc);
 
+public sealed record AgentUpdateRecoveryContextDto(
+    string MachineId,
+    string ChainId,
+    string CurrentHeadOperationId,
+    long CurrentGeneration,
+    string CurrentStatus,
+    string CurrentTargetVersion,
+    bool Held,
+    bool AllocationHeld);
+
 public sealed class AgentRecoveryIntentConflictException(string currentChainId, string currentHeadOperationId,
     long currentGeneration, string message)
     : InvalidOperationException(message)
@@ -78,6 +88,31 @@ public sealed partial class ControllerDatabase
 
     private sealed record RecoveryInspectionRow(string KeyFingerprint, string RequestBodyDigest,
         string EvidenceDigest, string BlockReason);
+
+    public AgentUpdateRecoveryContextDto? GetRecoveryContext(string machineId)
+    {
+        if (!agentReleaseRemediationEnabled)
+            throw new InvalidOperationException("Agent recovery intent is disabled.");
+        RecoveryIdentifier(machineId, nameof(machineId));
+
+        lock (gate)
+        {
+            using var tx = connection.BeginTransaction();
+            EnsureNotRestoreQuarantined(tx);
+            using var query = Command("SELECT c.machine_id,c.chain_id,c.current_head_operation_id,c.generation,o.status,o.target_version,c.held,EXISTS(SELECT 1 FROM leases l WHERE l.machine_id=c.machine_id AND l.allocation_held=1) FROM agent_maintenance_chains c JOIN agent_update_operations o ON o.operation_id=c.current_head_operation_id AND o.chain_id=c.chain_id AND o.machine_id=c.machine_id WHERE c.machine_id=$machine AND c.held=1",
+                ("$machine", machineId));
+            query.Transaction = tx;
+            using var row = query.ExecuteReader();
+            AgentUpdateRecoveryContextDto? result = row.Read()
+                ? new AgentUpdateRecoveryContextDto(row.GetString(0), row.GetString(1), row.GetString(2),
+                    row.GetInt64(3), row.GetString(4), row.GetString(5), row.GetInt32(6) != 0,
+                    row.GetInt64(7) != 0)
+                : null;
+            row.Close();
+            tx.Commit();
+            return result;
+        }
+    }
 
     public AgentUpdateRecoveryIntentDto CreateRecoveryIntent(string machineId, string expectedChainId,
         string expectedHeadId, long expectedGeneration, string targetReleaseVersion, string reason,
@@ -503,6 +538,7 @@ public sealed partial class ControllerDatabase
         lock (gate)
         {
             using var tx = connection.BeginTransaction();
+            EnsureNotRestoreQuarantined(tx);
             var result = FindRecoveryIntentByRequest(tx, actorId, requestId, machineId);
             tx.Commit();
             return result?.Dto;

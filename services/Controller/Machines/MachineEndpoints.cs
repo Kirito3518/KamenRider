@@ -15,6 +15,18 @@ public static class MachineEndpoints
         app.MapPost("/internal/agent-enrollment-tickets",(ControllerDatabase db)=>Results.Ok(db.CreateEnrollmentTicket()));
         app.MapPost("/internal/machines/{id}/agent-updates",(string id,AgentUpdateReservationRequest request,HttpContext context,ControllerDatabase db)=>
             IsAdmin(context)?Execute(()=>db.ReserveAgentUpdate(id,request.ReleaseVersion,context.Request.Headers["X-Authenticated-Actor-Id"].ToString(),request.RequestId ?? context.TraceIdentifier)):Results.StatusCode(StatusCodes.Status403Forbidden));
+        app.MapGet("/internal/machines/{id}/agent-update-recovery-context",(string id,HttpContext context,ControllerDatabase db)=>
+        {
+            context.Response.Headers.CacheControl = "no-store";
+            if (!IsAdmin(context)) return Results.StatusCode(StatusCodes.Status403Forbidden);
+            try
+            {
+                var recoveryContext = db.GetRecoveryContext(id);
+                return recoveryContext is null ? Results.NotFound() : Results.Ok(recoveryContext);
+            }
+            catch (ArgumentException) { return Results.BadRequest(); }
+            catch (InvalidOperationException) { return Results.StatusCode(StatusCodes.Status503ServiceUnavailable); }
+        });
         app.MapPost("/internal/machines/{id}/agent-update-recovery-intents",(string id,AgentRecoveryIntentRequest? request,HttpContext context,ControllerDatabase db)=>
         {
             context.Response.Headers.CacheControl = "no-store";
@@ -38,7 +50,7 @@ public static class MachineEndpoints
                 return intent is null ? Results.NotFound() : Results.Ok(intent);
             }
             catch (ArgumentException) { return Results.BadRequest(); }
-            catch (InvalidOperationException) { return Results.Conflict(); }
+            catch (InvalidOperationException) { return Results.StatusCode(StatusCodes.Status503ServiceUnavailable); }
         });
         app.MapPost("/internal/machines/{id}/agent-updates/{operationId}/recovery-ticket",(string id,string operationId,HttpContext context,ControllerDatabase db)=>
             IsAdmin(context)?Execute(()=>db.RenewAgentUpdateTicket(id,operationId)):Results.StatusCode(StatusCodes.Status403Forbidden));
