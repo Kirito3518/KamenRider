@@ -246,7 +246,6 @@ public sealed class StreamGuardPipeRequestHandler
                 try
                 {
                     await gate.BlockAsync(cancellationToken);
-                    await WriteResponseAsync(pipe, request.RequestId, true, null, cancellationToken);
                 }
                 catch (Exception blockError)
                 {
@@ -262,6 +261,8 @@ public sealed class StreamGuardPipeRequestHandler
                     await WriteResponseAsync(pipe, request.RequestId, false, "gate_rejected", cancellationToken);
                     return;
                 }
+
+                await WriteResponseAsync(pipe, request.RequestId, true, null, cancellationToken);
                 continue;
             }
 

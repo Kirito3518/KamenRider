@@ -8,7 +8,7 @@ public sealed class StreamGuardPipeClient : IStreamGate, IPairingFence, IAsyncDi
 {
     public const string DefaultPipeName = "KamenRaider.StreamGuard.v2";
     private static readonly TimeSpan DefaultConnectTimeout = TimeSpan.FromSeconds(2);
-    private static readonly TimeSpan DefaultRequestTimeout = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan DefaultRequestTimeout = TimeSpan.FromSeconds(60);
     private readonly string pipeName;
     private readonly TimeSpan connectTimeout;
     private readonly TimeSpan requestTimeout;
@@ -112,17 +112,19 @@ public sealed class StreamGuardPipeClient : IStreamGate, IPairingFence, IAsyncDi
                 command,
                 grant,
                 scope);
+            using var requestTimeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            requestTimeoutSource.CancelAfter(requestTimeout);
 
             for (var attempt = 0; attempt < 2; attempt++)
             {
                 StreamGuardPipeResponse response;
-                using var requestTimeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-                requestTimeoutSource.CancelAfter(requestTimeout);
+                var requestWriteStarted = false;
 
                 try
                 {
                     await EnsureConnectedAsync(requestTimeoutSource.Token);
                     var connectedPipe = pipe ?? throw new IOException("Stream Guard pipe is not connected.");
+                    requestWriteStarted = true;
                     await StreamGuardPipeProtocol.WriteFrameAsync(connectedPipe, request, requestTimeoutSource.Token);
                     var frame = await StreamGuardPipeProtocol.ReadFrameAsync(connectedPipe, requestTimeoutSource.Token);
                     if (frame is null)
@@ -137,9 +139,9 @@ public sealed class StreamGuardPipeClient : IStreamGate, IPairingFence, IAsyncDi
                 catch (Exception ex) when (IsTransportFailure(ex))
                 {
                     await ResetPipeAsync();
-                    if (attempt == 1)
-                        throw new InvalidOperationException("Stream Guard did not acknowledge the request.", ex);
-                    continue;
+                    if (attempt == 0 && !requestWriteStarted && !requestTimeoutSource.IsCancellationRequested)
+                        continue;
+                    throw new InvalidOperationException("Stream Guard did not acknowledge the request.", ex);
                 }
                 catch (JsonException ex)
                 {

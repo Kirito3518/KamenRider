@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.IO.Pipes;
 using System.Runtime.InteropServices;
 using System.Security.AccessControl;
@@ -7,11 +8,16 @@ using System.Runtime.Versioning;
 using KamenRaider.Agent.Leases;
 using KamenRaider.Agent.Sunshine;
 using Microsoft.Win32.SafeHandles;
+using Xunit.Abstractions;
 
 namespace Agent.Tests;
 
 public class StreamGuardPipeTests
 {
+    private readonly ITestOutputHelper output;
+
+    public StreamGuardPipeTests(ITestOutputHelper output) => this.output = output;
+
     private sealed class RecordingGate : IStreamGuardControl
     {
         public readonly List<string> Calls = [];
@@ -71,7 +77,53 @@ public class StreamGuardPipeTests
         public void Save(StreamGrantHistorySnapshot history) => snapshot = new(history.Grants.ToArray(), history.CurrentLease);
     }
 
-    private sealed class DuplexMemoryStream(byte[] input) : Stream
+    private sealed class SlowFirewallApi(TimeSpan readDelay, int slowReadCount) : IWindowsFirewallApi
+    {
+        private readonly FirewallRuleSnapshot rule = new(
+            WindowsStreamIngressPolicy.BlockRuleName,
+            @"C:\Program Files\Sunshine\sunshine.exe",
+            "",
+            Enabled: true,
+            WindowsStreamIngressPolicy.InboundDirection,
+            WindowsStreamIngressPolicy.BlockAction,
+            WindowsStreamIngressPolicy.AllProfiles,
+            WindowsStreamIngressPolicy.AnyProtocol,
+            "",
+            "",
+            "*",
+            "*",
+            "All",
+            InterfacesUnrestricted: true,
+            EdgeTraversal: false,
+            OverrideBlockRules: false);
+        private int readCount;
+
+        public List<DateTimeOffset> ReadStartedAtUtc { get; } = [];
+        public List<DateTimeOffset> ReadCompletedAtUtc { get; } = [];
+
+        public FirewallPolicySnapshot ReadPolicyState()
+        {
+            ReadStartedAtUtc.Add(DateTimeOffset.UtcNow);
+            if (Interlocked.Increment(ref readCount) <= slowReadCount)
+                Thread.Sleep(readDelay);
+            ReadCompletedAtUtc.Add(DateTimeOffset.UtcNow);
+            return new(2, true, true, true, 0, new Dictionary<string, bool>
+            {
+                ["Domain"] = true,
+                ["Private"] = true,
+                ["Public"] = true
+            });
+        }
+
+        public FirewallRuleSnapshot? FindRule(string name) =>
+            string.Equals(name, rule.Name, StringComparison.Ordinal) ? rule : null;
+
+        public void AddRule(FirewallRuleDefinition definition) => throw new InvalidOperationException("The managed block rule should already exist.");
+
+        public void SetRuleEnabled(string name, bool enabled) => throw new InvalidOperationException("The managed block rule is already enabled.");
+    }
+
+    private sealed class DuplexMemoryStream(byte[] input, bool failResponseWrites = false) : Stream
     {
         private readonly MemoryStream reader = new(input);
         public readonly MemoryStream Written = new();
@@ -84,8 +136,16 @@ public class StreamGuardPipeTests
         public override void Flush() => Written.Flush();
         public override int Read(byte[] buffer, int offset, int count) => reader.Read(buffer, offset, count);
         public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default) => reader.ReadAsync(buffer, cancellationToken);
-        public override void Write(byte[] buffer, int offset, int count) => Written.Write(buffer, offset, count);
-        public override ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default) => Written.WriteAsync(buffer, cancellationToken);
+        public override void Write(byte[] buffer, int offset, int count)
+        {
+            if (failResponseWrites)
+                throw new IOException("Simulated pipe disconnect during response write.");
+            Written.Write(buffer, offset, count);
+        }
+        public override ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default) =>
+            failResponseWrites
+                ? ValueTask.FromException(new IOException("Simulated pipe disconnect during response write."))
+                : Written.WriteAsync(buffer, cancellationToken);
         public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
         public override void SetLength(long value) => throw new NotSupportedException();
 
@@ -167,6 +227,65 @@ public class StreamGuardPipeTests
         Assert.False(response.Success);
         Assert.Equal("gate_rejected", response.Error);
         Assert.Equal(3, gate.Calls.Count(call => call == "block"));
+    }
+
+    [Fact]
+    public async Task ResponseWriteFailureDoesNotRepeatASuccessfulClose()
+    {
+        var gate = new RecordingGate();
+        var request = new StreamGuardPipeRequest(StreamGuardPipeProtocol.Version, Guid.NewGuid().ToString("N"), "block", null);
+        var frame = StreamGuardPipeProtocol.EncodeRequest(request).Append((byte)'\n').ToArray();
+        using var pipe = new DuplexMemoryStream(frame, failResponseWrites: true);
+
+        await Assert.ThrowsAsync<IOException>(() => new StreamGuardPipeRequestHandler(gate).HandleSessionAsync(pipe, default));
+
+        Assert.Equal(1, gate.Calls.Count(call => call == "block"));
+    }
+
+    [Fact]
+    public async Task ClientReceivesAcknowledgmentForAValidCloseThatTakesOverFiveSeconds()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+
+        var pipeName = $"KamenRaider.Test.{Guid.NewGuid():N}";
+        var readDelay = TimeSpan.FromMilliseconds(1900);
+        var firewall = new SlowFirewallApi(readDelay, slowReadCount: 3);
+        var sunshineEvents = new List<string>();
+        var gate = new StreamGateCoordinator(
+            new WindowsStreamIngressPolicy(
+                firewall,
+                new("SunshineService", @"C:\Program Files\Sunshine\tools\sunshinesvc.exe", @"C:\Program Files\Sunshine\sunshine.exe")),
+            new LifecycleSunshine(sunshineEvents),
+            TimeProvider.System,
+            new LifecycleClock(),
+            new GrantHistoryStore(),
+            new TestMaintenanceFence());
+        var server = CreateCurrentUserPipeServer(pipeName);
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        var serve = Task.Run(async () =>
+        {
+            await server.WaitForConnectionAsync(cancellation.Token);
+            await new StreamGuardPipeSession(new StreamGuardPipeRequestHandler(gate), gate).RunAsync(server, cancellation.Token);
+        }, cancellation.Token);
+        await using var client = new StreamGuardPipeClient(pipeName);
+        var clientStartedAtUtc = DateTimeOffset.UtcNow;
+        var clientTimer = Stopwatch.StartNew();
+        var clientError = await Record.ExceptionAsync(() => client.BlockAsync(default));
+        clientTimer.Stop();
+        await client.DisposeAsync();
+        var serverError = await Record.ExceptionAsync(() => serve);
+        await server.DisposeAsync();
+
+        output.WriteLine("client-start={0:O}; policy-read-1-start={1:O}; policy-read-3-complete={2:O}; client-elapsed={3:F3}s",
+            clientStartedAtUtc,
+            firewall.ReadStartedAtUtc[0],
+            firewall.ReadCompletedAtUtc[2],
+            clientTimer.Elapsed.TotalSeconds);
+        Assert.Null(clientError);
+        Assert.Null(serverError);
+        Assert.Equal(4, firewall.ReadStartedAtUtc.Count); // close path's three checks plus the post-disconnect verification
+        Assert.True(firewall.ReadCompletedAtUtc[2] - firewall.ReadStartedAtUtc[0] >= TimeSpan.FromSeconds(5));
+        Assert.Equal(new[] { "sunshine:stop", "sunshine:verify-stopped", "sunshine:verify-stopped" }, sunshineEvents);
     }
 
     [Fact]
@@ -264,6 +383,63 @@ public class StreamGuardPipeTests
         Assert.False(gate.MaintenanceActive);
         Assert.Equal(new[] { "verify-open", "maintenance-begin", "clear-api", "maintenance-end", "allow", "block" }, gate.Calls);
         await server.DisposeAsync();
+    }
+
+    [Fact]
+    [SupportedOSPlatform("windows")]
+    public async Task LostMaintenanceEndAcknowledgmentDoesNotReplayTheCommand()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+
+        var pipeName = $"KamenRaider.Test.{Guid.NewGuid():N}";
+        var gate = new RecordingGate();
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var secondListenerReady = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var serve = Task.Run(async () =>
+        {
+            await using (var firstServer = CreateCurrentUserPipeServer(pipeName))
+            {
+                await firstServer.WaitForConnectionAsync(cancellation.Token);
+                var begin = StreamGuardPipeProtocol.DecodeRequest(
+                    (await StreamGuardPipeProtocol.ReadFrameAsync(firstServer, cancellation.Token))!);
+                Assert.Equal("maintenance-begin", begin.Command);
+                await gate.BeginFencedMaintenanceAsync(cancellation.Token);
+                await StreamGuardPipeProtocol.WriteFrameAsync(firstServer,
+                    new StreamGuardPipeResponse(StreamGuardPipeProtocol.Version, begin.RequestId, true, null), cancellation.Token);
+
+                var end = StreamGuardPipeProtocol.DecodeRequest(
+                    (await StreamGuardPipeProtocol.ReadFrameAsync(firstServer, cancellation.Token))!);
+                Assert.Equal("maintenance-end", end.Command);
+                Assert.True(await gate.EndFencedMaintenanceAsync(cancellation.Token));
+            }
+
+            await using var secondServer = CreateCurrentUserPipeServer(pipeName);
+            secondListenerReady.SetResult();
+            try
+            {
+                await secondServer.WaitForConnectionAsync(cancellation.Token);
+                var replay = StreamGuardPipeProtocol.DecodeRequest(
+                    (await StreamGuardPipeProtocol.ReadFrameAsync(secondServer, cancellation.Token))!);
+                Assert.Equal("maintenance-end", replay.Command);
+                await gate.EndFencedMaintenanceAsync(cancellation.Token);
+                await StreamGuardPipeProtocol.WriteFrameAsync(secondServer,
+                    new StreamGuardPipeResponse(StreamGuardPipeProtocol.Version, replay.RequestId, true, null), cancellation.Token);
+            }
+            catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+            {
+            }
+        }, cancellation.Token);
+        await using var client = new StreamGuardPipeClient(pipeName, TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(3));
+
+        var cleanup = client.RunFencedCleanupAsync(_ => Task.CompletedTask, default);
+        await secondListenerReady.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var cleanupError = await Record.ExceptionAsync(() => cleanup);
+        cancellation.Cancel();
+        await serve;
+        await client.DisposeAsync();
+
+        Assert.IsType<InvalidOperationException>(cleanupError);
+        Assert.Equal(new[] { "maintenance-begin", "maintenance-end" }, gate.Calls);
     }
 
     [Fact]
@@ -453,7 +629,7 @@ public class StreamGuardPipeTests
 
     [Fact]
     [SupportedOSPlatform("windows")]
-    public async Task ClientReconnectsAfterGuardRestartsItsPipeSession()
+    public async Task ClientDoesNotReplayAfterStalePipeWriteFailsAndReconnectsOnTheNextCall()
     {
         if (!OperatingSystem.IsWindows()) return;
         var pipeName = $"KamenRaider.Test.{Guid.NewGuid():N}";
@@ -467,6 +643,7 @@ public class StreamGuardPipeTests
 
         var secondServer = CreateCurrentUserPipeServer(pipeName);
         var secondServe = RespondToOneRequestAsync(secondServer);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => client.BlockAsync(default));
         await client.BlockAsync(default);
         await secondServe;
         await secondServer.DisposeAsync();
