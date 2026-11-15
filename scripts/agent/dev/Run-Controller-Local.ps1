@@ -8,7 +8,7 @@ if (-not (Test-Path -LiteralPath $envFile -PathType Leaf)) { throw '.env.local i
 
 $values = @{}
 foreach ($line in Get-Content -LiteralPath $envFile) {
-    if ($line -match '^\s*(CONTROLLER_INTERNAL_URL|CONTROLLER_SERVICE_CREDENTIAL|CONTROLLER_AGENT_URL|CONTROLLER_DATABASE_PATH)\s*=(.*)$') {
+    if ($line -match '^\s*(CONTROLLER_INTERNAL_URL|CONTROLLER_SERVICE_CREDENTIAL|CONTROLLER_AGENT_URL|CONTROLLER_DATABASE_PATH|CONTROLLER_WAKE_INTERFACE_ADDRESS|CONTROLLER_WAKE_BROADCAST_ADDRESS)\s*=(.*)$') {
         $values[$Matches[1]] = $Matches[2].Trim()
     }
 }
@@ -20,10 +20,31 @@ if ($values.CONTROLLER_INTERNAL_URL -ne 'http://127.0.0.1:5081' -or $values.CONT
 }
 if ($values.CONTROLLER_DATABASE_PATH -notmatch '^[A-Za-z]:\\') { throw 'CONTROLLER_DATABASE_PATH must be an absolute drive path.' }
 
+$wakeInterfaceAddress = $values['CONTROLLER_WAKE_INTERFACE_ADDRESS']
+$wakeBroadcastAddress = $values['CONTROLLER_WAKE_BROADCAST_ADDRESS']
+$hasWakeInterfaceAddress = -not [string]::IsNullOrWhiteSpace($wakeInterfaceAddress)
+$hasWakeBroadcastAddress = -not [string]::IsNullOrWhiteSpace($wakeBroadcastAddress)
+if ($hasWakeInterfaceAddress -ne $hasWakeBroadcastAddress) {
+    throw 'Set both CONTROLLER_WAKE_INTERFACE_ADDRESS and CONTROLLER_WAKE_BROADCAST_ADDRESS, or omit both.'
+}
+if ($hasWakeInterfaceAddress) {
+    foreach ($name in @('CONTROLLER_WAKE_INTERFACE_ADDRESS', 'CONTROLLER_WAKE_BROADCAST_ADDRESS')) {
+        $parsedAddress = $null
+        if (-not [System.Net.IPAddress]::TryParse($values[$name], [ref]$parsedAddress) -or
+            $parsedAddress.AddressFamily -ne [System.Net.Sockets.AddressFamily]::InterNetwork) {
+            throw "$name must be an IPv4 address."
+        }
+    }
+}
+
 $env:InternalUrl = $values.CONTROLLER_INTERNAL_URL
 $env:AgentUrl = $values.CONTROLLER_AGENT_URL
 $env:DatabasePath = $values.CONTROLLER_DATABASE_PATH
 $env:ServiceCredential = $values.CONTROLLER_SERVICE_CREDENTIAL
+if ($hasWakeInterfaceAddress) {
+    $env:WakeInterfaceAddress = $wakeInterfaceAddress
+    $env:WakeBroadcastAddress = $wakeBroadcastAddress
+}
 $env:DOTNET_ENVIRONMENT = 'Development'
 
 Push-Location $repo
