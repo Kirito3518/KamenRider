@@ -1,4 +1,3 @@
-using System.Net.Http;
 using System.Diagnostics;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
@@ -10,7 +9,7 @@ using KamenRaider.Agent.Sunshine;
 internal static class Program
 {
     private const string PipePath = @"\\.\pipe\" + StreamGuardPipeClient.DefaultPipeName;
-    private static readonly Uri ApiUri = new("https://localhost:47990/api/clients/list");
+    private const int SunshinePort = 47990;
 
     private sealed record ProbeResult(
         string Status,
@@ -34,30 +33,34 @@ internal static class Program
                 throw new UnauthorizedAccessException("The protected helper must run as LocalSystem on Windows.");
             await WaitForGuardPipeAsync();
 
-            using var handler = new HttpClientHandler
-            {
-                UseProxy = false,
-                UseCookies = false,
-                AllowAutoRedirect = false
-            };
-            // The certificate callback is intentionally unset; HttpClient performs normal TLS validation.
-            using var http = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(8) };
+            var dataDirectory = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+                "KamenRaider",
+                "Agent");
+            var credentialStore = AuthenticatedSunshineApiProbe.CreateCredentialStore(dataDirectory);
             await using var pipe = new StreamGuardPipeClient(connectTimeout: TimeSpan.FromSeconds(30));
+            AuthenticatedSunshineApiProbeResult? apiResult = null;
 
             var completed = await pipe.RunFencedCleanupAsync(async cancellationToken =>
             {
-                using var request = new HttpRequestMessage(HttpMethod.Get, ApiUri);
-                using var response = await http.SendAsync(
-                    request,
-                    HttpCompletionOption.ResponseHeadersRead,
+                apiResult = await AuthenticatedSunshineApiProbe.ReadClientsAsync(
+                    credentialStore,
+                    SunshinePort,
                     cancellationToken);
-                httpStatus = (int)response.StatusCode;
-                tlsValidated = true;
             }, CancellationToken.None);
 
-            status = completed ? "RequestCompleted" : "FenceRejected";
-            if (!completed)
+            if (completed && apiResult is not null)
+            {
+                status = apiResult.Status;
+                httpStatus = apiResult.HttpStatus;
+                tlsValidated = apiResult.TlsValidated;
+                failureCategory = apiResult.FailureCategory;
+            }
+            else
+            {
+                status = "FenceRejected";
                 failureCategory = "FenceRejected";
+            }
         }
         catch (Exception exception)
         {

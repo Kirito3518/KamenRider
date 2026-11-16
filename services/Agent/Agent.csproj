@@ -13,6 +13,7 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="Agent.Tests" />
+    <InternalsVisibleTo Include="StreamGuardFencedApiProbe" />
     <AssemblyMetadata Include="AgentUpdateChallengeProtocol" Value="2" />
   </ItemGroup>
 
