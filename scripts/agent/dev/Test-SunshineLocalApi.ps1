@@ -6,6 +6,10 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
+# Windows PowerShell 5.1 does not load this assembly by default. Load it before
+# Get-SanitizedFailureCategory resolves HttpRequestException in its type check.
+Add-Type -AssemblyName System.Net.Http -ErrorAction Stop
+
 $script:BlockRuleName = 'KamenRaider Stream Guard - Sunshine'
 $script:SunshinePath = 'C:\Program Files\Sunshine\sunshine.exe'
 $script:SunshineServiceName = 'SunshineService'
