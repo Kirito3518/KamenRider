@@ -8,6 +8,18 @@
 4. The admin page refreshes its machine list automatically. The new pending machine appears first. The administrator checks the identity fingerprint on the client, sets name, price and ports on the web, and then approves it. A pending machine cannot be rented.
 5. After approval, the Agent receives the Controller configuration revision. Changing ports on the web only updates metadata; the operator configures Sunshine and router forwarding separately. Rental readiness remains gated by the stream fence, boot reconciliation and live health checks.
 
+## Admin VNC viewer password
+
+The fresh TightVNC setup generates a VNC viewer password and prints it once in the elevated PowerShell window. The password is also stored on the client in a file readable only by SYSTEM and local Administrators. A managed TightVNC repair preserves the existing password and does not print it again. If the install output was lost, an authorized local Administrator can retrieve the current password in an elevated, interactive PowerShell window on that client:
+
+```powershell
+Get-Content -LiteralPath (Join-Path $env:ProgramData 'KamenRaider\Agent\RemoteDesktop\vnc-password.txt')
+```
+
+Enter that password in the prompt inside the Admin VNC viewer. Do not paste it into chat or logs. The viewer is read-only. To open a session, the machine must be approved, recently reachable, and have its verified private LAN address saved as the administrator-confirmed VNC target in machine metadata. The current installer has no VNC password rotation command; its managed repair preserves the existing password.
+
+## Sunshine management credentials
+
 Before the first Moonlight pairing, prepare the client PC's Sunshine management TLS trust and credentials. The Agent calls Sunshine at `https://localhost:<SunshinePort>` and keeps normal certificate chain, name and expiry validation; provision and trust a certificate matching `localhost` through the host's approved process. After Agent installation, run this command from an elevated, interactive PowerShell window on that PC:
 
 ```powershell
