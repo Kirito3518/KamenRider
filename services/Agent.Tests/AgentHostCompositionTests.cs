@@ -134,6 +134,7 @@ public class AgentHostCompositionTests
 
         var dataDirectory = Path.Combine(Path.GetTempPath(), "agent-preparation-" + Guid.NewGuid().ToString("N"));
         var gate = new RecordingStreamGate();
+        var maintenanceFence = new TestMaintenanceFence();
         try
         {
             using var host = KamenRaider.Agent.AgentHost.Build([], builder =>
@@ -144,6 +145,7 @@ public class AgentHostCompositionTests
                     ["DataDirectory"] = dataDirectory
                 });
                 builder.Services.Replace(ServiceDescriptor.Singleton<KamenRaider.Agent.Leases.IStreamGate>(gate));
+                builder.Services.AddSingleton<KamenRaider.Agent.Sunshine.IMaintenanceFenceReader>(maintenanceFence);
             });
 
             var clock = host.Services.GetRequiredService<KamenRaider.Agent.Leases.IBootClock>();

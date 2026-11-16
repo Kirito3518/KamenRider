@@ -106,6 +106,13 @@ public class LeaseEnforcerTests {
   Assert.False(f.Enforcer.CanStream);
  }
 
+ [Fact] public async Task UnknownMaintenanceFenceRejectsMachinePreparation(){
+  using var f=new Fixture();f.Fence.SetUnknown();
+  var command=new CommandEnvelope("prepare","PrepareMachine","rental",1,f.Clock.BootId,f.Clock.Now.AddMinutes(1),JsonSerializer.SerializeToElement(new{}));
+  Assert.False(await f.Enforcer.CanPrepareMachineAsync(command,default));
+  Assert.True(f.Gate.Blocked);
+ }
+
  [Fact] public async Task MaintenanceSnapshotRetainsPendingInitialWhenSaveOutcomeIsAmbiguous(){
   using var f=new Fixture();
   var e=new LeaseEnforcer(new AfterSaveThrowStore(f.Dir),f.Clock,f.Clock,f.Gate,f.Power,f.Fence);
