@@ -5,6 +5,7 @@ $script:fixture = @{
     DisabledProfile = ''
     FirewallServiceStatus = 'Running'
     Profiles = @('Domain', 'Private', 'Public')
+    GuardServiceStatus = 'Running'
     ProfileQueryCount = 0
     LastPolicyStore = ''
     LastAll = $false
@@ -16,7 +17,7 @@ function Get-Service {
 
     switch ($Name) {
         'KamenRaider Agent' { return [pscustomobject]@{ Status = 'Running' } }
-        'KamenRaider Stream Guard' { return [pscustomobject]@{ Status = 'Running' } }
+        'KamenRaider Stream Guard' { return [pscustomobject]@{ Status = $script:fixture.GuardServiceStatus } }
         'SunshineService' { return [pscustomobject]@{ Status = 'Stopped' } }
         'MpsSvc' { return [pscustomobject]@{ Status = $script:fixture.FirewallServiceStatus } }
         default { throw "Unexpected service query: $Name" }
@@ -68,6 +69,18 @@ if ($planResult.Mode -ne 'Plan' -or $planResult.Status -ne 'PlanOnly' -or $planR
 if ($script:fixture.ServiceMutations -ne 0) { throw 'Plan mode mutated a service.' }
 if ($script:fixture.LastPolicyStore -ne 'ActiveStore' -or -not $script:fixture.LastAll) {
     throw 'Firewall preflight must query every effective ActiveStore profile.'
+}
+
+$result.Status = 'NotStarted'
+$result.FailureCategory = $null
+$result.FailureDetail = $null
+if (-not (Set-SunshinePortWaitFailure -SunshineState 'Stopped') -or
+    $result.Status -ne 'SunshineNotRunningDuringPortWait' -or
+    $result.FailureCategory -ne 'SunshineNotRunningDuringPortWait' -or
+    $result.SunshineStateDuringPortWait -ne 'Stopped' -or
+    $result.GuardDuringPortWait -ne 'Running' -or
+    $result.FailureDetail -notmatch 'Guard enforcement is possible') {
+    throw 'A Sunshine stop while Guard remains running must produce a bounded possible-enforcement diagnostic.'
 }
 
 foreach ($name in @('Domain', 'Private', 'Public')) {

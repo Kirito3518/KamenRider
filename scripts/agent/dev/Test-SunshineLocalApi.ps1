@@ -83,6 +83,25 @@ function Test-IsAdministrator {
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
+function Set-SunshinePortWaitFailure {
+    param([string]$SunshineState)
+
+    if ($SunshineState -eq 'Running') { return $false }
+
+    $guardState = (Get-Service -Name 'KamenRaider Stream Guard' -ErrorAction Stop).Status.ToString()
+    $result.SunshineStateDuringPortWait = $SunshineState
+    $result.GuardDuringPortWait = $guardState
+    $result.Status = 'SunshineNotRunningDuringPortWait'
+    $result.FailureCategory = 'SunshineNotRunningDuringPortWait'
+    $result.FailureDetail = if ($guardState -eq 'Running') {
+        'Sunshine state during the port wait: ' + $SunshineState + '. Stream Guard remained Running; Guard enforcement is possible.'
+    }
+    else {
+        'Sunshine state during the port wait: ' + $SunshineState + '.'
+    }
+    return $true
+}
+
 function Test-AuthenticationFailure {
     param([System.Exception]$Exception)
 
@@ -117,8 +136,11 @@ $result = [ordered]@{
     FirewallBlockBefore = $false
     FirewallBlockAfter = $null
     PortOpen = $false
+    SunshineStateDuringPortWait = 'NotChecked'
+    GuardDuringPortWait = 'NotChecked'
     ApiStatus = 'NotAttempted'
     FailureCategory = $null
+    FailureDetail = $null
     CleanupStatus = 'NotNeeded'
 }
 
@@ -219,12 +241,16 @@ try {
                         }
                         catch { }
                         finally { $tcpClient.Dispose() }
+                        $sunshine = Get-Service -Name $script:SunshineServiceName -ErrorAction Stop
+                        if (Set-SunshinePortWaitFailure -SunshineState $sunshine.Status.ToString()) { break }
                         Start-Sleep -Milliseconds 250
                     }
 
                     if (-not $result.PortOpen) {
-                        $result.Status = 'ApiPortTimedOut'
-                        $result.FailureCategory = 'LoopbackPortTimeout'
+                        if ($result.Status -eq 'NotStarted') {
+                            $result.Status = 'ApiPortTimedOut'
+                            $result.FailureCategory = 'LoopbackPortTimeout'
+                        }
                     }
                     else {
                         $result.WindowsFirewallAfter = Test-WindowsFirewallReady
