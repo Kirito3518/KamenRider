@@ -8,6 +8,14 @@
 4. The admin page refreshes its machine list automatically. The new pending machine appears first. The administrator checks the identity fingerprint on the client, sets name, price and ports on the web, and then approves it. A pending machine cannot be rented.
 5. After approval, the Agent receives the Controller configuration revision. Changing ports on the web only updates metadata; the operator configures Sunshine and router forwarding separately. Rental readiness remains gated by the stream fence, boot reconciliation and live health checks.
 
+Before the first Moonlight pairing, prepare the client PC's Sunshine management TLS trust and credentials. The Agent calls Sunshine at `https://localhost:<SunshinePort>` and keeps normal certificate chain, name and expiry validation; provision and trust a certificate matching `localhost` through the host's approved process. After Agent installation, run this command from an elevated, interactive PowerShell window on that PC:
+
+```powershell
+& "$env:ProgramFiles\KamenRaider\Agent\Agent.exe" --provision-sunshine-credentials "$env:ProgramData\KamenRaider\Agent"
+```
+
+It prompts for the Sunshine management username and password without echo and asks to confirm the password. Do not put credentials in the install command or send them in chat. The command stores them with machine-scope DPAPI protection and a private Agent service ACL; it does not contact Sunshine. Rotate an existing credential with `--replace`, then restart `KamenRaider Agent`. Missing credentials or untrusted/mismatched Sunshine TLS leave pairing unavailable even though Agent enrollment and heartbeats can work. See [Agent operations](agent-operations.md#installation-preparation) for the credential and TLS details; the customer-facing machine page already gives the Moonlight PIN steps.
+
 ## Recover if the service stops before enrollment
 
 The installer keeps the protected installation and generated machine identity when the Agent service stops during the enrollment wait. Before the ticket expires, fix Controller reachability or certificate trust, then run `Start-Service -Name 'KamenRaider Agent'` from elevated PowerShell. If the service is paused, use `Resume-Service -Name 'KamenRaider Agent'`. The service retries enrollment with the same identity; do not run the installer again. Confirm the service is `Running` and the pending machine appears in `/admin/machines`.
