@@ -71,6 +71,64 @@ if ($script:fixture.LastPolicyStore -ne 'ActiveStore' -or -not $script:fixture.L
     throw 'Firewall preflight must query every effective ActiveStore profile.'
 }
 
+$unreachableJson = '[{"machineId":"machine-1","approvalStatus":"pending","readiness":"unreachable","canRent":false}]'
+$parsedUnreachable = ConvertFrom-ControllerMachineJson -MachineId 'machine-1' -Json $unreachableJson
+if ($parsedUnreachable.ApprovalStatus -ne 'pending' -or $parsedUnreachable.Readiness -ne 'unreachable' -or
+    $parsedUnreachable.CanRent -isnot [bool] -or $parsedUnreachable.CanRent -or $parsedUnreachable.AllocationHeldPresent) {
+    throw 'Controller JSON parser must preserve unreachable readiness and strict boolean types.'
+}
+
+$typedAllocationJson = '[{"machineId":"machine-1","approvalStatus":"pending","readiness":"notReady","canRent":false,"allocationHeld":false}]'
+$parsedAllocation = ConvertFrom-ControllerMachineJson -MachineId 'machine-1' -Json $typedAllocationJson
+if (-not $parsedAllocation.AllocationHeldPresent -or $parsedAllocation.AllocationHeld -isnot [bool] -or $parsedAllocation.AllocationHeld) {
+    throw 'Controller JSON parser must preserve a typed allocationHeld=false value.'
+}
+
+foreach ($invalidJson in @(
+    '{"machineId":"machine-1","approvalStatus":"pending","readiness":"unreachable","canRent":false}',
+    '[{"MachineId":"machine-1","approvalStatus":"pending","readiness":"unreachable","canRent":false}]',
+    '[{"machineId":"machine-1","approvalStatus":"pending","readiness":"unreachable","canRent":"false"}]',
+    '[{"machineId":"machine-1","approvalStatus":"pending","readiness":"unreachable","canRent":false,"allocationHeld":"false"}]')) {
+    $rejected = $false
+    try { ConvertFrom-ControllerMachineJson -MachineId 'machine-1' -Json $invalidJson | Out-Null }
+    catch { $rejected = $true }
+    if (-not $rejected) { throw 'Controller JSON parser accepted an invalid shape, casing, or boolean type.' }
+}
+
+foreach ($readiness in @('notReady', 'unreachable')) {
+    $closedMachine = [pscustomobject]@{
+        ApprovalStatus = 'pending'
+        Readiness = $readiness
+        CanRent = $false
+        AllocationHeldPresent = $false
+        AllocationHeld = $null
+    }
+    if (-not (Test-ControllerMachineClosedForDevProbe -MachineState $closedMachine)) {
+        throw "Pending, non-rentable machine in $readiness must be accepted by the dev-probe gate."
+    }
+}
+
+$safeAllocation = [pscustomobject]@{
+    ApprovalStatus = 'pending'
+    Readiness = 'unreachable'
+    CanRent = $false
+    AllocationHeldPresent = $true
+    AllocationHeld = $false
+}
+if (-not (Test-ControllerMachineClosedForDevProbe -MachineState $safeAllocation)) {
+    throw 'allocationHeld=false must be accepted by the dev-probe gate.'
+}
+
+foreach ($unsafeMachine in @(
+    [pscustomobject]@{ ApprovalStatus = 'approved'; Readiness = 'unreachable'; CanRent = $false; AllocationHeldPresent = $false; AllocationHeld = $null },
+    [pscustomobject]@{ ApprovalStatus = 'pending'; Readiness = 'ready'; CanRent = $false; AllocationHeldPresent = $false; AllocationHeld = $null },
+    [pscustomobject]@{ ApprovalStatus = 'pending'; Readiness = 'unreachable'; CanRent = $true; AllocationHeldPresent = $false; AllocationHeld = $null },
+    [pscustomobject]@{ ApprovalStatus = 'pending'; Readiness = 'unreachable'; CanRent = $false; AllocationHeldPresent = $true; AllocationHeld = $true })) {
+    if (Test-ControllerMachineClosedForDevProbe -MachineState $unsafeMachine) {
+        throw 'The dev-probe gate accepted an approved, ready, rentable, or allocation-held machine.'
+    }
+}
+
 $result.Status = 'NotStarted'
 $result.FailureCategory = $null
 $result.FailureDetail = $null
