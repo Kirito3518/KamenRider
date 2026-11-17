@@ -13,6 +13,11 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# The package installer dot-sources a few helper scripts from files. Windows PowerShell defaults
+# to the Restricted execution policy on client SKUs, which would block those loads even though
+# this process is already elevated. Allow script loading for this process only.
+try { Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force -ErrorAction Stop } catch { }
+
 function ConvertTo-AllowedVncSourceAddress {
     param([Parameter(Mandatory)][string]$Address)
     $parsed = $null
