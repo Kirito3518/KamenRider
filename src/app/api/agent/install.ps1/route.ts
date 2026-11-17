@@ -63,7 +63,7 @@ export async function GET(request: Request): Promise<Response> {
   }
   const bootstrapSha256 = createHash("sha256").update(bootstrap).digest("hex").toUpperCase();
 
-  const installUrl = new URL(request.url).toString();
+  const installUrl = new URL(`/api/agent/install.ps1?k=${encodeURIComponent(ticket)}`, base).toString();
   const bootstrapUrl = new URL("/agent/Bootstrap-Agent.ps1", base).toString();
   const controllerCertUrl = new URL("/agent/controller-root.cer", base).toString();
   const installReturnUrl = new URL("/admin/machines", base).toString();
