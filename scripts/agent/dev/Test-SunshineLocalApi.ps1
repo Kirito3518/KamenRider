@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-    [switch]$Plan
+    [switch]$Plan,
+    [switch]$OpenSetupUi
 )
 
 $ErrorActionPreference = 'Stop'
@@ -17,6 +18,7 @@ $script:ApiUri = 'https://localhost:47990/api/clients/list'
 $script:AgentInstallRoot = 'C:\Program Files\KamenRaider\Agent'
 $script:ExpectedDataDirectory = Join-Path $env:ProgramData 'KamenRaider\Agent'
 $script:ProbeStagingRoot = 'C:\Windows\System32\KamenRaiderStreamGuardDevProbe'
+$script:SunshineSetupUri = 'https://localhost:47990'
 
 function Test-AnyFilterValue {
     param([AllowNull()][string]$Value)
@@ -484,8 +486,53 @@ function Stop-AndWaitProbeTask {
     } while ($true)
 }
 
+function Open-SunshineSetupUi {
+    Start-Process -FilePath $script:SunshineSetupUri -ErrorAction Stop | Out-Null
+}
+
+function Wait-ForSetupWindowInteraction {
+    param(
+        [Parameter(Mandatory)][string]$TaskName,
+        [Parameter(Mandatory)][string]$ResultPath,
+        [Parameter(Mandatory)][string]$DoneSignalPath,
+        [int]$TimeoutSeconds = 60
+    )
+
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    $consoleAvailable = -not [Console]::IsInputRedirected
+    while ([DateTime]::UtcNow -lt $deadline) {
+        if (Test-Path -LiteralPath $ResultPath -PathType Leaf) { return 'HelperCompleted' }
+
+        $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop
+        if ($task.State.ToString() -in @('Ready', 'Disabled')) {
+            if (Test-Path -LiteralPath $ResultPath -PathType Leaf) { return 'HelperCompleted' }
+            throw 'SetupWindowTaskExitedWithoutResult'
+        }
+
+        if ($consoleAvailable) {
+            try {
+                if ([Console]::KeyAvailable) {
+                    $key = [Console]::ReadKey($true)
+                    if ($key.Key -eq [ConsoleKey]::Enter) {
+                        [IO.File]::WriteAllText($DoneSignalPath, 'confirmed')
+                        return 'UserConfirmed'
+                    }
+                }
+            }
+            catch {
+                # Non-console hosts can still use the bounded helper timeout.
+                $consoleAvailable = $false
+            }
+        }
+
+        Start-Sleep -Milliseconds 200
+    }
+
+    throw 'SetupWindowTaskTimedOut'
+}
+
 $result = [ordered]@{
-    Mode = if ($Plan) { 'Plan' } else { 'Run' }
+    Mode = if ($Plan) { 'Plan' } elseif ($OpenSetupUi) { 'SetupWindow' } else { 'Run' }
     Status = 'NotStarted'
     Preflight = 'NotRun'
     AgentService = 'Unknown'
@@ -506,6 +553,7 @@ $result = [ordered]@{
     ProbeTaskStatus = 'NotCreated'
     ApiStatus = 'NotAttempted'
     TlsValidated = $false
+    SetupWindowStatus = if ($OpenSetupUi) { 'NotStarted' } else { 'NotRequested' }
     FailureCategory = $null
     FailureDetail = $null
     CleanupStatus = 'NotNeeded'
@@ -519,6 +567,8 @@ $taskRegistered = $false
 $stagePath = $null
 $helperExitCode = $null
 $probeResultPath = $null
+$setupReadyPath = $null
+$setupDoneSignalPath = $null
 $controllerState = $null
 
 try {
@@ -603,10 +653,25 @@ try {
                 if (-not (Test-Path -LiteralPath $helperExe -PathType Leaf)) { throw 'FencedProbeHelperBuildFailed' }
                 $probeResultPath = Join-Path $publishPath 'result.json'
                 $taskName = 'KamenRaider-Sunshine-DevProbe-' + [Guid]::NewGuid().ToString('N')
-                $action = New-ScheduledTaskAction -Execute $helperExe
+                $setupHelperArgument = if ($OpenSetupUi) { '--setup-window' } else { $null }
+                if ($OpenSetupUi) {
+                    $action = New-ScheduledTaskAction -Execute $helperExe -Argument $setupHelperArgument
+                    $setupReadyPath = Join-Path $publishPath 'setup-ready.json'
+                    $setupDoneSignalPath = Join-Path $publishPath 'setup-done.signal'
+                    $result.SetupWindowStatus = 'WaitingForGuardReady'
+                }
+                else {
+                    $action = New-ScheduledTaskAction -Execute $helperExe
+                }
                 $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
                 $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 2) -MultipleInstances IgnoreNew
-                Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Settings $settings -Description 'One-shot local development Sunshine TLS probe.' | Out-Null
+                $taskDescription = if ($OpenSetupUi) {
+                    'One-shot local development Sunshine setup window behind the Stream Guard firewall fence.'
+                }
+                else {
+                    'One-shot local development Sunshine TLS probe.'
+                }
+                Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Settings $settings -Description $taskDescription | Out-Null
                 $taskRegistered = $true
                 $result.ProbeTaskStatus = 'RegisteredAsSystem'
 
@@ -626,20 +691,51 @@ try {
                     throw 'LocalGuardStateChangedBeforeProbe'
                 }
 
-                Write-Host 'Local development probe: the Agent service will be stopped briefly to release its single Stream Guard pipe session, then restarted in finally. Stream Guard stays running; Sunshine will be started only behind its verified firewall block and stopped by the fence.'
+                if ($OpenSetupUi) {
+                    Write-Host 'Local setup window: the Agent service will be stopped briefly to release its single Stream Guard pipe session, then restarted in finally. Stream Guard stays running; Sunshine will run only behind its verified firewall block and the fence will stop it on confirmation or timeout.'
+                }
+                else {
+                    Write-Host 'Local development probe: the Agent service will be stopped briefly to release its single Stream Guard pipe session, then restarted in finally. Stream Guard stays running; Sunshine will be started only behind its verified firewall block and stopped by the fence.'
+                }
                 $agentStopAttempted = $true
                 Stop-Service -Name 'KamenRaider Agent' -ErrorAction Stop
                 if (-not (Wait-ServiceStatus -Name 'KamenRaider Agent' -Status 'Stopped')) { throw 'AgentStopTimedOut' }
 
                 Start-ScheduledTask -TaskName $taskName
                 $result.ProbeTaskStatus = 'RunningAsSystem'
-                $taskDeadline = [DateTime]::UtcNow.AddSeconds(75)
+                # The setup task waits for Guard's pipe and then presents a bounded UI window.
+                # Guard's own 45-second maintenance deadline starts before Sunshine starts, so
+                # the visible window can be shorter than the helper's timeout.
+                $taskDeadline = [DateTime]::UtcNow.AddSeconds($(if ($OpenSetupUi) { 120 } else { 75 }))
                 $taskWasRunning = $false
+                $setupUiOpened = $false
                 do {
                     $task = Get-ScheduledTask -TaskName $taskName -ErrorAction Stop
                     $taskState = $task.State.ToString()
                     if ($taskState -eq 'Running') { $taskWasRunning = $true }
                     $hasResult = Test-Path -LiteralPath $probeResultPath -PathType Leaf
+
+                    if ($OpenSetupUi -and -not $setupUiOpened -and
+                        (Test-Path -LiteralPath $setupReadyPath -PathType Leaf)) {
+                        # Readiness can race with task completion. Recheck both immediately
+                        # before opening a browser so a stale marker never launches the UI.
+                        $launchTask = Get-ScheduledTask -TaskName $taskName -ErrorAction Stop
+                        $launchTaskState = $launchTask.State.ToString()
+                        $hasResult = Test-Path -LiteralPath $probeResultPath -PathType Leaf
+                        $task = $launchTask
+                        $taskState = $launchTaskState
+                        if ($launchTaskState -eq 'Running') { $taskWasRunning = $true }
+
+                        if (-not $hasResult -and $launchTaskState -eq 'Running') {
+                            Open-SunshineSetupUi
+                            $setupUiOpened = $true
+                            $result.SetupWindowStatus = 'Open'
+                            Write-Host 'Sunshine setup UI opened at https://localhost:47990. Press Enter here when finished. Stream Guard may stop Sunshine sooner because its 45-second deadline starts before Sunshine finishes starting.'
+                            $interaction = Wait-ForSetupWindowInteraction -TaskName $taskName -ResultPath $probeResultPath -DoneSignalPath $setupDoneSignalPath -TimeoutSeconds 60
+                            if ($interaction -eq 'UserConfirmed') { $result.SetupWindowStatus = 'UserConfirmed' }
+                        }
+                    }
+
                     if ($hasResult -and $taskState -in @('Ready', 'Disabled')) { break }
                     if (-not $hasResult -and $taskWasRunning -and $taskState -in @('Ready', 'Disabled')) {
                         throw 'FencedProbeTaskExitedWithoutResult'
@@ -653,9 +749,32 @@ try {
                 $helperExitCode = [int]$taskInfo.LastTaskResult
                 $result.ApiStatus = if ($null -ne $probe.HttpStatus) { 'HTTP ' + [int]$probe.HttpStatus } else { 'NotReached' }
                 $result.TlsValidated = [bool]$probe.TlsValidated
-                if ($probe.Status -eq 'RequestCompleted' -and $helperExitCode -eq 0) {
+                if ($OpenSetupUi -and $probe.Status -in @('SetupWindowCompleted', 'SetupWindowTimedOut') -and $helperExitCode -eq 0) {
+                    $result.Status = [string]$probe.Status
+                    if ($probe.Status -eq 'SetupWindowTimedOut') { $result.SetupWindowStatus = 'TimedOut' }
+                    $result.CleanupStatus = 'FencedCleanupCompleted'
+                }
+                elseif (-not $OpenSetupUi -and $probe.Status -eq 'RequestCompleted' -and $helperExitCode -eq 0) {
                     $result.Status = 'RequestCompleted'
                     $result.CleanupStatus = 'FencedCleanupCompleted'
+                }
+                elseif ($OpenSetupUi) {
+                    $result.Status = if ($probe.Status -in @('SetupWindowFailed', 'FenceRejected')) {
+                        [string]$probe.Status
+                    }
+                    else {
+                        'SetupWindowFailed'
+                    }
+                    $result.SetupWindowStatus = if ($result.Status -eq 'FenceRejected') { 'FenceRejected' } else { 'Failed' }
+                    $result.FailureCategory = if ($probe.FailureCategory) {
+                        [string]$probe.FailureCategory
+                    }
+                    elseif ($helperExitCode -ne 0) {
+                        'SetupWindowHelperFailed'
+                    }
+                    else {
+                        'FencedProbeFailed'
+                    }
                 }
                 else {
                     $result.Status = 'RequestFailed'
@@ -750,9 +869,12 @@ finally {
     try { $result.SunshinePortClosedAfter = Test-SunshinePortClosed }
     catch { $result.SunshinePortClosedAfter = $false }
 
-    if ($result.SunshineAfter -ne 'Stopped' -or -not $result.FirewallBlockAfter -or -not $result.WindowsFirewallAfter -or -not $result.SunshinePortClosedAfter) {
+    if ($result.GuardService -ne 'Running' -or $result.SunshineAfter -ne 'Stopped' -or
+        -not $result.FirewallBlockAfter -or -not $result.WindowsFirewallAfter -or -not $result.SunshinePortClosedAfter) {
         if (-not $result.FailureCategory) { $result.FailureCategory = 'FinalGuardStateNotVerified' }
-        if ($result.Status -eq 'RequestCompleted') { $result.Status = 'FinalStateNotVerified' }
+        if ($result.Status -in @('RequestCompleted', 'SetupWindowCompleted', 'SetupWindowTimedOut')) {
+            $result.Status = 'FinalStateNotVerified'
+        }
     }
 
     [pscustomobject]$result

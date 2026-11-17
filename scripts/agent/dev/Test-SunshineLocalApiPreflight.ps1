@@ -71,6 +71,16 @@ if ($script:fixture.LastPolicyStore -ne 'ActiveStore' -or -not $script:fixture.L
     throw 'Firewall preflight must query every effective ActiveStore profile.'
 }
 
+# The optional UI mode must remain a read-only plan when combined with -Plan.
+$result.Status = 'NotStarted'
+$result.Preflight = 'NotRun'
+. $probe -Plan:$true -OpenSetupUi:$true | Out-Null
+$setupPlanResult = [pscustomobject]$result
+if ($setupPlanResult.Mode -ne 'Plan' -or $setupPlanResult.Status -ne 'PlanOnly' -or
+    $setupPlanResult.SetupWindowStatus -ne 'NotStarted' -or $script:fixture.ServiceMutations -ne 0) {
+    throw "Setup UI plan must not launch a task or mutate a service; got $($setupPlanResult | ConvertTo-Json -Compress)."
+}
+
 $unreachableJson = '[{"machineId":"machine-1","approvalStatus":"pending","readiness":"unreachable","canRent":false}]'
 $parsedUnreachable = ConvertFrom-ControllerMachineJson -MachineId 'machine-1' -Json $unreachableJson
 if ($parsedUnreachable.ApprovalStatus -ne 'pending' -or $parsedUnreachable.Readiness -ne 'unreachable' -or

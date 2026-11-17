@@ -158,6 +158,82 @@ public sealed class AuthenticatedSunshineApiProbeTests
         Assert.Single(transport.Requests);
     }
 
+    [Fact]
+    public async Task ReadOnlyProbeRetriesConnectionFailuresUntilTheManagementEndpointAccepts()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        using var directory = new TempDirectory();
+        var store = NewStore(directory.Path);
+        store.Save(new("probe-user", "fixture-password"));
+        var attempts = 0;
+        using var transport = new RecordingTransport(_ =>
+        {
+            attempts++;
+            if (attempts < 3) throw new HttpRequestException("listener not reachable yet");
+            return new(HttpStatusCode.OK)
+            {
+                Content = new StringContent("{\"status\":\"true\",\"named_certs\":[]}")
+            };
+        });
+
+        var result = await AuthenticatedSunshineApiProbe.ReadClientsAsync(
+            store,
+            47990,
+            default,
+            transport,
+            TimeSpan.FromSeconds(5));
+
+        Assert.Equal("RequestCompleted", result.Status);
+        Assert.Equal(3, attempts);
+    }
+
+    [Fact]
+    public async Task ReadOnlyProbeDoesNotRetryDeterministicTlsFailure()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        using var directory = new TempDirectory();
+        var store = NewStore(directory.Path);
+        store.Save(new("probe-user", "fixture-password"));
+        using var transport = new RecordingTransport(_ => throw new HttpRequestException(
+            "private request detail",
+            new AuthenticationException("private TLS detail")));
+
+        var result = await AuthenticatedSunshineApiProbe.ReadClientsAsync(
+            store,
+            47990,
+            default,
+            transport,
+            TimeSpan.FromSeconds(5));
+
+        Assert.Equal("ProbeFailed", result.Status);
+        Assert.Equal("TlsValidationFailed", result.FailureCategory);
+        Assert.Single(transport.Requests);
+    }
+
+    [Fact]
+    public async Task ReadOnlyProbeStopsRetryingWhenTheReadinessBudgetExpires()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        using var directory = new TempDirectory();
+        var store = NewStore(directory.Path);
+        store.Save(new("probe-user", "fixture-password"));
+        using var transport = new RecordingTransport(_ => throw new HttpRequestException("listener not reachable"));
+
+        var timer = System.Diagnostics.Stopwatch.StartNew();
+        var result = await AuthenticatedSunshineApiProbe.ReadClientsAsync(
+            store,
+            47990,
+            default,
+            transport,
+            TimeSpan.FromMilliseconds(400));
+        timer.Stop();
+
+        Assert.Equal("ProbeFailed", result.Status);
+        Assert.Equal("HttpsRequestFailed", result.FailureCategory);
+        Assert.True(transport.Requests.Count >= 2);
+        Assert.True(timer.Elapsed < TimeSpan.FromSeconds(10));
+    }
+
     private static WindowsSunshineCredentialStore NewStore(string dataDirectory)
     {
         var currentUser = WindowsIdentity.GetCurrent().User ?? throw new InvalidOperationException("Windows user SID is unavailable.");

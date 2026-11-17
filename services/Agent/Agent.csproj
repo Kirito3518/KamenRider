@@ -14,6 +14,7 @@
   <ItemGroup>
     <InternalsVisibleTo Include="Agent.Tests" />
     <InternalsVisibleTo Include="StreamGuardFencedApiProbe" />
+    <InternalsVisibleTo Include="SunshineCredentialReset" />
     <AssemblyMetadata Include="AgentUpdateChallengeProtocol" Value="2" />
   </ItemGroup>
 

@@ -66,6 +66,33 @@ function Remove-ProbeStage {
     [IO.File]::AppendAllText((Join-Path $env:KAMENRAIDER_SUNSHINE_LIFECYCLE_STAGE_ROOT 'stage-removal-request.txt'), $fullPath + [Environment]::NewLine)
 }
 '@
+        'Open-SunshineSetupUi' = @'
+function Open-SunshineSetupUi {
+    [IO.File]::WriteAllText((Join-Path $env:KAMENRAIDER_SUNSHINE_LIFECYCLE_STAGE_ROOT 'browser-opened.txt'), 'https://localhost:47990')
+}
+'@
+        'Wait-ForSetupWindowInteraction' = @'
+function Wait-ForSetupWindowInteraction {
+    param([string]$TaskName, [string]$ResultPath, [string]$DoneSignalPath, [int]$TimeoutSeconds)
+    $browserPath = Join-Path $env:KAMENRAIDER_SUNSHINE_LIFECYCLE_STAGE_ROOT 'browser-opened.txt'
+    if (-not (Test-Path -LiteralPath $browserPath -PathType Leaf)) { throw 'Setup UI browser did not open before the user confirmation wait.' }
+    $fixture = Get-MockFixture
+    if ($fixture.Scenario -eq 'SetupWindowTimeout') {
+        [IO.File]::WriteAllText($ResultPath, '{"Status":"SetupWindowTimedOut","HttpStatus":null,"TlsValidated":false}')
+        Set-MockTaskReady
+        return 'HelperCompleted'
+    }
+    if ($fixture.Scenario -eq 'SetupWindowFailure') {
+        [IO.File]::WriteAllText($ResultPath, '{"Status":"SetupWindowFailed","HttpStatus":null,"TlsValidated":false,"FailureCategory":"GuardPipeFailed"}')
+        Set-MockTaskReady
+        return 'HelperCompleted'
+    }
+    [IO.File]::WriteAllText($DoneSignalPath, 'confirmed')
+    [IO.File]::WriteAllText($ResultPath, '{"Status":"SetupWindowCompleted","HttpStatus":null,"TlsValidated":false}')
+    Set-MockTaskReady
+    return 'UserConfirmed'
+}
+'@
     }
 
     $edits = @()
@@ -121,6 +148,7 @@ function Reset-Fixture {
 }
 
 function Get-MockFixture { return [pscustomobject]$script:fixture }
+function Set-MockTaskReady { $script:fixture.TaskState = 'Ready' }
 
 function Get-Service {
     [CmdletBinding()]
@@ -203,8 +231,8 @@ function Test-SunshineMockDotnet {
 
 function New-ScheduledTaskAction {
     [CmdletBinding()]
-    param([Parameter(Mandatory)][string]$Execute)
-    return [pscustomobject]@{ Execute = $Execute }
+    param([Parameter(Mandatory)][string]$Execute, [string]$Argument)
+    return [pscustomobject]@{ Execute = $Execute; Argument = $Argument }
 }
 
 function New-ScheduledTaskPrincipal {
@@ -236,6 +264,19 @@ function Start-ScheduledTask {
         throw 'Mock task started but the command reported failure.'
     }
 
+    if ($script:fixture.TaskAction.Argument -eq '--setup-window') {
+        $readyPath = Join-Path (Split-Path -Parent $script:fixture.TaskAction.Execute) 'setup-ready.json'
+        [IO.File]::WriteAllText($readyPath, '{"status":"ready"}')
+        if ($script:fixture.Scenario -eq 'SetupWindowStaleReady') {
+            $resultPath = Join-Path (Split-Path -Parent $script:fixture.TaskAction.Execute) 'result.json'
+            [IO.File]::WriteAllText($resultPath, '{"Status":"SetupWindowTimedOut","HttpStatus":null,"TlsValidated":false}')
+            $script:fixture.TaskState = 'Ready'
+            return
+        }
+        $script:fixture.TaskState = 'Running'
+        return
+    }
+
     $resultPath = Join-Path (Split-Path -Parent $script:fixture.TaskAction.Execute) 'result.json'
     [IO.File]::WriteAllText($resultPath, '{"Status":"RequestCompleted","HttpStatus":200,"TlsValidated":true}')
     $script:fixture.TaskState = 'Ready'
@@ -265,7 +306,9 @@ function Unregister-ScheduledTask {
 function Get-ScheduledTaskInfo {
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$TaskName)
-    return [pscustomobject]@{ LastTaskResult = 0 }
+    if ($script:fixture.Scenario -eq 'GuardStoppedAfterProbe') { $script:fixture.GuardStatus = 'Stopped' }
+    $lastTaskResult = if ($script:fixture.Scenario -eq 'SetupWindowFailure') { 1 } else { 0 }
+    return [pscustomobject]@{ LastTaskResult = $lastTaskResult }
 }
 
 Export-ModuleMember -Function @(
@@ -276,7 +319,8 @@ Export-ModuleMember -Function @(
     'Get-NetFirewallInterfaceTypeFilter', 'Get-Command', 'Test-SunshineMockDotnet',
     'New-ScheduledTaskAction', 'New-ScheduledTaskPrincipal', 'New-ScheduledTaskSettingsSet',
     'Register-ScheduledTask', 'Start-ScheduledTask', 'Get-ScheduledTask', 'Stop-ScheduledTask',
-    'Unregister-ScheduledTask', 'Get-ScheduledTaskInfo'
+    'Unregister-ScheduledTask', 'Get-ScheduledTaskInfo', 'Open-SunshineSetupUi', 'Wait-ForSetupWindowInteraction',
+    'Set-MockTaskReady'
 )
 }
 Import-Module $mockModule -Force
@@ -287,7 +331,9 @@ function Assert-Condition {
 }
 
 function Invoke-MockedWrapper {
-    $output = @(& $testWrapperPath)
+    param([switch]$OpenSetupUi)
+    if ($OpenSetupUi) { $output = @(& $testWrapperPath -OpenSetupUi) }
+    else { $output = @(& $testWrapperPath) }
     if ($output.Count -ne 1) { throw "Expected exactly one wrapper result, got $($output.Count)." }
     return [pscustomobject]$output[0]
 }
@@ -320,6 +366,45 @@ try {
     Assert-Condition ($restartFailure.AgentRestartStatus -eq 'RestartFailed' -and $fixture.StartServiceCount -eq 1) 'The restart failure must be surfaced in the Agent status.'
     Assert-Condition ($restartFailure.ProbeTaskStatus -eq 'Removed' -and $restartFailure.CleanupStatus -eq 'FencedCleanupCompleted;StagingRemoved') 'Quiesced task and stage must still be cleaned after restart failure.'
     Assert-Condition (Test-Path -LiteralPath (Join-Path $stageRoot 'stage-removal-request.txt')) 'Stage cleanup must be requested after restart failure when the task is quiesced.'
+
+    $stageRoot = Join-Path $tempRoot ('stages-guard-stopped-after-probe-' + [Guid]::NewGuid().ToString('N'))
+    Reset-Fixture -Scenario 'GuardStoppedAfterProbe' -StageRoot $stageRoot
+    $guardStopped = Invoke-MockedWrapper
+    Assert-Condition ($guardStopped.Status -eq 'FinalStateNotVerified' -and $guardStopped.FailureCategory -eq 'FinalGuardStateNotVerified') 'A successful API probe must fail final verification if Stream Guard stopped.'
+    Assert-Condition ($guardStopped.GuardService -eq 'Stopped' -and $guardStopped.AgentRestartStatus -eq 'Running') 'The final result must report the stopped Guard while still restarting the Agent.'
+
+    $stageRoot = Join-Path $tempRoot ('stages-setup-window-' + [Guid]::NewGuid().ToString('N'))
+    Reset-Fixture -Scenario 'SetupWindow' -StageRoot $stageRoot
+    $setupResult = Invoke-MockedWrapper -OpenSetupUi
+    $fixture = Get-MockFixture
+    Assert-Condition ($setupResult.Mode -eq 'SetupWindow' -and $setupResult.Status -eq 'SetupWindowCompleted') "Setup window mode must complete through the fenced helper; got $($setupResult | ConvertTo-Json -Compress), fixture $($fixture | ConvertTo-Json -Compress)."
+    Assert-Condition ($setupResult.SetupWindowStatus -eq 'UserConfirmed' -and $setupResult.ApiStatus -eq 'NotReached') 'Setup window confirmation must not report an API probe.'
+    Assert-Condition ($fixture.TaskAction.Argument -eq '--setup-window') 'Setup window mode must pass only the opt-in helper argument.'
+    Assert-Condition ((Get-Content -LiteralPath (Join-Path $stageRoot 'browser-opened.txt') -Raw) -eq 'https://localhost:47990') 'The browser must open the local Sunshine UI after helper readiness.'
+    Assert-Condition (Test-Path -LiteralPath (Join-Path (Split-Path -Parent $fixture.TaskAction.Execute) 'setup-done.signal') -PathType Leaf) 'User confirmation must signal the helper to end the window.'
+    Assert-Condition ($fixture.StopServiceCount -eq 1 -and $fixture.StartServiceCount -eq 1 -and $setupResult.AgentRestartStatus -eq 'Running') 'Setup window mode must preserve Agent stop/restart cleanup.'
+    Assert-Condition ($setupResult.ProbeTaskStatus -eq 'Removed' -and $setupResult.CleanupStatus -eq 'FencedCleanupCompleted;StagingRemoved') 'Setup window task and stage must be cleaned after the task is quiesced.'
+
+    $stageRoot = Join-Path $tempRoot ('stages-setup-window-timeout-' + [Guid]::NewGuid().ToString('N'))
+    Reset-Fixture -Scenario 'SetupWindowTimeout' -StageRoot $stageRoot
+    $setupTimeoutResult = Invoke-MockedWrapper -OpenSetupUi
+    $fixture = Get-MockFixture
+    Assert-Condition ($setupTimeoutResult.Status -eq 'SetupWindowTimedOut' -and $setupTimeoutResult.SetupWindowStatus -eq 'TimedOut') 'Setup window timeout must be reported as an expected bounded completion.'
+    Assert-Condition (-not (Test-Path -LiteralPath (Join-Path (Split-Path -Parent $fixture.TaskAction.Execute) 'setup-done.signal') -PathType Leaf)) 'A timeout must not fabricate a user confirmation signal.'
+    Assert-Condition ($setupTimeoutResult.AgentRestartStatus -eq 'Running' -and $setupTimeoutResult.ProbeTaskStatus -eq 'Removed' -and $setupTimeoutResult.CleanupStatus -eq 'FencedCleanupCompleted;StagingRemoved') 'Timeout must still clean up the task, staging, and Agent service.'
+
+    $stageRoot = Join-Path $tempRoot ('stages-setup-window-stale-ready-' + [Guid]::NewGuid().ToString('N'))
+    Reset-Fixture -Scenario 'SetupWindowStaleReady' -StageRoot $stageRoot
+    $staleReadyResult = Invoke-MockedWrapper -OpenSetupUi
+    $fixture = Get-MockFixture
+    Assert-Condition ($staleReadyResult.Status -eq 'SetupWindowTimedOut' -and $staleReadyResult.SetupWindowStatus -eq 'TimedOut') 'A completed setup helper with a leftover ready marker must report its result.'
+    Assert-Condition (-not (Test-Path -LiteralPath (Join-Path $stageRoot 'browser-opened.txt') -PathType Leaf)) 'The wrapper must not launch a browser when the task has completed before the ready-marker check.'
+
+    $stageRoot = Join-Path $tempRoot ('stages-setup-window-failure-' + [Guid]::NewGuid().ToString('N'))
+    Reset-Fixture -Scenario 'SetupWindowFailure' -StageRoot $stageRoot
+    $setupFailure = Invoke-MockedWrapper -OpenSetupUi
+    Assert-Condition ($setupFailure.Status -eq 'SetupWindowFailed' -and $setupFailure.SetupWindowStatus -eq 'Failed') 'Helper errors must retain a setup-specific status.'
+    Assert-Condition ($setupFailure.FailureCategory -eq 'GuardPipeFailed') 'Helper errors must retain their sanitized failure category.'
 
     Write-Output 'Sunshine local API lifecycle mock checks passed.'
 }
