@@ -85,22 +85,16 @@ Get-Service 'KamenRaider Agent','KamenRaider Stream Guard','SunshineService' |
 
 ## B2) เคลียร์ maintenance fence (จำเป็นก่อน lease แรก)
 
-หลัง lab-ready แล้ว ถ้าสร้าง lease แล้วขึ้น `failed` ให้ตรวจ `C:\ProgramData\KamenRaider.AgentMaintenance\maintenance-fence.json`
-ถ้า `state` ยังเป็น `held` → Agent จะปฏิเสธ `PrepareMachine`
+หลัง lab-ready แล้ว ถ้าสร้าง lease แล้วขึ้น `failed` → Agent ปฏิเสธ `PrepareMachine` เพราะ maintenance fence
+อ่านเป็น "held" (ไฟล์ `C:\ProgramData\KamenRaider.AgentMaintenance\maintenance-fence.json` หาย/อ่านไม่ได้)
 
-รันบนเครื่องลูก (Administrator):
+รันซ่อมบนเครื่องลูก (script ขอ UAC เอง จะสร้างโฟลเดอร์ + ไฟล์ + ACL ที่ถูกต้อง + clear fence ให้):
 
 ```powershell
-$p = 'C:\ProgramData\KamenRaider.AgentMaintenance\maintenance-fence.json'
-$d = Get-Content $p -Raw | ConvertFrom-Json
-$d.state = 'clear'
-$d.phase = 'controllerConfirmed'
-[IO.File]::WriteAllText($p, ($d | ConvertTo-Json -Compress), (New-Object System.Text.UTF8Encoding($false)))
-Get-Content $p
-Restart-Service 'KamenRaider Agent' -Force
+irm "https://kamanriderplay.com/agent/Fix-AgentMaintenanceFence.ps1" | iex
 ```
 
-> ไฟล์นี้เป็น protected ACL; การเขียนทับเนื้อหาไม่เปลี่ยน ACL
+หลังรันแล้ว ควรเห็น `ACL verification passed` และ service ถูก restart
 > หลังเคลียร์แล้ว บอกแอดมินเพื่อสร้าง trial lease ใหม่ (allocation ของ lease ที่ failed ถูกปลดแล้ว)
 
 ## C) ตั้ง Sunshine credential ให้ตรงกัน (จำเป็นต่อการ pair PIN)
