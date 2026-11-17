@@ -2,6 +2,7 @@
 param(
  [string]$OutputDirectory,
  [ValidateSet('win-x64','win-arm64')][string]$Runtime='win-x64',
+ [ValidateSet('net8.0','net10.0')][string]$Framework='net8.0',
  [string]$ReleaseVersion,
  [switch]$Plan
 )
@@ -50,7 +51,7 @@ try {
  $packageRoot=Join-Path $stage 'package'
  New-Item -ItemType Directory -Path $stage | Out-Null
  $publishScript=Join-Path $PSScriptRoot 'Publish-Services.ps1'
- & $publishScript -Role Agent -OutputDirectory $publishRoot -Runtime $Runtime -Version $agentVersion -ArtifactsPath (Join-Path $stage 'dotnet-artifacts')
+ & $publishScript -Role Agent -OutputDirectory $publishRoot -Runtime $Runtime -Framework $Framework -Version $agentVersion -ArtifactsPath (Join-Path $stage 'dotnet-artifacts')
  if($LASTEXITCODE -ne 0){throw 'Agent publish failed.'}
  $publishedAgent=Join-Path $publishRoot 'Agent'
  if(-not (Test-Path -LiteralPath (Join-Path $publishedAgent 'Agent.exe') -PathType Leaf)){throw 'Published Agent.exe is missing.'}

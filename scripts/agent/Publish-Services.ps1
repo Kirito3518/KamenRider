@@ -4,6 +4,7 @@ param(
  [Parameter(Mandatory)][string]$OutputDirectory,
  [ValidateSet('win-x64','win-arm64')][string]$Runtime='win-x64',
  [string]$Version='1.0.0',
+ [ValidatePattern('^net[0-9]+\.0$')][string]$Framework='',
  [string]$ArtifactsPath,
  [switch]$Plan
 )
@@ -23,7 +24,8 @@ try {
   $output=Join-Path $OutputDirectory $item
   if($Plan){[pscustomobject]@{Project=$project;Output=$output;ArtifactsPath=$ArtifactsPath;Runtime=$Runtime;SelfContained=$true;Version=$Version};continue}
   if($PSCmdlet.ShouldProcess($output,"Publish $item")){
-   & dotnet publish $project -c Release -r $Runtime --self-contained true -o $output --artifacts-path $ArtifactsPath "-p:Version=$Version" -p:IncludeSourceRevisionInInformationalVersion=false
+   $frameworkArgs=@(); if(-not [string]::IsNullOrWhiteSpace($Framework)){$frameworkArgs=@('-f',$Framework)}
+   & dotnet publish $project -c Release -r $Runtime --self-contained true -o $output --artifacts-path $ArtifactsPath @frameworkArgs "-p:Version=$Version" -p:IncludeSourceRevisionInInformationalVersion=false
    if($LASTEXITCODE -ne 0){throw "Publishing $item failed."}
   }
  }

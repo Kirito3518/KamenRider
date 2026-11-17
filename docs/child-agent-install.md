@@ -105,6 +105,7 @@ Get-Service 'KamenRaider Agent','KamenRaider Stream Guard','tvnserver','Sunshine
 | `Cannot find an overload for "SetEquals"` | แพ็กเกจเก่า → ขอ one-liner ใหม่ (รุ่นที่แก้แล้ว hash `3CAC6829…67059`) |
 | `Agent installation is incomplete or inconsistent` | มีเศษติดตั้งเก่าค้าง → รัน Cleanup ในข้อ 1 |
 | `Bootstrap path has an untrusted writable ancestor` | ACL มี ACE แปลก (มักเกิดจาก takeown/ลบไฟล์เอง) → รัน Cleanup ข้อ 1 แล้วทำตามบรรทัด `fix:` |
+| Fatal error. Your Windows doesn't fully support CET | แพ็กเกจ Agent รุ่นเก่าใช้ .NET 10 ที่ต้อง CET (Win10 รุ่นเก่าไม่มี) → ใช้ one-liner ใหม่ที่แพ็กเกจเป็น .NET 8 (hash 0884C10A…) |
 | `...PrivateInstallFiles.ps1 cannot be loaded because running scripts is disabled` | เครื่องตั้ง ExecutionPolicy เป็น Restricted → Bootstrap ใหม่ตั้ง `Process` เป็น Bypass ให้แล้ว; ให้**ขอ one-liner ใหม่** ถ้ายังเจอให้รัน `Set-ExecutionPolicy -Scope Process Bypass -Force` ในหน้าต่างเดียวกันก่อน |
 | `Sunshine is not installed` หรือ winget ผิดพลาด | ติดตั้ง Sunshine manual จาก https://github.com/LizardByte/Sunshine/releases แล้วรัน one-liner ใหม่ |
 | เครื่องลูกต่อ Controller ไม่ได้ | ต้องอยู่ LAN เดียวกันและเข้าถึง `192.168.1.100:7443`; ตรวจ firewall |
