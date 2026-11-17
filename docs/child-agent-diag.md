@@ -51,6 +51,36 @@ if (Test-Path "C:\ProgramData\KamenRaider\Agent\enrollment-receipt.json") {
 }
 ```
 
+## เพิ่มเติม: Sunshine layout + .NET Runtime (สำหรับ error นี้)
+
+`KamenRaider Stream Guard` รันด้วย `Agent.exe --stream-guard` และต้องหา Sunshine ให้เจอในรูปแบบที่รองรับ
+ถ้า Sunshine ติดตั้งแบบ portable/คนละ layout จะทำให้ Guard crash → SCM timeout 7009/7000 → Agent start ไม่ได้ (7001)
+
+รันเพิ่มบนเครื่องลูก (Administrator) แล้วแคปผล:
+
+```powershell
+"=== Sunshine service ==="
+Get-CimInstance Win32_Service -Filter "Name='SunshineService'" -ErrorAction SilentlyContinue |
+  Select-Object Name, State, StartMode, StartName, PathName | Format-List
+
+"=== Sunshine layout ==="
+Get-ChildItem "C:\Program Files\Sunshine" -Force -ErrorAction SilentlyContinue |
+  Select-Object Name, Length | Format-Table -AutoSize
+Get-ChildItem "C:\Program Files\Sunshine\tools" -Force -ErrorAction SilentlyContinue |
+  Select-Object Name, Length | Format-Table -AutoSize
+
+"=== .NET Runtime crash (stack) ==="
+Get-WinEvent -LogName Application -MaxEvents 600 -ErrorAction SilentlyContinue |
+  Where-Object { $_.ProviderName -eq '.NET Runtime' -or $_.ProviderName -eq 'Application Error' } |
+  Select-Object -First 6 TimeCreated, ProviderName, Id, LevelDisplayName, Message |
+  Format-List
+```
+
+สิ่งที่ต้องดู:
+- `PathName` ของ `SunshineService` ต้องเป็น `...\tools\sunshinesvc.exe` (มี `sunshine.exe` อยู่ระดับบน)
+- ถ้าเป็น `...\sunshine.exe --service` หรืออยู่ในโฟลเดอร์อื่น = layout ไม่ตรง แล้วแต่ต้องรอแพ็กเกจแก้/ติดตั้ง Sunshine ใหม่ให้ถูก layout
+- `.NET Runtime` event จะบอก exception จริงว่า Guard crash เพราะอะไร (ข้อความต่อจากนี้)
+
 ## ถ้าต้องการเก็บเป็นไฟล์ก่อนส่ง
 
 ```powershell
