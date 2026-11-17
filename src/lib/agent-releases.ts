@@ -9,6 +9,8 @@ export type AgentRelease = {
   sourceCommit: string;
   sourceDirty: boolean;
   publishedAtUtc: string;
+  targetRuntime?: "win-x64" | "win-arm64" | "unknown";
+  agentUpdateChallengeProtocol?: number;
 };
 
 export const updateStatusLabels: Record<string, string> = {

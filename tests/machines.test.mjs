@@ -570,11 +570,17 @@ test("agent update release and command routes enforce Admin origin and forward e
     assert.ok(uploadRequest.rawBody.includes("package bytes"));
 
     const beforeCommand = requests.length;
-    const command = await call("/admin/machines/pc/agent-update-command", { releaseVersion: "2.0.0" }, adminCookie);
-    assert.equal(command.status, 503);
+    const command = await call(
+      "/admin/machines/0123456789abcdef0123456789abcdef/agent-update-command",
+      { releaseVersion: "2.0.0" },
+      adminCookie,
+    );
+    assert.equal(command.status, 200);
     assert.equal(command.headers.get("cache-control"), "no-store");
-    assert.deepEqual(await command.json(), { error: "Controller unavailable" });
-    assert.equal(requests.length, beforeCommand, "command issuance remains disabled until the trusted helper workflow is complete");
+    const commandBody = await command.json();
+    assert.equal(commandBody.available, false);
+    assert.equal(typeof commandBody.reason, "string");
+    assert.equal(requests.length, beforeCommand, "command issuance is gated off by default");
   } finally {
     if (!scriptWasPresent) unlinkSync(scriptPath);
     else writeFileSync(scriptPath, originalScript);
