@@ -1,6 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
+import { Bot, ShieldAlert } from "lucide-react";
+import { Button } from "@/components/ui/button";
 import { isAgentOnline, updateStatusLabels, type AgentRelease } from "@/lib/agent-releases";
 import type { Machine } from "@/lib/machine-contracts";
 
@@ -449,64 +451,86 @@ function AgentRecoveryIntentControl({ machine, actorId, onUpdated }: { machine: 
 
   const choices = releases ?? [];
 
-  return <div className="space-y-2">
-      <button type="button" className="rounded border px-3 py-2 text-sm disabled:opacity-50" disabled={busy || !canTrackAttempt || confirmedIntentActive || (!attempt && !canRequest)} onClick={() => {
-      if (attempt) { setAttemptDismissed(false); setOpen(true); return; }
-      setMessage(""); setContext(null); setOpen(false); setBusy(true);
-      void loadCurrentContext().catch((error: unknown) => {
-        setOpen(false);
-        setMessage(error instanceof Error ? error.message : "Recovery context is unavailable.");
-      }).finally(() => setBusy(false));
-    }}>{busy && !open ? "กำลังตรวจ held chain…" : confirmedIntentActive ? "Recovery intent ยัง active" : attempt ? "ตรวจสอบ recovery request เดิม" : confirmedIntent ? "ตรวจสอบ held context ใหม่" : "ขอ recovery intent"}</button>
-    <p className="text-sm">Recovery intent จะคง hold ไว้ ไม่ออกคำสั่ง successor และยังไม่ทำให้ update พร้อม</p>
-    {contextStale && open ? <p role="status">หัว operation เปลี่ยนแล้ว ฟอร์ม recovery เดิมถูกปิด กรุณาอ่านสถานะปัจจุบันก่อนขอใหม่</p> : null}
-    {open && context && !contextStale && !attempt && !confirmedIntentActive ? <div className="space-y-3 rounded border p-3">
-      <p className="text-sm">Controller ยืนยัน chain {context.chainId} · head {context.currentHeadOperationId} · generation {context.currentGeneration} · {context.currentStatus} · เป้าหมายเดิม {context.currentTargetVersion}</p>
-      <p className="text-sm">Recovery intent จะคง hold ไว้ ไม่ออกคำสั่ง successor และยังไม่ทำให้ update พร้อม</p>
-      {context.allocationHeld ? <p role="status">มี allocation hold จึงสร้าง recovery intent ไม่ได้</p> : null}
-      {!context.allocationHeld && !intent ? <>
-        <label className="block text-sm">เลือก target release สำหรับ {machine.machineId}
-          <select aria-label={`เลือก target release สำหรับ ${machine.machineId}`} className="ml-2 rounded border bg-background p-2" value={targetReleaseVersion} onChange={(event) => setTargetReleaseVersion(event.target.value)}>
-            <option value="">เลือก release</option>
-            {choices.map((release) => <option key={release.version} value={release.version}>{release.version} · {release.channel}</option>)}
-          </select>
-        </label>
-        <label className="block text-sm">เหตุผล recovery
-          <textarea aria-label="เหตุผล recovery" className="mt-1 block w-full rounded border bg-background p-2" maxLength={512} required rows={3} value={reason} onChange={(event) => setReason(event.target.value)} />
-        </label>
-        <p className="text-sm">Controller ตรวจสอบความเข้ากันได้ของ release กับ held chain ก่อนรับ intent</p>
-        <button type="button" className="rounded border px-3 py-2 text-sm disabled:opacity-50" disabled={!targetReleaseVersion || !reason.trim() || reason.length > 512 || /[\u0000-\u001f\u007f]/.test(reason) || busy} onClick={createIntent}>{busy ? "กำลังบันทึก intent…" : "สร้าง recovery intent"}</button>
-      </> : null}
-    </div> : null}
-    {confirmedIntent ? <div className="space-y-1 rounded border p-3 text-sm" role="status">
-      <p>Intent {confirmedIntent.intentId} · request {confirmedIntent.requestId} · {expired || confirmedIntent.status === "expired" ? "หมดอายุ" : confirmedIntent.status}</p>
-      <p>หมดอายุ (UTC): {confirmedIntent.expiresAtUtc}</p>
-      <p>{confirmedIntent.status === "superseded"
-        ? "Intent นี้ถูกแทนที่แล้ว โปรดโหลด held context ปัจจุบันก่อนสร้างคำขอใหม่; chain ยัง held และยังไม่มี successor/update พร้อม"
-        : expired || confirmedIntent.status === "expired"
-          ? "Intent หมดอายุแล้ว แต่ chain ยัง held และยังไม่มี successor/update พร้อม"
-          : confirmedIntentActive
-            ? "Recovery intent กำลังรอตรวจสอบ; คำขอใหม่ถูกล็อกจนกว่าจะหมดอายุ. Chain ยังคง held; successor operation และ update readiness ยังไม่เสร็จ"
-            : "Intent ไม่ได้รอตรวจสอบแล้ว โปรดโหลด held context ปัจจุบันก่อนสร้างคำขอใหม่; chain ยัง held และยังไม่มี successor/update พร้อม"}</p>
-    </div> : null}
-    {recoveryPanelOpen && attempt && !confirmedIntentActive ? <div className="space-y-2 rounded border p-3">
-        <p className="text-sm">Request ID: {attempt.requestId}</p>
-        <p className="text-sm">Target release: {attempt.targetReleaseVersion} · chain {attempt.expectedChainId} · head {attempt.expectedHeadId} · generation {attempt.expectedGeneration}</p>
-        <p className="text-sm">This exact request remains unresolved. A missing GET result or temporary Controller error does not unlock a new request.</p>
-        <div className="flex flex-wrap gap-2">
-        <button type="button" className="rounded border px-3 py-2 text-sm disabled:opacity-50" disabled={busy} onClick={() => {
-          setBusy(true);
-          void reconcile(attempt).finally(() => setBusy(false));
-        }}>ตรวจสอบ request ID</button>
-        <button type="button" className="rounded border px-3 py-2 text-sm disabled:opacity-50" disabled={busy} onClick={() => void submit(attempt)}>ลอง request เดิมซ้ำ</button>
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="flex flex-wrap items-start gap-2">
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          disabled={busy || !canTrackAttempt || confirmedIntentActive || (!attempt && !canRequest)}
+          onClick={() => {
+            if (attempt) { setAttemptDismissed(false); setOpen(true); return; }
+            setMessage(""); setContext(null); setOpen(false); setBusy(true);
+            void loadCurrentContext().catch((error: unknown) => {
+              setOpen(false);
+              setMessage(error instanceof Error ? error.message : "Recovery context is unavailable.");
+            }).finally(() => setBusy(false));
+          }}
+        >
+          {busy && !open ? "กำลังตรวจ held chain…" : confirmedIntentActive ? "Recovery intent ยัง active" : attempt ? "ตรวจสอบ recovery request เดิม" : confirmedIntent ? "ตรวจสอบ held context ใหม่" : "ขอ recovery intent"}
+        </Button>
+        <p className="max-w-xl text-sm text-muted-foreground">Recovery intent จะคง hold ไว้ ไม่ออกคำสั่ง successor และยังไม่ทำให้ update พร้อม</p>
+      </div>
+      {contextStale && open ? <p role="status" className="text-sm text-status-busy">หัว operation เปลี่ยนแล้ว ฟอร์ม recovery เดิมถูกปิด กรุณาอ่านสถานะปัจจุบันก่อนขอใหม่</p> : null}
+      {open && context && !contextStale && !attempt && !confirmedIntentActive ? (
+        <div className="flex flex-col gap-3 rounded-2xl bg-muted/50 p-4">
+          <p className="text-sm">Controller ยืนยัน chain {context.chainId} · head {context.currentHeadOperationId} · generation {context.currentGeneration} · {context.currentStatus} · เป้าหมายเดิม {context.currentTargetVersion}</p>
+          <p className="text-sm">Recovery intent จะคง hold ไว้ ไม่ออกคำสั่ง successor และยังไม่ทำให้ update พร้อม</p>
+          {context.allocationHeld ? <p role="status" className="text-sm">มี allocation hold จึงสร้าง recovery intent ไม่ได้</p> : null}
+          {!context.allocationHeld && !intent ? (
+            <>
+              <label className="flex flex-col gap-1 text-sm">
+                เลือก target release สำหรับ {machine.machineId}
+                <select aria-label={`เลือก target release สำหรับ ${machine.machineId}`} className="h-9 rounded-xl border border-transparent bg-background px-3 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/30" value={targetReleaseVersion} onChange={(event) => setTargetReleaseVersion(event.target.value)}>
+                  <option value="">เลือก release</option>
+                  {choices.map((release) => <option key={release.version} value={release.version}>{release.version} · {release.channel}</option>)}
+                </select>
+              </label>
+              <label className="flex flex-col gap-1 text-sm">
+                เหตุผล recovery
+                <textarea aria-label="เหตุผล recovery" className="min-h-20 rounded-xl border border-transparent bg-background px-3 py-2 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/30" maxLength={512} required rows={3} value={reason} onChange={(event) => setReason(event.target.value)} />
+              </label>
+              <p className="text-sm text-muted-foreground">Controller ตรวจสอบความเข้ากันได้ของ release กับ held chain ก่อนรับ intent</p>
+              <Button type="button" size="sm" className="self-start" disabled={!targetReleaseVersion || !reason.trim() || reason.length > 512 || /[\u0000-\u001f\u007f]/.test(reason) || busy} onClick={createIntent}>{busy ? "กำลังบันทึก intent…" : "สร้าง recovery intent"}</Button>
+            </>
+          ) : null}
         </div>
-        <button type="button" className="rounded border px-3 py-2 text-sm" disabled={busy} onClick={() => { setOpen(false); setAttemptDismissed(true); setContext(null); setIntent(null); }}>ปิด</button>
-    </div> : null}
-    {!storageAvailable ? <p role="status" className="text-sm">This tab cannot preserve a recovery request safely. Enable session storage before requesting an intent; no request was sent.</p> : null}
-    {invalidStoredAttempt ? <p role="status" className="text-sm">A saved recovery request could not be read. No new request will be sent from this tab.</p> : null}
-    {invalidStoredConfirmation ? <p role="status" className="text-sm">A saved recovery confirmation could not be read. No new request will be sent from this tab.</p> : null}
-    {storageReady && storageAvailable && !invalidStoredAttempt ? <p role="status" aria-live="polite" className="text-sm">{message}</p> : null}
-  </div>;
+      ) : null}
+      {confirmedIntent ? (
+        <div className="flex flex-col gap-1 rounded-2xl bg-muted/50 p-4 text-sm" role="status">
+          <p>Intent {confirmedIntent.intentId} · request {confirmedIntent.requestId} · {expired || confirmedIntent.status === "expired" ? "หมดอายุ" : confirmedIntent.status}</p>
+          <p>หมดอายุ (UTC): {confirmedIntent.expiresAtUtc}</p>
+          <p>{confirmedIntent.status === "superseded"
+            ? "Intent นี้ถูกแทนที่แล้ว โปรดโหลด held context ปัจจุบันก่อนสร้างคำขอใหม่; chain ยัง held และยังไม่มี successor/update พร้อม"
+            : expired || confirmedIntent.status === "expired"
+              ? "Intent หมดอายุแล้ว แต่ chain ยัง held และยังไม่มี successor/update พร้อม"
+              : confirmedIntentActive
+                ? "Recovery intent กำลังรอตรวจสอบ; คำขอใหม่ถูกล็อกจนกว่าจะหมดอายุ. Chain ยังคง held; successor operation และ update readiness ยังไม่เสร็จ"
+                : "Intent ไม่ได้รอตรวจสอบแล้ว โปรดโหลด held context ปัจจุบันก่อนสร้างคำขอใหม่; chain ยัง held และยังไม่มี successor/update พร้อม"}</p>
+        </div>
+      ) : null}
+      {recoveryPanelOpen && attempt && !confirmedIntentActive ? (
+        <div className="flex flex-col gap-2 rounded-2xl bg-muted/50 p-4">
+          <p className="text-sm">Request ID: {attempt.requestId}</p>
+          <p className="text-sm">Target release: {attempt.targetReleaseVersion} · chain {attempt.expectedChainId} · head {attempt.expectedHeadId} · generation {attempt.expectedGeneration}</p>
+          <p className="text-sm">This exact request remains unresolved. A missing GET result or temporary Controller error does not unlock a new request.</p>
+          <div className="flex flex-wrap gap-2">
+            <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => {
+              setBusy(true);
+              void reconcile(attempt).finally(() => setBusy(false));
+            }}>ตรวจสอบ request ID</Button>
+            <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => void submit(attempt)}>ลอง request เดิมซ้ำ</Button>
+            <Button type="button" variant="ghost" size="sm" disabled={busy} onClick={() => { setOpen(false); setAttemptDismissed(true); setContext(null); setIntent(null); }}>ปิด</Button>
+          </div>
+        </div>
+      ) : null}
+      {!storageAvailable ? <p role="status" className="text-sm">This tab cannot preserve a recovery request safely. Enable session storage before requesting an intent; no request was sent.</p> : null}
+      {invalidStoredAttempt ? <p role="status" className="text-sm">A saved recovery request could not be read. No new request will be sent from this tab.</p> : null}
+      {invalidStoredConfirmation ? <p role="status" className="text-sm">A saved recovery confirmation could not be read. No new request will be sent from this tab.</p> : null}
+      {storageReady && storageAvailable && !invalidStoredAttempt ? <p role="status" aria-live="polite" className="text-sm">{message}</p> : null}
+    </div>
+  );
 }
 
 export function AgentUpdateControl({ machine, actorId, onUpdated }: { machine: Machine; actorId: string; onUpdated?: () => boolean | Promise<boolean> }) {
@@ -587,23 +611,71 @@ export function AgentUpdateControl({ machine, actorId, onUpdated }: { machine: M
   }
 
   const choices = releases?.filter((release) => release.version !== machine.agentVersion) ?? [];
-  return <section className="space-y-2 rounded border p-3" aria-label={`อัปเดต Agent ${machine.machineId}`}>
-    <h3 className="font-semibold">Update Agent</h3>
-    <p className="text-sm">สถานะอัปเดต: {status ? updateStatusLabels[status] || status : "ยังไม่มีการอัปเดต"}{targetVersion ? ` · เป้าหมาย ${targetVersion}` : ""}</p>
-    <p className="text-sm text-muted-foreground">ผลอัปเดตแยกจากการอนุมัติและความพร้อมให้เช่า</p>
-    {!leaseClear ? <p className="text-sm">{machine.allocationHeld ? "เครื่องมี lease อยู่ จึงอัปเดตไม่ได้" : "ไม่ทราบสถานะ lease กรุณารีเฟรชข้อมูลเครื่อง"}</p> : null}
-    {leaseClear && !locked && (!machine.agentVersion || !isAgentOnline(machine, clock)) ? <p className="text-sm">ต้องมี heartbeat ล่าสุดพร้อมเวอร์ชัน Agent ภายใน 20 วินาที</p> : null}
-    {status === "rollingBack" ? <p className="text-sm">หาก Agent รุ่นเดิมไม่รองรับการยืนยันหลัง rollback เครื่องจะยังถูกล็อก ใช้กู้คืนการอัปเดตเดิมเพื่อติดตั้งเป้าหมายเดิมที่รองรับการยืนยัน หากเป้าหมายเดิมเป็น release เก่าที่ไม่รองรับ ให้หยุดและวางแผนกู้คืนกับผู้ดูแล</p> : null}
-    <div className="flex flex-wrap gap-2">
-      <button type="button" className="rounded border px-3 py-2 text-sm disabled:opacity-50" disabled={!canStart || busy || Boolean(command && !expired && !terminal.has(status || ""))} onClick={() => void chooseRelease()}>Update Agent</button>
-    <AgentRecoveryIntentControl key={`${actorId}:${machine.machineId}`} machine={machine} actorId={actorId} onUpdated={onUpdated} />
-    </div>
-    {open ? <div className="space-y-2">
-      {busy && !releases ? <p role="status">กำลังโหลด release…</p> : null}
-      {releases ? choices.length ? <><label className="block text-sm">เลือก release สำหรับ {machine.machineId}<select className="ml-2 rounded border bg-background p-2" value={selected} onChange={(event) => setSelected(event.target.value)}><option value="">เลือก release</option>{choices.map((release) => <option key={release.version} value={release.version}>{release.version} · {release.channel}</option>)}</select></label><button type="button" className="rounded bg-primary px-3 py-2 text-sm text-primary-foreground disabled:opacity-50" disabled={!selected || busy || !canStart} onClick={() => void requestCommand({ releaseVersion: selected })}>สร้างคำสั่งอัปเดต</button></> : <p>ไม่มี release ที่ต่างจากเวอร์ชันปัจจุบัน</p> : null}
-      <button type="button" className="rounded border px-3 py-2 text-sm" onClick={() => setOpen(false)}>ปิด</button>
-    </div> : null}
-    {command?.command ? <div className="space-y-2"><p className="text-sm">คำสั่งสำหรับ {machine.machineId} · เป้าหมาย {command.targetVersion} · หมดอายุเมื่อ (UTC): {command.expiresAtUtc}</p><p className="text-sm">เรียกใช้ PowerShell แบบผู้ดูแลบนเครื่องนี้ คำสั่งมีตั๋วใช้ครั้งเดียว</p><textarea aria-label={`คำสั่งอัปเดต Agent สำหรับ ${machine.machineId}`} className="w-full rounded border bg-background p-2 font-mono text-xs" rows={5} readOnly spellCheck={false} value={command.command} /><button type="button" className="rounded border px-3 py-2 text-sm disabled:opacity-50" disabled={expired} onClick={() => void copy()}>คัดลอกคำสั่งอัปเดต</button>{expired ? <p className="text-sm">คำสั่งหมดอายุแล้ว</p> : null}</div> : null}
-    <p role="status" aria-live="polite" className="text-sm">{message}</p>
-  </section>;
+  return (
+    <section className="flex flex-col gap-3 rounded-2xl border bg-card p-4" aria-label={`อัปเดต Agent ${machine.machineId}`}>
+      <h3 className="flex items-center gap-2 font-heading text-base font-medium">
+        <span className="flex size-8 items-center justify-center rounded-xl bg-muted text-muted-foreground">
+          <Bot aria-hidden className="size-4" />
+        </span>
+        Update Agent
+      </h3>
+      <p className="text-sm">สถานะอัปเดต: {status ? updateStatusLabels[status] || status : "ยังไม่มีการอัปเดต"}{targetVersion ? ` · เป้าหมาย ${targetVersion}` : ""}</p>
+      <p className="text-sm text-muted-foreground">ผลอัปเดตแยกจากการอนุมัติและความพร้อมให้เช่า</p>
+      {!leaseClear ? <p className="text-sm text-status-busy">{machine.allocationHeld ? "เครื่องมี lease อยู่ จึงอัปเดตไม่ได้" : "ไม่ทราบสถานะ lease กรุณารีเฟรชข้อมูลเครื่อง"}</p> : null}
+      {leaseClear && !locked && (!machine.agentVersion || !isAgentOnline(machine, clock)) ? <p className="text-sm text-status-busy">ต้องมี heartbeat ล่าสุดพร้อมเวอร์ชัน Agent ภายใน 20 วินาที</p> : null}
+      {status === "rollingBack" ? (
+        <p className="flex items-start gap-2 rounded-2xl bg-status-busy/10 p-3 text-sm text-status-busy">
+          <ShieldAlert aria-hidden className="mt-0.5 size-4 shrink-0" />
+          <span>หาก Agent รุ่นเดิมไม่รองรับการยืนยันหลัง rollback เครื่องจะยังถูกล็อก ใช้กู้คืนการอัปเดตเดิมเพื่อติดตั้งเป้าหมายเดิมที่รองรับการยืนยัน หากเป้าหมายเดิมเป็น release เก่าที่ไม่รองรับ ให้หยุดและวางแผนกู้คืนกับผู้ดูแล</span>
+        </p>
+      ) : null}
+      <div className="flex flex-col gap-2">
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="self-start"
+          disabled={!canStart || busy || Boolean(command && !expired && !terminal.has(status || ""))}
+          onClick={() => void chooseRelease()}
+        >
+          Update Agent
+        </Button>
+        <AgentRecoveryIntentControl key={`${actorId}:${machine.machineId}`} machine={machine} actorId={actorId} onUpdated={onUpdated} />
+      </div>
+      {open ? (
+        <div className="flex flex-col gap-3 rounded-2xl bg-muted/50 p-4">
+          {busy && !releases ? <p role="status" className="text-sm">กำลังโหลด release…</p> : null}
+          {releases ? (
+            choices.length ? (
+              <>
+                <label className="flex flex-col gap-1 text-sm">
+                  เลือก release สำหรับ {machine.machineId}
+                  <select className="h-9 rounded-xl border border-transparent bg-background px-3 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/30" value={selected} onChange={(event) => setSelected(event.target.value)}>
+                    <option value="">เลือก release</option>
+                    {choices.map((release) => <option key={release.version} value={release.version}>{release.version} · {release.channel}</option>)}
+                  </select>
+                </label>
+                <Button type="button" size="sm" className="self-start" disabled={!selected || busy || !canStart} onClick={() => void requestCommand({ releaseVersion: selected })}>สร้างคำสั่งอัปเดต</Button>
+              </>
+            ) : (
+              <p className="text-sm">ไม่มี release ที่ต่างจากเวอร์ชันปัจจุบัน</p>
+            )
+          ) : null}
+          <Button type="button" variant="ghost" size="sm" className="self-start" onClick={() => setOpen(false)}>ปิด</Button>
+        </div>
+      ) : null}
+      {command?.command ? (
+        <div className="flex flex-col gap-3 rounded-2xl bg-muted/50 p-4">
+          <p className="text-sm">คำสั่งสำหรับ {machine.machineId} · เป้าหมาย {command.targetVersion} · หมดอายุเมื่อ (UTC): {command.expiresAtUtc}</p>
+          <p className="text-sm text-muted-foreground">เรียกใช้ PowerShell แบบผู้ดูแลบนเครื่องนี้ คำสั่งมีตั๋วใช้ครั้งเดียว</p>
+          <textarea aria-label={`คำสั่งอัปเดต Agent สำหรับ ${machine.machineId}`} className="min-h-24 w-full rounded-xl border border-transparent bg-background px-3 py-2 font-mono text-xs outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/30" rows={5} readOnly spellCheck={false} value={command.command} />
+          <div className="flex flex-wrap items-center gap-2">
+            <Button type="button" variant="outline" size="sm" disabled={expired} onClick={() => void copy()}>คัดลอกคำสั่งอัปเดต</Button>
+            {expired ? <p className="text-sm text-status-maintenance">คำสั่งหมดอายุแล้ว</p> : null}
+          </div>
+        </div>
+      ) : null}
+      <p role="status" aria-live="polite" className="text-sm">{message}</p>
+    </section>
+  );
 }

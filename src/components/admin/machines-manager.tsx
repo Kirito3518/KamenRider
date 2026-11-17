@@ -1,101 +1,62 @@
 "use client";
-import Link from "next/link";
-import { useCallback, useEffect, useRef, useState, type ChangeEventHandler } from "react";
-import { AgentUpdateControl } from "@/components/admin/agent-update-control";
-import type {
-  Machine,
-  ReadinessDiagnosticCheckId,
-  ReadinessDiagnosticStatus,
-} from "@/lib/machine-contracts";
-import { getInstallCommandExpiryState } from "@/lib/agent-install-expiry.mjs";
-import { formatRamBytes, formatSpec } from "@/lib/machine-specs";
-import {
-  getSavedVncTargetForMetadataUpdate,
-  getVncTargetForExplicitSave,
-  mergeVncTargetDrafts,
-  updateVncTargetDraft,
-} from "@/lib/admin-vnc-target-drafts.mjs";
 
-const READINESS_CHECK_LABELS: Record<ReadinessDiagnosticCheckId, string> = {
-  baseline: "การตรวจพื้นฐาน",
-  bootChallenge: "การทดสอบยืนยันการบูต",
-  restoration: "การตรวจการคืนค่าสภาพเครื่อง",
-  streamFence: "การตรวจป้องกันการสตรีมก่อนพร้อม",
-  desktopHealth: "การตรวจสุขภาพเดสก์ท็อป",
-  configurationRevision: "การตรวจ revision การตั้งค่า",
-  leaseReconciliation: "การตรวจสถานะ lease",
-  runtimeHealth: "การตรวจความพร้อมขณะทำงาน",
-};
+import { useCallback, useEffect, useRef, useState } from "react";
+import toast from "react-hot-toast";
+import { AlertTriangle, Download, Monitor, RefreshCw } from "lucide-react";
+import { AdminPage, AdminPageHeader } from "@/components/admin/admin-page";
+import { AgentInstallDialog } from "@/components/admin/machines/agent-install-dialog";
+import { ApproveMachineDialog } from "@/components/admin/machines/approve-machine-dialog";
+import { ApprovedMachinesTable } from "@/components/admin/machines/approved-machines-table";
+import { MachineSettingsDialog, type MachineMetadataInput } from "@/components/admin/machines/machine-settings-dialog";
+import { MachineStats } from "@/components/admin/machines/machine-stats";
+import { PendingMachines } from "@/components/admin/machines/pending-machines";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Spinner } from "@/components/ui/spinner";
+import type { Machine } from "@/lib/machine-contracts";
 
-const READINESS_STATUS_LABELS: Record<ReadinessDiagnosticStatus, string> = {
-  passed: "ผ่าน",
-  blocked: "ถูกบล็อก",
-  unavailable: "ไม่มีระบบตรวจสอบ",
-  unknown: "ยังไม่ทราบผล",
-};
-
-type AgentInstallCommandResult = {
-  available: boolean;
-  command?: string;
-  expiresAtUtc?: string;
-  reason?: string;
-};
-
-async function fetchInstallCommand(): Promise<AgentInstallCommandResult> {
-  const response = await fetch("/api/admin/agent-install-command", {
-    method: "POST",
-    cache: "no-store",
-  });
-  if (!response.ok) throw new Error("ตรวจชุดติดตั้งไม่ได้");
-  return (await response.json()) as AgentInstallCommandResult;
-}
-
-async function request(path: string, body?: unknown, method = "POST") {
-  const r = await fetch(path, {
-    method,
-    cache: "no-store",
-    headers: { "Content-Type": "application/json" },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
-  const data = await r.json();
-  if (!r.ok) throw new Error(`${r.status}: ${data.error}`);
-  return data;
+async function responseError(response: Response, fallback: string) {
+  const payload = (await response.json().catch(() => ({}))) as { error?: unknown };
+  const detail = typeof payload.error === "string" && payload.error ? payload.error : `HTTP ${response.status}`;
+  return new Error(`${fallback} (${detail})`);
 }
 
 export function MachinesManager({ actorId }: { actorId: string }) {
-  const [machines, setMachines] = useState<Machine[]>([]);
-  const [vncTargetDrafts, setVncTargetDrafts] = useState<Record<string, string>>({});
-  const [vncTargetCheckStatuses, setVncTargetCheckStatuses] = useState<
-    Record<string, { targetAddress: string; checkedAt: number | null; state: "checking" | "supported" | "unsupported" | "error" }>
-  >({});
-  const vncTargetCheckRuns = useRef(new Map<string, number>());
-  const [installCommand, setInstallCommand] = useState<string | null>(null);
-  const [installExpiresAtUtc, setInstallExpiresAtUtc] = useState<string | null>(null);
-  const [installClockNow, setInstallClockNow] = useState(0);
-  const [isRefreshingInstallCommand, setIsRefreshingInstallCommand] = useState(false);
-  const [installStatus, setInstallStatus] = useState("กดปุ่มเพื่อขอคำสั่งติดตั้ง");
-  const [copyStatus, setCopyStatus] = useState("");
-  const [loadStatus, setLoadStatus] = useState("กำลังโหลด…");
+  const [machines, setMachines] = useState<Machine[] | null>(null);
+  const [loadError, setLoadError] = useState("");
+  const [now, setNow] = useState(0);
+  const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState("");
+  const [installOpen, setInstallOpen] = useState(false);
+  const [settingsMachineId, setSettingsMachineId] = useState<string | null>(null);
+  const [approveMachineId, setApproveMachineId] = useState<string | null>(null);
   const latestLoad = useRef(0);
+
   const load = useCallback(async (signal?: AbortSignal): Promise<boolean> => {
     const run = ++latestLoad.current;
     try {
       const response = await fetch("/api/admin/machines", { cache: "no-store", signal });
-      if (!response.ok) throw new Error("โหลดเครื่องไม่ได้");
-      const nextMachines: Machine[] = await response.json();
+      if (!response.ok) throw new Error("โหลดข้อมูลเครื่องไม่ได้");
+      const nextMachines = (await response.json()) as Machine[];
       if (signal?.aborted || run !== latestLoad.current) return false;
       setMachines(nextMachines);
-      setVncTargetDrafts((current) =>
-        mergeVncTargetDrafts(current, nextMachines),
+      setSettingsMachineId((current) =>
+        current && !nextMachines.some((machine) => machine.machineId === current) ? null : current,
       );
-      setLoadStatus("");
+      setApproveMachineId((current) =>
+        current && !nextMachines.some((machine) => machine.machineId === current) ? null : current,
+      );
+      setNow(Date.now());
+      setLoadError("");
       return true;
-    } catch (e) {
-      if (!signal?.aborted && run === latestLoad.current) setLoadStatus(String(e));
+    } catch (cause) {
+      if (signal?.aborted || run !== latestLoad.current) return false;
+      setLoadError(cause instanceof Error && cause.message ? cause.message : "โหลดข้อมูลเครื่องไม่ได้");
       return false;
     }
   }, []);
+
   useEffect(() => {
     const loads = latestLoad;
     const controller = new AbortController();
@@ -119,406 +80,153 @@ export function MachinesManager({ actorId }: { actorId: string }) {
       window.clearInterval(timer);
     };
   }, [load]);
-  const refreshInstallCommand = useCallback(async () => {
-    setIsRefreshingInstallCommand(true);
-    setInstallStatus("กำลังขอคำสั่งติดตั้ง…");
-    setCopyStatus("");
-    try {
-      const result = await fetchInstallCommand();
-      const available = result.available && Boolean(result.command) && Boolean(result.expiresAtUtc);
-      setInstallCommand(available ? result.command! : null);
-      setInstallExpiresAtUtc(available ? result.expiresAtUtc! : null);
-      setInstallClockNow(Date.now());
-      setInstallStatus(available ? "ชุดติดตั้งพร้อมใช้งาน" : result.reason || "ชุดติดตั้งยังไม่พร้อม");
-    } catch (error) {
-      setInstallStatus(`ตรวจชุดติดตั้งไม่ได้: ${String(error)}`);
-    } finally {
-      setIsRefreshingInstallCommand(false);
-    }
-  }, []);
-  useEffect(() => {
-    if (!installExpiresAtUtc) return;
-    const expiresAtMs = Date.parse(installExpiresAtUtc);
-    const updateClock = () => setInstallClockNow(Date.now());
-    if (!Number.isFinite(expiresAtMs)) {
-      updateClock();
-      return;
-    }
-    const timer = window.setTimeout(updateClock, Math.max(0, expiresAtMs - Date.now()));
-    window.addEventListener("focus", updateClock);
-    document.addEventListener("visibilitychange", updateClock);
-    return () => {
-      window.clearTimeout(timer);
-      window.removeEventListener("focus", updateClock);
-      document.removeEventListener("visibilitychange", updateClock);
-    };
-  }, [installExpiresAtUtc]);
-  const installExpiry = installExpiresAtUtc
-    ? getInstallCommandExpiryState(installExpiresAtUtc, installClockNow)
-    : null;
-  async function copyInstallCommand() {
-    if (!installCommand || !installExpiresAtUtc) return;
-    const expiry = getInstallCommandExpiryState(installExpiresAtUtc, Date.now());
-    setInstallClockNow(Date.now());
-    if (expiry.expired) {
-      setCopyStatus("คำสั่งหมดอายุแล้ว กรุณาขอคำสั่งใหม่");
-      return;
-    }
-    try {
-      await navigator.clipboard.writeText(installCommand);
-      setCopyStatus("คัดลอกคำสั่งแล้ว");
-    } catch {
-      setCopyStatus("คัดลอกอัตโนมัติไม่ได้ เลือกข้อความในช่องแล้วกด Ctrl+C");
-    }
-  }
-  async function act(path: string, body: unknown, method = "POST") {
-    try {
-      setMessage("กำลังส่ง…");
-      await request(path, body, method);
-      await load();
-      setMessage("บันทึกคำขอแล้ว ตรวจสถานะ Agent ก่อนใช้งาน");
-      return true;
-    } catch (e) {
-      setMessage(String(e));
-      return false;
-    }
-  }
-  function invalidateVncTargetCheck(machineId: string) {
-    vncTargetCheckRuns.current.set(
-      machineId,
-      (vncTargetCheckRuns.current.get(machineId) ?? 0) + 1,
-    );
-    setVncTargetCheckStatuses((current) => {
-      if (!(machineId in current)) return current;
-      const next = { ...current };
-      delete next[machineId];
-      return next;
-    });
-  }
-  async function checkVncTarget(machineId: string) {
-    const targetAddress = getVncTargetForExplicitSave(vncTargetDrafts[machineId]);
-    if (!targetAddress) {
-      setMessage("กรอก IPv4 LAN ส่วนตัวหรือ IPv6 ULA ที่ยืนยันกับเครื่องจริงก่อนตรวจสอบ");
-      return;
-    }
 
-    const requestId = (vncTargetCheckRuns.current.get(machineId) ?? 0) + 1;
-    vncTargetCheckRuns.current.set(machineId, requestId);
-    setVncTargetCheckStatuses((current) => ({
-      ...current,
-      [machineId]: { targetAddress, checkedAt: null, state: "checking" },
-    }));
+  async function refreshManually() {
+    setLoading(true);
     try {
-      const result = (await request("/api/admin/vnc-target-check", {
-        machineId,
-        targetAddress,
-      })) as { supported: boolean };
-      if (vncTargetCheckRuns.current.get(machineId) !== requestId) return;
-      setVncTargetCheckStatuses((current) => ({
-        ...current,
-        [machineId]: {
-          targetAddress,
-          checkedAt: Date.now(),
-          state: result.supported ? "supported" : "unsupported",
-        },
-      }));
-    } catch {
-      if (vncTargetCheckRuns.current.get(machineId) !== requestId) return;
-      setVncTargetCheckStatuses((current) => ({
-        ...current,
-        [machineId]: { targetAddress, checkedAt: null, state: "error" },
-      }));
+      const ok = await load();
+      if (!ok) toast.error("โหลดข้อมูลเครื่องไม่สำเร็จ");
+    } finally {
+      setLoading(false);
     }
   }
+
+  async function saveMachineSettings(machine: Machine, input: MachineMetadataInput) {
+    const response = await fetch(`/api/admin/machines/${encodeURIComponent(machine.machineId)}`, {
+      method: "PATCH",
+      cache: "no-store",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...input, expectedRevision: machine.configRevision }),
+    });
+    if (!response.ok) throw await responseError(response, "บันทึกการตั้งค่าไม่สำเร็จ");
+    setMessage(`บันทึกการตั้งค่า ${machine.displayName || machine.machineId} แล้ว`);
+    toast.success("บันทึกการตั้งค่าแล้ว");
+    await load();
+  }
+
+  async function approveMachine(machine: Machine, fingerprint: string) {
+    const response = await fetch(`/api/admin/machines/${encodeURIComponent(machine.machineId)}/approve`, {
+      method: "POST",
+      cache: "no-store",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ fingerprint }),
+    });
+    if (!response.ok) throw await responseError(response, "อนุมัติเครื่องไม่สำเร็จ");
+    setApproveMachineId(null);
+    setMessage(`อนุมัติเครื่อง ${machine.displayName || machine.machineId} แล้ว`);
+    toast.success("อนุมัติเครื่องแล้ว");
+    await load();
+  }
+
+  async function rejectMachine(machine: Machine) {
+    if (!machine.publicKeyFingerprint) throw new Error("ไม่พบ fingerprint ของเครื่องนี้");
+    const response = await fetch(`/api/admin/machines/${encodeURIComponent(machine.machineId)}/reject`, {
+      method: "POST",
+      cache: "no-store",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ fingerprint: machine.publicKeyFingerprint }),
+    });
+    if (!response.ok) throw await responseError(response, "ปฏิเสธเครื่องไม่สำเร็จ");
+    setSettingsMachineId(null);
+    setMessage(`ปฏิเสธเครื่อง ${machine.displayName || machine.machineId} แล้ว`);
+    toast.success("ปฏิเสธเครื่องแล้ว");
+    await load();
+  }
+
+  const settingsMachine = machines?.find((machine) => machine.machineId === settingsMachineId) ?? null;
+  const approveMachineTarget = machines?.find((machine) => machine.machineId === approveMachineId) ?? null;
+
   return (
-    <main className="mx-auto max-w-5xl space-y-5 p-5">
-      <h1 className="text-3xl font-bold">เครื่องและ Agent</h1>
-      <section className="space-y-2 rounded-xl border p-4">
-        <h2 className="text-xl font-semibold">ติดตั้งเครื่องลูก</h2>
-        <p role="status" aria-live="polite">
-          {installCommand && installExpiry?.expired ? "คำสั่งติดตั้งหมดอายุแล้ว กรุณาขอคำสั่งใหม่" : installStatus}
-        </p>
-        <button
-          type="button"
-          className="rounded border p-2 disabled:opacity-50"
-          disabled={isRefreshingInstallCommand}
-          onClick={() => void refreshInstallCommand()}
-        >
-          {isRefreshingInstallCommand
-            ? "กำลังขอคำสั่ง…"
-            : installCommand
-              ? "ขอคำสั่งติดตั้งใหม่"
-              : "ขอคำสั่งติดตั้ง"}
-        </button>
-        {installCommand ? <>
-          <ol className="list-inside list-decimal space-y-1 text-sm">
-            <li>เปิด PowerShell แบบ Administrator บนเครื่องลูก</li>
-            <li>คัดลอกคำสั่งด้านล่างไปรันบนเครื่องนั้น</li>
-            <li>หลังลงทะเบียนแล้ว หน้าแอดมินจะเปิดขึ้นและเครื่องจะแสดงเป็น pending</li>
-          </ol>
-          <p>หมดอายุเมื่อ (UTC): {installExpiry?.displayUtc || "ไม่ทราบ"}</p>
-          <textarea id="agent-install-command" className="w-full rounded border p-2 font-mono text-xs" rows={5} readOnly spellCheck={false} value={installCommand} aria-label="คำสั่งติดตั้ง Agent" />
-          <button
-            className="rounded border p-2 disabled:opacity-50"
-            disabled={isRefreshingInstallCommand || !installExpiresAtUtc || installExpiry?.expired !== false}
-            onClick={copyInstallCommand}
-          >
-            คัดลอกคำสั่ง PowerShell
-          </button>
-          <p role="status" aria-live="polite">{copyStatus}</p>
-        </> : null}
-      </section>
-      <p>
-        ระบบทดลอง ไม่มีการหักยอดเงิน ความพร้อมจริงยังต้องผ่านการตรวจสอบ Agent
-      </p>
-      <button className="rounded border p-2" onClick={() => void load()}>
-        รีเฟรช
-      </button>
-      <p role="status">{message || loadStatus}</p>
-      {!machines.length && !loadStatus ? <p>ยังไม่มีเครื่องลงทะเบียน</p> : null}
-      {machines.some((m) => m.approvalStatus === "pending") ? (
-        <p>เครื่องรอตั้งค่าและอนุมัติ: {machines.filter((m) => m.approvalStatus === "pending").length}</p>
-      ) : null}
-      {[...machines].sort((a, b) => Number(b.approvalStatus === "pending") - Number(a.approvalStatus === "pending")).map((m) => (
-        <section
-          key={`${m.machineId}-${m.configRevision}`}
-          className="space-y-3 rounded-xl border p-4"
-        >
-          <h2 className="font-bold">
-            {m.machineId} · {m.approvalStatus}
-          </h2>
-          <p>
-            Agent: {m.agentVersion || "ยังไม่รายงาน"} · Readiness: {m.readiness} · Config revision: {m.configRevision} ·
-            ACK: {m.appliedConfigRevision ?? "ยังไม่ยืนยัน"}{" "}
-            {m.appliedConfigRevision === m.configRevision
-              ? "(ตรงกับ config)"
-              : "(รอ Agent ACK)"}
-          </p>
-          <p>
-            ชื่อที่แสดง: {formatSpec(m.displayName)} · Hostname: {formatSpec(m.hostname)} · CPU: {formatSpec(m.cpu)} · GPU: {formatSpec(m.gpu)} · RAM: {formatRamBytes(m.ramBytes)}
-          </p>
-          <p>
-            Sunshine credential revision ที่ Agent ใช้: {m.appliedSunshineCredentialRevision ?? 0}
-          </p>
-          <p role="status">
-            เซสชันผู้ดูแลที่กำลังดู VNC: {m.activeAdminVncSessions ?? 0}
-          </p>
-          <AgentUpdateControl key={`${actorId}:${m.machineId}`} machine={m} actorId={actorId} onUpdated={() => load()} />
-          <p className="break-all font-mono text-sm">
-            Fingerprint: {m.publicKeyFingerprint || "ยังไม่มีข้อมูลยืนยัน"}
-          </p>
-          <p className="break-all font-mono text-sm">
-            IP ที่ Agent รายงาน: {m.localIp}
-          </p>
-          <section
-            className="space-y-2 rounded border p-3"
-            aria-label="ผลตรวจวินิจฉัยจาก Agent"
-          >
-            <h3 className="font-semibold">ผลตรวจวินิจฉัยจาก Agent</h3>
-            <p className="text-sm">
-              ผลตรวจวินิจฉัยจาก Agent เท่านั้น ไม่ใช่การอนุมัติให้เช่า
-            </p>
-            {m.readinessDiagnostics?.length ? (
-              <ul className="space-y-1 text-sm">
-                {m.readinessDiagnostics.map((diagnostic) => (
-                  <li
-                    key={diagnostic.checkId}
-                    className="flex flex-wrap justify-between gap-2"
-                  >
-                    <span>{READINESS_CHECK_LABELS[diagnostic.checkId]}</span>
-                    <span>{READINESS_STATUS_LABELS[diagnostic.status]}</span>
-                  </li>
-                ))}
-              </ul>
-            ) : (
-              <p role="status">
-                {m.readinessDiagnostics
-                  ? "รายงานนี้ไม่มีรายการตรวจวินิจฉัย"
-                  : "Agent ยังไม่รายงานผลตรวจวินิจฉัย"}
-              </p>
-            )}
-          </section>
-          <form
-            className="grid gap-3 sm:grid-cols-2"
-            onSubmit={(e) => {
-              e.preventDefault();
-              const d = new FormData(e.currentTarget);
-              const savedVncTarget = getSavedVncTargetForMetadataUpdate(m);
-              void act(
-                `/api/admin/machines/${encodeURIComponent(m.machineId)}`,
-                {
-                  displayName: d.get("name"),
-                  hourlyPriceMinorUnits: Number(d.get("price")),
-                  moonlightPort: Number(d.get("moon")),
-                  sunshinePort: Number(d.get("sun")),
-                  vncLocalIp: savedVncTarget,
-                  expectedRevision: m.configRevision,
-                },
-                "PATCH",
-              );
-            }}
-          >
-            <label>
-              ชื่อ
-              <Input name="name" value={m.displayName} />
-            </label>
-            <label>
-              ราคา (สตางค์/ชั่วโมง)
-              <Input
-                name="price"
-                value={m.hourlyPriceMinorUnits}
-                type="number"
-              />
-            </label>
-            <label>
-              Moonlight port
-              <Input name="moon" value={m.moonlightPort} type="number" />
-            </label>
-            <label>
-              Management port
-              <Input name="sun" value={m.sunshinePort} type="number" />
-            </label>
-            <label>
-              IP เป้าหมาย VNC (ตรวจสอบกับเครื่องจริงก่อนบันทึก)
-              <Input
-                name="vncIp"
-                value={vncTargetDrafts[m.machineId] ?? ""}
-                required={false}
-                onChange={(event) => {
-                  const value = event.currentTarget.value;
-                  invalidateVncTargetCheck(m.machineId);
-                  setVncTargetDrafts((current) =>
-                    updateVncTargetDraft(current, m.machineId, value),
-                  );
-                }}
-              />
-            </label>
-            <button className="rounded border p-2">บันทึก metadata</button>
-            <div className="flex flex-wrap gap-2">
-              <button
-                type="button"
-                className="rounded border p-2 disabled:opacity-50"
-                disabled={vncTargetCheckStatuses[m.machineId]?.state === "checking"}
-                onClick={() => void checkVncTarget(m.machineId)}
-              >
-                {vncTargetCheckStatuses[m.machineId]?.state === "checking"
-                  ? "กำลังตรวจสอบ VNC…"
-                  : "ตรวจสอบ VNC"}
-              </button>
-              <button
-                type="button"
-                className="rounded border p-2"
-                onClick={async () => {
-                  const target = getVncTargetForExplicitSave(
-                    vncTargetDrafts[m.machineId],
-                  );
-                  if (!target) {
-                    setMessage("กรอก IPv4 LAN ส่วนตัวหรือ IPv6 ULA ที่ยืนยันกับเครื่องจริงก่อนบันทึก");
-                    return;
-                  }
-                  const saved = await act(
-                    `/api/admin/machines/${encodeURIComponent(m.machineId)}`,
-                    {
-                      displayName: m.displayName,
-                      hourlyPriceMinorUnits: m.hourlyPriceMinorUnits,
-                      moonlightPort: m.moonlightPort,
-                      sunshinePort: m.sunshinePort,
-                      vncLocalIp: target,
-                      expectedRevision: m.configRevision,
-                    },
-                    "PATCH",
-                  );
-                  if (!saved) return;
-                  setVncTargetDrafts((current) =>
-                    updateVncTargetDraft(current, m.machineId, target),
-                  );
-                }}
-              >
-                บันทึก IP เป้าหมาย VNC ที่ยืนยันแล้ว
-              </button>
-            </div>
-            {vncTargetCheckStatuses[m.machineId] ? (
-              <p role="status" aria-live="polite" className="text-sm">
-                {vncTargetCheckStatuses[m.machineId].state === "checking"
-                  ? `กำลังตรวจ ${vncTargetCheckStatuses[m.machineId].targetAddress}:5900…`
-                  : vncTargetCheckStatuses[m.machineId].state === "supported"
-                    ? `พบ VNC ที่รองรับบน ${vncTargetCheckStatuses[m.machineId].targetAddress}:5900 · ตรวจเมื่อ ${new Date(vncTargetCheckStatuses[m.machineId].checkedAt!).toLocaleString()} ตามเวลาท้องถิ่น (ยังไม่ได้ยืนยันรหัสผ่าน)`
-                    : vncTargetCheckStatuses[m.machineId].state === "unsupported"
-                      ? `ไม่พบ VNC ที่รองรับบน ${vncTargetCheckStatuses[m.machineId].targetAddress}:5900`
-                      : `ตรวจสอบ ${vncTargetCheckStatuses[m.machineId].targetAddress}:5900 ไม่สำเร็จ`}
-              </p>
-            ) : null}
-          </form>
-          {m.approvalStatus === "pending" ? (
-            <form
-              className="space-y-2"
-              onSubmit={(e) => {
-                e.preventDefault();
-                const fingerprint = String(
-                  new FormData(e.currentTarget).get("fingerprint"),
-                );
-                void act(
-                  `/api/admin/machines/${encodeURIComponent(m.machineId)}/approve`,
-                  { fingerprint },
-                );
-              }}
+    <AdminPage>
+      <AdminPageHeader
+        icon={Monitor}
+        title="เครื่องและ Agent"
+        titleSuffix={
+          <Badge variant="outline">
+            {machines === null ? "กำลังโหลด" : `${machines.length.toLocaleString("th-TH")} เครื่อง`}
+          </Badge>
+        }
+        description="อนุมัติเครื่องใหม่ ตั้งค่าชื่อ ราคา และเครือข่าย ดูแล Agent update จากที่เดียว — การควบคุมเครื่อง การเช่า และ VNC อยู่ที่ PC Control"
+        actions={
+          <>
+            <Button type="button" variant="outline" size="sm" disabled={loading} onClick={() => void refreshManually()}>
+              {loading ? <Spinner data-icon="inline-start" /> : <RefreshCw data-icon="inline-start" />}
+              รีเฟรช
+            </Button>
+            <Button type="button" size="sm" onClick={() => setInstallOpen(true)}>
+              <Download data-icon="inline-start" />
+              ติดตั้ง Agent
+            </Button>
+          </>
+        }
+      />
+
+      {loadError ? (
+        <Alert variant="destructive">
+          <AlertTriangle aria-hidden />
+          <AlertTitle>โหลดข้อมูลเครื่องไม่สำเร็จ</AlertTitle>
+          <AlertDescription>
+            <p>{loadError}</p>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="mt-2"
+              disabled={loading}
+              onClick={() => void refreshManually()}
             >
-              <label>
-                พิมพ์ fingerprint ที่ตรวจสอบจากเครื่องจริง
-                <Input name="fingerprint" value="" />
-              </label>
-              <button
-                disabled={!m.publicKeyFingerprint}
-                className="rounded border p-2 disabled:opacity-50"
-              >
-                อนุมัติ
-              </button>
-              <button
-                type="button"
-                className="ml-3 rounded border p-2"
-                onClick={() =>
-                  act(
-                    `/api/admin/machines/${encodeURIComponent(m.machineId)}/reject`,
-                    { fingerprint: m.publicKeyFingerprint },
-                  )
-                }
-              >
-                ปฏิเสธ pending
-              </button>
-            </form>
-          ) : (
-            <p className="text-sm text-muted-foreground">
-              ควบคุมเครื่อง เปิดจอ VNC ตรวจเวลา และจัดการการเช่าที่{" "}
-              <Link href="/admin/pc-control" className="underline underline-offset-4">
-                PC Control
-              </Link>
-            </p>
-          )}
-        </section>
-      ))}
-    </main>
-  );
-}
-function Input({
-  name,
-  value,
-  type = "text",
-  onChange,
-  required = true,
-}: {
-  name: string;
-  value: string | number;
-  type?: string;
-  onChange?: ChangeEventHandler<HTMLInputElement>;
-  required?: boolean;
-}) {
-  return (
-    <input
-      className="mt-1 block w-full rounded border p-2"
-      name={name}
-      {...(onChange ? { value, onChange } : { defaultValue: value })}
-      type={type}
-      required={required}
-    />
+              ลองใหม่
+            </Button>
+          </AlertDescription>
+        </Alert>
+      ) : null}
+
+      <MachineStats machines={machines} now={now} />
+
+      <PendingMachines
+        machines={machines}
+        onOpenSettings={setSettingsMachineId}
+        onApprove={setApproveMachineId}
+      />
+
+      <ApprovedMachinesTable
+        machines={machines}
+        now={now}
+        onOpenSettings={setSettingsMachineId}
+        onOpenInstall={() => setInstallOpen(true)}
+      />
+
+      <p className="text-xs text-muted-foreground">
+        ระบบทดลอง ไม่มีการหักยอดเงิน — ความพร้อมจริงยังต้องผ่านการตรวจสอบ Agent
+      </p>
+      <p role="status" aria-live="polite" className="sr-only">
+        {message}
+      </p>
+
+      <AgentInstallDialog open={installOpen} onOpenChange={setInstallOpen} />
+
+      <MachineSettingsDialog
+        key={settingsMachine?.machineId ?? "settings-closed"}
+        machine={settingsMachine}
+        open={settingsMachineId !== null}
+        actorId={actorId}
+        onOpenChange={(open) => {
+          if (!open) setSettingsMachineId(null);
+        }}
+        onSave={saveMachineSettings}
+        onReject={rejectMachine}
+        onUpdated={load}
+      />
+
+      <ApproveMachineDialog
+        key={approveMachineTarget?.machineId ?? "approve-closed"}
+        machine={approveMachineTarget}
+        open={approveMachineId !== null}
+        onOpenChange={(open) => {
+          if (!open) setApproveMachineId(null);
+        }}
+        onConfirm={(fingerprint) => (approveMachineTarget ? approveMachine(approveMachineTarget, fingerprint) : Promise.reject(new Error("ไม่พบเครื่องที่ต้องการอนุมัติ")))}
+      />
+    </AdminPage>
   );
 }
