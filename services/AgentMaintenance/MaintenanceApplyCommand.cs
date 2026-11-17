@@ -22,6 +22,13 @@ public interface IMaintenanceApplyLeaseAuthorization : IMaintenanceApplyAuthoriz
     void VerifyRequestBinding(MaintenanceCommandRequest request);
 }
 
+public interface IMaintenanceApplyWithHeldExclusion : IMaintenanceApplyCommand
+{
+    AgentMaintenanceCommandResult ExecuteWithHeldExclusion(
+        IMaintenanceApplyProcessExclusionLease exclusion,
+        MaintenanceCommandRequest? expectedRequest = null);
+}
+
 public interface IMaintenanceTrustedSunshinePathProvider
 {
     string GetTrustedSunshineExecutablePath(MaintenanceCommandRequest request);
@@ -36,7 +43,7 @@ public interface IMaintenanceApplyOperationFactory
         IMaintenanceApplyAuthorization authorization);
 }
 
-public sealed class MaintenanceApplyCommand : IMaintenanceApplyCommand
+public sealed class MaintenanceApplyCommand : IMaintenanceApplyWithHeldExclusion
 {
     private readonly LocalUpdateEngine engine;
     private readonly IMaintenanceApplyProcessExclusionProvider exclusionProvider;
@@ -44,6 +51,8 @@ public sealed class MaintenanceApplyCommand : IMaintenanceApplyCommand
     private readonly IMaintenanceTrustedSunshinePathProvider sunshinePathProvider;
     private readonly IMaintenanceApplyOperationFactory operationFactory;
     private readonly IMaintenanceJournalStore? journalStore;
+    private readonly IMaintenanceApplyMetadataStore? applyMetadataStore;
+    private readonly IMaintenanceOperationFenceVerifier? fenceVerifier;
 
     public MaintenanceApplyCommand(
         LocalUpdateEngine engine,
@@ -51,7 +60,9 @@ public sealed class MaintenanceApplyCommand : IMaintenanceApplyCommand
         IMaintenanceApplyLeaseAuthorization leaseAuthorization,
         IMaintenanceTrustedSunshinePathProvider sunshinePathProvider,
         IMaintenanceApplyOperationFactory operationFactory,
-        IMaintenanceJournalStore? journalStore = null)
+        IMaintenanceJournalStore? journalStore = null,
+        IMaintenanceApplyMetadataStore? applyMetadataStore = null,
+        IMaintenanceOperationFenceVerifier? fenceVerifier = null)
     {
         this.engine = engine ?? throw new ArgumentNullException(nameof(engine));
         this.exclusionProvider = exclusionProvider ?? throw new ArgumentNullException(nameof(exclusionProvider));
@@ -59,12 +70,17 @@ public sealed class MaintenanceApplyCommand : IMaintenanceApplyCommand
         this.sunshinePathProvider = sunshinePathProvider ?? throw new ArgumentNullException(nameof(sunshinePathProvider));
         this.operationFactory = operationFactory ?? throw new ArgumentNullException(nameof(operationFactory));
         this.journalStore = journalStore;
+        this.applyMetadataStore = applyMetadataStore ?? engine.ApplyMetadataStore;
+        this.fenceVerifier = fenceVerifier;
     }
 
-    public static MaintenanceApplyCommand CreateFailClosed(LocalUpdateEngine engine) =>
+    public static MaintenanceApplyCommand CreateFailClosed(
+        LocalUpdateEngine engine,
+        IMaintenanceApplyProcessExclusionProvider? exclusionProvider = null,
+        IMaintenanceApplyLeaseAuthorization? leaseAuthorization = null) =>
         new(engine,
-            new UnqualifiedLegacyProcessExclusionProvider(),
-            new UnavailableMaintenanceApplyLeaseAuthorization(),
+            exclusionProvider ?? new UnqualifiedLegacyProcessExclusionProvider(),
+            leaseAuthorization ?? new UnavailableMaintenanceApplyLeaseAuthorization(),
             new UnavailableMaintenanceTrustedSunshinePathProvider(),
             new UnavailableMaintenanceApplyOperationFactory());
 
@@ -76,42 +92,57 @@ public sealed class MaintenanceApplyCommand : IMaintenanceApplyCommand
 
         using (exclusion)
         {
-            var request = engine.ReadRequest("apply");
-            VerifyNativeTargetRuntime(request.TargetRuntime);
-            if (journalStore is null)
-                throw new InvalidOperationException("The protected maintenance journal store is unavailable.");
-            _ = new MaintenanceJournal(journalStore, request.ChainId!).VerifyApplyRequestBinding(request);
-
-            var authorization = new BoundMaintenanceApplyAuthorization(request, exclusion, leaseAuthorization);
-            authorization.VerifyHeld(request.OperationId);
-            var sunshinePath = ValidateTrustedSunshinePath(
-                sunshinePathProvider.GetTrustedSunshineExecutablePath(request));
-            var (inventory, extractionRoot) = engine.ExtractForApply(request);
-            // Extraction is isolated under the operation's protected work path. The
-            // apply operation performs the quiescence check immediately before each
-            // service or install transition, including recovery from a lost journal write.
-            authorization.VerifyHeld(request.OperationId);
-
-            var applyOperation = operationFactory.Create(
-                request, extractionRoot, sunshinePath, authorization)
-                ?? throw new InvalidOperationException("The maintenance apply operation factory returned no operation.");
-            var result = applyOperation.ApplyAsync(request.OperationId, inventory, CancellationToken.None)
-                .GetAwaiter().GetResult();
-            authorization.VerifyHeld(request.OperationId);
-
-            var applied = string.Equals(result.Outcome, "applied", StringComparison.Ordinal);
-            return new AgentMaintenanceCommandResult(
-                applied ? "ok" : "failed",
-                applied ? null : "rolledBack",
-                inventory.ArchiveHash,
-                result.InstalledVersion,
-                inventory.TargetRuntime,
-                inventory.InventoryDigest,
-                inventory.TotalBytes,
-                null,
-                ApplyOutcome: result.Outcome,
-                RollbackReason: result.RollbackReason);
+            return ExecuteWithHeldExclusion(exclusion);
         }
+    }
+
+    public AgentMaintenanceCommandResult ExecuteWithHeldExclusion(
+        IMaintenanceApplyProcessExclusionLease exclusion,
+        MaintenanceCommandRequest? expectedRequest = null)
+    {
+        ArgumentNullException.ThrowIfNull(exclusion);
+        var request = engine.ReadRequest("apply");
+        if (expectedRequest is not null && expectedRequest != request)
+            throw new InvalidOperationException("The protected apply request changed during reconciliation.");
+        VerifyNativeTargetRuntime(request.TargetRuntime);
+        if (journalStore is null)
+            throw new InvalidOperationException("The protected maintenance journal store is unavailable.");
+        var journalOperation = new MaintenanceJournal(journalStore, request.ChainId!).VerifyApplyRequestBinding(request);
+
+        var authorization = new BoundMaintenanceApplyAuthorization(request, journalOperation.Binding,
+            exclusion, leaseAuthorization, fenceVerifier);
+        authorization.VerifyHeld(request.OperationId);
+        var metadata = applyMetadataStore?.GetOrCreate(request)
+            ?? throw new InvalidOperationException("The protected operation-bound apply metadata store is unavailable.");
+        if (metadata != MaintenanceApplyMetadata.FromRequest(request))
+            throw new InvalidOperationException("The protected operation-bound apply metadata differs from the journaled target.");
+        var sunshinePath = ValidateTrustedSunshinePath(
+            sunshinePathProvider.GetTrustedSunshineExecutablePath(request));
+        var (inventory, extractionRoot) = engine.ExtractForApply(request);
+        // Extraction is isolated under the operation's protected work path. The
+        // apply operation performs the quiescence check immediately before each
+        // service or install transition, including recovery from a lost journal write.
+        authorization.VerifyHeld(request.OperationId);
+
+        var applyOperation = operationFactory.Create(
+            request, extractionRoot, sunshinePath, authorization)
+            ?? throw new InvalidOperationException("The maintenance apply operation factory returned no operation.");
+        var result = applyOperation.ApplyAsync(request.OperationId, inventory, CancellationToken.None)
+            .GetAwaiter().GetResult();
+        authorization.VerifyHeld(request.OperationId);
+
+        var applied = string.Equals(result.Outcome, "applied", StringComparison.Ordinal);
+        return new AgentMaintenanceCommandResult(
+            applied ? "ok" : "failed",
+            applied ? null : "rolledBack",
+            inventory.ArchiveHash,
+            result.InstalledVersion,
+            inventory.TargetRuntime,
+            inventory.InventoryDigest,
+            inventory.TotalBytes,
+            null,
+            ApplyOutcome: result.Outcome,
+            RollbackReason: result.RollbackReason);
     }
 
     private static string ValidateTrustedSunshinePath(string? path)
@@ -138,8 +169,10 @@ public sealed class MaintenanceApplyCommand : IMaintenanceApplyCommand
 
     private sealed class BoundMaintenanceApplyAuthorization(
         MaintenanceCommandRequest request,
+        MaintenanceOperationBinding binding,
         IMaintenanceApplyProcessExclusionLease exclusion,
-        IMaintenanceApplyLeaseAuthorization leaseAuthorization) : IMaintenanceApplyAuthorization
+        IMaintenanceApplyLeaseAuthorization leaseAuthorization,
+        IMaintenanceOperationFenceVerifier? fenceVerifier) : IMaintenanceApplyAuthorization
     {
         public void VerifyHeldAndQuiesced(string operationId)
         {
@@ -147,6 +180,7 @@ public sealed class MaintenanceApplyCommand : IMaintenanceApplyCommand
             exclusion.VerifyContinuouslyHeld(operationId);
             leaseAuthorization.VerifyRequestBinding(request);
             leaseAuthorization.VerifyHeldAndQuiesced(operationId);
+            fenceVerifier?.VerifyHeld(binding);
         }
 
         public void VerifyHeld(string operationId)
@@ -155,6 +189,7 @@ public sealed class MaintenanceApplyCommand : IMaintenanceApplyCommand
             exclusion.VerifyContinuouslyHeld(operationId);
             leaseAuthorization.VerifyRequestBinding(request);
             leaseAuthorization.VerifyHeld(operationId);
+            fenceVerifier?.VerifyHeld(binding);
         }
 
         private void VerifyOperationId(string operationId)

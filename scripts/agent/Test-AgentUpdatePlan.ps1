@@ -13,14 +13,27 @@ function Assert-AgentUpdateThrows {
 
 $validRequest = [pscustomobject]@{
     ControllerUrl = 'https://controller.example/'
+    AssetBaseUrl = 'https://assets.example/'
     MachineId = '00112233445566778899aabbccddeeff'
     OperationId = 'ffeeddccbbaa99887766554433221100'
+    ChainId = 'ffeeddccbbaa99887766554433221100'
+    HeadOperationId = 'ffeeddccbbaa99887766554433221100'
+    Generation = 1
+    EnrollmentKeyFingerprint = 'D' * 64
+    PackageLength = 1048576
     UpdateTicket = 'A' * 43
     ReleaseVersion = '2.3.4'
     TargetVersion = '2.3.4'
+    TargetRuntime = 'win-x64'
     PackageSha256 = 'A' * 64
     TrustedRootThumbprint = 'B' * 40
     AdminReturnUrl = 'https://admin.example/admin/agent-releases'
+    WrapperSha256 = 'E' * 64
+    WrapperLength = 1024
+    HelperRelativeUrl = ('/agent/maintenance/sha256/' + ('F' * 64).ToLowerInvariant() + '/AgentMaintenance.exe')
+    HelperSha256 = 'F' * 64
+    HelperLength = 4096
+    HelperProtocol = 1
 }
 
 Test-AgentUpdateRequest -Request $validRequest | Out-Null

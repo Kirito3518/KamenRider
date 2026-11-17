@@ -61,8 +61,9 @@ public sealed partial class InstalledAgentSourceInspectorTests
         MaintenanceCommandRequest request,
         byte[] archive,
         string extractionRoot,
-        List<string> events) : IMaintenanceWorkStore, IMaintenanceApplyWorkStore
+        List<string> events) : IMaintenanceWorkStore, IMaintenanceApplyWorkStore, IMaintenanceApplyMetadataStore
     {
+        private MaintenanceApplyMetadata? applyMetadata;
         public int ArchiveOpenCount { get; private set; }
         public int ExtractionRootCreateCount { get; private set; }
         public int ApplyExtractionRootCreateCount { get; private set; }
@@ -73,6 +74,7 @@ public sealed partial class InstalledAgentSourceInspectorTests
                 request.ChainId, request.HeadOperationId,
                 request.Generation!.Value.ToString(System.Globalization.CultureInfo.InvariantCulture), request.OperationId,
                 request.TargetVersion, request.TargetRuntime, request.TargetPackageSha256.ToUpperInvariant())))));
+        public MaintenanceApplyMetadata? StoredApplyMetadata => applyMetadata;
 
         public MaintenanceCommandRequest ReadRequest(string expectedCommand)
         {
@@ -100,6 +102,30 @@ public sealed partial class InstalledAgentSourceInspectorTests
             Directory.CreateDirectory(ExtractionRoot);
             ExtractionRootCreateCount++;
             events.Add("extraction-root-created");
+        }
+
+        public MaintenanceApplyMetadata GetOrCreate(MaintenanceCommandRequest applyRequest)
+        {
+            var candidate = MaintenanceApplyMetadata.FromRequest(applyRequest);
+            if (applyMetadata is not null && applyMetadata != candidate)
+                throw new InvalidOperationException("The test apply metadata store is immutable per operation.");
+            applyMetadata = candidate;
+            events.Add("apply-metadata-persisted");
+            return candidate;
+        }
+
+        public MaintenanceApplyMetadata Read(MaintenanceOperationBinding binding)
+        {
+            var metadata = applyMetadata
+                ?? throw new InvalidOperationException("Apply metadata was not persisted before terminal verification.");
+            Assert.Equal(binding.OperationId, metadata.OperationId);
+            Assert.Equal(binding.ChainId, metadata.ChainId);
+            Assert.Equal(binding.HeadOperationId, metadata.HeadOperationId);
+            Assert.Equal(binding.Generation, metadata.Generation);
+            Assert.Equal(binding.TargetVersion, metadata.TargetVersion);
+            Assert.Equal(binding.TargetRuntime, metadata.TargetRuntime);
+            Assert.Equal(binding.TargetSha256, metadata.TargetPackageSha256);
+            return metadata;
         }
 
         public MaintenanceApplyExtractionRoot PrepareApplyExtractionRoot(
@@ -250,8 +276,9 @@ public sealed partial class InstalledAgentSourceInspectorTests
             Assert.Equal(Path.GetFullPath(expectedExtractedTargetDirectory), Path.GetFullPath(extractedTargetDirectory));
             Assert.Equal(Path.GetFullPath(expectedSunshinePath), trustedSunshineExecutablePath);
             events.Add("apply-operation-created");
+            var verifier = new MaintenanceTerminalStateVerifier(installDirectory, backupOperation, fileSystem, services);
             return new(installDirectory, extractedTargetDirectory, journal, backupOperation,
-                authorization, fileSystem, services);
+                authorization, fileSystem, services, verifier);
         }
     }
 
@@ -303,8 +330,14 @@ public sealed partial class InstalledAgentSourceInspectorTests
         Assert.Equal(1, workStore.ArchiveOpenCount);
         Assert.Equal(0, workStore.ExtractionRootCreateCount);
         Assert.Equal(1, workStore.ApplyExtractionRootCreateCount);
+        Assert.NotNull(workStore.StoredApplyMetadata);
+        Assert.Equal("operation-1", workStore.StoredApplyMetadata!.OperationId);
+        Assert.Equal("chain-1", workStore.StoredApplyMetadata.ChainId);
+        Assert.DoesNotContain("ticket", JsonSerializer.Serialize(workStore.StoredApplyMetadata,
+            new JsonSerializerOptions(JsonSerializerDefaults.Web)), StringComparison.OrdinalIgnoreCase);
         Assert.True(events.IndexOf("exclusion-acquired") < events.IndexOf("request-read"));
         Assert.True(events.IndexOf("exclusion-acquired") < events.IndexOf("archive-open"));
+        Assert.True(events.IndexOf("apply-metadata-persisted") < events.IndexOf("archive-open"));
         Assert.True(events.IndexOf("trusted-sunshine-resolved") < events.IndexOf("archive-open"));
         Assert.True(events.IndexOf("apply-operation-created") < events.IndexOf("exclusion-released"));
         Assert.Equal("servicesStarted", setup.Journal.Read()!.Operations.Single().Phase);
@@ -556,6 +589,138 @@ public sealed partial class InstalledAgentSourceInspectorTests
         Assert.Equal(1, workStore.ApplyExtractionRootCreateCount);
         Assert.Equal(1, workStore.ApplyExtractionRootReuseCount);
         Assert.False(retryExclusion.Lease.IsHeld);
+    }
+
+    [Fact]
+    public async Task ReconcileCommandRunsTheRealApplyExecutorAndVerifiesTheTerminalState()
+    {
+        var nativeRuntime = RuntimeInformation.OSArchitecture switch
+        {
+            Architecture.X64 => "win-x64",
+            Architecture.Arm64 => "win-arm64",
+            _ => throw new PlatformNotSupportedException("The apply command test requires x64 or ARM64.")
+        };
+        var archive = AgentPackageCorpus.Valid(nativeRuntime);
+        var setup = await PrepareApplySetupAsync(archive);
+        var events = new List<string>();
+        var services = new ApplyServices(events);
+        setup.BackupAuthorization.IsQuiesced = () => !services.IsRunning;
+        var request = new MaintenanceCommandRequest(1, "apply", "operation-1", AgentPackageCorpus.Version,
+            nativeRuntime, Convert.ToHexStringLower(SHA256.HashData(archive)), archive.LongLength,
+            "chain-1", "operation-1", 1);
+        var workStore = new ApplyCommandWorkStore(request, archive,
+            Path.Combine(root, "apply-reconcile-terminal-" + Guid.NewGuid().ToString("N")), events);
+        var engine = new LocalUpdateEngine(workStore);
+        var sunshinePath = Path.Combine(root, "Sunshine", "sunshine.exe");
+
+        var initialExclusion = new QualifiedExclusionProvider(events);
+        var initialCommand = new MaintenanceApplyCommand(engine, initialExclusion,
+            new ApplyCommandLeaseAuthorization(events, initialExclusion.Lease, () => !services.IsRunning),
+            new TrustedSunshinePathProvider(sunshinePath, events),
+            new ApplyCommandOperationFactory(sourceRoot, setup.Journal, setup.BackupOperation,
+                new ApplyFileSystem(events), services, sunshinePath, workStore.ApplyExtractionRoot, events),
+            setup.JournalStore);
+        var initialHost = new WindowsAgentMaintenanceCommandHost(engine, applyCommand: initialCommand);
+        using var initialOutput = new StringWriter();
+        using var initialError = new StringWriter();
+        var initialExitCode = AgentMaintenanceCli.Run(["apply"], initialHost, initialOutput, initialError);
+
+        Assert.Equal(0, initialExitCode);
+        Assert.Equal("servicesStarted", setup.Journal.Read()!.Operations.Single().Phase);
+        Assert.True(services.IsRunning);
+
+        var reconcileExclusion = new QualifiedExclusionProvider(events);
+        var reconcileApply = new MaintenanceApplyCommand(engine, reconcileExclusion,
+            new ApplyCommandLeaseAuthorization(events, reconcileExclusion.Lease, () => !services.IsRunning),
+            new TrustedSunshinePathProvider(sunshinePath, events),
+            new ApplyCommandOperationFactory(sourceRoot, setup.Journal, setup.BackupOperation,
+                new ApplyFileSystem(events), services, sunshinePath, workStore.ApplyExtractionRoot, events),
+            setup.JournalStore);
+        var reconcile = new MaintenanceReconcileCommand(engine, setup.JournalStore, reconcileExclusion,
+            new MaintenanceApplyReconcileExecutor(reconcileApply));
+
+        var result = reconcile.Execute();
+
+        Assert.Equal("ok", result.Status);
+        Assert.Equal("applied", result.ApplyOutcome);
+        Assert.Equal("servicesStarted", setup.Journal.Read()!.Operations.Single().Phase);
+        Assert.True(services.IsRunning);
+        Assert.Contains("verify-running:" + AgentPackageCorpus.Version, events);
+        Assert.False(reconcileExclusion.Lease.IsHeld);
+        Assert.Equal(2, workStore.ArchiveOpenCount);
+    }
+
+    [Fact]
+    public async Task ReconcileResumesRealApplyAfterSourceMoveBeforeJournalAdvance()
+    {
+        var nativeRuntime = RuntimeInformation.OSArchitecture switch
+        {
+            Architecture.X64 => "win-x64",
+            Architecture.Arm64 => "win-arm64",
+            _ => throw new PlatformNotSupportedException("The apply command test requires x64 or ARM64.")
+        };
+        var archive = AgentPackageCorpus.Valid(nativeRuntime);
+        var setup = await PrepareApplySetupAsync(archive);
+        var events = new List<string>();
+        var services = new ApplyServices(events);
+        setup.BackupAuthorization.IsQuiesced = () => !services.IsRunning;
+        var request = new MaintenanceCommandRequest(1, "apply", "operation-1", AgentPackageCorpus.Version,
+            nativeRuntime, Convert.ToHexStringLower(SHA256.HashData(archive)), archive.LongLength,
+            "chain-1", "operation-1", 1);
+        var workStore = new ApplyCommandWorkStore(request, archive,
+            Path.Combine(root, "apply-reconcile-interrupted-swap-" + Guid.NewGuid().ToString("N")), events);
+        var engine = new LocalUpdateEngine(workStore);
+        var sunshinePath = Path.Combine(root, "Sunshine", "sunshine.exe");
+        var priorPath = Path.Combine(Path.GetDirectoryName(sourceRoot)!, ".Agent-prior-operation-1");
+        var interruptedProvider = new QualifiedExclusionProvider(events);
+        var interruptedFileSystem = new ApplyFileSystem(events)
+        {
+            AfterMove = (source, destination) =>
+            {
+                if (string.Equals(Path.GetFullPath(source), Path.GetFullPath(sourceRoot), StringComparison.OrdinalIgnoreCase) &&
+                    string.Equals(Path.GetFullPath(destination), Path.GetFullPath(priorPath), StringComparison.OrdinalIgnoreCase))
+                    throw new IOException("simulated process loss after the source-to-prior rename");
+            }
+        };
+        var interruptedApply = new MaintenanceApplyCommand(engine, interruptedProvider,
+            new ApplyCommandLeaseAuthorization(events, interruptedProvider.Lease, () => !services.IsRunning),
+            new TrustedSunshinePathProvider(sunshinePath, events),
+            new ApplyCommandOperationFactory(sourceRoot, setup.Journal, setup.BackupOperation,
+                interruptedFileSystem, services, sunshinePath, workStore.ApplyExtractionRoot, events),
+            setup.JournalStore, workStore);
+
+        var interrupted = Assert.Throws<IOException>(() => interruptedApply.Execute());
+
+        Assert.Contains("source-to-prior rename", interrupted.Message, StringComparison.Ordinal);
+        Assert.Equal("swapIntent", setup.Journal.Read()!.Operations.Single().Phase);
+        Assert.False(Directory.Exists(sourceRoot));
+        Assert.True(Directory.Exists(priorPath));
+        Assert.True(Directory.Exists(Path.Combine(Path.GetDirectoryName(sourceRoot)!, ".Agent-stage-operation-1")));
+        Assert.False(services.IsRunning);
+        Assert.False(interruptedProvider.Lease.IsHeld);
+
+        var recoveryProvider = new QualifiedExclusionProvider(events);
+        var recoveryApply = new MaintenanceApplyCommand(engine, recoveryProvider,
+            new ApplyCommandLeaseAuthorization(events, recoveryProvider.Lease, () => !services.IsRunning),
+            new TrustedSunshinePathProvider(sunshinePath, events),
+            new ApplyCommandOperationFactory(sourceRoot, setup.Journal, setup.BackupOperation,
+                new ApplyFileSystem(events), services, sunshinePath, workStore.ApplyExtractionRoot, events),
+            setup.JournalStore, workStore);
+        var reconcile = new MaintenanceReconcileCommand(engine, setup.JournalStore, recoveryProvider,
+            new MaintenanceApplyReconcileExecutor(recoveryApply));
+
+        var result = reconcile.Execute();
+
+        Assert.Equal("ok", result.Status);
+        Assert.Equal("applied", result.ApplyOutcome);
+        Assert.Equal("servicesStarted", setup.Journal.Read()!.Operations.Single().Phase);
+        Assert.Equal(["swapIntent", "sourceMoved", "targetPlaced", "servicesStarted"],
+            setup.Journal.Read()!.Operations.Single().PhaseHistory.TakeLast(4));
+        Assert.True(services.IsRunning);
+        Assert.True(Directory.Exists(priorPath));
+        Assert.True(workStore.StoredApplyMetadata is not null);
+        Assert.Contains("start:" + AgentPackageCorpus.Version, events);
+        Assert.False(recoveryProvider.Lease.IsHeld);
     }
 
     [Fact]

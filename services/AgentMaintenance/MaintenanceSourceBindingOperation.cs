@@ -82,14 +82,20 @@ public sealed class WindowsMaintenanceBootIdentityProvider : IMaintenanceBootIde
 public sealed class HttpMaintenanceSourceBindingClient : IMaintenanceSourceBindingClient
 {
     private const int MaximumResponseBytes = 64 * 1024;
+    private static readonly TimeSpan DefaultRequestTimeout = TimeSpan.FromSeconds(30);
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { MaxDepth = 8 };
     private readonly HttpClient httpClient;
     private readonly TimeProvider timeProvider;
+    private readonly TimeSpan requestTimeout;
 
     public HttpMaintenanceSourceBindingClient(HttpClient httpClient, TimeProvider? timeProvider = null)
+        : this(httpClient, DefaultRequestTimeout, timeProvider) { }
+
+    internal HttpMaintenanceSourceBindingClient(HttpClient httpClient, TimeSpan requestTimeout, TimeProvider? timeProvider = null)
     {
         this.httpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
         this.timeProvider = timeProvider ?? TimeProvider.System;
+        this.requestTimeout = ValidateRequestTimeout(requestTimeout);
     }
 
     public static HttpMaintenanceSourceBindingClient CreateDefault(TimeProvider? timeProvider = null)
@@ -160,35 +166,47 @@ public sealed class HttpMaintenanceSourceBindingClient : IMaintenanceSourceBindi
         message.Headers.TryAddWithoutValidation("X-Agent-Signature", identity.Sign("POST", path, seconds, nonce,
             Encoding.UTF8.GetString(body)));
 
-        using var response = await httpClient.SendAsync(message, HttpCompletionOption.ResponseHeadersRead, cancellationToken)
-            .ConfigureAwait(false);
-        if (response.RequestMessage?.RequestUri is { } finalUri && finalUri != uri)
-            throw new InvalidOperationException("The Controller redirected a signed maintenance request.");
-        if (!response.IsSuccessStatusCode)
-        {
-            if (response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
-                throw new UnauthorizedAccessException("The Controller rejected the signed maintenance request.");
-            if (response.StatusCode == HttpStatusCode.Conflict)
-            {
-                var errorBytes = await ReadBoundedAsync(response.Content, cancellationToken).ConfigureAwait(false);
-                if (IsChallengeRenewalRequired(errorBytes))
-                    throw new MaintenanceSourceChallengeRenewalRequiredException();
-                throw new InvalidOperationException("The Controller rejected the maintenance state transition.");
-            }
-            if (response.StatusCode == HttpStatusCode.RequestEntityTooLarge)
-                throw new InvalidDataException("The Controller returned an oversized maintenance response.");
-            throw new IOException($"The Controller maintenance endpoint returned HTTP {(int)response.StatusCode}.");
-        }
-
-        var responseBytes = await ReadBoundedAsync(response.Content, cancellationToken).ConfigureAwait(false);
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        deadline.CancelAfter(requestTimeout);
         try
         {
-            return JsonSerializer.Deserialize<TResponse>(responseBytes, JsonOptions)
-                ?? throw new InvalidDataException("The Controller maintenance response was empty.");
+            using var response = await httpClient.SendAsync(message, HttpCompletionOption.ResponseHeadersRead, deadline.Token)
+                .ConfigureAwait(false);
+            if (response.RequestMessage?.RequestUri is { } finalUri && finalUri != uri)
+                throw new InvalidOperationException("The Controller redirected a signed maintenance request.");
+            if (response.StatusCode != HttpStatusCode.OK)
+            {
+                if (response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
+                    throw new UnauthorizedAccessException("The Controller rejected the signed maintenance request.");
+                if (response.StatusCode == HttpStatusCode.Conflict)
+                {
+                    var errorBytes = await ReadBoundedAsync(response.Content, deadline.Token).ConfigureAwait(false);
+                    if (IsChallengeRenewalRequired(errorBytes))
+                        throw new MaintenanceSourceChallengeRenewalRequiredException();
+                    throw new InvalidOperationException("The Controller rejected the maintenance state transition.");
+                }
+                if (response.StatusCode == HttpStatusCode.RequestEntityTooLarge)
+                    throw new InvalidDataException("The Controller returned an oversized maintenance response.");
+                throw new IOException($"The Controller maintenance endpoint returned HTTP {(int)response.StatusCode}.");
+            }
+
+            var responseBytes = await ReadBoundedAsync(response.Content, deadline.Token).ConfigureAwait(false);
+            deadline.Token.ThrowIfCancellationRequested();
+            try
+            {
+                var result = JsonSerializer.Deserialize<TResponse>(responseBytes, JsonOptions)
+                    ?? throw new InvalidDataException("The Controller maintenance response was empty.");
+                deadline.Token.ThrowIfCancellationRequested();
+                return result;
+            }
+            catch (JsonException exception)
+            {
+                throw new InvalidDataException("The Controller maintenance response was malformed.", exception);
+            }
         }
-        catch (JsonException exception)
+        catch (OperationCanceledException exception) when (!cancellationToken.IsCancellationRequested)
         {
-            throw new InvalidDataException("The Controller maintenance response was malformed.", exception);
+            throw new TimeoutException("The Controller maintenance request exceeded its bounded deadline.", exception);
         }
     }
 
@@ -243,6 +261,13 @@ public sealed class HttpMaintenanceSourceBindingClient : IMaintenanceSourceBindi
             throw new InvalidDataException("The signed maintenance route contains an invalid identifier.");
         return Uri.EscapeDataString(value);
     }
+
+    private static TimeSpan ValidateRequestTimeout(TimeSpan value)
+    {
+        if (value <= TimeSpan.Zero || value > TimeSpan.FromDays(1))
+            throw new ArgumentOutOfRangeException(nameof(value), "The maintenance HTTP deadline must be positive and bounded.");
+        return value;
+    }
 }
 
 public sealed class MaintenanceSourceBindingOperation(
@@ -273,9 +298,9 @@ public sealed class MaintenanceSourceBindingOperation(
         {
             var snapshot = journal.Read()
                 ?? throw new InvalidOperationException("The maintenance journal is missing; source binding remains held.");
-            if (snapshot.Operations.Count != 1 || snapshot.HeadOperationId != snapshot.Operations[0].Binding.OperationId)
+            var operation = MaintenanceJournal.Head(snapshot);
+            if (!string.Equals(snapshot.HeadOperationId, operation.Binding.OperationId, StringComparison.Ordinal))
                 throw new InvalidOperationException("The source binding journal head is invalid.");
-            var operation = snapshot.Operations[0];
             if (operation.Phase is not ("servicesQuiesced" or "backupPublished" or "sourceBound"))
                 throw new InvalidOperationException("Source binding requires the quiesced-service journal phase or a later recoverable phase.");
             if (!string.Equals(parameters.HelperRuntime, operation.Binding.TargetRuntime, StringComparison.Ordinal))
@@ -303,7 +328,9 @@ public sealed class MaintenanceSourceBindingOperation(
                     }
                     catch (MaintenanceSourceChallengeRenewalRequiredException)
                     {
-                        var pending = journal.Read()?.Operations.Single().PendingSourceChallengeAttempt
+                        var pendingSnapshot = journal.Read()
+                            ?? throw new InvalidDataException("The maintenance journal disappeared during source challenge renewal.");
+                        var pending = MaintenanceJournal.Head(pendingSnapshot).PendingSourceChallengeAttempt
                             ?? throw new InvalidDataException("The rejected source challenge has no matching durable journal attempt.");
                         _ = journal.RejectPendingSourceChallengeAttempt(operation.Binding.OperationId, pending);
                         if (renewal >= MaximumRenewalsPerInvocation) throw;
@@ -336,7 +363,8 @@ public sealed class MaintenanceSourceBindingOperation(
                     operation.Binding.OperationId, bindingRequest, identity, cancellationToken).ConfigureAwait(false);
             }
             catch (MaintenanceSourceChallengeRenewalRequiredException) when (
-                journal.Read()?.Operations.SingleOrDefault()?.Phase == "backupPublished")
+                journal.Read() is { } renewalSnapshot &&
+                MaintenanceJournal.Head(renewalSnapshot).Phase == "backupPublished")
             {
                 _ = journal.RejectSourceBindingIntent(operation.Binding.OperationId, intent.AttemptNumber,
                     intent.SourceRequestId, intent.BindingBodyDigest);
@@ -387,7 +415,8 @@ public sealed class MaintenanceSourceBindingOperation(
         var intent = new MaintenanceSourceBindingIntent(evidence, attemptNumber, challenge.ChallengeId, challenge.Challenge,
             challenge.RuntimeEpoch, challenge.ExpiresAtUtc, challengeRequestBodyDigest, evidenceSignature, sourceRequestId,
             ComputeBodyDigest(bindingRequest));
-        return journal.RecordSourceBindingIntent(binding.OperationId, intent).Operations.Single().SourceBindingIntent
+        var recorded = journal.RecordSourceBindingIntent(binding.OperationId, intent);
+        return MaintenanceJournal.Head(recorded).SourceBindingIntent
             ?? throw new IOException("The signed source-binding intent was not durably recorded.");
     }
 
@@ -425,6 +454,8 @@ public sealed class MaintenanceSourceBindingOperation(
             response.Generation != binding.Generation || !response.Held || response.Status != "installing" ||
             response.ReleaseVersion != request.ReleaseVersion ||
             response.TargetVersion != binding.TargetVersion || !FixedHexEquals(response.TargetPackageSha256, binding.TargetSha256) ||
+            response.TargetRuntime != binding.TargetRuntime ||
+            response.TargetProtocol != MaintenanceLifecycleValidation.SupportedTargetProtocol ||
             response.SourceVersion != request.SourceVersion ||
             response.SourceEvidenceDigest is null || !FixedHexEquals(response.SourceEvidenceDigest, bodyDigest) ||
             response.BackupOwnerOperationId != request.BackupOwnerOperationId ||

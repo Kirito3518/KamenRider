@@ -114,6 +114,40 @@ public sealed class WindowsMaintenanceApplyServiceLifecycle : IMaintenanceApplyS
         }
     }
 
+    public Task VerifyStartedAsync(
+        string operationId,
+        string installDirectory,
+        string expectedVersion,
+        Action verifyHeld,
+        CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(operationId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(installDirectory);
+        ArgumentNullException.ThrowIfNull(verifyHeld);
+        var normalizedInstallDirectory = Path.GetFullPath(installDirectory);
+        if (!VersionPattern.IsMatch(expectedVersion ?? string.Empty) ||
+            !PathEquals(normalizedInstallDirectory, Path.GetDirectoryName(layout.AgentExecutablePath)!))
+            throw new InvalidDataException("The terminal service verification request does not match the fixed Agent installation layout.");
+        var installedVersion = readInstalledVersion(normalizedInstallDirectory);
+        if (!string.Equals(installedVersion, expectedVersion, StringComparison.Ordinal))
+            throw new InvalidDataException("The protected Agent tree version does not match the terminal journal outcome.");
+
+        var definitions = Definitions().ToArray();
+        foreach (var definition in definitions)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            authorization.VerifyHeld(operationId);
+            verifyHeld();
+            var running = QueryAndValidate(definition);
+            if (running.State != MaintenanceWindowsServiceState.Running || running.ProcessId == 0)
+                throw new InvalidOperationException($"Required service '{definition.Name}' is not running in the verified terminal state.");
+        }
+
+        authorization.VerifyHeld(operationId);
+        verifyHeld();
+        return Task.CompletedTask;
+    }
+
     private async Task StopAndVerifyAsync(ServiceDefinition definition, string operationId, CancellationToken cancellationToken)
     {
         var initial = QueryAndValidate(definition);

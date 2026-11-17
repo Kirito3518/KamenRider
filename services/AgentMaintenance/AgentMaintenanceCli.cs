@@ -14,10 +14,24 @@ public interface IMaintenanceApplyCommand
     AgentMaintenanceCommandResult Execute();
 }
 
+public interface IMaintenanceReconcileCommand
+{
+    AgentMaintenanceCommandResult Execute();
+}
+
+public interface IMaintenanceSourceBindingCommand
+{
+    AgentMaintenanceCommandResult Execute();
+}
+
 public sealed class WindowsAgentMaintenanceCommandHost(
     LocalUpdateEngine engine,
     InstalledAgentSourceInspector? sourceInspector = null,
-    IMaintenanceApplyCommand? applyCommand = null) : IAgentMaintenanceCommandHost
+    IMaintenanceApplyCommand? applyCommand = null,
+    IMaintenanceReconcileCommand? reconcileCommand = null,
+    IMaintenanceStartCommand? startCommand = null,
+    IMaintenanceSourceBindingCommand? sourceBindingCommand = null,
+    IMaintenanceReportCommand? reportCommand = null) : IAgentMaintenanceCommandHost
 {
     private static readonly HashSet<string> KnownCommands = new(StringComparer.Ordinal)
     {
@@ -59,8 +73,20 @@ public sealed class WindowsAgentMaintenanceCommandHost(
                 inventory.InventoryDigest, inventory.TotalBytes, inventory.Nodes);
         }
 
+        if (command == "start")
+            return startCommand?.Execute() ?? new("unavailable", "startUnavailable", null, null, null, null, null, null);
+
+        if (command == "bind-source")
+            return sourceBindingCommand?.Execute() ?? new("unavailable", "sourceBindingUnavailable", null, null, null, null, null, null);
+
+        if (command == "report")
+            return reportCommand?.Execute() ?? new("unavailable", "outcomeReportUnavailable", null, null, null, null, null, null);
+
         if (command == "apply")
             return applyCommand?.Execute() ?? new("unavailable", "legacyProcessExclusionUnqualified", null, null, null, null, null, null);
+
+        if (command == "reconcile")
+            return reconcileCommand?.Execute() ?? new("unavailable", "reconciliationUnavailable", null, null, null, null, null, null);
 
         return new("unavailable", "operationNotImplemented", null, null, null, null, null, null);
     }

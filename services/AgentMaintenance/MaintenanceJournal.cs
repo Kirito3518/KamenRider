@@ -131,6 +131,113 @@ public sealed class MaintenanceJournal(IMaintenanceJournalStore store, string ch
         return ReadPublished(snapshot);
     }
 
+    /// <summary>
+    /// Appends a successor operation to an existing held chain. The successor names itself as its
+    /// own head (the chain head moves to it) and must carry a newer fencing generation. Existing
+    /// history stays immutable; only the new head may advance afterwards.
+    /// </summary>
+    public MaintenanceJournalSnapshot StartSuccessor(MaintenanceOperationBinding binding)
+    {
+        ArgumentNullException.ThrowIfNull(binding);
+        ValidateChainId(chainId);
+        ValidateBinding(binding);
+        if (!string.Equals(binding.ChainId, chainId, StringComparison.Ordinal))
+            throw new InvalidOperationException("The successor belongs to another maintenance chain.");
+        var current = ReadValidated()
+            ?? throw new InvalidOperationException("A successor requires an existing held maintenance chain journal.");
+        var existing = current.Operations.FirstOrDefault(entry =>
+            string.Equals(entry.Binding.OperationId, binding.OperationId, StringComparison.Ordinal));
+        if (existing is not null)
+        {
+            if (existing.Binding == binding &&
+                string.Equals(current.HeadOperationId, binding.OperationId, StringComparison.Ordinal) &&
+                existing.PhaseHistory.Count == 1 && existing.Phase == "inspected")
+                return current;
+            throw new InvalidOperationException("The journaled successor operation binding changed or is not the current head.");
+        }
+        var head = Head(current);
+        if (binding.HeadOperationId != binding.OperationId)
+            throw new InvalidOperationException("A successor operation must be its own chain head.");
+        if (binding.Generation <= current.Generation || binding.Generation != checked(head.Binding.Generation + 1))
+            throw new InvalidOperationException("A successor requires the next fencing generation.");
+        if (head.Phase is not ("controllerConfirmed" or "outcomeReported" or "rollbackServicesStarted"))
+            throw new InvalidOperationException("The current chain head is not in a recoverable terminal phase.");
+        var operation = new MaintenanceJournalOperation(binding, "inspected", ["inspected"]);
+        var snapshot = current with
+        {
+            HeadOperationId = binding.OperationId,
+            Generation = binding.Generation,
+            Operations = [.. current.Operations, operation]
+        };
+        ValidateSnapshot(snapshot);
+        store.WriteAtomic(chainId, snapshot);
+        return ReadPublished(snapshot);
+    }
+
+    /// <summary>
+    /// Starts the first operation of a new chain, or starts the successor operation of an
+    /// existing recoverable chain. A lifecycle start request for an audited recovery successor
+    /// names the same chain with the next fencing generation, so the helper must append the
+    /// successor instead of rejecting the already journaled chain.
+    /// </summary>
+    public MaintenanceJournalSnapshot StartOrSuccessor(MaintenanceOperationBinding binding)
+    {
+        ArgumentNullException.ThrowIfNull(binding);
+        ValidateChainId(chainId);
+        ValidateBinding(binding);
+        if (!string.Equals(binding.ChainId, chainId, StringComparison.Ordinal))
+            throw new InvalidOperationException("The operation belongs to another maintenance chain.");
+        var current = ReadValidated();
+        if (current is null)
+        {
+            if (binding.Generation != 1)
+                throw new InvalidOperationException(
+                    "A held chain without a new-format journal requires an explicit legacy import and cannot start a successor directly.");
+            return Start(binding);
+        }
+        var existing = current.Operations.FirstOrDefault(entry =>
+            string.Equals(entry.Binding.OperationId, binding.OperationId, StringComparison.Ordinal));
+        if (existing is not null)
+        {
+            if (existing.Binding == binding) return current;
+            throw new InvalidOperationException("The journaled operation binding changed.");
+        }
+        return StartSuccessor(binding);
+    }
+
+    /// <summary>
+    /// Begins a legacy-imported chain entry. The old updater did not write a new-format journal,
+    /// so the chain starts at the explicit legacyImported phase with the inspected old backup
+    /// owner/digest only; earlier phases are never invented.
+    /// </summary>
+    public MaintenanceJournalSnapshot StartLegacyImported(
+        MaintenanceOperationBinding binding,
+        MaintenanceJournalEvidence evidence)
+    {
+        ArgumentNullException.ThrowIfNull(binding);
+        ArgumentNullException.ThrowIfNull(evidence);
+        ValidateChainId(chainId);
+        ValidateBinding(binding);
+        if (!string.Equals(binding.ChainId, chainId, StringComparison.Ordinal))
+            throw new InvalidOperationException("The legacy import belongs to another maintenance chain.");
+        if (ReadValidated() is not null)
+            throw new InvalidOperationException("Legacy import requires the absence of a new-format journal for this chain.");
+        if (binding.HeadOperationId != binding.OperationId)
+            throw new InvalidOperationException("A legacy-imported journal must begin at its operation head.");
+        if (string.IsNullOrWhiteSpace(evidence.BackupOwnerOperationId) || evidence.BackupOwnerOperationId.Length > 128 ||
+            !IsDigest(evidence.BackupDigest) || evidence.SourceVersion is not null ||
+            evidence.SourceInventoryDigest is not null || evidence.TargetInventoryDigest is not null ||
+            evidence.RollbackReason is not null || evidence.RestoredBackupDigest is not null)
+            throw new InvalidOperationException("Legacy import requires only the inspected old backup owner and digest.");
+        ValidateChainId(evidence.BackupOwnerOperationId);
+        var operation = new MaintenanceJournalOperation(
+            binding, "legacyImported", ["legacyImported"], evidence.BackupOwnerOperationId, evidence.BackupDigest);
+        var snapshot = new MaintenanceJournalSnapshot(1, chainId, binding.OperationId, binding.Generation, [operation]);
+        ValidateSnapshot(snapshot);
+        store.WriteAtomic(chainId, snapshot);
+        return ReadPublished(snapshot);
+    }
+
     public MaintenanceJournalSnapshot Advance(
         string operationId,
         string nextPhase,
@@ -140,11 +247,7 @@ public sealed class MaintenanceJournal(IMaintenanceJournalStore store, string ch
         ArgumentException.ThrowIfNullOrWhiteSpace(nextPhase);
         var current = ReadValidated()
             ?? throw new InvalidOperationException("The maintenance journal is missing; the operation remains held.");
-        if (current.HeadOperationId != operationId || current.Operations.Count != 1 ||
-            current.Operations[0].Binding.OperationId != operationId)
-            throw new InvalidOperationException("Only the current journal head can advance.");
-
-        var operation = current.Operations[0];
+        var operation = RequireHead(current, operationId);
         var resolvedEvidence = evidence ?? new MaintenanceJournalEvidence();
         if (operation.Phase == nextPhase)
         {
@@ -156,7 +259,8 @@ public sealed class MaintenanceJournal(IMaintenanceJournalStore store, string ch
             throw new InvalidOperationException("The maintenance journal phase transition is not allowed.");
 
         var updated = ApplyEvidence(operation, nextPhase, resolvedEvidence);
-        var operations = new List<MaintenanceJournalOperation> { updated };
+        var operations = new List<MaintenanceJournalOperation>(current.Operations);
+        operations[^1] = updated;
         var snapshot = current with { Operations = operations };
         ValidateSnapshot(snapshot);
         store.WriteAtomic(chainId, snapshot);
@@ -164,6 +268,36 @@ public sealed class MaintenanceJournal(IMaintenanceJournalStore store, string ch
     }
 
     public MaintenanceJournalSnapshot? Read() => ReadValidated();
+
+    /// <summary>The current head operation is always the last immutable chain entry.</summary>
+    public static MaintenanceJournalOperation Head(MaintenanceJournalSnapshot snapshot)
+    {
+        ArgumentNullException.ThrowIfNull(snapshot);
+        if (snapshot.Operations is null || snapshot.Operations.Count == 0)
+            throw new InvalidDataException("The maintenance journal has no operations.");
+        return snapshot.Operations[^1];
+    }
+
+    /// <summary>Returns the head operation only when it is the requested operation; otherwise throws.</summary>
+    public static MaintenanceJournalOperation RequireHead(MaintenanceJournalSnapshot snapshot, string operationId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(operationId);
+        var head = Head(snapshot);
+        if (!string.Equals(snapshot.HeadOperationId, operationId, StringComparison.Ordinal) ||
+            !string.Equals(head.Binding.OperationId, operationId, StringComparison.Ordinal))
+            throw new InvalidOperationException("Only the current journal head can advance.");
+        return head;
+    }
+
+    /// <summary>Returns the requested immutable chain entry or throws when it is not in this chain.</summary>
+    public static MaintenanceJournalOperation RequireOperation(MaintenanceJournalSnapshot snapshot, string operationId)
+    {
+        ArgumentNullException.ThrowIfNull(snapshot);
+        ArgumentException.ThrowIfNullOrWhiteSpace(operationId);
+        return snapshot.Operations?.FirstOrDefault(entry =>
+            string.Equals(entry.Binding.OperationId, operationId, StringComparison.Ordinal))
+            ?? throw new InvalidOperationException("The maintenance journal does not contain this operation.");
+    }
 
     public MaintenanceJournalOperation VerifyApplyRequestBinding(MaintenanceCommandRequest request)
     {
@@ -174,11 +308,12 @@ public sealed class MaintenanceJournal(IMaintenanceJournalStore store, string ch
 
         var current = ReadValidated()
             ?? throw new InvalidOperationException("The current maintenance journal is missing; the operation remains held.");
-        if (current.ChainId != request.ChainId || current.HeadOperationId != request.HeadOperationId ||
-            current.Generation != request.Generation || current.Operations.Count != 1)
+        if (current.ChainId != request.ChainId ||
+            !string.Equals(current.HeadOperationId, request.OperationId, StringComparison.Ordinal) ||
+            current.Generation != request.Generation)
             throw new InvalidOperationException("The apply request is not bound to the current maintenance journal head and generation.");
 
-        var operation = current.Operations[0];
+        var operation = RequireHead(current, request.OperationId);
         var binding = operation.Binding;
         if (binding.OperationId != request.OperationId || binding.ChainId != request.ChainId ||
             binding.HeadOperationId != request.HeadOperationId || binding.Generation != request.Generation ||
@@ -197,11 +332,9 @@ public sealed class MaintenanceJournal(IMaintenanceJournalStore store, string ch
         ArgumentNullException.ThrowIfNull(intent);
         var current = ReadValidated()
             ?? throw new InvalidOperationException("The maintenance journal is missing; the operation remains held.");
-        if (current.HeadOperationId != operationId || current.Operations.Count != 1 ||
-            current.Operations[0].Binding.OperationId != operationId || current.Operations[0].Phase != "backupPublished")
+        var operation = RequireHead(current, operationId);
+        if (operation.Phase != "backupPublished")
             throw new InvalidOperationException("A source binding intent requires the current operation's published backup phase.");
-
-        var operation = current.Operations[0];
         if (operation.SourceBindingIntent is not null)
         {
             if (operation.SourceBindingIntent != intent)
@@ -216,7 +349,9 @@ public sealed class MaintenanceJournal(IMaintenanceJournalStore store, string ch
         ValidateSourceBindingIntent(operation, intent);
 
         var updated = operation with { SourceBindingIntent = intent, PendingSourceChallengeAttempt = null };
-        var snapshot = current with { Operations = [updated] };
+        var operations = new List<MaintenanceJournalOperation>(current.Operations);
+        operations[^1] = updated;
+        var snapshot = current with { Operations = operations };
         ValidateSnapshot(snapshot);
         store.WriteAtomic(chainId, snapshot);
         return ReadPublished(snapshot);
@@ -230,10 +365,9 @@ public sealed class MaintenanceJournal(IMaintenanceJournalStore store, string ch
         ArgumentNullException.ThrowIfNull(attempt);
         var current = ReadValidated()
             ?? throw new InvalidOperationException("The maintenance journal is missing; source challenge issuance remains held.");
-        if (current.HeadOperationId != operationId || current.Operations.Count != 1 ||
-            current.Operations[0].Binding.OperationId != operationId || current.Operations[0].Phase != "backupPublished")
+        var operation = RequireHead(current, operationId);
+        if (operation.Phase != "backupPublished")
             throw new InvalidOperationException("A source challenge attempt requires the current operation's published backup phase.");
-        var operation = current.Operations[0];
         if (operation.SourceBindingIntent is not null)
             throw new InvalidOperationException("A new source challenge cannot replace an un-rejected binding intent.");
         if (operation.PendingSourceChallengeAttempt is { } pending)
@@ -245,7 +379,9 @@ public sealed class MaintenanceJournal(IMaintenanceJournalStore store, string ch
             throw new InvalidOperationException("The source challenge attempt number is not the next journaled attempt.");
         ValidateSourceChallengeAttempt(operation.Binding, attempt);
         var updated = operation with { PendingSourceChallengeAttempt = attempt };
-        var snapshot = current with { Operations = [updated] };
+        var operations = new List<MaintenanceJournalOperation>(current.Operations);
+        operations[^1] = updated;
+        var snapshot = current with { Operations = operations };
         ValidateSnapshot(snapshot);
         store.WriteAtomic(chainId, snapshot);
         return ReadPublished(snapshot);
@@ -259,10 +395,9 @@ public sealed class MaintenanceJournal(IMaintenanceJournalStore store, string ch
         ArgumentNullException.ThrowIfNull(expectedAttempt);
         var current = ReadValidated()
             ?? throw new InvalidOperationException("The maintenance journal is missing; source challenge recovery remains held.");
-        if (current.HeadOperationId != operationId || current.Operations.Count != 1 ||
-            current.Operations[0].Binding.OperationId != operationId || current.Operations[0].Phase != "backupPublished")
+        var operation = RequireHead(current, operationId);
+        if (operation.Phase != "backupPublished")
             throw new InvalidOperationException("A source challenge rejection requires the current operation's published backup phase.");
-        var operation = current.Operations[0];
         if (operation.PendingSourceChallengeAttempt != expectedAttempt || operation.SourceBindingIntent is not null)
             throw new InvalidOperationException("The typed source challenge rejection does not match the pending journal attempt.");
         var rejected = operation.RejectedSourceChallengeAttempts ?? [];
@@ -273,7 +408,9 @@ public sealed class MaintenanceJournal(IMaintenanceJournalStore store, string ch
             PendingSourceChallengeAttempt = null,
             RejectedSourceChallengeAttempts = [.. rejected, expectedAttempt]
         };
-        var snapshot = current with { Operations = [updated] };
+        var operations = new List<MaintenanceJournalOperation>(current.Operations);
+        operations[^1] = updated;
+        var snapshot = current with { Operations = operations };
         ValidateSnapshot(snapshot);
         store.WriteAtomic(chainId, snapshot);
         return ReadPublished(snapshot);
@@ -288,10 +425,9 @@ public sealed class MaintenanceJournal(IMaintenanceJournalStore store, string ch
         ArgumentException.ThrowIfNullOrWhiteSpace(operationId);
         var current = ReadValidated()
             ?? throw new InvalidOperationException("The maintenance journal is missing; source binding recovery remains held.");
-        if (current.HeadOperationId != operationId || current.Operations.Count != 1 ||
-            current.Operations[0].Binding.OperationId != operationId || current.Operations[0].Phase != "backupPublished")
+        var operation = RequireHead(current, operationId);
+        if (operation.Phase != "backupPublished")
             throw new InvalidOperationException("A source binding rejection requires the current operation's published backup phase.");
-        var operation = current.Operations[0];
         var intent = operation.SourceBindingIntent
             ?? throw new InvalidOperationException("There is no pending source binding intent to reject.");
         if (intent.AttemptNumber != expectedAttemptNumber || intent.SourceRequestId != expectedSourceRequestId ||
@@ -305,7 +441,9 @@ public sealed class MaintenanceJournal(IMaintenanceJournalStore store, string ch
             SourceBindingIntent = null,
             RejectedSourceBindingIntents = [.. rejected, intent]
         };
-        var snapshot = current with { Operations = [updated] };
+        var operations = new List<MaintenanceJournalOperation>(current.Operations);
+        operations[^1] = updated;
+        var snapshot = current with { Operations = operations };
         ValidateSnapshot(snapshot);
         store.WriteAtomic(chainId, snapshot);
         return ReadPublished(snapshot);
@@ -430,6 +568,11 @@ public sealed class MaintenanceJournal(IMaintenanceJournalStore store, string ch
 
     private static bool CanAdvance(string current, string next)
     {
+        if (current == "legacyImported")
+        {
+            var legacyNext = Array.IndexOf(NormalPhases, next);
+            return legacyNext >= 1;
+        }
         var currentIndex = Array.IndexOf(NormalPhases, current);
         var nextIndex = Array.IndexOf(NormalPhases, next);
         if (currentIndex >= 0 && nextIndex == currentIndex + 1)
@@ -490,30 +633,58 @@ public sealed class MaintenanceJournal(IMaintenanceJournalStore store, string ch
     private void ValidateSnapshot(MaintenanceJournalSnapshot snapshot)
     {
         if (snapshot.SchemaVersion != 1 || snapshot.ChainId != chainId || snapshot.Operations is null ||
-            snapshot.Operations.Count != 1 || snapshot.Generation <= 0)
+            snapshot.Operations.Count == 0 || snapshot.Generation <= 0)
             throw new InvalidDataException("The maintenance journal header is invalid or unsupported.");
-        var operation = snapshot.Operations[0];
-        ValidateBinding(operation.Binding);
-        if (operation.Binding.ChainId != chainId ||
-            operation.Binding.OperationId != snapshot.HeadOperationId ||
-            operation.Binding.HeadOperationId != snapshot.HeadOperationId ||
-            operation.Binding.Generation != snapshot.Generation ||
-            operation.PhaseHistory is null || operation.PhaseHistory.Count == 0 ||
-            operation.PhaseHistory[^1] != operation.Phase ||
-            operation.PhaseHistory.Distinct(StringComparer.Ordinal).Count() != operation.PhaseHistory.Count)
-            throw new InvalidDataException("The maintenance journal operation head is inconsistent.");
 
-        if (operation.PhaseHistory[0] != "inspected" ||
-            operation.PhaseHistory.Where((phase, index) => index != 0 && !CanAdvance(operation.PhaseHistory[index - 1], phase)).Any())
-            throw new InvalidDataException("The maintenance journal phase history is not a valid transition sequence.");
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        long previousGeneration = 0;
+        for (var index = 0; index < snapshot.Operations.Count; index++)
+        {
+            var operation = snapshot.Operations[index];
+            if (operation is null)
+                throw new InvalidDataException("The maintenance journal operation entry is missing.");
+            ValidateBinding(operation.Binding);
+            if (operation.Binding.ChainId != chainId ||
+                !string.Equals(operation.Binding.OperationId, operation.Binding.HeadOperationId, StringComparison.Ordinal) ||
+                !seen.Add(operation.Binding.OperationId) ||
+                operation.Binding.Generation <= previousGeneration ||
+                operation.PhaseHistory is null || operation.PhaseHistory.Count == 0 ||
+                operation.PhaseHistory[^1] != operation.Phase ||
+                operation.PhaseHistory.Distinct(StringComparer.Ordinal).Count() != operation.PhaseHistory.Count)
+                throw new InvalidDataException("The maintenance journal operation head is inconsistent.");
+            previousGeneration = operation.Binding.Generation;
 
+            var startedLegacy = index == 0 && operation.PhaseHistory[0] == "legacyImported";
+            if ((!startedLegacy && operation.PhaseHistory[0] != "inspected") ||
+                operation.PhaseHistory.Where((phase, phaseIndex) => phaseIndex != 0 &&
+                    !CanAdvance(operation.PhaseHistory[phaseIndex - 1], phase)).Any())
+                throw new InvalidDataException("The maintenance journal phase history is not a valid transition sequence.");
+
+            ValidateOperationFacts(operation, startedLegacy);
+        }
+
+        var head = snapshot.Operations[^1];
+        if (!string.Equals(snapshot.HeadOperationId, head.Binding.OperationId, StringComparison.Ordinal) ||
+            snapshot.Generation != head.Binding.Generation)
+            throw new InvalidDataException("The maintenance journal head or generation is inconsistent.");
+    }
+
+    private static void ValidateOperationFacts(MaintenanceJournalOperation operation, bool startedLegacy)
+    {
         var hasBackupPhase = operation.PhaseHistory.Contains("backupPublished", StringComparer.Ordinal);
         var hasSourcePhase = operation.PhaseHistory.Contains("sourceBound", StringComparer.Ordinal);
         var hasSwapPhase = operation.PhaseHistory.Contains("swapIntent", StringComparer.Ordinal);
         var hasRollbackPhase = operation.PhaseHistory.Contains("rollbackIntent", StringComparer.Ordinal);
         var hasRestorePhase = operation.PhaseHistory.Contains("sourceRestored", StringComparer.Ordinal);
 
-        if (hasBackupPhase)
+        if (startedLegacy && !hasBackupPhase)
+        {
+            // The legacy import carries the inspected old backup owner/digest before any new
+            // backup publication. Earlier phases are never invented.
+            if (string.IsNullOrWhiteSpace(operation.BackupOwnerOperationId) || !IsDigest(operation.BackupDigest))
+                throw new InvalidDataException("The legacy-imported journal is missing the inspected old backup owner or digest.");
+        }
+        else if (hasBackupPhase)
         {
             if (operation.BackupOwnerOperationId != operation.Binding.OperationId || !IsDigest(operation.BackupDigest))
                 throw new InvalidDataException("The maintenance journal backup binding is missing or invalid.");
@@ -575,7 +746,6 @@ public sealed class MaintenanceJournal(IMaintenanceJournalStore store, string ch
 
         ValidateSourceBindingAttempts(operation, hasBackupPhase);
     }
-
     private static void ValidateSourceBindingAttempts(MaintenanceJournalOperation operation, bool hasBackupPhase)
     {
         var rejectedChallenges = operation.RejectedSourceChallengeAttempts ?? [];

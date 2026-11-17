@@ -68,6 +68,51 @@ public sealed class AgentMaintenanceCliTests
         }
     }
 
+    private sealed class FakeApplyCommand : IMaintenanceApplyCommand
+    {
+        public int Calls;
+
+        public AgentMaintenanceCommandResult Execute()
+        {
+            Calls++;
+            return new("ok", null, null, "2.3.4", "win-x64", null, null, null, ApplyOutcome: "applied");
+        }
+    }
+
+    private sealed class FakeReconcileCommand : IMaintenanceReconcileCommand
+    {
+        public int Calls;
+
+        public AgentMaintenanceCommandResult Execute()
+        {
+            Calls++;
+            return new("ok", null, null, "2.3.4", "win-x64", null, null, null, ApplyOutcome: "reconciled");
+        }
+    }
+
+    [Fact]
+    public void ReconcileUsesItsDedicatedFailClosedRecoveryCommand()
+    {
+        var archive = AgentPackageCorpus.Valid();
+        var hash = Convert.ToHexString(SHA256.HashData(archive));
+        var work = new WorkStore(new(1, "apply", "op-1", AgentPackageCorpus.Version,
+            "win-x64", hash, archive.Length, "chain-1", "op-1", 1), archive);
+        var apply = new FakeApplyCommand();
+        var reconcile = new FakeReconcileCommand();
+        var host = new WindowsAgentMaintenanceCommandHost(new LocalUpdateEngine(work), applyCommand: apply,
+            reconcileCommand: reconcile);
+
+        var result = host.Execute("reconcile");
+
+        Assert.Equal("ok", result.Status);
+        Assert.Equal("reconciled", result.ApplyOutcome);
+        Assert.Equal(0, apply.Calls);
+        Assert.Equal(1, reconcile.Calls);
+        Assert.Equal(0, work.RequestReads);
+        Assert.Equal(0, work.ArchiveOpens);
+        Assert.False(work.ExtractionCreated);
+    }
+
     [Fact]
     public void ValidateArchiveReturnsBoundedInventoryOnlyAfterExpectedBytesAndRuntimeMatch()
     {

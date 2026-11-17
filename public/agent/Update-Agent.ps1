@@ -3,6 +3,11 @@ param(
     [Parameter(Mandatory)][string]$ControllerUrl,
     [Parameter(Mandatory)][string]$MachineId,
     [Parameter(Mandatory)][string]$OperationId,
+    [string]$ChainId,
+    [string]$HeadOperationId,
+    [long]$Generation,
+    [string]$EnrollmentKeyFingerprint,
+    [long]$PackageLength,
     [Parameter(Mandatory)][string]$UpdateTicket,
     [Parameter(Mandatory)][string]$ReleaseVersion,
     [Parameter(Mandatory)][string]$TargetVersion,
@@ -48,7 +53,8 @@ function Test-AgentUpdateRequest {
     param([Parameter(Mandatory)]$Request)
 
     $names = @(
-        'ControllerUrl','MachineId','OperationId','UpdateTicket','ReleaseVersion','TargetVersion',
+        'ControllerUrl','MachineId','OperationId','ChainId','HeadOperationId','Generation','EnrollmentKeyFingerprint','PackageLength',
+        'UpdateTicket','ReleaseVersion','TargetVersion',
         'PackageSha256','TrustedRootThumbprint','AdminReturnUrl','AssetBaseUrl','TargetRuntime',
         'WrapperSha256','WrapperLength','HelperRelativeUrl','HelperSha256','HelperLength','HelperProtocol'
     )
@@ -59,6 +65,11 @@ function Test-AgentUpdateRequest {
 
     $machineId = [string](Get-AgentUpdateProperty -Request $Request -Name 'MachineId')
     $operationId = [string](Get-AgentUpdateProperty -Request $Request -Name 'OperationId')
+    $chainId = [string](Get-AgentUpdateProperty -Request $Request -Name 'ChainId')
+    $headOperationId = [string](Get-AgentUpdateProperty -Request $Request -Name 'HeadOperationId')
+    $generation = [long](Get-AgentUpdateProperty -Request $Request -Name 'Generation')
+    $enrollmentKeyFingerprint = [string](Get-AgentUpdateProperty -Request $Request -Name 'EnrollmentKeyFingerprint')
+    $packageLength = [long](Get-AgentUpdateProperty -Request $Request -Name 'PackageLength')
     $ticket = [string](Get-AgentUpdateProperty -Request $Request -Name 'UpdateTicket')
     $releaseVersion = [string](Get-AgentUpdateProperty -Request $Request -Name 'ReleaseVersion')
     $targetVersion = [string](Get-AgentUpdateProperty -Request $Request -Name 'TargetVersion')
@@ -75,6 +86,11 @@ function Test-AgentUpdateRequest {
     if ($machineId -notmatch '\A[0-9a-fA-F]{32}\z' -or $operationId -notmatch '\A[0-9a-fA-F]{32}\z') {
         throw 'MachineId and OperationId must be 32-character hexadecimal GUIDs.'
     }
+    if ($chainId -notmatch '\A[0-9a-fA-F]{32}\z' -or $headOperationId -notmatch '\A[0-9a-fA-F]{32}\z' -or $headOperationId -ne $operationId -or $generation -lt 1) {
+        throw 'ChainId, HeadOperationId, OperationId and Generation are inconsistent.'
+    }
+    if ($enrollmentKeyFingerprint -notmatch '\A[0-9a-fA-F]{64}\z') { throw 'EnrollmentKeyFingerprint is invalid.' }
+    if ($packageLength -lt 1 -or $packageLength -gt 104857600) { throw 'PackageLength is invalid.' }
     if ($ticket -notmatch '\A[A-Za-z0-9_-]{43}\z') { throw 'UpdateTicket is invalid.' }
     foreach ($version in @($releaseVersion,$targetVersion)) {
         if ($version.Length -gt 64 -or $version -notmatch '\A(?:\d+\.\d+\.\d+|1\.0\.0\+g[0-9a-f]{12,40})\z') {
@@ -109,6 +125,11 @@ function Test-AgentUpdateRequest {
         AssetBaseUrl = $assetBase
         MachineId = $machineId.ToLowerInvariant()
         OperationId = $operationId.ToLowerInvariant()
+        ChainId = $chainId.ToLowerInvariant()
+        HeadOperationId = $headOperationId.ToLowerInvariant()
+        Generation = $generation
+        EnrollmentKeyFingerprint = $enrollmentKeyFingerprint.ToUpperInvariant()
+        PackageLength = $packageLength
         UpdateTicket = $ticket
         ReleaseVersion = $releaseVersion
         TargetVersion = $targetVersion
@@ -554,6 +575,298 @@ function Assert-AgentUpdateElevated {
     if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw 'Run the Agent maintenance command from an elevated Administrator session.' }
 }
 
+function Get-AgentUpdateAgentServiceSid {
+    $scPath = Join-Path $env:SystemRoot 'System32\sc.exe'
+    if (-not (Test-Path -LiteralPath $scPath)) { throw 'The Agent service SID lookup tool is unavailable.' }
+    $output = (& $scPath showsid 'KamenRaider Agent' 2>&1 | Out-String)
+    if ($LASTEXITCODE -ne 0) { throw 'The installed KamenRaider Agent service is required before the update wrapper can run.' }
+    $match = [regex]::Match($output,'SERVICE SID:\s*(S-1-5-80(?:-\d+){5})',[Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    if (-not $match.Success) { throw 'The installed KamenRaider Agent service SID could not be resolved.' }
+    return [Security.Principal.SecurityIdentifier]::new($match.Groups[1].Value)
+}
+
+function New-AgentUpdateFenceDirectorySecurity {
+    $security = [Security.AccessControl.DirectorySecurity]::new()
+    $security.SetAccessRuleProtection($true,$false)
+    $security.SetOwner([Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))
+    $inherit = [Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit'
+    foreach ($sid in @([Security.Principal.SecurityIdentifier]::new('S-1-5-18'),[Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))) {
+        $security.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+            $sid,[Security.AccessControl.FileSystemRights]::FullControl,$inherit,
+            [Security.AccessControl.PropagationFlags]::None,[Security.AccessControl.AccessControlType]::Allow))
+    }
+    $serviceSid = Get-AgentUpdateAgentServiceSid
+    $serviceRights = [Security.AccessControl.FileSystemRights]'ReadAndExecute,Synchronize'
+    $security.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+        $serviceSid,$serviceRights,$inherit,
+        [Security.AccessControl.PropagationFlags]::None,[Security.AccessControl.AccessControlType]::Allow))
+    return $security
+}
+
+function Assert-AgentUpdateFenceAcl {
+    param([Parameter(Mandatory)][string]$Path)
+    $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop
+    $owner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
+    if ($owner -notin @('S-1-5-18','S-1-5-32-544') -or -not $acl.AreAccessRulesProtected) {
+        throw 'The maintenance directory owner or ACL is unsafe; the update wrapper will not repair it automatically.'
+    }
+    $serviceSid = (Get-AgentUpdateAgentServiceSid).Value
+    $rules = @($acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier]))
+    if ($rules.Count -ne 3) { throw 'The maintenance directory ACL is unexpected; the update wrapper will not repair it automatically.' }
+    $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($rule in $rules) {
+        if ($rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow -or $rule.IsInherited -or
+            $rule.PropagationFlags -ne [Security.AccessControl.PropagationFlags]::None -or
+            $rule.InheritanceFlags -ne [Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit' -or
+            -not $seen.Add($rule.IdentityReference.Value)) {
+            throw 'The maintenance directory ACL is unexpected; the update wrapper will not repair it automatically.'
+        }
+        if ($rule.IdentityReference.Value -in @('S-1-5-18','S-1-5-32-544')) {
+            if ($rule.FileSystemRights -ne [Security.AccessControl.FileSystemRights]::FullControl) { throw 'The maintenance directory ACL is missing a trusted full-control rule.' }
+        }
+        elseif ($rule.IdentityReference.Value -ceq $serviceSid) {
+            if ($rule.FileSystemRights -ne [Security.AccessControl.FileSystemRights]'ReadAndExecute,Synchronize') { throw 'The maintenance directory ACL grants the Agent service unexpected rights.' }
+        }
+        else { throw 'The maintenance directory ACL contains an unexpected principal.' }
+    }
+    if (-not $seen.Contains('S-1-5-18') -or -not $seen.Contains('S-1-5-32-544') -or -not $seen.Contains($serviceSid)) {
+        throw 'The maintenance directory ACL is missing a required principal.'
+    }
+}
+
+function Initialize-AgentUpdateWorkStore {
+    $commonData = [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
+    if ([string]::IsNullOrWhiteSpace($commonData) -or -not [IO.Path]::IsPathRooted($commonData)) { throw 'Native CommonApplicationData is unavailable.' }
+    $root = Join-Path $commonData 'KamenRaider.AgentMaintenance'
+    Assert-AgentUpdateNoReparseAncestors -Path $root
+    if (-not (Test-Path -LiteralPath $root -PathType Container)) {
+        [void][IO.DirectoryInfo]::new($root).Create((New-AgentUpdateFenceDirectorySecurity))
+    }
+    Assert-AgentUpdateFenceAcl -Path $root
+    $work = Join-Path $root 'work'
+    if (-not (Test-Path -LiteralPath $work -PathType Container)) {
+        [void][IO.DirectoryInfo]::new($work).Create((New-AgentUpdatePrivateDirectorySecurity))
+    }
+    Assert-AgentUpdateNoReparseAncestors -Path $work
+    Assert-AgentUpdatePrivateAcl -Path $work -Directory
+    return [pscustomobject]@{
+        Root = $root
+        Work = $work
+        Request = (Join-Path $work 'request.json')
+        Archive = (Join-Path $work 'target.zip')
+    }
+}
+
+function Write-AgentUpdateProtectedJson {
+    param([Parameter(Mandatory)][string]$Path,[Parameter(Mandatory)][hashtable]$Value)
+    $json = $Value | ConvertTo-Json -Depth 4 -Compress
+    $bytes = [Text.Encoding]::UTF8.GetBytes($json)
+    if ($bytes.Length -le 0 -or $bytes.Length -gt 16384) { throw 'The maintenance request exceeds its size limit.' }
+    $directory = [IO.Path]::GetDirectoryName($Path)
+    Assert-AgentUpdatePrivateAcl -Path $directory -Directory
+    $temporary = Join-Path $directory ('.request-' + [guid]::NewGuid().ToString('N') + '.tmp')
+    try {
+        $file = [IO.FileStream]::new($temporary,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None,4096,[IO.FileOptions]::WriteThrough)
+        try { $file.Write($bytes,0,$bytes.Length); $file.Flush($true) } finally { $file.Dispose() }
+        Set-AgentUpdatePrivateFileSecurity -Path $temporary
+        Assert-AgentUpdatePrivateAcl -Path $temporary
+        if (Test-Path -LiteralPath $Path) { Remove-Item -LiteralPath $Path -Force -ErrorAction Stop }
+        [IO.File]::Move($temporary,$Path)
+        Assert-AgentUpdatePrivateAcl -Path $Path
+    }
+    finally {
+        if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue }
+    }
+}
+
+function New-AgentUpdateLifecycleRequest {
+    param([Parameter(Mandatory)]$Request,[Parameter(Mandatory)][string]$Command,[string]$HelperBuildSha256)
+    $value = [ordered]@{
+        schemaVersion = 1
+        command = $Command
+        operationId = $Request.OperationId
+        chainId = $Request.ChainId
+        headOperationId = $Request.HeadOperationId
+        generation = [long]$Request.Generation
+        controllerOrigin = $Request.ControllerUrl
+        enrollmentKeyFingerprint = $Request.EnrollmentKeyFingerprint
+        helperProtocol = [int]$Request.HelperProtocol
+        targetVersion = $Request.TargetVersion
+        targetRuntime = $Request.TargetRuntime
+        targetPackageSha256 = $Request.PackageSha256
+        releaseVersion = $Request.ReleaseVersion
+        ticket = $Request.UpdateTicket
+    }
+    if ($Command -ceq 'bind-source') { $value.helperBuildSha256 = $HelperBuildSha256 }
+    return $value
+}
+
+function New-AgentUpdateArchiveRequest {
+    param([Parameter(Mandatory)]$Request,[Parameter(Mandatory)][string]$Command)
+    $value = [ordered]@{
+        schemaVersion = 1
+        command = $Command
+        operationId = $Request.OperationId
+        targetVersion = $Request.TargetVersion
+        targetRuntime = $Request.TargetRuntime
+        targetPackageSha256 = $Request.PackageSha256
+        targetPackageLength = [long]$Request.PackageLength
+    }
+    if ($Command -ceq 'apply') {
+        $value.chainId = $Request.ChainId
+        $value.headOperationId = $Request.HeadOperationId
+        $value.generation = [long]$Request.Generation
+    }
+    return $value
+}
+
+function Invoke-AgentMaintenanceCommand {
+    param([Parameter(Mandatory)][string]$Path,[Parameter(Mandatory)][string]$Verb,[int]$TimeoutSeconds = 600)
+    if ($Verb -cnotin @('inspect','start','extract','bind-source','apply','report','reconcile')) {
+        throw 'Maintenance workflow requested an unsupported helper verb.'
+    }
+    $start = [Diagnostics.ProcessStartInfo]::new()
+    $start.FileName = $Path
+    $start.Arguments = $Verb
+    $start.WorkingDirectory = [IO.Path]::GetDirectoryName($Path)
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $start
+    try {
+        if (-not $process.Start()) { throw 'Pinned maintenance helper did not start.' }
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
+        if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+            try { $process.Kill() } catch { }
+            throw "Pinned maintenance helper $Verb timed out."
+        }
+        $stdout = $stdoutTask.GetAwaiter().GetResult()
+        $stderr = $stderrTask.GetAwaiter().GetResult()
+        $parsed = $null
+        if (-not [string]::IsNullOrWhiteSpace($stdout)) {
+            try { $parsed = $stdout | ConvertFrom-Json -ErrorAction Stop }
+            catch { throw "Pinned maintenance helper $Verb returned malformed JSON." }
+        }
+        return [pscustomobject]@{
+            Verb = $Verb
+            ExitCode = $process.ExitCode
+            Result = $parsed
+            StandardError = $stderr
+        }
+    }
+    finally { $process.Dispose() }
+}
+
+function Get-AgentMaintenanceResultCategory {
+    param($Result)
+    if (-not $Result) { return 'helperResultMissing' }
+    $category = [string]$Result.category
+    if ([string]::IsNullOrWhiteSpace($category)) { $category = [string]$Result.Category }
+    if ([string]::IsNullOrWhiteSpace($category)) { return 'helperResultRejected' }
+    return $category
+}
+
+function Save-AgentUpdatePackage {
+    param([Parameter(Mandatory)]$Request,[Parameter(Mandatory)][string]$Destination)
+    if (Test-Path -LiteralPath $Destination) {
+        Assert-AgentUpdatePrivateAcl -Path $Destination
+        Remove-Item -LiteralPath $Destination -Force -ErrorAction Stop
+    }
+    $directory = [IO.Path]::GetDirectoryName($Destination)
+    Assert-AgentUpdatePrivateAcl -Path $directory -Directory
+    $relative = '/agent/machines/' + [Uri]::EscapeDataString($Request.MachineId) + '/agent-updates/' + [Uri]::EscapeDataString($Request.OperationId) + '/package'
+    $target = [Uri]::new([Uri]::new($Request.ControllerUrl,[UriKind]::Absolute),$relative)
+    if ($target.Scheme -cne 'https') { throw 'Controller package downloads require HTTPS.' }
+    Initialize-AgentPinnedHttpType
+    $client = [KamenRaider.Update.PinnedHttpClientV1]::Create($Request.TrustedRootThumbprint)
+    $message = [Net.Http.HttpRequestMessage]::new([Net.Http.HttpMethod]::Get,$target)
+    $stream = $null
+    $file = $null
+    $hash = $null
+    try {
+        [void]$message.Headers.TryAddWithoutValidation('X-Agent-Update-Ticket',$Request.UpdateTicket)
+        [void]$message.Headers.TryAddWithoutValidation('X-Agent-Update-Release-Version',$Request.ReleaseVersion)
+        [void]$message.Headers.TryAddWithoutValidation('X-Agent-Update-Target-Version',$Request.TargetVersion)
+        [void]$message.Headers.TryAddWithoutValidation('X-Agent-Update-Package-SHA256',$Request.PackageSha256)
+        $response = $client.SendAsync($message,[Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
+        try {
+            if (-not $response.IsSuccessStatusCode) { throw "Pinned package download failed with HTTP $([int]$response.StatusCode)." }
+            $declared = $response.Content.Headers.ContentLength
+            if ($declared -and [long]$declared -ne [long]$Request.PackageLength) { throw 'Pinned package length does not match the update ticket.' }
+            $stream = $response.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
+            $file = [IO.FileStream]::new($Destination,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None,65536,[IO.FileOptions]::WriteThrough)
+            $hash = [Security.Cryptography.SHA256]::Create()
+            $buffer = New-Object byte[] 81920
+            $total = [long]0
+            while (($read = $stream.Read($buffer,0,$buffer.Length)) -gt 0) {
+                $total += $read
+                if ($total -gt [long]$Request.PackageLength -or $total -gt 104857600) { throw 'Pinned package exceeds its declared length.' }
+                [void]$hash.TransformBlock($buffer,0,$read,$null,0)
+                $file.Write($buffer,0,$read)
+            }
+            [void]$hash.TransformFinalBlock((New-Object byte[] 0),0,0)
+            $file.Flush($true)
+        }
+        finally {
+            if ($file) { $file.Dispose(); $file = $null }
+            if ($stream) { $stream.Dispose(); $stream = $null }
+            $response.Dispose()
+        }
+        Set-AgentUpdatePrivateFileSecurity -Path $Destination
+        Assert-AgentUpdateNoReparseAncestors -Path $Destination
+        Assert-AgentUpdatePrivateAcl -Path $Destination
+        if ((Get-Item -LiteralPath $Destination).Length -ne [long]$Request.PackageLength) { throw 'Downloaded package length changed after download.' }
+        $actual = [BitConverter]::ToString($hash.Hash).Replace('-','')
+        if ($actual -cne $Request.PackageSha256) { throw 'Downloaded package does not match the signed package SHA-256.' }
+    }
+    finally {
+        if ($file) { $file.Dispose() }
+        if ($stream) { $stream.Dispose() }
+        if ($hash) { $hash.Dispose() }
+        $message.Dispose()
+        $client.Dispose()
+    }
+}
+
+function Assert-AgentMaintenanceStep {
+    param([Parameter(Mandatory)]$Step,[Parameter(Mandatory)][string]$Name)
+    if (-not $Step.Result -or [string]$Step.Result.status -cne 'ok') {
+        throw ("Trusted maintenance " + $Name + " did not complete: " + (Get-AgentMaintenanceResultCategory -Result $Step.Result))
+    }
+}
+
+function Enter-AgentUpdateWorkflowLock {
+    param([Parameter(Mandatory)]$WorkStore)
+    $path = Join-Path $WorkStore.Work '.update.lock'
+    if (-not (Test-Path -LiteralPath $path)) {
+        $created = [IO.FileStream]::new($path,[IO.FileMode]::CreateNew,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None,4096,[IO.FileOptions]::WriteThrough)
+        try { } finally { $created.Dispose() }
+        Set-AgentUpdatePrivateFileSecurity -Path $path
+    }
+    Assert-AgentUpdateNoReparseAncestors -Path $path
+    Assert-AgentUpdatePrivateAcl -Path $path
+    try {
+        $stream = [IO.FileStream]::new($path,[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None,4096)
+    }
+    catch [IO.IOException] {
+        throw 'Another Agent update wrapper is already active on this machine.'
+    }
+    try {
+        $owner = [Text.Encoding]::UTF8.GetBytes([string]$PID)
+        $stream.SetLength(0)
+        $stream.Write($owner,0,$owner.Length)
+        $stream.Flush($true)
+    }
+    catch {
+        $stream.Dispose()
+        throw
+    }
+    return $stream
+}
+
 function Invoke-AgentMaintenanceProcess {
     param([Parameter(Mandatory)][string]$Path,[Parameter(Mandatory)][string]$Verb)
     if ($Verb -cne 'inspect') { throw 'Maintenance bootstrap only permits the read-only inspect verb.' }
@@ -593,6 +906,11 @@ function Invoke-AgentUpdateMain {
         AssetBaseUrl = $BoundParameters.AssetBaseUrl
         MachineId = $BoundParameters.MachineId
         OperationId = $BoundParameters.OperationId
+        ChainId = $BoundParameters.ChainId
+        HeadOperationId = $BoundParameters.HeadOperationId
+        Generation = $BoundParameters.Generation
+        EnrollmentKeyFingerprint = $BoundParameters.EnrollmentKeyFingerprint
+        PackageLength = $BoundParameters.PackageLength
         UpdateTicket = $BoundParameters.UpdateTicket
         ReleaseVersion = $BoundParameters.ReleaseVersion
         TargetVersion = $BoundParameters.TargetVersion
@@ -636,7 +954,60 @@ function Invoke-AgentUpdateMain {
     catch { throw 'Trusted maintenance helper capability is unavailable; the read-only inspection result was invalid.' }
     if (-not $result -or $result.status -cne 'ok') { throw 'Trusted maintenance helper capability is unavailable; the read-only inspection was rejected.' }
 
-    throw 'Trusted Agent update capability is unavailable. The helper does not yet implement the complete start, source-binding, apply, report, and reconciliation workflow; no Controller update was started.'
+    $workStore = Initialize-AgentUpdateWorkStore
+    $workflowLock = $null
+    try {
+    $workflowLock = Enter-AgentUpdateWorkflowLock -WorkStore $workStore
+
+    Write-AgentUpdateProtectedJson -Path $workStore.Request -Value (New-AgentUpdateLifecycleRequest -Request $normalized -Command 'start')
+    $startStep = Invoke-AgentMaintenanceCommand -Path $helperPath -Verb 'start' -TimeoutSeconds 300
+    if (-not $startStep.Result -or [string]$startStep.Result.status -cne 'ok') {
+        $startCategory = Get-AgentMaintenanceResultCategory -Result $startStep.Result
+        if ($startCategory -ceq 'controllerStartUnconfirmed') {
+            [void](Invoke-AgentMaintenanceCommand -Path $helperPath -Verb 'reconcile' -TimeoutSeconds 600)
+        }
+        throw ("Trusted maintenance start did not complete: " + $startCategory)
+    }
+
+    Save-AgentUpdatePackage -Request $normalized -Destination $workStore.Archive
+
+    Write-AgentUpdateProtectedJson -Path $workStore.Request -Value (New-AgentUpdateArchiveRequest -Request $normalized -Command 'extract')
+    $staleExtractionRoot = Join-Path $workStore.Work 'target'
+    if (Test-Path -LiteralPath $staleExtractionRoot -PathType Container) {
+        Assert-AgentUpdateNoReparseAncestors -Path $staleExtractionRoot
+        Assert-AgentUpdatePrivateAcl -Path $staleExtractionRoot -Directory
+        Remove-Item -LiteralPath $staleExtractionRoot -Recurse -Force -ErrorAction Stop
+    }
+    Assert-AgentMaintenanceStep -Step (Invoke-AgentMaintenanceCommand -Path $helperPath -Verb 'extract' -TimeoutSeconds 900) -Name 'extract'
+
+    Write-AgentUpdateProtectedJson -Path $workStore.Request -Value (New-AgentUpdateLifecycleRequest -Request $normalized -Command 'bind-source' -HelperBuildSha256 $normalized.HelperSha256)
+    Assert-AgentMaintenanceStep -Step (Invoke-AgentMaintenanceCommand -Path $helperPath -Verb 'bind-source' -TimeoutSeconds 900) -Name 'source binding'
+
+    Write-AgentUpdateProtectedJson -Path $workStore.Request -Value (New-AgentUpdateArchiveRequest -Request $normalized -Command 'apply')
+    $applyStep = Invoke-AgentMaintenanceCommand -Path $helperPath -Verb 'apply' -TimeoutSeconds 1800
+
+    Write-AgentUpdateProtectedJson -Path $workStore.Request -Value (New-AgentUpdateLifecycleRequest -Request $normalized -Command 'report')
+    $reportStep = Invoke-AgentMaintenanceCommand -Path $helperPath -Verb 'report' -TimeoutSeconds 900
+    if (-not $reportStep.Result -or [string]$reportStep.Result.status -cne 'ok') {
+        throw ("Trusted maintenance outcome report did not complete: " + (Get-AgentMaintenanceResultCategory -Result $reportStep.Result))
+    }
+    if (-not $applyStep.Result -or [string]$applyStep.Result.status -cne 'ok') {
+        $applyOutcome = [string]$applyStep.Result.applyOutcome
+        throw ("Trusted maintenance apply did not complete: " + (Get-AgentMaintenanceResultCategory -Result $applyStep.Result) + "; reported outcome: " + $applyOutcome)
+    }
+
+    [pscustomobject]@{
+        status = 'ok'
+        operationId = $normalized.OperationId
+        chainId = $normalized.ChainId
+        generation = $normalized.Generation
+        targetVersion = $normalized.TargetVersion
+        applyOutcome = [string]$applyStep.Result.applyOutcome
+    } | ConvertTo-Json -Compress | Write-Output
+    }
+    finally {
+        if ($workflowLock) { $workflowLock.Dispose() }
+    }
 }
 
 if ($DefineFunctionsOnly) { return }

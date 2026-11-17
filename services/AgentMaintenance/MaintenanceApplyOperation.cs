@@ -27,6 +27,12 @@ public interface IMaintenanceApplyServiceLifecycle
 {
     Task EnsureStoppedAndVerifyQuiescedAsync(string operationId, CancellationToken cancellationToken);
     Task StartAndVerifyAsync(string operationId, string installDirectory, string expectedVersion, CancellationToken cancellationToken);
+    Task VerifyStartedAsync(
+        string operationId,
+        string installDirectory,
+        string expectedVersion,
+        Action verifyHeld,
+        CancellationToken cancellationToken);
 }
 
 public sealed record MaintenanceApplyResult(string Outcome, string InstalledVersion, string? RollbackReason);
@@ -38,7 +44,8 @@ public sealed class MaintenanceApplyOperation(
     MaintenanceBackupOperation backupOperation,
     IMaintenanceApplyAuthorization authorization,
     IMaintenanceApplyFileSystem fileSystem,
-    IMaintenanceApplyServiceLifecycle services)
+    IMaintenanceApplyServiceLifecycle services,
+    IMaintenanceTerminalStateVerifier? terminalStateVerifier = null)
 {
     public async Task<MaintenanceApplyResult> ApplyAsync(
         string operationId,
@@ -72,9 +79,21 @@ public sealed class MaintenanceApplyOperation(
         if (operation.Phase is "controllerConfirmed" or "outcomeReported")
             throw new InvalidOperationException("The maintenance outcome is already reported or confirmed.");
         if (operation.Phase == "servicesStarted")
+        {
+            if (terminalStateVerifier is null)
+                throw new InvalidOperationException("The terminal apply state verifier is unavailable; the journal alone cannot confirm the installed outcome.");
+            await terminalStateVerifier.VerifyAsync(binding, operation, MaintenanceTerminalOutcome.Applied,
+                expectedTarget, () => authorization.VerifyHeld(operationId), cancellationToken).ConfigureAwait(false);
             return new("applied", binding.TargetVersion, null);
+        }
         if (operation.Phase == "rollbackServicesStarted")
+        {
+            if (terminalStateVerifier is null)
+                throw new InvalidOperationException("The terminal rollback state verifier is unavailable; the journal alone cannot confirm the restored outcome.");
+            await terminalStateVerifier.VerifyAsync(binding, operation, MaintenanceTerminalOutcome.RolledBack,
+                expectedTarget, () => authorization.VerifyHeld(operationId), cancellationToken).ConfigureAwait(false);
             return new("rolledBack", operation.SourceVersion!, operation.RollbackReason);
+        }
         if (operation.Phase is "rollbackIntent" or "targetMovedToFailed" or "sourceRestored")
         {
             return await ContinueRollbackAsync(operationId, expectedTarget, failedTarget,
@@ -106,8 +125,8 @@ public sealed class MaintenanceApplyOperation(
             fileSystem.PrepareTargetInstallTree(extractedTargetDirectory, targetStage, expectedTarget, publishedBackup);
             PackageVerifier.ValidateExtracted(targetStage, expectedInstallTree);
             fileSystem.ValidateTargetInstallTree(targetStage, expectedInstallTree);
-            operation = journal.Advance(operationId, "swapIntent",
-                new MaintenanceJournalEvidence(TargetInventoryDigest: expectedTarget.InventoryDigest)).Operations.Single();
+            operation = MaintenanceJournal.Head(journal.Advance(operationId, "swapIntent",
+                new MaintenanceJournalEvidence(TargetInventoryDigest: expectedTarget.InventoryDigest)));
         }
 
         if (operation.Phase == "swapIntent")
@@ -132,7 +151,7 @@ public sealed class MaintenanceApplyOperation(
             {
                 throw new InvalidDataException("The source and prior trees do not match a recoverable swap-intent state.");
             }
-            operation = journal.Advance(operationId, "sourceMoved").Operations.Single();
+            operation = MaintenanceJournal.Head(journal.Advance(operationId, "sourceMoved"));
         }
 
         if (operation.Phase == "sourceMoved")
@@ -158,7 +177,7 @@ public sealed class MaintenanceApplyOperation(
                     PackageVerifier.ValidateExtracted(installDirectory, expectedInstallTree);
                     fileSystem.ValidateTargetInstallTree(installDirectory, expectedInstallTree);
                 }
-                operation = journal.Advance(operationId, "targetPlaced").Operations.Single();
+                operation = MaintenanceJournal.Head(journal.Advance(operationId, "targetPlaced"));
             }
             catch
             {
@@ -200,10 +219,6 @@ public sealed class MaintenanceApplyOperation(
             return new("applied", binding.TargetVersion, null);
         }
 
-        if (operation.Phase == "rollbackServicesStarted")
-            return new("rolledBack", operation.SourceVersion!, operation.RollbackReason);
-        if (operation.Phase == "servicesStarted")
-            return new("applied", binding.TargetVersion, null);
         throw new InvalidOperationException("The maintenance journal phase cannot be applied or reconciled.");
     }
 
@@ -285,10 +300,7 @@ public sealed class MaintenanceApplyOperation(
     {
         var snapshot = journal.Read()
             ?? throw new InvalidOperationException("The maintenance journal is missing; the update remains held.");
-        if (snapshot.Operations.Count != 1 || snapshot.HeadOperationId != operationId ||
-            snapshot.Operations[0].Binding.OperationId != operationId)
-            throw new InvalidOperationException("The update is not the current maintenance journal head.");
-        return snapshot.Operations[0];
+        return MaintenanceJournal.RequireHead(snapshot, operationId);
     }
 
     private static string Sibling(string parent, string prefix, string operationId)

@@ -258,11 +258,9 @@ public sealed class MaintenanceBackupOperation(
         ArgumentNullException.ThrowIfNull(journal);
         var snapshot = journal.Read()
             ?? throw new InvalidOperationException("The maintenance journal is missing; backup publication remains held.");
-        if (snapshot.Operations.Count != 1 || snapshot.HeadOperationId != operationId ||
-            snapshot.Operations[0].Binding.OperationId != operationId || snapshot.Operations[0].Binding.ChainId != snapshot.ChainId)
+        var operation = MaintenanceJournal.RequireHead(snapshot, operationId);
+        if (operation.Binding.ChainId != snapshot.ChainId)
             throw new InvalidOperationException("The backup operation is not the current journal head.");
-
-        var operation = snapshot.Operations[0];
         var phaseIndex = Array.IndexOf(Phases, operation.Phase);
         var servicesQuiescedIndex = Array.IndexOf(Phases, "servicesQuiesced");
         var backupPublishedIndex = Array.IndexOf(Phases, "backupPublished");
@@ -293,12 +291,30 @@ public sealed class MaintenanceBackupOperation(
         ArgumentNullException.ThrowIfNull(journal);
         var snapshot = journal.Read()
             ?? throw new InvalidOperationException("The maintenance journal is missing; backup verification remains held.");
-        if (snapshot.Operations.Count != 1 || snapshot.HeadOperationId != operationId ||
-            snapshot.Operations[0].Binding.OperationId != operationId || snapshot.Operations[0].Phase is not
+        var operation = MaintenanceJournal.RequireHead(snapshot, operationId);
+        if (operation.Phase is not
                 ("backupPublished" or "sourceBound" or "swapIntent" or "sourceMoved" or "targetPlaced" or
                  "rollbackIntent" or "targetMovedToFailed" or "sourceRestored" or "rollbackServicesStarted"))
             throw new InvalidOperationException("The immutable backup is not bound to the current journal head.");
         return publisher.VerifyPublished(operationId);
+    }
+
+    public MaintenanceBackupResult VerifyPublishedBackupUnderHold(string operationId, Action verifyHeld)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(operationId);
+        ArgumentNullException.ThrowIfNull(verifyHeld);
+        ArgumentNullException.ThrowIfNull(publisher);
+        ArgumentNullException.ThrowIfNull(journal);
+        var snapshot = journal.Read()
+            ?? throw new InvalidOperationException("The maintenance journal is missing; terminal verification remains held.");
+        var terminalOperation = MaintenanceJournal.RequireHead(snapshot, operationId);
+        if (terminalOperation.Phase is not
+                ("servicesStarted" or "rollbackServicesStarted" or "outcomeReported" or "controllerConfirmed"))
+            throw new InvalidOperationException("The terminal backup is not bound to the current journal head.");
+        verifyHeld();
+        var backup = publisher.VerifyPublishedUnderHold(operationId, verifyHeld);
+        verifyHeld();
+        return backup;
     }
 
     private static bool ContainsSourceMetadata(MaintenanceBackupResult backup, InstalledAgentSourceSnapshot source)

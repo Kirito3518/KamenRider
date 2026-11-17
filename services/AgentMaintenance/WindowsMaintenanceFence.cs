@@ -52,6 +52,11 @@ public interface IWindowsMaintenanceFirewallFence
     void RemoveBlock(string sunshinePath);
 }
 
+public interface IMaintenanceOperationFenceVerifier
+{
+    void VerifyHeld(MaintenanceOperationBinding binding);
+}
+
 public sealed class WindowsMaintenanceFence(
     IMaintenanceFenceStore store,
     IWindowsMaintenanceFirewallFence firewall)
@@ -118,6 +123,33 @@ public sealed class WindowsMaintenanceFence(
         var published = store.Read();
         if (published is null || !SameRecord(published, requested) || !firewall.IsBlocked(executable))
             throw new IOException("The protected maintenance hold could not be verified after publication.");
+    }
+
+    public void VerifyHeld(AgentMaintenanceFenceRecord expectedHeld, string sunshinePath)
+    {
+        ArgumentNullException.ThrowIfNull(expectedHeld);
+        ArgumentException.ThrowIfNullOrWhiteSpace(sunshinePath);
+        expectedHeld.Validate();
+        if (expectedHeld.State != "held")
+            throw new ArgumentException("The expected maintenance fence record must have state 'held'.", nameof(expectedHeld));
+
+        var current = store.Read();
+        if (current is null || !SameRecord(current, expectedHeld) ||
+            !firewall.IsBlocked(Path.GetFullPath(sunshinePath)))
+            throw new InvalidOperationException("The independent Windows Firewall maintenance fence is not continuously held for this operation.");
+    }
+
+    public void VerifyHeld(MaintenanceOperationBinding binding, string sunshinePath)
+    {
+        ArgumentNullException.ThrowIfNull(binding);
+        ArgumentException.ThrowIfNullOrWhiteSpace(sunshinePath);
+        var current = store.Read();
+        var expected = new AgentMaintenanceFenceRecord(1, "held", binding.OperationId, binding.ChainId,
+            binding.HeadOperationId, binding.Generation, "servicesQuiesced");
+        if (current is null || !SameOperation(current, expected) || current.State != "held" ||
+            PhaseRank(current.Phase) < PhaseRank("servicesQuiesced") ||
+            !firewall.IsBlocked(Path.GetFullPath(sunshinePath)))
+            throw new InvalidOperationException("The independent Windows Firewall maintenance fence is not held for the current operation.");
     }
 
     public void Release(
@@ -232,6 +264,14 @@ public sealed class WindowsMaintenanceFence(
         "legacyImported" => 0,
         _ => -1
     };
+}
+
+public sealed class WindowsMaintenanceOperationFenceVerifier(
+    WindowsMaintenanceFence fence,
+    string trustedSunshineExecutablePath) : IMaintenanceOperationFenceVerifier
+{
+    public void VerifyHeld(MaintenanceOperationBinding binding) =>
+        fence.VerifyHeld(binding, trustedSunshineExecutablePath);
 }
 
 [SupportedOSPlatform("windows")]
@@ -597,7 +637,7 @@ public static class WindowsMaintenanceFirewallPolicyVerifier
         if (!string.Equals(rule.Name, ruleName, StringComparison.Ordinal) ||
             !string.Equals(rule.PolicySourceType, "Local", StringComparison.OrdinalIgnoreCase) ||
             !rule.Enabled || !PathEquals(rule.ApplicationPath, executable) ||
-            !string.IsNullOrWhiteSpace(rule.ServiceName) ||
+            !IsAny(rule.ServiceName) ||
             !string.Equals(rule.Direction, "Inbound", StringComparison.OrdinalIgnoreCase) ||
             !string.Equals(rule.Action, "Block", StringComparison.OrdinalIgnoreCase) ||
             !string.Equals(rule.Profiles, "Any", StringComparison.OrdinalIgnoreCase) ||

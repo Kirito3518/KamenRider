@@ -37,6 +37,7 @@ public interface IMaintenanceBackupSecurity
 public interface IMaintenanceBackupAuthorization
 {
     void VerifyHeldAndQuiesced(string operationId);
+    void VerifyHeld(string operationId) => VerifyHeldAndQuiesced(operationId);
 }
 
 public sealed class MaintenanceBackupPublisher
@@ -45,6 +46,8 @@ public sealed class MaintenanceBackupPublisher
     private const long MaximumTreeBytes = 524288000;
     private const int MaximumManifestBytes = 3 * 1024 * 1024;
     private const string ManifestName = "backup-manifest.json";
+    private const string PendingOwnerName = ".pending-owner.json";
+    private const int MaximumPendingOwnerBytes = 4096;
     private static readonly Regex OperationIdPattern = new("\\A[A-Za-z0-9._-]{1,128}\\z", RegexOptions.CultureInvariant);
     private static readonly Regex DeviceNamePattern = new("\\A(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])\\z", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
@@ -84,16 +87,21 @@ public sealed class MaintenanceBackupPublisher
         if (Directory.Exists(finalDirectory) || File.Exists(finalDirectory))
             return ReadAndVerifyPublished(operationId, finalDirectory);
 
-        var stagingDirectory = Path.Combine(backupRoot, ".pending-" + operationId);
-        if (Directory.Exists(stagingDirectory) || File.Exists(stagingDirectory))
-            throw new InvalidOperationException("An incomplete backup staging tree exists and requires reconciliation.");
-
         var sourceInventory = ScanTree(sourceRoot, isPrivateBackup: false);
         if (sourceInventory.Nodes.Count == 0)
             throw new InvalidDataException("The installed Agent tree is empty and cannot be used as a rollback source.");
+
+        var stagingDirectory = Path.Combine(backupRoot, ".pending-" + operationId);
+        if (Directory.Exists(stagingDirectory) || File.Exists(stagingDirectory))
+        {
+            RecoverOwnedPendingStage(stagingDirectory, operationId, ComputeInventoryDigest(sourceInventory.Nodes));
+            authorization.VerifyHeldAndQuiesced(operationId);
+        }
+
         security.EnsurePrivateDirectory(stagingDirectory, create: true);
+        WritePendingOwner(stagingDirectory, operationId, ComputeInventoryDigest(sourceInventory.Nodes));
         CopyTree(sourceInventory, stagingDirectory);
-        var copiedInventory = ScanTree(stagingDirectory, isPrivateBackup: true);
+        var copiedInventory = ScanTree(stagingDirectory, isPrivateBackup: true, excludeRootPendingOwner: true);
         if (!SameInventory(sourceInventory, copiedInventory))
             throw new InvalidDataException("The copied Agent tree does not match the quiesced source snapshot.");
 
@@ -126,6 +134,23 @@ public sealed class MaintenanceBackupPublisher
         return ReadAndVerifyPublished(operationId, finalDirectory);
     }
 
+    public MaintenanceBackupResult VerifyPublishedUnderHold(string operationId, Action verifyHeld)
+    {
+        ArgumentNullException.ThrowIfNull(verifyHeld);
+        if (operationId is null || !OperationIdPattern.IsMatch(operationId))
+            throw new InvalidDataException("The backup operation ID is invalid.");
+        verifyHeld();
+        authorization.VerifyHeld(operationId);
+        security.EnsureBackupDirectory(backupRoot, create: false);
+        var finalDirectory = Path.Combine(backupRoot, operationId);
+        if (!Directory.Exists(finalDirectory) || File.Exists(finalDirectory))
+            throw new DirectoryNotFoundException("The immutable Agent backup has not been published.");
+        var backup = ReadAndVerifyPublished(operationId, finalDirectory);
+        authorization.VerifyHeld(operationId);
+        verifyHeld();
+        return backup;
+    }
+
     private MaintenanceBackupResult ReadAndVerifyPublished(string operationId, string directory)
     {
         security.EnsurePrivateDirectory(directory, create: false);
@@ -143,10 +168,23 @@ public sealed class MaintenanceBackupPublisher
             !FixedDigestEquals(ComputeBackupDigest(operationId, inventoryDigest), manifest.BackupDigest))
             throw new InvalidDataException("The published Agent backup manifest digest is invalid.");
 
-        var actual = ScanTree(directory, isPrivateBackup: true, excludeRootManifest: true);
+        var pendingOwnerPath = Path.Combine(directory, PendingOwnerName);
+        var hasPendingOwner = File.Exists(pendingOwnerPath) || Directory.Exists(pendingOwnerPath);
+        var actual = ScanTree(directory, isPrivateBackup: true, excludeRootManifest: true,
+            excludeRootPendingOwner: true);
         if (actual.TotalBytes != manifest.TotalBytes || !SameNodes(actual.Nodes, expectedNodes) ||
             !FixedDigestEquals(ComputeInventoryDigest(actual.Nodes), inventoryDigest))
             throw new InvalidDataException("The published Agent backup bytes do not match its immutable manifest.");
+
+        if (hasPendingOwner)
+        {
+            var pendingOwner = ReadPendingOwner(directory);
+            if (pendingOwner.OperationId != operationId ||
+                !FixedDigestEquals(pendingOwner.SourceInventoryDigest, inventoryDigest))
+                throw new InvalidDataException("The published Agent backup has a mismatched pending owner marker.");
+            DeletePrivateFile(pendingOwnerPath);
+            security.FlushDirectory(directory);
+        }
 
         security.FlushDirectory(directory);
         security.FlushDirectory(backupRoot);
@@ -154,7 +192,8 @@ public sealed class MaintenanceBackupPublisher
             manifest.TotalBytes, expectedNodes);
     }
 
-    private TreeInventory ScanTree(string root, bool isPrivateBackup, bool excludeRootManifest = false)
+    private TreeInventory ScanTree(string root, bool isPrivateBackup, bool excludeRootManifest = false,
+        bool excludeRootPendingOwner = false)
     {
         var nodes = new List<MaintenanceBackupNode>();
         var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -179,12 +218,22 @@ public sealed class MaintenanceBackupPublisher
             {
                 var name = Path.GetFileName(child);
                 var relative = relativeDirectory.Length == 0 ? name : relativeDirectory + "/" + name;
-                if (excludeRootManifest && relativeDirectory.Length == 0 && name == ManifestName)
-                    continue;
                 ValidateRelativePath(relative);
                 var attributes = File.GetAttributes(child);
                 if ((attributes & (FileAttributes.ReparsePoint | FileAttributes.Device)) != 0)
                     throw new UnauthorizedAccessException("The Agent tree contains a reparse point or special file.");
+                if (relativeDirectory.Length == 0 && name == PendingOwnerName && excludeRootPendingOwner)
+                {
+                    if ((attributes & FileAttributes.Directory) != 0)
+                        throw new UnauthorizedAccessException("The pending backup owner marker is not a regular file.");
+                    continue;
+                }
+                if (excludeRootManifest && relativeDirectory.Length == 0 && name == ManifestName)
+                {
+                    if ((attributes & FileAttributes.Directory) != 0)
+                        throw new UnauthorizedAccessException("The backup manifest is not a regular file.");
+                    continue;
+                }
                 if ((attributes & FileAttributes.Directory) != 0)
                 {
                     Visit(child, relative, includeDirectoryNode: true);
@@ -193,6 +242,8 @@ public sealed class MaintenanceBackupPublisher
 
                 if (!isPrivateBackup && relative == ManifestName)
                     throw new InvalidDataException("The installed Agent tree contains a reserved backup manifest path.");
+                if (!isPrivateBackup && relative == PendingOwnerName)
+                    throw new InvalidDataException("The installed Agent tree contains a reserved pending backup owner path.");
                 using var file = isPrivateBackup ? security.OpenPrivateFile(child) : security.OpenSourceFile(child);
                 if (!file.CanRead || !file.CanSeek || file.Length < 0 || file.Length > MaximumTreeBytes - totalBytes)
                     throw new InvalidDataException("The Agent tree exceeds its size limit or contains an unreadable file.");
@@ -252,6 +303,104 @@ public sealed class MaintenanceBackupPublisher
                 output.Flush();
         }
         security.EnsurePrivateFile(path);
+    }
+
+    private void WritePendingOwner(string stagingDirectory, string operationId, string sourceInventoryDigest)
+    {
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(
+            new PendingBackupOwner(1, operationId, sourceInventoryDigest), JsonOptions);
+        if (bytes.Length is <= 0 or > MaximumPendingOwnerBytes)
+            throw new InvalidDataException("The pending backup owner marker exceeds its size limit.");
+        var path = Path.Combine(stagingDirectory, PendingOwnerName);
+        using (var output = security.CreateBackupFile(path))
+        {
+            output.Write(bytes);
+            if (output is FileStream fileStream)
+                fileStream.Flush(flushToDisk: true);
+            else
+                output.Flush();
+        }
+        security.EnsurePrivateFile(path);
+        security.FlushDirectory(stagingDirectory);
+    }
+
+    private PendingBackupOwner ReadPendingOwner(string directory)
+    {
+        var path = Path.Combine(directory, PendingOwnerName);
+        security.EnsurePrivateFile(path);
+        var bytes = ReadPrivateFile(path, MaximumPendingOwnerBytes);
+        try
+        {
+            using var document = JsonDocument.Parse(bytes, new JsonDocumentOptions
+            {
+                MaxDepth = 2,
+                CommentHandling = JsonCommentHandling.Disallow,
+                AllowTrailingCommas = false
+            });
+            ValidateObjectFields(document.RootElement, ["schemaVersion", "operationId", "sourceInventoryDigest"]);
+            return JsonSerializer.Deserialize<PendingBackupOwner>(bytes, JsonOptions)
+                ?? throw new InvalidDataException("The pending backup owner marker is empty.");
+        }
+        catch (JsonException exception)
+        {
+            throw new InvalidDataException("The pending backup owner marker is malformed.", exception);
+        }
+    }
+
+    private void RecoverOwnedPendingStage(string stagingDirectory, string operationId, string sourceInventoryDigest)
+    {
+        if (!Directory.Exists(stagingDirectory) || File.Exists(stagingDirectory))
+            throw new UnauthorizedAccessException("The pending backup staging path is not a directory.");
+        security.EnsurePrivateDirectory(stagingDirectory, create: false);
+        var owner = ReadPendingOwner(stagingDirectory);
+        if (owner.SchemaVersion != 1 || owner.OperationId != operationId ||
+            !IsDigest(owner.SourceInventoryDigest) ||
+            !FixedDigestEquals(owner.SourceInventoryDigest, sourceInventoryDigest))
+            throw new InvalidDataException("The pending backup staging tree is not owned by this operation and source snapshot.");
+
+        authorization.VerifyHeldAndQuiesced(operationId);
+        var discardedDirectory = Path.Combine(backupRoot,
+            ".discard-" + operationId + "-" + Guid.NewGuid().ToString("N"));
+        security.PublishDirectory(stagingDirectory, discardedDirectory);
+        security.FlushDirectory(backupRoot);
+        DeletePendingTreeContents(discardedDirectory, string.Empty);
+        Directory.Delete(discardedDirectory, recursive: false);
+        security.FlushDirectory(backupRoot);
+    }
+
+    private void DeletePendingTreeContents(string directory, string relativeDirectory)
+    {
+        var entries = Directory.EnumerateFileSystemEntries(directory)
+            .OrderBy(path => string.Equals(Path.GetFileName(path), PendingOwnerName, StringComparison.Ordinal)
+                ? 1
+                : 0)
+            .ThenBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        foreach (var entry in entries)
+        {
+            var name = Path.GetFileName(entry);
+            var relative = relativeDirectory.Length == 0 ? name : relativeDirectory + "/" + name;
+            ValidateRelativePath(relative);
+            var attributes = File.GetAttributes(entry);
+            if ((attributes & (FileAttributes.ReparsePoint | FileAttributes.Device)) != 0)
+                throw new UnauthorizedAccessException("The pending backup staging tree contains a reparse point or special file.");
+            if ((attributes & FileAttributes.Directory) != 0)
+            {
+                security.EnsurePrivateDirectory(entry, create: false);
+                DeletePendingTreeContents(entry, relative);
+                Directory.Delete(entry, recursive: false);
+                continue;
+            }
+
+            DeletePrivateFile(entry);
+        }
+    }
+
+    private void DeletePrivateFile(string path)
+    {
+        security.EnsurePrivateFile(path);
+        using (security.OpenPrivateFile(path)) { }
+        File.Delete(path);
     }
 
     private static BackupManifest ParseManifest(byte[] bytes)
@@ -394,6 +543,7 @@ public sealed class MaintenanceBackupPublisher
     private sealed record TreeInventory(List<MaintenanceBackupNode> Nodes, long TotalBytes);
     private sealed record BackupManifest(int SchemaVersion, string OperationId, string BackupDigest,
         string InventoryDigest, long TotalBytes, List<MaintenanceBackupNode> Nodes);
+    private sealed record PendingBackupOwner(int SchemaVersion, string OperationId, string SourceInventoryDigest);
 }
 
 [System.Runtime.Versioning.SupportedOSPlatform("windows")]

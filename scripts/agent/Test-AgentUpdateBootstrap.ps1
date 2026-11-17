@@ -145,6 +145,11 @@ try {
         AssetBaseUrl = 'https://assets.example/'
         MachineId = '00112233445566778899aabbccddeeff'
         OperationId = 'ffeeddccbbaa99887766554433221100'
+        ChainId = 'ffeeddccbbaa99887766554433221100'
+        HeadOperationId = 'ffeeddccbbaa99887766554433221100'
+        Generation = 1
+        EnrollmentKeyFingerprint = 'D' * 64
+        PackageLength = 1048576
         UpdateTicket = 'A' * 43
         ReleaseVersion = '2.3.4'
         TargetVersion = '2.3.4'
@@ -212,6 +217,36 @@ try {
         }
     }
 
+    $script:bootstrapWorkRequests = [Collections.Generic.List[object]]::new()
+    $script:bootstrapPackageSaves = [Collections.Generic.List[string]]::new()
+    function Initialize-AgentUpdateWorkStore {
+        return [pscustomobject]@{
+            Root = $fixtureRoot
+            Work = $fixtureRoot
+            Request = (Join-Path $fixtureRoot 'request.json')
+            Archive = (Join-Path $fixtureRoot 'target.zip')
+        }
+    }
+    function Write-AgentUpdateProtectedJson {
+        param($Path,$Value)
+        $script:bootstrapWorkRequests.Add($Value)
+    }
+    function Save-AgentUpdatePackage {
+        param($Request,$Destination)
+        $script:bootstrapPackageSaves.Add($Destination)
+    }
+    function Invoke-AgentMaintenanceCommand {
+        param($Path,$Verb,[int]$TimeoutSeconds = 600)
+        $script:bootstrapHelperCommands.Add($Verb)
+        $outcome = if ($Verb -ceq 'apply') { 'applied' } else { $null }
+        return [pscustomobject]@{
+            Verb = $Verb
+            ExitCode = 0
+            Result = [pscustomobject]@{ status = 'ok'; category = $null; applyOutcome = $outcome }
+            StandardError = ''
+        }
+    }
+
     $boundParameters = @{}
     foreach ($property in $valid.PSObject.Properties) { $boundParameters[$property.Name] = $property.Value }
     $wrongRuntime = $valid.PSObject.Copy()
@@ -226,20 +261,65 @@ try {
     }
 
     $mainError = $null
-    try { Invoke-AgentUpdateMain -BoundParameters $boundParameters | Out-Null } catch { $mainError = $_.Exception.Message }
-    if ($mainError -notmatch 'capability is unavailable|operation is not available|not ready') {
-        throw "Bootstrap must stop after the read-only helper probe while start/bind/apply/report are unavailable; got: $mainError"
+    $mainOutput = @()
+    try { $mainOutput = @(Invoke-AgentUpdateMain -BoundParameters $boundParameters) } catch { $mainError = $_.Exception.Message }
+    if ($mainError) { throw "Trusted bootstrap main flow failed before its fail-closed boundary: $mainError" }
+    if (-not $mainOutput -or (($mainOutput | Out-String) -notmatch '"status":"ok"')) {
+        throw 'Bootstrap did not complete the helper-driven update workflow.'
     }
     if ($script:bootstrapAssetCalls.Count -ne 2 -or
         $script:bootstrapAssetCalls[0] -cne '/agent/Update-Agent.ps1' -or
         $script:bootstrapAssetCalls[1] -cne $helperUrl) {
         throw 'Bootstrap did not fetch exactly the fixed wrapper and server-pinned native helper assets.'
     }
-    if ($script:bootstrapHelperCommands.Count -ne 1 -or $script:bootstrapHelperCommands[0] -cne 'inspect') {
-        throw 'Bootstrap ran a mutating or unsupported helper operation.'
+    $expectedHelperCommands = @('inspect','start','extract','bind-source','apply','report')
+    if (($script:bootstrapHelperCommands -join ',') -cne ($expectedHelperCommands -join ',')) {
+        throw ('Bootstrap invoked an unexpected helper command sequence: ' + ($script:bootstrapHelperCommands -join ','))
     }
-    if ($script:bootstrapPrivateFileSecurityAssignments.Count -ne 2) {
-        throw 'Every staged asset must receive an explicit Administrators-owned private file ACL.'
+    $requestCommands = @($script:bootstrapWorkRequests | ForEach-Object { [string]$_.command })
+    if (($requestCommands -join ',') -cne 'start,extract,bind-source,apply,report') {
+        throw ('Bootstrap wrote an unexpected helper request sequence: ' + ($requestCommands -join ','))
+    }
+    if ($script:bootstrapWorkRequests[0].chainId -cne $valid.ChainId -or
+        $script:bootstrapWorkRequests[0].generation -ne 1 -or
+        $script:bootstrapWorkRequests[0].enrollmentKeyFingerprint -cne $valid.EnrollmentKeyFingerprint -or
+        $script:bootstrapWorkRequests[0].controllerOrigin -cne $valid.ControllerUrl) {
+        throw 'Bootstrap lifecycle request does not carry the Controller-bound operation identity.'
+    }
+    if ($script:bootstrapWorkRequests[2].helperBuildSha256 -cne $helperHash) {
+        throw 'Bootstrap source-binding request is not pinned to the verified helper build.'
+    }
+    if ($script:bootstrapWorkRequests[3].targetPackageLength -ne $valid.PackageLength -or
+        $script:bootstrapWorkRequests[3].headOperationId -cne $valid.HeadOperationId) {
+        throw 'Bootstrap apply request does not carry the bound package and maintenance head.'
+    }
+    if ($script:bootstrapPackageSaves.Count -ne 1) {
+        throw 'Bootstrap did not download exactly one pinned package into the protected work store.'
+    }
+    if ($script:bootstrapPrivateFileSecurityAssignments.Count -ne 3) {
+        throw 'Every staged asset and the workflow lock must receive an explicit Administrators-owned private file ACL.'
+    }
+
+    # An ambiguous Controller start must never be retried blindly: the helper reconcile
+    # command runs and the wrapper still fails closed.
+    $script:bootstrapHelperCommands.Clear()
+    $script:bootstrapWorkRequests.Clear()
+    $ambiguousStage = Join-Path $fixtureRoot $valid.OperationId
+    if (Test-Path -LiteralPath $ambiguousStage) { Remove-Item -LiteralPath $ambiguousStage -Recurse -Force }
+    function Invoke-AgentMaintenanceCommand {
+        param($Path,$Verb,[int]$TimeoutSeconds = 600)
+        $script:bootstrapHelperCommands.Add($Verb)
+        if ($Verb -ceq 'start') {
+            return [pscustomobject]@{ Verb='start'; ExitCode=3; Result=[pscustomobject]@{ status='unavailable'; category='controllerStartUnconfirmed' }; StandardError='' }
+        }
+        return [pscustomobject]@{ Verb=$Verb; ExitCode=0; Result=[pscustomobject]@{ status='ok'; category=$null; applyOutcome=$null }; StandardError='' }
+    }
+    $ambiguousError = $null
+    try { Invoke-AgentUpdateMain -BoundParameters $boundParameters | Out-Null } catch { $ambiguousError = $_.Exception.Message }
+    if ($ambiguousError -notmatch 'controllerStartUnconfirmed' -or
+        ($script:bootstrapHelperCommands -join ',') -cne 'inspect,start,reconcile') {
+        throw ('Bootstrap did not reconcile and fail closed after an unconfirmed Controller start. error=' +
+            [string]$ambiguousError + ' commands=' + ($script:bootstrapHelperCommands -join ','))
     }
 
     $wrapperText = [IO.File]::ReadAllText($wrapperPath)
@@ -250,7 +330,7 @@ try {
     Write-Output ('Trusted Agent update bootstrap contract passed under PowerShell ' + $PSVersionTable.PSVersion + '.')
 }
 finally {
-    foreach ($functionName in @('Get-Acl','Set-AgentUpdatePrivateFileSecurity','Assert-AgentUpdateElevated','Get-NativeAgentMaintenanceRuntime','New-AgentUpdatePrivateStage','Assert-AgentUpdatePrivateStage','Assert-AgentUpdatePrivateAcl','Get-AgentUpdateAssetBytes','Invoke-AgentMaintenanceProcess')) {
+    foreach ($functionName in @('Get-Acl','Set-AgentUpdatePrivateFileSecurity','Assert-AgentUpdateElevated','Get-NativeAgentMaintenanceRuntime','New-AgentUpdatePrivateStage','Assert-AgentUpdatePrivateStage','Assert-AgentUpdatePrivateAcl','Get-AgentUpdateAssetBytes','Invoke-AgentMaintenanceProcess','Initialize-AgentUpdateWorkStore','Write-AgentUpdateProtectedJson','Save-AgentUpdatePackage','Invoke-AgentMaintenanceCommand','Enter-AgentUpdateWorkflowLock')) {
         Remove-Item -LiteralPath (Join-Path 'Function:' $functionName) -Force -ErrorAction SilentlyContinue
     }
     Remove-Variable testPrivateAcl -Scope Script -ErrorAction SilentlyContinue
@@ -258,6 +338,8 @@ finally {
     Remove-Variable bootstrapAssetCalls -Scope Script -ErrorAction SilentlyContinue
     Remove-Variable bootstrapHelperCommands -Scope Script -ErrorAction SilentlyContinue
     Remove-Variable bootstrapPrivateFileSecurityAssignments -Scope Script -ErrorAction SilentlyContinue
+    Remove-Variable bootstrapWorkRequests -Scope Script -ErrorAction SilentlyContinue
+    Remove-Variable bootstrapPackageSaves -Scope Script -ErrorAction SilentlyContinue
     $buildRoot = [IO.Path]::GetFullPath($temporaryRoot).TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
     $resolvedFixture = [IO.Path]::GetFullPath($fixtureRoot)
     if (-not $resolvedFixture.StartsWith($buildRoot,[StringComparison]::OrdinalIgnoreCase) -or

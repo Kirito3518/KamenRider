@@ -18,6 +18,9 @@ public sealed class MaintenanceBackupPublisherTests : IDisposable
 {
     private sealed class TestBackupSecurity : IMaintenanceBackupSecurity
     {
+        public string? FailCreatingFileName { get; set; }
+        public bool FailAfterNextDirectoryMove { get; set; }
+
         public void EnsureSourceRoot(string path) => Assert.True(Directory.Exists(path));
         public void EnsureSourceDirectory(string path) => Assert.True(Directory.Exists(path));
         public void EnsureBackupDirectory(string path, bool create)
@@ -32,10 +35,23 @@ public sealed class MaintenanceBackupPublisherTests : IDisposable
         }
         public Stream OpenSourceFile(string path) => new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
         public Stream OpenPrivateFile(string path) => new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
-        public Stream CreateBackupFile(string path) => new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None, 65536, FileOptions.WriteThrough);
+        public Stream CreateBackupFile(string path)
+        {
+            if (string.Equals(Path.GetFileName(path), FailCreatingFileName, StringComparison.OrdinalIgnoreCase))
+                throw new IOException("simulated process interruption while copying a backup file");
+            return new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None, 65536, FileOptions.WriteThrough);
+        }
         public void EnsurePrivateFile(string path) => Assert.True(File.Exists(path));
         public void FlushDirectory(string path) => Assert.True(Directory.Exists(path));
-        public void PublishDirectory(string stagingDirectory, string publishedDirectory) => Directory.Move(stagingDirectory, publishedDirectory);
+        public void PublishDirectory(string stagingDirectory, string publishedDirectory)
+        {
+            Directory.Move(stagingDirectory, publishedDirectory);
+            if (FailAfterNextDirectoryMove)
+            {
+                FailAfterNextDirectoryMove = false;
+                throw new IOException("simulated process interruption after an atomic staging rename");
+            }
+        }
     }
 
     private sealed class TestBackupAuthorization : IMaintenanceBackupAuthorization
@@ -140,6 +156,47 @@ public sealed class MaintenanceBackupPublisherTests : IDisposable
         Assert.Equal(2, authorization.Checks);
         Assert.False(Directory.Exists(Path.Combine(backups, "operation-1")));
         Assert.True(Directory.Exists(Path.Combine(backups, ".pending-operation-1")));
+    }
+
+    [Fact]
+    public void PublishRecoversAnOperationOwnedPartialStagingTreeAfterACrashDuringCopy()
+    {
+        var security = new TestBackupSecurity { FailCreatingFileName = "data.bin" };
+        var publisher = new MaintenanceBackupPublisher(source, backups, security, new TestBackupAuthorization());
+        var staging = Path.Combine(backups, ".pending-operation-1");
+
+        Assert.Throws<IOException>(() => publisher.Publish("operation-1"));
+        Assert.True(File.Exists(Path.Combine(staging, "Agent.dll")));
+        Assert.False(File.Exists(Path.Combine(staging, "nested", "data.bin")));
+
+        security.FailCreatingFileName = null;
+        var recovered = publisher.Publish("operation-1");
+
+        Assert.True(File.Exists(Path.Combine(recovered.DirectoryPath, "Agent.dll")));
+        Assert.True(File.Exists(Path.Combine(recovered.DirectoryPath, "nested", "data.bin")));
+        Assert.False(Directory.Exists(staging));
+        Assert.Equal("verified-agent-bytes", File.ReadAllText(Path.Combine(recovered.DirectoryPath, "Agent.dll")));
+    }
+
+    [Fact]
+    public void PublishRetryCanResumeAfterPartialStageIsAtomicallyMovedOutOfTheBlockingPath()
+    {
+        var security = new TestBackupSecurity { FailCreatingFileName = "data.bin" };
+        var publisher = new MaintenanceBackupPublisher(source, backups, security, new TestBackupAuthorization());
+        var staging = Path.Combine(backups, ".pending-operation-1");
+
+        Assert.Throws<IOException>(() => publisher.Publish("operation-1"));
+        security.FailCreatingFileName = null;
+        security.FailAfterNextDirectoryMove = true;
+
+        Assert.Throws<IOException>(() => publisher.Publish("operation-1"));
+        Assert.False(Directory.Exists(staging));
+        Assert.False(Directory.Exists(Path.Combine(backups, "operation-1")));
+
+        var recovered = publisher.Publish("operation-1");
+
+        Assert.True(File.Exists(Path.Combine(recovered.DirectoryPath, "nested", "data.bin")));
+        Assert.False(Directory.Exists(staging));
     }
 
     [Fact]

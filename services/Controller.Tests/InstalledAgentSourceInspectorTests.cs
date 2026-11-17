@@ -50,6 +50,7 @@ public sealed partial class InstalledAgentSourceInspectorTests : IDisposable
     private sealed class Authorization : IMaintenanceBackupAuthorization
     {
         public int Checks { get; private set; }
+        public int HeldChecks { get; private set; }
         public Action<int>? OnCheck { get; set; }
         public Func<bool>? IsQuiesced { get; set; }
 
@@ -59,6 +60,12 @@ public sealed partial class InstalledAgentSourceInspectorTests : IDisposable
             Assert.True(IsQuiesced?.Invoke() ?? true, "Backup verification requires services to be stopped.");
             Checks++;
             OnCheck?.Invoke(Checks);
+        }
+
+        public void VerifyHeld(string operationId)
+        {
+            Assert.Equal("operation-1", operationId);
+            HeldChecks++;
         }
     }
 
@@ -85,6 +92,85 @@ public sealed partial class InstalledAgentSourceInspectorTests : IDisposable
         }
     }
 
+    private sealed class LifecycleWorkStore(MaintenanceLifecycleRequest request) : IMaintenanceLifecycleWorkStore
+    {
+        public MaintenanceLifecycleRequest ReadLifecycleRequest(string expectedCommand)
+        {
+            Assert.Equal("bind-source", expectedCommand);
+            return request;
+        }
+    }
+
+    private sealed class SourceCommandAuthorization(MaintenanceLifecycleRequest request)
+        : IMaintenanceSourceBindingAuthorization
+    {
+        public void VerifyRequestBinding(MaintenanceLifecycleRequest actual) => Assert.Equal(request, actual);
+        public void VerifyHeldAndQuiesced(string operationId) => Assert.Equal(request.OperationId, operationId);
+        public void VerifyHeld(string operationId) => Assert.Equal(request.OperationId, operationId);
+    }
+
+    private sealed class SourceCommandLease(string operationId) : IMaintenanceApplyProcessExclusionLease
+    {
+        public bool Disposed { get; private set; }
+        public void VerifyContinuouslyHeld(string actual) => Assert.Equal(operationId, actual);
+        public void Dispose() => Disposed = true;
+    }
+
+    private sealed class SourceCommandExclusionProvider(SourceCommandLease lease)
+        : IMaintenanceApplyProcessExclusionProvider
+    {
+        public IMaintenanceApplyProcessExclusionLease Acquire() => lease;
+    }
+
+    private sealed class SourceCommandHelperIdentity(string sha256) : IMaintenanceHelperBuildIdentityProvider
+    {
+        public string ReadSha256() => sha256;
+    }
+
+    private sealed class StallingHandler(StallingContent content) : HttpMessageHandler
+    {
+        public StallingContent Content { get; } = content;
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
+            Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = Content });
+    }
+
+    private sealed class StallingContent : HttpContent
+    {
+        public StallingStream Body { get; } = new();
+        protected override bool TryComputeLength(out long length) { length = 0; return false; }
+        protected override Task SerializeToStreamAsync(Stream stream, TransportContext? context) =>
+            throw new NotSupportedException();
+        protected override Task<Stream> CreateContentReadStreamAsync() => Task.FromResult<Stream>(Body);
+    }
+
+    private sealed class StallingStream : Stream
+    {
+        public TaskCompletionSource CancellationObserved { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            try
+            {
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+                return 0;
+            }
+            catch (OperationCanceledException)
+            {
+                CancellationObserved.TrySetResult();
+                throw;
+            }
+        }
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override void Flush() => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
+
     private sealed class UnusedWorkStore : IMaintenanceWorkStore
     {
         public MaintenanceCommandRequest ReadRequest(string expectedCommand) =>
@@ -95,6 +181,65 @@ public sealed partial class InstalledAgentSourceInspectorTests : IDisposable
         public void CreateExtractionRoot() =>
             throw new InvalidOperationException("The read-only inspect command must not create an extraction tree.");
     }
+
+    private sealed class TerminalWorkStore(MaintenanceCommandRequest request) : IMaintenanceWorkStore
+    {
+        public MaintenanceCommandRequest ReadRequest(string expectedCommand)
+        {
+            Assert.Equal("apply", expectedCommand);
+            return request;
+        }
+
+        public Stream OpenArchiveRead() =>
+            throw new InvalidOperationException("The apply replay test supplies its already-verified target inventory.");
+        public string ExtractionRoot => Path.GetTempPath();
+        public void CreateExtractionRoot() => throw new InvalidOperationException("The terminal verifier must not extract a package.");
+    }
+
+    private sealed class ReportOverwrittenWorkStore(MaintenanceCommandRequest request, byte[] archive) : IMaintenanceWorkStore
+    {
+        public bool ReportRequestReplacedRequestJson { get; set; }
+        public int ApplyRequestReads { get; private set; }
+        public MaintenanceCommandRequest ReadRequest(string expectedCommand)
+        {
+            if (ReportRequestReplacedRequestJson)
+                throw new InvalidOperationException("request.json now contains the lifecycle report request.");
+            Assert.Equal("apply", expectedCommand);
+            ApplyRequestReads++;
+            return request;
+        }
+        public Stream OpenArchiveRead() => new MemoryStream(archive, writable: false);
+        public string ExtractionRoot => Path.GetTempPath();
+        public void CreateExtractionRoot() => throw new InvalidOperationException("The terminal verifier must not extract a package.");
+    }
+
+    private sealed class MemoryApplyMetadataStore : IMaintenanceApplyMetadataStore
+    {
+        private readonly Dictionary<string, MaintenanceApplyMetadata> entries = new(StringComparer.Ordinal);
+        public int Reads;
+
+        public MaintenanceApplyMetadata GetOrCreate(MaintenanceCommandRequest request)
+        {
+            var metadata = MaintenanceApplyMetadata.FromRequest(request);
+            if (entries.TryGetValue(metadata.OperationId, out var existing) && existing != metadata)
+                throw new InvalidOperationException("The operation metadata is immutable.");
+            entries[metadata.OperationId] = metadata;
+            return metadata;
+        }
+
+        public MaintenanceApplyMetadata Read(MaintenanceOperationBinding binding)
+        {
+            Reads++;
+            var metadata = entries[binding.OperationId];
+            Assert.Equal(binding.ChainId, metadata.ChainId);
+            Assert.Equal(binding.Generation, metadata.Generation);
+            Assert.Equal(binding.TargetVersion, metadata.TargetVersion);
+            Assert.Equal(binding.TargetRuntime, metadata.TargetRuntime);
+            Assert.Equal(binding.TargetSha256, metadata.TargetPackageSha256);
+            return metadata;
+        }
+    }
+
 
     private sealed record IdentitySource(string MachineId, string PrivateKey) : ITrustedIdentitySource
     {
@@ -117,10 +262,14 @@ public sealed partial class InstalledAgentSourceInspectorTests : IDisposable
 
     private sealed class SourceBindingClient(TimeProvider timeProvider) : IMaintenanceSourceBindingClient
     {
+        public Action? BeforeChallenge { get; set; }
+        public Action<AgentUpdateSourceBindingRequest>? BeforeBinding { get; set; }
         public int ChallengeCalls { get; private set; }
         public int RenewalRequiredOnChallengeCall { get; set; }
         public int RenewalRequiredOnBindingCall { get; set; }
         public int ConflictOnBindingCall { get; set; }
+        public string? TargetRuntimeOverride { get; set; }
+        public int? TargetProtocolOverride { get; set; }
         public List<AgentUpdateSourceBindingRequest> BindingRequests { get; } = [];
         public List<string> BindingBodyDigests { get; } = [];
         public List<string> ChallengeRequestIds { get; } = [];
@@ -133,6 +282,7 @@ public sealed partial class InstalledAgentSourceInspectorTests : IDisposable
             string operationId, AgentUpdateSourceChallengeRequest request, TrustedIdentity identity,
             CancellationToken cancellationToken)
         {
+            BeforeChallenge?.Invoke();
             ChallengeCalls++;
             ChallengeRequest = request;
             ChallengeRequestIds.Add(request.RequestId);
@@ -147,6 +297,7 @@ public sealed partial class InstalledAgentSourceInspectorTests : IDisposable
             string operationId, AgentUpdateSourceBindingRequest request, TrustedIdentity identity,
             CancellationToken cancellationToken)
         {
+            BeforeBinding?.Invoke(request);
             BindingRequests.Add(request);
             var body = JsonSerializer.SerializeToUtf8Bytes(request, new JsonSerializerOptions(JsonSerializerDefaults.Web));
             var bodyDigest = Convert.ToHexString(SHA256.HashData(body));
@@ -167,7 +318,8 @@ public sealed partial class InstalledAgentSourceInspectorTests : IDisposable
                 throw new InvalidOperationException("simulated non-renewal conflict");
             return Task.FromResult(new AgentUpdateOperationDto(operationId, machineId, request.ChainId,
                 request.HeadOperationId, request.Generation, true, null, request.ReleaseVersion,
-                request.TargetVersion, request.TargetPackageSha256, request.HelperRuntime, 2, null,
+                request.TargetVersion, request.TargetPackageSha256, TargetRuntimeOverride ?? request.HelperRuntime,
+                TargetProtocolOverride ?? 2, null,
                 request.SourceVersion, bodyDigest, request.BackupOwnerOperationId, request.BackupDigest,
                 "installing", timeProvider.GetUtcNow(), timeProvider.GetUtcNow()));
         }
@@ -185,8 +337,10 @@ public sealed partial class InstalledAgentSourceInspectorTests : IDisposable
 
     private sealed class ApplyServices(List<string> events) : IMaintenanceApplyServiceLifecycle
     {
+        public Action<string>? OnStart { get; set; }
         public string? FailedVersion { get; set; }
         public bool IsRunning { get; set; }
+        public string? InstalledVersion { get; set; }
         public int FailStopOnCall { get; set; }
         public int StopChecks { get; private set; }
 
@@ -210,8 +364,23 @@ public sealed partial class InstalledAgentSourceInspectorTests : IDisposable
             cancellationToken.ThrowIfCancellationRequested();
             events.Add("start:" + expectedVersion);
             IsRunning = true;
+            InstalledVersion = expectedVersion;
+            OnStart?.Invoke(expectedVersion);
             if (expectedVersion == FailedVersion)
                 throw new InvalidOperationException("simulated target service start failure");
+            return Task.CompletedTask;
+        }
+
+        public Task VerifyStartedAsync(string operationId, string installDirectory, string expectedVersion,
+            Action verifyHeld, CancellationToken cancellationToken)
+        {
+            Assert.Equal("operation-1", operationId);
+            cancellationToken.ThrowIfCancellationRequested();
+            verifyHeld();
+            events.Add("verify-running:" + expectedVersion);
+            if (!IsRunning || !string.Equals(InstalledVersion, expectedVersion, StringComparison.Ordinal))
+                throw new InvalidOperationException("simulated terminal service state mismatch");
+            verifyHeld();
             return Task.CompletedTask;
         }
     }
@@ -347,8 +516,9 @@ public sealed partial class InstalledAgentSourceInspectorTests : IDisposable
         var fileSystem = new ApplyFileSystem(events);
         var services = new ApplyServices(events);
         setup.BackupAuthorization.IsQuiesced = () => !services.IsRunning;
+        var verifier = new MaintenanceTerminalStateVerifier(sourceRoot, setup.BackupOperation, fileSystem, services);
         var apply = new MaintenanceApplyOperation(sourceRoot, setup.ExtractedTarget, setup.Journal,
-            setup.BackupOperation, new ApplyAuthorization(events, () => !services.IsRunning), fileSystem, services);
+            setup.BackupOperation, new ApplyAuthorization(events, () => !services.IsRunning), fileSystem, services, verifier);
 
         var result = await apply.ApplyAsync("operation-1", setup.ExpectedTarget, CancellationToken.None);
 
@@ -376,6 +546,156 @@ public sealed partial class InstalledAgentSourceInspectorTests : IDisposable
 
         Assert.Equal("applied", repeated.Outcome);
         Assert.Equal(0, services.StopChecks);
+    }
+
+    [Fact]
+    public async Task ApplyReplayDoesNotTrustServicesStartedJournalWithoutTerminalVerification()
+    {
+        var setup = await PrepareApplySetupAsync();
+        var events = new List<string>();
+        var services = new ApplyServices(events);
+        setup.BackupAuthorization.IsQuiesced = () => !services.IsRunning;
+        var apply = new MaintenanceApplyOperation(sourceRoot, setup.ExtractedTarget, setup.Journal,
+            setup.BackupOperation, new ApplyAuthorization(events, () => !services.IsRunning),
+            new ApplyFileSystem(events), services);
+
+        _ = await apply.ApplyAsync("operation-1", setup.ExpectedTarget, CancellationToken.None);
+        Assert.Equal("servicesStarted", setup.Journal.Read()!.Operations.Single().Phase);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            apply.ApplyAsync("operation-1", setup.ExpectedTarget, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task ApplyReplayVerifiesExactInstalledTargetBackupAndRunningServices()
+    {
+        var setup = await PrepareApplySetupAsync();
+        var events = new List<string>();
+        var services = new ApplyServices(events);
+        var fileSystem = new ApplyFileSystem(events);
+        setup.BackupAuthorization.IsQuiesced = () => !services.IsRunning;
+        var binding = setup.Journal.Read()!.Operations.Single().Binding;
+        var applyRequest = new MaintenanceCommandRequest(1, "apply", binding.OperationId, binding.TargetVersion,
+            binding.TargetRuntime, binding.TargetSha256, 1, binding.ChainId, binding.HeadOperationId, binding.Generation);
+        var verifier = new MaintenanceTerminalStateVerifier(sourceRoot, setup.BackupOperation, fileSystem, services,
+            new LocalUpdateEngine(new TerminalWorkStore(applyRequest)));
+        var apply = new MaintenanceApplyOperation(sourceRoot, setup.ExtractedTarget, setup.Journal,
+            setup.BackupOperation, new ApplyAuthorization(events, () => !services.IsRunning), fileSystem, services, verifier);
+
+        _ = await apply.ApplyAsync("operation-1", setup.ExpectedTarget, CancellationToken.None);
+        var replay = await apply.ApplyAsync("operation-1", setup.ExpectedTarget, CancellationToken.None);
+
+        Assert.Equal("applied", replay.Outcome);
+        Assert.Contains("verify-running:2.3.4", events);
+        Assert.True(setup.BackupAuthorization.HeldChecks >= 2);
+    }
+
+    [Fact]
+    public async Task ApplyReplayRejectsATamperedInstalledTarget()
+    {
+        var setup = await PrepareApplySetupAsync();
+        var events = new List<string>();
+        var services = new ApplyServices(events);
+        var fileSystem = new ApplyFileSystem(events);
+        setup.BackupAuthorization.IsQuiesced = () => !services.IsRunning;
+        var binding = setup.Journal.Read()!.Operations.Single().Binding;
+        var applyRequest = new MaintenanceCommandRequest(1, "apply", binding.OperationId, binding.TargetVersion,
+            binding.TargetRuntime, binding.TargetSha256, 1, binding.ChainId, binding.HeadOperationId, binding.Generation);
+        var verifier = new MaintenanceTerminalStateVerifier(sourceRoot, setup.BackupOperation, fileSystem, services,
+            new LocalUpdateEngine(new TerminalWorkStore(applyRequest)));
+        var apply = new MaintenanceApplyOperation(sourceRoot, setup.ExtractedTarget, setup.Journal,
+            setup.BackupOperation, new ApplyAuthorization(events, () => !services.IsRunning), fileSystem, services, verifier);
+        _ = await apply.ApplyAsync("operation-1", setup.ExpectedTarget, CancellationToken.None);
+        File.WriteAllText(Path.Combine(sourceRoot, "tampered-after-start.txt"), "unexpected tree entry");
+
+        await Assert.ThrowsAsync<PackageValidationException>(() =>
+            apply.ApplyAsync("operation-1", setup.ExpectedTarget, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task ApplyReplayRejectsATamperedImmutableBackup()
+    {
+        var setup = await PrepareApplySetupAsync();
+        var events = new List<string>();
+        var services = new ApplyServices(events);
+        var fileSystem = new ApplyFileSystem(events);
+        setup.BackupAuthorization.IsQuiesced = () => !services.IsRunning;
+        var binding = setup.Journal.Read()!.Operations.Single().Binding;
+        var applyRequest = new MaintenanceCommandRequest(1, "apply", binding.OperationId, binding.TargetVersion,
+            binding.TargetRuntime, binding.TargetSha256, 1, binding.ChainId, binding.HeadOperationId, binding.Generation);
+        var verifier = new MaintenanceTerminalStateVerifier(sourceRoot, setup.BackupOperation, fileSystem, services,
+            new LocalUpdateEngine(new TerminalWorkStore(applyRequest)));
+        var apply = new MaintenanceApplyOperation(sourceRoot, setup.ExtractedTarget, setup.Journal,
+            setup.BackupOperation, new ApplyAuthorization(events, () => !services.IsRunning), fileSystem, services, verifier);
+        _ = await apply.ApplyAsync("operation-1", setup.ExpectedTarget, CancellationToken.None);
+        File.AppendAllText(Path.Combine(backupRoot, "operation-1", "Agent.dll"), "tampered backup");
+
+        await Assert.ThrowsAsync<InvalidDataException>(() =>
+            apply.ApplyAsync("operation-1", setup.ExpectedTarget, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task ApplyReplayRejectsAStoppedOrWrongVersionService()
+    {
+        var setup = await PrepareApplySetupAsync();
+        var events = new List<string>();
+        var services = new ApplyServices(events);
+        var fileSystem = new ApplyFileSystem(events);
+        setup.BackupAuthorization.IsQuiesced = () => !services.IsRunning;
+        var binding = setup.Journal.Read()!.Operations.Single().Binding;
+        var applyRequest = new MaintenanceCommandRequest(1, "apply", binding.OperationId, binding.TargetVersion,
+            binding.TargetRuntime, binding.TargetSha256, 1, binding.ChainId, binding.HeadOperationId, binding.Generation);
+        var verifier = new MaintenanceTerminalStateVerifier(sourceRoot, setup.BackupOperation, fileSystem, services,
+            new LocalUpdateEngine(new TerminalWorkStore(applyRequest)));
+        var apply = new MaintenanceApplyOperation(sourceRoot, setup.ExtractedTarget, setup.Journal,
+            setup.BackupOperation, new ApplyAuthorization(events, () => !services.IsRunning), fileSystem, services, verifier);
+        _ = await apply.ApplyAsync("operation-1", setup.ExpectedTarget, CancellationToken.None);
+        services.InstalledVersion = "1.2.3";
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            apply.ApplyAsync("operation-1", setup.ExpectedTarget, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task TerminalVerificationUsesImmutableApplyMetadataAfterReportReplacesRequestJson()
+    {
+        var nativeRuntime = RuntimeInformation.OSArchitecture switch
+        {
+            Architecture.X64 => "win-x64",
+            Architecture.Arm64 => "win-arm64",
+            _ => throw new PlatformNotSupportedException("The terminal metadata test requires x64 or ARM64.")
+        };
+        var archive = AgentPackageCorpus.Valid(nativeRuntime);
+        var setup = await PrepareApplySetupAsync(archive);
+        var request = new MaintenanceCommandRequest(1, "apply", "operation-1", AgentPackageCorpus.Version,
+            nativeRuntime, Convert.ToHexStringLower(SHA256.HashData(archive)), archive.LongLength,
+            "chain-1", "operation-1", 1);
+        var metadataStore = new MemoryApplyMetadataStore();
+        var metadata = metadataStore.GetOrCreate(request);
+        var workStore = new ReportOverwrittenWorkStore(request, archive);
+        var engine = new LocalUpdateEngine(workStore);
+        var events = new List<string>();
+        var services = new ApplyServices(events);
+        setup.BackupAuthorization.IsQuiesced = () => !services.IsRunning;
+        var fileSystem = new ApplyFileSystem(events);
+        var verifier = new MaintenanceTerminalStateVerifier(sourceRoot, setup.BackupOperation, fileSystem,
+            services, engine, metadataStore);
+        var apply = new MaintenanceApplyOperation(sourceRoot, setup.ExtractedTarget, setup.Journal,
+            setup.BackupOperation, new ApplyAuthorization(events, () => !services.IsRunning), fileSystem, services, verifier);
+
+        _ = await apply.ApplyAsync("operation-1", setup.ExpectedTarget, CancellationToken.None);
+        workStore.ReportRequestReplacedRequestJson = true;
+        var terminalOperation = setup.Journal.Read()!.Operations.Single();
+
+        var verificationError = await Record.ExceptionAsync(() => verifier.VerifyAsync(
+            terminalOperation.Binding, terminalOperation, MaintenanceTerminalOutcome.Applied,
+            expectedTarget: null, () => { }, CancellationToken.None));
+
+        Assert.Null(verificationError);
+        Assert.Equal(0, workStore.ApplyRequestReads);
+        Assert.Equal(1, metadataStore.Reads);
+        var metadataJson = JsonSerializer.Serialize(metadata, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        Assert.DoesNotContain("ticket", metadataJson, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -905,6 +1225,42 @@ public sealed partial class InstalledAgentSourceInspectorTests : IDisposable
     }
 
     [Fact]
+    public async Task SourceBindingCommandReleasesItsExclusionWhenTheChallengeBodyDeadlineExpires()
+    {
+        const string machineId = "0123456789abcdef0123456789abcdef";
+        const string operationId = "operation-1";
+        using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var identitySource = new IdentitySource(machineId, Convert.ToBase64String(key.ExportPkcs8PrivateKey()));
+        string keyFingerprint;
+        using (var identity = TrustedIdentity.ReadExisting(identitySource))
+            keyFingerprint = identity.KeyFingerprint.ToLowerInvariant();
+        var runtime = RuntimeInformation.OSArchitecture == Architecture.Arm64 ? "win-arm64" : "win-x64";
+        var request = new MaintenanceLifecycleRequest(1, "bind-source", operationId, "chain-1", operationId, 1,
+            "https://controller.example/", keyFingerprint, 1, "2.3.4", runtime, new string('b', 64),
+            "2.3.4", new string('T', 43), new string('c', 64));
+        var journalStore = NewJournalAt("servicesQuiesced", targetVersion: request.TargetVersion,
+            keyFingerprint: keyFingerprint, targetSha256: request.TargetPackageSha256);
+        var authorization = new SourceCommandAuthorization(request);
+        var lease = new SourceCommandLease(operationId);
+        var handler = new StallingHandler(new StallingContent());
+        using var http = new HttpClient(handler) { Timeout = Timeout.InfiniteTimeSpan };
+        var client = new HttpMaintenanceSourceBindingClient(http, TimeSpan.FromMilliseconds(150));
+        var factory = new MaintenanceSourceBindingOperationFactory(NewSecurity(), sourceRoot, backupRoot,
+            client, new BootIdentity("native-boot-1"));
+        var command = new MaintenanceSourceBindingCommand(new LifecycleWorkStore(request), identitySource,
+            journalStore, new SourceCommandExclusionProvider(lease), authorization,
+            new SourceCommandHelperIdentity(request.HelperBuildSha256!), factory);
+
+        var error = await Record.ExceptionAsync(() => Task.Run(command.Execute).WaitAsync(TimeSpan.FromSeconds(5)));
+
+        Assert.IsType<TimeoutException>(error);
+        await handler.Content.Body.CancellationObserved.Task.WaitAsync(TimeSpan.FromSeconds(1));
+        Assert.True(lease.Disposed);
+        Assert.Equal("backupPublished", journalStore.Snapshot!.Operations.Single().Phase);
+        Assert.NotNull(journalStore.Snapshot.Operations.Single().PendingSourceChallengeAttempt);
+    }
+
+    [Fact]
     public async Task SourceBindingRotatesChallengeAfterControllerRestartBeforeChallengeWasBound()
     {
         using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
@@ -987,6 +1343,37 @@ public sealed partial class InstalledAgentSourceInspectorTests : IDisposable
         var otherConflictClient = new HttpMaintenanceSourceBindingClient(otherConflictHttp);
         await Assert.ThrowsAsync<InvalidOperationException>(() => otherConflictClient.IssueChallengeAsync(
             "https://controller.example/", identity.MachineId, "operation-1", request, identity, CancellationToken.None));
+    }
+
+    [Theory]
+    [InlineData("win-arm64", 2)]
+    [InlineData("win-x64", 3)]
+    public async Task SourceBindingRejectsAcknowledgementsWithWrongTargetRuntimeOrProtocol(
+        string targetRuntime, int targetProtocol)
+    {
+        using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        using var identity = TrustedIdentity.ReadExisting(new IdentitySource(
+            "0123456789abcdef0123456789abcdef", Convert.ToBase64String(key.ExportPkcs8PrivateKey())));
+        var journalStore = NewJournalAt("servicesQuiesced", keyFingerprint: identity.KeyFingerprint.ToLowerInvariant());
+        var journal = new MaintenanceJournal(journalStore, "chain-1");
+        var security = NewSecurity();
+        var publisher = new MaintenanceBackupPublisher(sourceRoot, backupRoot, security, new Authorization());
+        var backupOperation = new MaintenanceBackupOperation(sourceRoot,
+            new InstalledAgentSourceInspector(sourceRoot, security), publisher, journal);
+        var client = new SourceBindingClient(TimeProvider.System)
+        {
+            TargetRuntimeOverride = targetRuntime,
+            TargetProtocolOverride = targetProtocol
+        };
+        var operation = new MaintenanceSourceBindingOperation(backupOperation, journal, client, identity,
+            new BootIdentity("native-boot-1"));
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => operation.BindAsync(
+            new MaintenanceSourceBindingParameters(new string('A', 43), "2.3.4", new string('c', 64), "win-x64", 1),
+            CancellationToken.None));
+
+        Assert.Equal("backupPublished", journal.Read()!.Operations.Single().Phase);
+        Assert.Single(client.BindingRequests);
     }
 
     [Fact]

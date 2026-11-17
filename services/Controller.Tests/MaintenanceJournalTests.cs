@@ -186,6 +186,166 @@ public sealed class MaintenanceJournalTests
             SourceVersion: evidence.SourceVersion, SourceInventoryDigest: evidence.InventoryDigest));
     }
 
+    private static void AdvanceToTerminalOutcome(MaintenanceJournal journal)
+    {
+        AdvanceToSourceBound(journal);
+        journal.Advance("operation-1", "swapIntent", new MaintenanceJournalEvidence(
+            TargetInventoryDigest: new string('f', 64)));
+        journal.Advance("operation-1", "sourceMoved");
+        journal.Advance("operation-1", "targetPlaced");
+        journal.Advance("operation-1", "servicesStarted");
+        journal.Advance("operation-1", "outcomeReported");
+    }
+
+    [Fact]
+    public void StartOrSuccessorStartsNewChainsAndAppendsAuditedRecoverySuccessors()
+    {
+        var store = new MemoryStore();
+        var journal = new MaintenanceJournal(store, "chain-1");
+
+        var first = journal.StartOrSuccessor(Binding());
+        Assert.Equal("inspected", first.Operations.Single().Phase);
+        Assert.Equal(first, journal.StartOrSuccessor(Binding()));
+
+        AdvanceToTerminalOutcome(journal);
+        var successorBinding = Binding() with
+        {
+            OperationId = "operation-2",
+            HeadOperationId = "operation-2",
+            Generation = 2
+        };
+        var successor = journal.StartOrSuccessor(successorBinding);
+        Assert.Equal("operation-2", successor.HeadOperationId);
+        Assert.Equal(2, successor.Generation);
+        Assert.Equal("inspected", successor.Operations.Single(entry => entry.Binding.OperationId == "operation-2").Phase);
+        Assert.Equal(successor, journal.StartOrSuccessor(successorBinding));
+        Assert.Throws<InvalidOperationException>(() => journal.StartOrSuccessor(successorBinding with
+        {
+            TargetSha256 = new string('c', 64)
+        }));
+
+        // A successor start is only valid for the next generation and must not change history.
+        Assert.Throws<InvalidOperationException>(() => journal.StartOrSuccessor(Binding() with
+        {
+            OperationId = "operation-3",
+            HeadOperationId = "operation-3",
+            Generation = 4
+        }));
+        Assert.Equal(2, journal.Read()!.Operations.Count);
+
+        // A held chain with no new-format journal must be explicitly legacy-imported; a
+        // successor generation must never be fabricated as a brand-new journal.
+        var missingJournal = new MaintenanceJournal(new MemoryStore(), "chain-2");
+        Assert.Throws<InvalidOperationException>(() => missingJournal.StartOrSuccessor(Binding() with
+        {
+            ChainId = "chain-2",
+            OperationId = "operation-9",
+            HeadOperationId = "operation-9",
+            Generation = 3
+        }));
+    }
+
+    [Fact]
+    public void SuccessorAppendsANewImmutableHeadAndOnlyTheHeadCanAdvance()
+    {
+        var store = new MemoryStore();
+        var journal = new MaintenanceJournal(store, "chain-1");
+        journal.Start(Binding());
+        AdvanceToTerminalOutcome(journal);
+
+        var successorBinding = Binding() with
+        {
+            OperationId = "operation-2",
+            HeadOperationId = "operation-2",
+            Generation = 2
+        };
+        var successor = journal.StartSuccessor(successorBinding);
+        var retried = journal.StartSuccessor(successorBinding);
+
+        Assert.Equal(2, successor.Operations.Count);
+        Assert.Equal("operation-2", successor.HeadOperationId);
+        Assert.Equal(2, successor.Generation);
+        Assert.Equal("operation-1", successor.Operations[0].Binding.OperationId);
+        Assert.Equal("outcomeReported", successor.Operations[0].Phase);
+        Assert.Equal("inspected", successor.Operations[1].Phase);
+        Assert.Equal(successor, retried);
+
+        Assert.Throws<InvalidOperationException>(() => journal.Advance("operation-1", "controllerStarted"));
+        journal.Advance("operation-2", "controllerStarted");
+
+        var applyRequest = new MaintenanceCommandRequest(
+            1, "apply", "operation-2", "2.0.0", "win-x64", new string('b', 64), 1024,
+            "chain-1", "operation-2", 2);
+        var operation = journal.VerifyApplyRequestBinding(applyRequest);
+        Assert.Equal("operation-2", operation.Binding.OperationId);
+    }
+
+    [Fact]
+    public void SuccessorRequiresTheNextGenerationSelfHeadAndARecoverableHeadPhase()
+    {
+        var store = new MemoryStore();
+        var journal = new MaintenanceJournal(store, "chain-1");
+        journal.Start(Binding());
+
+        var successorBinding = Binding() with
+        {
+            OperationId = "operation-2",
+            HeadOperationId = "operation-2",
+            Generation = 2
+        };
+        Assert.Throws<InvalidOperationException>(() => journal.StartSuccessor(successorBinding));
+
+        AdvanceToTerminalOutcome(journal);
+        Assert.Throws<InvalidOperationException>(() => journal.StartSuccessor(successorBinding with { Generation = 3 }));
+        Assert.Throws<InvalidOperationException>(() => journal.StartSuccessor(successorBinding with { HeadOperationId = "operation-1" }));
+        Assert.Throws<InvalidOperationException>(() => journal.StartSuccessor(Binding()));
+        Assert.Single(journal.Read()!.Operations);
+    }
+
+    [Fact]
+    public void LegacyImportedJournalStartsAtTheExplicitPhaseWithoutInventingEarlierPhases()
+    {
+        var store = new MemoryStore();
+        var journal = new MaintenanceJournal(store, "chain-1");
+        var evidence = new MaintenanceJournalEvidence(
+            BackupOwnerOperationId: "legacy-rollback-7",
+            BackupDigest: new string('e', 64));
+
+        var imported = journal.StartLegacyImported(Binding(), evidence);
+
+        Assert.Equal("legacyImported", imported.Operations.Single().Phase);
+        Assert.Equal(new[] { "legacyImported" }, imported.Operations.Single().PhaseHistory);
+        Assert.Equal("legacy-rollback-7", imported.Operations.Single().BackupOwnerOperationId);
+        Assert.Equal(new string('e', 64), imported.Operations.Single().BackupDigest);
+
+        journal.Advance("operation-1", "targetValidated");
+        Assert.Equal("targetValidated", journal.Read()!.Operations.Single().Phase);
+
+        Assert.Throws<InvalidOperationException>(() => journal.StartLegacyImported(Binding(), evidence));
+        Assert.Throws<InvalidOperationException>(() => journal.StartLegacyImported(Binding(),
+            new MaintenanceJournalEvidence(BackupOwnerOperationId: "legacy-rollback-7")));
+        Assert.Throws<InvalidOperationException>(() => journal.StartLegacyImported(Binding(),
+            evidence with { SourceVersion = "1.0.0" }));
+    }
+
+    [Fact]
+    public void MultiOperationValidationRejectsDuplicateIdsAndNonIncreasingGenerations()
+    {
+        var store = new MemoryStore();
+        var journal = new MaintenanceJournal(store, "chain-1");
+        var first = new MaintenanceJournalOperation(Binding(), "inspected", ["inspected"]);
+        var duplicate = new MaintenanceJournalOperation(
+            Binding() with { Generation = 2 }, "inspected", ["inspected"]);
+        store.Current = new MaintenanceJournalSnapshot(1, "chain-1", "operation-1", 2, [first, duplicate]);
+        Assert.Throws<InvalidDataException>(() => journal.Read());
+
+        var older = new MaintenanceJournalOperation(
+            Binding() with { OperationId = "operation-2", HeadOperationId = "operation-2", Generation = 1 },
+            "inspected", ["inspected"]);
+        store.Current = new MaintenanceJournalSnapshot(1, "chain-1", "operation-2", 1, [first, older]);
+        Assert.Throws<InvalidDataException>(() => journal.Read());
+    }
+
     private static string StableSourceRequestId(string purpose, string operationId, int attemptNumber)
     {
         var bytes = Encoding.UTF8.GetBytes("KamenRaider.AgentMaintenance." + purpose + ".v1\n" + operationId + "\n" +

@@ -21,6 +21,87 @@ public sealed record MaintenanceCommandRequest(
     string? HeadOperationId = null,
     long? Generation = null);
 
+public sealed record MaintenanceApplyMetadata(
+    int SchemaVersion,
+    string OperationId,
+    string ChainId,
+    string HeadOperationId,
+    long Generation,
+    string TargetVersion,
+    string TargetRuntime,
+    string TargetPackageSha256,
+    long TargetPackageLength)
+{
+    public static MaintenanceApplyMetadata FromRequest(MaintenanceCommandRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        var validated = LocalUpdateEngineRequestValidation.Validate(request, "apply");
+        return new(1, validated.OperationId, validated.ChainId!, validated.HeadOperationId!,
+            validated.Generation!.Value, validated.TargetVersion, validated.TargetRuntime,
+            validated.TargetPackageSha256.ToLowerInvariant(), validated.TargetPackageLength);
+    }
+
+    public MaintenanceCommandRequest ToApplyRequest() => new(
+        SchemaVersion, "apply", OperationId, TargetVersion, TargetRuntime, TargetPackageSha256,
+        TargetPackageLength, ChainId, HeadOperationId, Generation);
+}
+
+public interface IMaintenanceApplyMetadataStore
+{
+    MaintenanceApplyMetadata GetOrCreate(MaintenanceCommandRequest request);
+    MaintenanceApplyMetadata Read(MaintenanceOperationBinding binding);
+}
+
+public static class MaintenanceApplyMetadataParser
+{
+    private const int MaximumMetadataBytes = 16 * 1024;
+    private static readonly HashSet<string> Fields = new(StringComparer.Ordinal)
+    {
+        "schemaVersion", "operationId", "chainId", "headOperationId", "generation",
+        "targetVersion", "targetRuntime", "targetPackageSha256", "targetPackageLength"
+    };
+    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
+    {
+        PropertyNameCaseInsensitive = false,
+        MaxDepth = 3
+    };
+
+    public static MaintenanceApplyMetadata Parse(byte[] bytes)
+    {
+        ArgumentNullException.ThrowIfNull(bytes);
+        if (bytes.Length is <= 0 or > MaximumMetadataBytes)
+            throw new InvalidDataException("The protected apply metadata exceeds its size limit.");
+        try
+        {
+            using var document = JsonDocument.Parse(bytes, new JsonDocumentOptions
+            {
+                MaxDepth = 3,
+                CommentHandling = JsonCommentHandling.Disallow,
+                AllowTrailingCommas = false
+            });
+            if (document.RootElement.ValueKind != JsonValueKind.Object)
+                throw new InvalidDataException("The protected apply metadata must be a JSON object.");
+            var found = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var property in document.RootElement.EnumerateObject())
+                if (!Fields.Contains(property.Name) || !found.Add(property.Name))
+                    throw new InvalidDataException("The protected apply metadata contains an unknown or duplicate field.");
+            if (!found.SetEquals(Fields))
+                throw new InvalidDataException("The protected apply metadata is incomplete.");
+
+            var metadata = JsonSerializer.Deserialize<MaintenanceApplyMetadata>(bytes, JsonOptions)
+                ?? throw new InvalidDataException("The protected apply metadata is empty.");
+            _ = MaintenanceApplyMetadata.FromRequest(metadata.ToApplyRequest());
+            if (metadata.SchemaVersion != 1)
+                throw new InvalidDataException("The protected apply metadata schema version is unsupported.");
+            return metadata;
+        }
+        catch (JsonException exception)
+        {
+            throw new InvalidDataException("The protected apply metadata is malformed.", exception);
+        }
+    }
+}
+
 public static class MaintenanceCommandRequestParser
 {
     private const int MaximumRequestBytes = 16 * 1024;
@@ -112,6 +193,8 @@ public interface IMaintenanceApplyWorkStore
 
 public sealed class LocalUpdateEngine(IMaintenanceWorkStore workStore)
 {
+    public IMaintenanceApplyMetadataStore? ApplyMetadataStore => workStore as IMaintenanceApplyMetadataStore;
+
     public string ExtractionRoot
     {
         get
@@ -168,6 +251,47 @@ public sealed class LocalUpdateEngine(IMaintenanceWorkStore workStore)
         }
     }
 
+    public PackageInventory ValidateApplyArchive(MaintenanceCommandRequest expectedRequest)
+    {
+        ArgumentNullException.ThrowIfNull(expectedRequest);
+        var validatedRequest = ValidateRequest(expectedRequest, "apply");
+        var (storedRequest, archive, inventory) = OpenVerifiedArchive("apply");
+        using (archive)
+        {
+            if (storedRequest != validatedRequest)
+                throw new InvalidOperationException("The protected apply request changed during terminal verification.");
+            return inventory;
+        }
+    }
+
+    public PackageInventory ValidateApplyArchive(MaintenanceApplyMetadata metadata)
+    {
+        ArgumentNullException.ThrowIfNull(metadata);
+        var request = LocalUpdateEngineRequestValidation.Validate(metadata.ToApplyRequest(), "apply");
+        using var archive = workStore.OpenArchiveRead();
+        return ValidateArchiveBytes(archive, request);
+    }
+
+    public PackageInventory ValidateLifecycleArchive(MaintenanceLifecycleRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        if (request.Command is not ("start" or "bind-source") ||
+            request.TargetVersion is null || request.TargetRuntime is not ("win-x64" or "win-arm64") ||
+            request.TargetPackageSha256 is not { Length: 64 } ||
+            !request.TargetPackageSha256.All(Uri.IsHexDigit))
+            throw new InvalidDataException("The lifecycle request does not identify a verifiable target archive.");
+
+        using var archive = workStore.OpenArchiveRead();
+        if (!archive.CanRead || !archive.CanSeek || archive.Length <= 0)
+            throw new InvalidOperationException("The target archive is not a readable seekable file.");
+        archive.Position = 0;
+        var inventory = PackageVerifier.ValidateArchive(archive, request.TargetVersion);
+        if (!string.Equals(inventory.ArchiveHash, request.TargetPackageSha256, StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(inventory.TargetRuntime, request.TargetRuntime, StringComparison.Ordinal))
+            throw new InvalidOperationException("The target archive bytes or native runtime do not match the started operation.");
+        return inventory;
+    }
+
     private (MaintenanceCommandRequest Request, Stream Archive, PackageInventory Inventory) OpenVerifiedArchive(string command)
     {
         ArgumentNullException.ThrowIfNull(workStore);
@@ -175,13 +299,7 @@ public sealed class LocalUpdateEngine(IMaintenanceWorkStore workStore)
         var archive = workStore.OpenArchiveRead();
         try
         {
-            if (!archive.CanRead || !archive.CanSeek || archive.Length != request.TargetPackageLength)
-                throw new InvalidOperationException("The target archive length does not match its typed request.");
-            archive.Position = 0;
-            var inventory = PackageVerifier.ValidateArchive(archive, request.TargetVersion);
-            if (!string.Equals(inventory.ArchiveHash, request.TargetPackageSha256, StringComparison.OrdinalIgnoreCase) ||
-                !string.Equals(inventory.TargetRuntime, request.TargetRuntime, StringComparison.Ordinal))
-                throw new InvalidOperationException("The target archive bytes or native runtime do not match the typed request.");
+            var inventory = ValidateArchiveBytes(archive, request);
             return (request, archive, inventory);
         }
         catch
@@ -189,6 +307,18 @@ public sealed class LocalUpdateEngine(IMaintenanceWorkStore workStore)
             archive.Dispose();
             throw;
         }
+    }
+
+    private static PackageInventory ValidateArchiveBytes(Stream archive, MaintenanceCommandRequest request)
+    {
+        if (!archive.CanRead || !archive.CanSeek || archive.Length != request.TargetPackageLength)
+            throw new InvalidOperationException("The target archive length does not match its typed request.");
+        archive.Position = 0;
+        var inventory = PackageVerifier.ValidateArchive(archive, request.TargetVersion);
+        if (!string.Equals(inventory.ArchiveHash, request.TargetPackageSha256, StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(inventory.TargetRuntime, request.TargetRuntime, StringComparison.Ordinal))
+            throw new InvalidOperationException("The target archive bytes or native runtime do not match the typed request.");
+        return inventory;
     }
 
     private static MaintenanceCommandRequest ValidateRequest(MaintenanceCommandRequest? request, string expectedCommand)
@@ -200,9 +330,11 @@ public sealed class LocalUpdateEngine(IMaintenanceWorkStore workStore)
 }
 
 [SupportedOSPlatform("windows")]
-public sealed class WindowsMaintenanceWorkStore : IMaintenanceWorkStore, IMaintenanceApplyWorkStore
+public sealed class WindowsMaintenanceWorkStore : IMaintenanceWorkStore, IMaintenanceApplyWorkStore,
+    IMaintenanceLifecycleWorkStore, IMaintenanceApplyMetadataStore
 {
     private const int MaximumRequestBytes = 16 * 1024;
+    private const int MaximumMetadataBytes = 16 * 1024;
     private const int FileDispositionInfoClass = 4;
     private readonly string directory;
 
@@ -237,6 +369,17 @@ public sealed class WindowsMaintenanceWorkStore : IMaintenanceWorkStore, IMainte
         return MaintenanceCommandRequestParser.Parse(bytes, expectedCommand);
     }
 
+    public MaintenanceLifecycleRequest ReadLifecycleRequest(string expectedCommand)
+    {
+        if (expectedCommand is not ("start" or "bind-source" or "report"))
+            throw new InvalidOperationException("This maintenance command does not use a lifecycle request.");
+        EnsureWorkDirectory(create: false);
+        var path = Path.Combine(directory, "request.json");
+        EnsurePrivateFile(path);
+        var bytes = ReadSingleLinkFile(path, MaximumRequestBytes);
+        return MaintenanceLifecycleRequestParser.Parse(bytes, expectedCommand);
+    }
+
     public Stream OpenArchiveRead()
     {
         EnsureWorkDirectory(create: false);
@@ -244,6 +387,83 @@ public sealed class WindowsMaintenanceWorkStore : IMaintenanceWorkStore, IMainte
         EnsurePrivateFile(path);
         return OpenArchiveStream(path);
     }
+
+    public MaintenanceApplyMetadata GetOrCreate(MaintenanceCommandRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        var metadata = MaintenanceApplyMetadata.FromRequest(request);
+        EnsureWorkDirectory(create: true);
+        var path = ApplyMetadataPath(metadata.OperationId);
+        if (File.Exists(path))
+            return ReadAndVerifyApplyMetadata(path, metadata);
+
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(metadata, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        if (bytes.Length is <= 0 or > MaximumMetadataBytes)
+            throw new InvalidDataException("The protected apply metadata exceeds its size limit.");
+        var temporary = Path.Combine(directory, ".apply-metadata-" + Guid.NewGuid().ToString("N") + ".tmp");
+        try
+        {
+            using (var stream = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write,
+                       FileShare.None, 4096, FileOptions.WriteThrough))
+            {
+                SetPrivateFileSecurity(temporary);
+                stream.Write(bytes);
+                stream.Flush(flushToDisk: true);
+            }
+            EnsurePrivateFile(temporary);
+            try
+            {
+                File.Move(temporary, path);
+            }
+            catch (IOException) when (File.Exists(path))
+            {
+                return ReadAndVerifyApplyMetadata(path, metadata);
+            }
+            EnsurePrivateFile(path);
+            WindowsMaintenanceBackupSecurity.FlushDirectoryToDisk(directory);
+            return ReadAndVerifyApplyMetadata(path, metadata);
+        }
+        finally
+        {
+            if (File.Exists(temporary))
+                File.Delete(temporary);
+        }
+    }
+
+    public MaintenanceApplyMetadata Read(MaintenanceOperationBinding binding)
+    {
+        ArgumentNullException.ThrowIfNull(binding);
+        if (string.IsNullOrWhiteSpace(binding.OperationId) || binding.OperationId.Length > 128 ||
+            binding.OperationId.Any(character => !char.IsAsciiLetterOrDigit(character) && character is not ('.' or '_' or '-')))
+            throw new InvalidDataException("The apply metadata operation ID is invalid.");
+        EnsureWorkDirectory(create: false);
+        var path = ApplyMetadataPath(binding.OperationId);
+        EnsurePrivateFile(path);
+        var metadata = MaintenanceApplyMetadataParser.Parse(ReadSingleLinkFile(path, MaximumMetadataBytes));
+        VerifyMetadataBinding(metadata, binding);
+        return metadata;
+    }
+
+    private MaintenanceApplyMetadata ReadAndVerifyApplyMetadata(string path, MaintenanceApplyMetadata expected)
+    {
+        EnsurePrivateFile(path);
+        var metadata = MaintenanceApplyMetadataParser.Parse(ReadSingleLinkFile(path, MaximumMetadataBytes));
+        if (metadata != expected)
+            throw new InvalidOperationException("The protected apply metadata is already bound to different target bytes.");
+        return metadata;
+    }
+
+    private static void VerifyMetadataBinding(MaintenanceApplyMetadata metadata, MaintenanceOperationBinding binding)
+    {
+        if (metadata.OperationId != binding.OperationId || metadata.ChainId != binding.ChainId ||
+            metadata.HeadOperationId != binding.HeadOperationId || metadata.Generation != binding.Generation ||
+            metadata.TargetVersion != binding.TargetVersion || metadata.TargetRuntime != binding.TargetRuntime ||
+            !string.Equals(metadata.TargetPackageSha256, binding.TargetSha256, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("The protected apply metadata does not match the immutable journal binding.");
+    }
+
+    private string ApplyMetadataPath(string operationId) =>
+        Path.Combine(directory, "apply-metadata-" + operationId + ".json");
 
     internal static Stream OpenArchiveStream(string path)
     {
