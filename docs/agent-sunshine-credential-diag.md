@@ -78,6 +78,36 @@ Get-WinEvent -ProviderName "Agent" -MaxEvents 20 |
 
 > **อย่าเปลี่ยน fleet credential ซ้ำ** จนกว่า Agent จะตามทัน (applied revision = fleet revision) ไม่งั้น revision จะเพิ่มขึ้นเรื่อย ๆ
 
+## หลังซ่อม ACL แล้วเจอ `Sync unavailable (HttpRequestException)`
+
+ถ้ารัน `Fix-AgentSunshineStore.ps1` แล้ว Agent ยัง `applied revision = 0` และ Event Log ขึ้น
+`Sync unavailable (HttpRequestException); retrying` แปลว่า Agent **ต่อ Controller ไม่ได้** (network/TLS)
+จึงยังไม่ได้รับ fleet credential revision ใหม่
+
+รันบนเครื่องลูก (Administrator):
+
+```powershell
+Test-NetConnection 192.168.1.100 -Port 7443
+
+curl.exe -k -v https://192.168.1.100:7443/ 2>&1 | Select-Object -First 25
+
+Restart-Service 'KamenRaider Agent' -Force
+Start-Sleep -Seconds 10
+Get-WinEvent -ProviderName "Agent" -MaxEvents 8 -ErrorAction SilentlyContinue |
+  Select-Object TimeCreated, Id, LevelDisplayName, Message | Format-List
+Get-Service 'KamenRaider Agent','KamenRaider Stream Guard','SunshineService' |
+  Format-Table Name, Status, StartType
+```
+
+| ผล | ความหมาย / ทางแก้ |
+|---|---|
+| `TcpTestSucceeded : False` | เครื่องลูกกับเครื่องแม่ขาด LAN หรือ firewall — ตรวจ IP เครื่องลูกยังเป็น `192.168.1.x` และ firewall 7443 ฝั่งแม่ |
+| TCP True แต่ curl/Agent ยัง error | ปัญหา TLS/hostname/HTTP — เก็บ output `curl -v` ส่งให้แอดมิน |
+| log เปลี่ยนเป็น `Applied fleet Sunshine management credential revision 3.` | สำเร็จ — พร้อมทดสอบ PIN |
+| ยัง `UnauthorizedAccessException` | ACL store ยังไม่ถูก — รัน `Fix-AgentSunshineStore.ps1` ซ้ำ/ตรวจ `Get-Acl` |
+
+**หมายเหตุ:** การซ่อม ACL ไม่ได้แตะ network; ถ้า sync เพิ่งหลุดให้ตรวจ LAN/ไฟร์วอลล์ก่อนสรุปว่าเป็นที่ Agent
+
 ## หลัง applied revision = 3
 
 1. SunshineService ต้อง Running (Guard เปิดให้เพราะ lease active)
