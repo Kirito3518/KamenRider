@@ -2,7 +2,7 @@
 
 Last updated: 2026-11-17. Tested source: `26f1c15` (`feat(machines): report hardware profile and share fleet Sunshine credential`) on `master`.
 
-This runbook walks a **real-machine test**: one Mother PC runs the Controller + web, one or more Child PCs run the Agent. It starts from `git clone` on the Mother and ends with a pending machine approved in the admin UI commands. For a single copy-paste command sheet in execution order, see [production-commands.md](production-commands.md). Commands assume Windows PowerShell (run as Administrator where noted) and placeholder LAN addresses:
+This runbook walks a **real-machine test**: one Mother PC runs the Controller + web, one or more Child PCs run the Agent. It starts from `git clone` on the Mother and ends with a pending machine approved in the admin UI commands. For a single copy-paste command sheet in execution order, see [production-commands.md](production-commands.md); database migrate/generate/backup commands are in [database-operations.md](database-operations.md). Commands assume Windows PowerShell (run as Administrator where noted) and placeholder LAN addresses:
 
 - Mother `192.168.1.10` (also give it a DNS name, e.g. `kamen-prod`, optional)
 - Child `192.168.1.21`, `192.168.1.22`, …

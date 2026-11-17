@@ -2,6 +2,8 @@
 
 Copy‑paste companion to [production-test-deployment.md](production-test-deployment.md). Every block states **which machine** it runs on and whether it needs an **elevated** PowerShell. Values with `<…>` are placeholders you must replace; the setup block below defines the common ones.
 
+Database migration / fresh-database generation / backup & restore commands: [database-operations.md](database-operations.md). Local development stack commands: [development-commands.md](development-commands.md).
+
 > Run the ordered blocks **in one PowerShell window per machine** so the `$variables` defined above stay available. `.env.local` / launchers are written as **ASCII** on purpose (no UTF‑8 BOM at the start of `BETTER_AUTH_SECRET`). If `winget` is unavailable on the Mother, install Git/.NET 10 SDK/Node 24 manually instead of the winget block.
 
 ```powershell
