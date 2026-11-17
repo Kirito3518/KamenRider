@@ -47,6 +47,14 @@ public static class AgentHost
         builder.Services.TryAddSingleton<KamenRaider.Agent.Sunshine.StreamGuardPipeClient>();
         builder.Services.TryAddSingleton<KamenRaider.Agent.Leases.IStreamGate>(sp => sp.GetRequiredService<KamenRaider.Agent.Sunshine.StreamGuardPipeClient>());
         builder.Services.TryAddSingleton<KamenRaider.Agent.Sunshine.IPairingFence>(sp => sp.GetRequiredService<KamenRaider.Agent.Sunshine.StreamGuardPipeClient>());
+        // TEST ONLY: KAMENRAIDER_AGENT_LAB_READY=1 lets a lab machine report ready without the
+        // hardware-qualified boot/restoration/desktop/health evidence providers. It must never be
+        // set on a machine that is actually rented out.
+        if (string.Equals(Environment.GetEnvironmentVariable("KAMENRAIDER_AGENT_LAB_READY"), "1", StringComparison.Ordinal))
+        {
+            builder.Services.TryAddSingleton<KamenRaider.Agent.Startup.IBootEnvironment, KamenRaider.Agent.Startup.LabBootEnvironment>();
+            builder.Services.TryAddSingleton<KamenRaider.Agent.Startup.IBootBaselineEvidence, KamenRaider.Agent.Startup.LabBootBaselineEvidence>();
+        }
         builder.Services.TryAddSingleton<KamenRaider.Agent.Startup.IBootEnvironment>(sp =>
             new KamenRaider.Agent.Startup.StreamGuardBootEnvironment(
                 () => sp.GetRequiredService<KamenRaider.Agent.Sunshine.ISunshinePairingSession>()));
