@@ -210,9 +210,85 @@ http://192.168.1.100:3000/admin/settings/sunshine
 
 ---
 
-## 11) ขั้นต่อไป: ติดตั้ง Agent จากเครื่องลูก (ต้องมี HTTPS ก่อน)
+## 11) เปิด HTTPS สำหรับเว็บ (Cloudflare Tunnel หรือ Caddy)
 
-ตอนนี้เว็บเป็น HTTP — ติดตั้ง Agent จากเครื่องลูกได้เฉพาะเมื่อมี HTTPS reverse proxy (Caddy) แล้ว:
+เว็บ (หน้าแอดมิน + ไฟล์ติดตั้ง Agent) ต้องเป็น HTTPS ก่อนจึงจะสร้างคำสั่งติดตั้ง Agent ให้เครื่องลูกได้
+ส่วน **Agent ↔ Controller (7443)** ยังวิ่งผ่าน LAN `192.168.1.100:7443` ด้วย self-signed cert ตามที่ตั้งไว้
+(เครื่องลูกต้อง import `controller-root.cer`)
+
+### 11.1 Cloudflare Tunnel (แนะนำถ้ามี domain บน Cloudflare)
+
+1. ติดตั้ง cloudflared บนเครื่องแม่ (PowerShell ปกติ):
+
+```powershell
+winget install --id Cloudflare.cloudflared -e
+cloudflared --version
+```
+
+2. สร้าง tunnel จาก Cloudflare Dashboard → **Zero Trust → Networks → Tunnels → Create a tunnel**
+   → เลือก **Cloudflared** → ตั้งชื่อ เช่น `kamenraider` → คัดลอก **token**
+
+3. ติดตั้งเป็น Windows service (Run as Administrator):
+
+```powershell
+cloudflared service install <PASTE_TOKEN_HERE>
+Start-Service cloudflared
+Get-Service cloudflared
+```
+
+4. ใน Dashboard ของ tunnel → **Public Hostname → Add a public hostname**
+   - Subdomain: `kamen` (หรือตามต้องการ)
+   - Domain: `example.com`
+   - Service: **HTTP** → `127.0.0.1:3000`
+   - บันทึก → Cloudflare สร้าง DNS record ให้อัตโนมัติ
+
+5. ตรวจว่าออกจากภายนอกได้ (หลัง web รันอยู่):
+
+```powershell
+(Invoke-WebRequest https://kamen.example.com -UseBasicParsing).StatusCode
+```
+
+6. ตั้งค่าแอปให้ใช้ domain (แก้ `kamen.example.com` เป็นโดเมนจริง):
+
+```powershell
+cd "$env:USERPROFILE\Desktop\KamenRider"
+git pull
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\agent\dev\Configure-MotherLan.ps1 -LanIp 192.168.1.100 -WebHttpsOrigin https://kamen.example.com -Force -Start
+```
+
+สคริปต์จะตั้ง `BETTER_AUTH_URL`, `AGENT_INSTALL_BASE_URL`, `AGENT_PACKAGE_URL` เป็นโดเมน HTTPS
+แต่คง `AGENT_CONTROLLER_URL=https://192.168.1.100:7443` ไว้สำหรับช่อง Agent
+(ถ้า web เดิมรันอยู่ ให้หยุด process บนพอร์ต 3000 ก่อนเพื่อให้สคริปต์ start ใหม่ด้วย env ใหม่)
+
+7. เปิด `https://kamen.example.com/login`
+
+### 11.2 หลังมี HTTPS แล้ว
+
+- ที่ **เครื่องลูก** (Run as Administrator) import certificate ของ Controller (ช่อง 7443):
+
+```powershell
+Import-Certificate -FilePath 'C:\path\to\controller-root.cer' -CertStoreLocation Cert:\LocalMachine\Root
+```
+
+ไฟล์ cert อยู่ที่เครื่องแม่:
+
+```text
+C:\Users\PC\Desktop\KamenRider\.next-local\mother\controller-root.cer
+```
+
+- ใช้คำสั่งติดตั้ง Agent จาก `https://kamen.example.com/admin/machines` ไปรันบนเครื่องลูก (elevated)
+- เครื่องลูกต้องเข้าถึง `192.168.1.100:7443` ได้ (LAN เดียวกัน + firewall เปิด)
+
+### 11.3 ความปลอดภัยเมื่อเปิดอินเทอร์เน็ต
+
+- ควรใส่ **Cloudflare Access** ครอบ path `/admin*` (Zero Trust → Access → Applications) หรือทั้งเว็บ
+- rotate secret ใน `.env.local` ก่อนใช้งานจริง (BETTER_AUTH_SECRET, CONTROLLER_SERVICE_CREDENTIAL, CONTROLLER_SUNSHINE_CREDENTIAL_KEY)
+- อย่าเปิดพอร์ต 5081 (loopback) หรือ 7443 ออกอินเทอร์เน็ตผ่าน tunnel — ให้ Agent ใช้ LAN เท่านั้น
+- ถ้าเครื่องลูกอยู่นอก LAN ต้องมีวิธีแยกสำหรับช่อง 7443 (เช่น cloudflared access บนเครื่องลูก หรือ VPN)
+
+### 11.4 Caddy (ทางเลือก)
+
+ถ้าไม่ใช้ Cloudflare Tunnel: ติดตั้ง Caddy เป็น HTTPS reverse proxy ก่อน แล้วรัน:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\agent\dev\Configure-MotherLan.ps1 -LanIp 192.168.1.100 -HttpsWeb -Start
