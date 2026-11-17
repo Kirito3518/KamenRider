@@ -401,7 +401,7 @@ function Test-AgentMaintenanceFenceSecurity {
   $expected=if($rule.IdentityReference.Value -eq $systemSid.Value -or $rule.IdentityReference.Value -eq $administratorsSid.Value){[Security.AccessControl.FileSystemRights]::FullControl}elseif($rule.IdentityReference.Value -eq $ServiceSid.Value){[Security.AccessControl.FileSystemRights]::ReadAndExecute -bor [Security.AccessControl.FileSystemRights]::Synchronize}else{$null}
   if($null -eq $expected -or $rule.FileSystemRights -ne $expected){return $false}
  }
- return $identities.SetEquals(@($systemSid.Value,$administratorsSid.Value,$ServiceSid.Value))
+ return $identities.Count -eq 3 -and $identities.Contains($systemSid.Value) -and $identities.Contains($administratorsSid.Value) -and $identities.Contains($ServiceSid.Value)
 }
 function Initialize-FreshAgentMaintenanceFence {
  param([Parameter(Mandatory)][string]$DirectoryPath,[Parameter(Mandatory)][Security.Principal.SecurityIdentifier]$ServiceSid)
