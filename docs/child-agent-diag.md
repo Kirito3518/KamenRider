@@ -100,6 +100,31 @@ Expand-Archive $zip $dir -Force
 - **ขึ้น "internal error in the .NET Runtime" แล้วจบ** → เป็นปัญหา .NET runtime/OS (เครื่องนี้ Win10 build 19041 ซึ่ง .NET 10 ไม่รองรับจริง — จะต้องเปลี่ยนไปแพ็กเกจ .NET 8)
 - **ค้าง/รันเงียบ ๆ** → runtime ทำงานได้ ปัญหาอยู่ที่ service configuration/ACL (กด Ctrl+C เพื่อหยุด)
 
+## หลังเครื่องแม่แก้ firewall/DB แล้ว แต่เครื่องลูกยังไม่ขึ้นใน /admin/machines
+
+รันบนเครื่องลูก (Administrator) เพื่อให้ Agent retry ทันที:
+
+```powershell
+Restart-Service "KamenRaider Agent" -Force
+Start-Sleep -Seconds 10
+Get-Service "KamenRaider Agent","KamenRaider Stream Guard" | Format-Table Name,Status,StartType
+```
+
+ตรวจว่าเข้าถึง Controller ได้:
+
+```powershell
+Test-NetConnection 192.168.1.100 -Port 7443
+curl.exe -k -I https://192.168.1.100:7443/ 2>$null | Select-Object -First 3
+```
+
+- ถ้า `TcpTestSucceeded : False` → เครื่องลูกไม่ได้อยู่ใน LAN เดียวกับเครื่องแม่ หรือ firewall/network profile ยังบล็อก
+- ถ้า True แต่เครื่องยังไม่ขึ้น → ดู log:
+
+```powershell
+Get-WinEvent -ProviderName "Agent" -MaxEvents 20 -ErrorAction SilentlyContinue |
+  Select-Object TimeCreated, Id, LevelDisplayName, Message | Format-List
+```
+
 ## ถ้าต้องการเก็บเป็นไฟล์ก่อนส่ง
 
 ```powershell
