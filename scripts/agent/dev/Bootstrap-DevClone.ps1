@@ -199,11 +199,28 @@ if (-not (Test-Path -LiteralPath $nodeModules -PathType Container)) {
 # --- 3. Dev HTTPS certificate (Controller Agent listener on https://localhost:7443) --
 $services = Get-Command dotnet -ErrorAction Stop
 Write-Step 'Checking the ASP.NET Core development HTTPS certificate'
-& dotnet dev-certs https --check --quiet *> $null
-if ($LASTEXITCODE -ne 0) {
+# PowerShell 5.1 turns native stderr into a terminating error when $ErrorActionPreference is
+# 'Stop', and the very first dotnet invocation can print first-run messages to stderr. Capture
+# the output with 'Continue' and decide on the exit code instead.
+$savedEap = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+try {
+    $checkOutput = & dotnet dev-certs https --check --quiet 2>&1
+    $checkExit = $LASTEXITCODE
+} finally { $ErrorActionPreference = $savedEap }
+if ($checkExit -ne 0) {
     if ($PSCmdlet.ShouldProcess('dotnet dev-certs', 'Create the development HTTPS certificate')) {
-        & dotnet dev-certs https | Out-Null
-        if ($LASTEXITCODE -ne 0) { Write-Fail 'Could not create the development HTTPS certificate.'; exit 1 }
+        $savedEap = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            $createOutput = & dotnet dev-certs https 2>&1
+            $createExit = $LASTEXITCODE
+        } finally { $ErrorActionPreference = $savedEap }
+        if ($createExit -ne 0) {
+            Write-Fail 'Could not create the development HTTPS certificate.'
+            if ($createOutput) { Write-Host (($createOutput | Out-String).Trim()) -ForegroundColor DarkGray }
+            exit 1
+        }
     }
     Write-Ok 'Created the development HTTPS certificate'
 } else {
@@ -211,7 +228,9 @@ if ($LASTEXITCODE -ne 0) {
 }
 if ($TrustCertificate) {
     if ($PSCmdlet.ShouldProcess('dotnet dev-certs', 'Trust the development HTTPS certificate')) {
-        & dotnet dev-certs https --trust | Out-Null
+        $savedEap = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try { & dotnet dev-certs https --trust 2>&1 | Out-Null } finally { $ErrorActionPreference = $savedEap }
     }
 }
 
