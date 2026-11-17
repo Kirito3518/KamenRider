@@ -507,6 +507,7 @@ public static class ControllerDatabaseMaintenance
             if (userVersion >= 21) ValidateRecoverySuccessorSchema(connection);
             if (userVersion >= 22) ValidateUpdateConfirmationSchema(connection);
             if (userVersion >= 23) ValidatePcControlSchema(connection);
+            if (userVersion >= 24) ValidateMachineProfileSchema(connection);
             // These uniqueness constraints enforce allocation and command-revision invariants.
             ValidateIndex(connection, "leases", "leases_machine_allocation", ["machine_id"], "allocation_held=1", required: true);
             var hasCommandRevisionIndex = HasIndex(connection, "command_outbox", "lease_command_revision");
@@ -777,6 +778,48 @@ public static class ControllerDatabaseMaintenance
             indexCheck.Parameters.AddWithValue("$name", name);
             if (Convert.ToInt64(indexCheck.ExecuteScalar(), CultureInfo.InvariantCulture) != 1)
                 throw new InvalidDataException($"Controller database is missing PC-control command index '{name}'.");
+        }
+    }
+
+    internal static void ValidateMachineProfileSchema(SqliteConnection connection, SqliteTransaction? transaction = null)
+    {
+        long userVersion;
+        using (var version = connection.CreateCommand())
+        {
+            version.Transaction = transaction;
+            version.CommandText = "PRAGMA user_version";
+            userVersion = Convert.ToInt64(version.ExecuteScalar(), CultureInfo.InvariantCulture);
+        }
+        if (userVersion < 24)
+            throw new InvalidDataException("Controller database is missing the version 24 machine profile schema.");
+
+        ValidateColumns(connection, "sunshine_management_credential", [
+            new("singleton", "INTEGER"), new("username", "TEXT", true),
+            new("password_ciphertext", "BLOB", true), new("password_nonce", "BLOB", true),
+            new("password_tag", "BLOB", true), new("revision", "INTEGER", true),
+            new("updated_at_unix_ms", "INTEGER", true), new("updated_by", "TEXT", true)
+        ], ["singleton"]);
+
+        using (var credential = connection.CreateCommand())
+        {
+            credential.Transaction = transaction;
+            credential.CommandText = "SELECT COUNT(*) FROM sunshine_management_credential WHERE singleton<>1 OR length(trim(username)) NOT BETWEEN 1 AND 128 OR length(password_ciphertext)=0 OR length(password_nonce)<>12 OR length(password_tag)<>16 OR revision<1 OR updated_at_unix_ms<0 OR length(trim(updated_by))=0";
+            if (Convert.ToInt64(credential.ExecuteScalar(), CultureInfo.InvariantCulture) != 0)
+                throw new InvalidDataException("Controller database has an invalid Sunshine management credential record.");
+        }
+        using (var count = connection.CreateCommand())
+        {
+            count.Transaction = transaction;
+            count.CommandText = "SELECT COUNT(*) FROM sunshine_management_credential";
+            if (Convert.ToInt64(count.ExecuteScalar(), CultureInfo.InvariantCulture) > 1)
+                throw new InvalidDataException("Controller database has more than one Sunshine management credential record.");
+        }
+        using (var machines = connection.CreateCommand())
+        {
+            machines.Transaction = transaction;
+            machines.CommandText = "SELECT COUNT(*) FROM machines WHERE ram_bytes<0 OR sunshine_credential_revision<0 OR length(hostname)>128 OR length(cpu)>128 OR length(gpu)>256";
+            if (Convert.ToInt64(machines.ExecuteScalar(), CultureInfo.InvariantCulture) != 0)
+                throw new InvalidDataException("Controller database has invalid Agent-reported machine profile values.");
         }
     }
 
@@ -1070,7 +1113,7 @@ public static class ControllerDatabaseMaintenance
 
     internal static void ValidateCanonicalSchema(SqliteConnection connection, long expectedVersion, SqliteTransaction? transaction = null)
     {
-        if (expectedVersion is < 0 or > 23)
+        if (expectedVersion is < 0 or > 24)
             throw new InvalidDataException("Controller database version is outside the supported migration range.");
 
         var checkpoints = expectedSchemas.GetOrAdd(expectedVersion, BuildCanonicalSchemas);
@@ -1153,7 +1196,7 @@ public static class ControllerDatabaseMaintenance
 
     private static IReadOnlyList<IReadOnlyDictionary<string, SchemaObject>> BuildCanonicalSchemas(long version)
     {
-        if (version is not (0 or 2 or 3 or >= 4 and <= 23))
+        if (version is not (0 or 2 or 3 or >= 4 and <= 24))
             return [];
 
         var connectionString = new SqliteConnectionStringBuilder { DataSource = ":memory:", ForeignKeys = true, Pooling = false }.ToString();

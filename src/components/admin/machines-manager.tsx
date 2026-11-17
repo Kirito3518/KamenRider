@@ -8,6 +8,7 @@ import type {
   ReadinessDiagnosticStatus,
 } from "@/lib/machine-contracts";
 import { getInstallCommandExpiryState } from "@/lib/agent-install-expiry.mjs";
+import { formatRamBytes, formatSpec } from "@/lib/machine-specs";
 import {
   getSavedVncTargetForMetadataUpdate,
   getVncTargetForExplicitSave,
@@ -292,6 +293,12 @@ export function MachinesManager({ actorId }: { actorId: string }) {
             {m.appliedConfigRevision === m.configRevision
               ? "(ตรงกับ config)"
               : "(รอ Agent ACK)"}
+          </p>
+          <p>
+            ชื่อที่แสดง: {formatSpec(m.displayName)} · Hostname: {formatSpec(m.hostname)} · CPU: {formatSpec(m.cpu)} · GPU: {formatSpec(m.gpu)} · RAM: {formatRamBytes(m.ramBytes)}
+          </p>
+          <p>
+            Sunshine credential revision ที่ Agent ใช้: {m.appliedSunshineCredentialRevision ?? 0}
           </p>
           <p role="status">
             เซสชันผู้ดูแลที่กำลังดู VNC: {m.activeAdminVncSessions ?? 0}

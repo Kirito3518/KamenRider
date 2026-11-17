@@ -6,7 +6,7 @@ import { updateStatusLabels } from "@/lib/agent-releases";
 
 const now = "2026-11-08T12:00:00.000Z";
 const release = (version: string, channel: string) => ({ version, channel, releaseNotes: `Notes ${version}`, packageSha256: "A".repeat(64), packageSizeBytes: 100, sourceCommit: "abc", sourceDirty: false, publishedAtUtc: now });
-const machine = { machineId: "pc-1", approvalStatus: "approved", displayName: "PC 1", localIp: "192.168.1.2", vncLocalIp: null, hourlyPriceMinorUnits: 100, moonlightPort: 1, sunshinePort: 2, configRevision: 1, appliedConfigRevision: 1, readiness: "notReady", canRent: false, allocationHeld: false, lastSeenAt: now, agentVersion: "1.0.0", activeAdminVncSessions: 0, agentUpdateStatus: null, agentUpdateOperationId: null, agentUpdateTargetVersion: null };
+const machine = { machineId: "pc-1", approvalStatus: "approved", displayName: "PC 1", hostname: "PC-1", cpu: null, gpu: null, ramBytes: 0, appliedSunshineCredentialRevision: 0, localIp: "192.168.1.2", vncLocalIp: null, hourlyPriceMinorUnits: 100, moonlightPort: 1, sunshinePort: 2, configRevision: 1, appliedConfigRevision: 1, readiness: "notReady", canRent: false, allocationHeld: false, lastSeenAt: now, agentVersion: "1.0.0", activeAdminVncSessions: 0, agentUpdateStatus: null, agentUpdateOperationId: null, agentUpdateTargetVersion: null };
 const json = (body: unknown, ok = true, status = ok ? 200 : 409) => ({ ok, status, json: async () => body }) as Response;
 
 describe("Agent releases dashboard", () => {

@@ -167,7 +167,9 @@ function LeaseCard({
   }
   return (
     <section className="space-y-3 rounded-xl border p-4">
-      <h2 className="text-xl font-bold">{lease.machineId}</h2>
+      <h2 className="text-xl font-bold">
+        {lease.machineDisplayName || lease.machineId}
+      </h2>
       <p>
         สถานะ: {lease.state} · Revision {lease.revision}
         {lease.pendingRevision !== null
@@ -185,11 +187,20 @@ function LeaseCard({
       <p className="text-sm text-muted-foreground">
         Heartbeat ล่าสุด: {lease.agent?.lastSeenAt || "ไม่มีข้อมูล"}
       </p>
-      <p className="text-sm text-muted-foreground">
-        {lease.connection?.address
-          ? `${lease.connection.address}${lease.connection.stale ? " (ข้อมูลเก่า — ตรวจสอบกับผู้ดูแล)" : ""}`
-          : "ยังไม่มีที่อยู่สาธารณะที่ตรวจสอบแล้ว กรุณาติดต่อผู้ดูแล"}
-      </p>
+      {lease.state === "active" ? (
+        <>
+          <p className="break-all">
+            {lease.connection?.address
+              ? `เชื่อมต่อ: ${lease.connection.address}`
+              : "เชื่อมต่อ: ยังไม่มีที่อยู่สาธารณะที่ตรวจสอบแล้ว กรุณาติดต่อผู้ดูแล"}
+          </p>
+          {lease.connection?.address && lease.connection.stale ? (
+            <p className="text-sm text-status-busy">
+              ข้อมูลที่อยู่เชื่อมต่ออาจล้าสมัย — ตรวจสอบกับผู้ดูแลก่อนใช้งาน
+            </p>
+          ) : null}
+        </>
+      ) : null}
       {lease.state === "active" ? (
         <>
           <button className="rounded border p-2" onClick={pending}>

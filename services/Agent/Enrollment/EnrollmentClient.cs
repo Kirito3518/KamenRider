@@ -6,10 +6,13 @@ using KamenRaider.Contracts;
 namespace KamenRaider.Agent.Enrollment;
 public sealed class EnrollmentClient(HttpClient client,DeviceIdentity identity)
 {
-    public async Task<EnrollmentResult> EnrollAsync(Uri controller,string localIp,string macAddress,int moonlightPort,int sunshinePort,string? enrollmentTicket,CancellationToken token) {
+    public Task<EnrollmentResult> EnrollAsync(Uri controller,string localIp,string macAddress,int moonlightPort,int sunshinePort,string? enrollmentTicket,CancellationToken token) =>
+        EnrollAsync(controller,localIp,macAddress,moonlightPort,sunshinePort,enrollmentTicket,null,token);
+
+    public async Task<EnrollmentResult> EnrollAsync(Uri controller,string localIp,string macAddress,int moonlightPort,int sunshinePort,string? enrollmentTicket,HardwareInfo? hardware,CancellationToken token) {
         if(controller.Scheme!=Uri.UriSchemeHttps)throw new ArgumentException("HTTPS required");
         if(enrollmentTicket is not null&&!System.Text.RegularExpressions.Regex.IsMatch(enrollmentTicket,@"\A[A-Za-z0-9_-]{43}\z"))throw new ArgumentException("Invalid enrollment ticket",nameof(enrollmentTicket));
-        var body=JsonSerializer.Serialize(new EnrollmentRequest(identity.MachineId,identity.PublicKey,localIp,macAddress,moonlightPort,sunshinePort),new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        var body=JsonSerializer.Serialize(new EnrollmentRequest(identity.MachineId,identity.PublicKey,localIp,macAddress,moonlightPort,sunshinePort){Hardware=hardware},new JsonSerializerOptions(JsonSerializerDefaults.Web));
         var timestamp=DateTimeOffset.UtcNow;var nonce=Guid.NewGuid().ToString("N");
         using var request=new HttpRequestMessage(HttpMethod.Post,new Uri(controller,"/agent/enroll")) {Content=new StringContent(body,Encoding.UTF8,"application/json")};
         request.Headers.Add("X-Agent-Timestamp",timestamp.ToUnixTimeSeconds().ToString());request.Headers.Add("X-Agent-Nonce",nonce);request.Headers.Add("X-Agent-Signature",identity.Sign("POST","/agent/enroll",timestamp,nonce,body));

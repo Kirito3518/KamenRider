@@ -135,3 +135,29 @@ public/agent/Update-Agent.ps1 no longer stops after the read-only helper probe. 
 6. eport lifecycle request after the apply outcome, including the apply-failure path.
 
 An unconfirmed Controller start is reconciled by the helper and still fails the wrapper; any helper unavailable/ejected category surfaces as a hard error. Test-AgentUpdateBootstrap.ps1 now asserts this command/request sequence, the helper-build pin, the protected-package download and the ambiguous-start reconcile path under Windows PowerShell 5.1. A real elevated execution against a live Controller and an installed Agent service remains NOT RUN (it mutates the service/firewall/installation and therefore needs the qualified hardware window); the retired ZIP-replacement workflow scripts that still target Update-AgentPackage.ps1 (Test-AgentUpdatePlan, Test-AgentUpdatePublicWorkflow, Test-AgentUpdateServiceApi, Test-AgentUpdateArchiveFreshProcess, Test-AgentUpdateConcurrent) are stale and not evidence for this wrapper.
+
+## Machine profile reporting and fleet Sunshine credential (2026-11-17)
+
+Migration 024 (canonical schema version 24) adds the Agent-reported `machines.hostname/cpu/gpu/ram_bytes/sunshine_credential_revision` columns and the singleton `sunshine_management_credential` table. Neither feature changes approval, readiness, configuration revision or rentability: the profile is display/diagnostic data and the credential is an out-of-band management secret.
+
+### Machine profile and display name
+
+- `POST /agent/enroll` accepts optional `Hardware { hostname, cpu, gpu, ramBytes }`. The values are trimmed and bounded before persistence: hostname 1..64 characters is required when a profile is reported, CPU and GPU are optional and capped at 128/256 characters, and RAM must be 0..2^40 bytes. Control characters are rejected; a malformed profile fails the request without inserting or updating anything (no implicit truncation).
+- For a **new** machine, the reported hostname becomes the initial `display_name`; the administrator can rename the machine afterwards and later moves never overwrite that choice. Re-enrollment and every signed sync refresh the stored hardware columns only.
+- `MachineDto` exposes `Hostname`, `Cpu`, `Gpu`, `RamBytes` and `AppliedSunshineCredentialRevision` to the admin/renter web. Unreported text fields are `null`; `RamBytes`/`AppliedSunshineCredentialRevision` default to 0.
+- `SyncRequest` carries the same optional `Hardware` plus `AppliedSunshineCredentialRevision` (the fleet credential revision the Agent has persisted). `SyncResponse.SunshineCredentialRevision` reports the Controller's current revision (0 = no fleet credential configured).
+
+### Fleet-wide Sunshine management credential (Agent-side DPAPI store only)
+
+Sunshine's own configuration, service and executable are not modified. The Controller owns one fleet-wide management username/password pair; each approved Agent fetches it and stores it in its own DPAPI-protected credential store.
+
+- Encryption at rest: the password is stored only as AES-256-GCM ciphertext (12-byte random nonce, 16-byte tag in separate columns). The database never contains the plaintext password. The key comes from `CONTROLLER_SUNSHINE_CREDENTIAL_KEY` (base64 of exactly 32 random bytes; empty disables credential storage). A missing, malformed or wrong key fails closed: protected writes are refused and deliveries throw instead of returning corrupt plaintext. The key and password must never be committed, logged or pasted into tickets.
+- Admin metadata: `GET /internal/sunshine-credential` returns `{ configured, userName, revision, updatedAtUtc }` (never the password or ciphertext). `PUT /internal/sunshine-credential` with `X-Service-Credential`, an authenticated `X-Authenticated-Actor-Id` header and body `{ userName, password }` replaces the credential and increments the revision. Missing actor -> 401, malformed body -> 400, storage not configured -> 409.
+- Agent delivery: `POST /agent/sunshine-credential` is ECDSA-signed like enrollment/sync with the exact path (headers `X-Agent-Id`, `X-Agent-Timestamp`, `X-Agent-Nonce`, `X-Agent-Signature`) and body `{ knownRevision }`. The Controller validates the signature, the signature timestamp window, nonce replay, restore quarantine and `approval_status='approved'`. Responses: 200 with `{ userName, password, revision }` when the Agent is behind; 204 when `knownRevision` already matches (nothing to apply); 401 for a bad/replayed signature; 404 when no fleet credential is configured; 409 when the machine is not approved or the Controller is restore-quarantined; 400 for a malformed body. Responses are `Cache-Control: no-store`.
+- Rotation: every admin save increments the revision, so Agents converge on the next sync/fetch. An Agent reporting a revision ahead of the Controller (for example after a database restore) is treated as stale and receives the Controller's current revision rather than being trusted.
+
+### Local configuration
+
+`.env.example` documents `CONTROLLER_PUBLIC_IP_ENDPOINT` and `CONTROLLER_SUNSHINE_CREDENTIAL_KEY`; `scripts/agent/dev/Run-Controller-Local.ps1` reads both from `.env.local` and maps them to the Controller `PublicIpEndpoint` and `SunshineCredentialKey` options. Keep real values only in `.env.local` (gitignored); generate the key once with `node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"`.
+
+`PublicIpJob` behavior is unchanged: it polls the configured HTTPS `CONTROLLER_PUBLIC_IP_ENDPOINT` (for example `https://api.ipify.org`) every five minutes, accepts only globally routable IPv4 addresses, keeps the last good value and marks it stale on failure. The lease connection endpoint uses that published address with the machine's Moonlight port.

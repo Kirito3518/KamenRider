@@ -17,6 +17,12 @@ public sealed class ControllerOptions
     public string WakeInterfaceAddress { get; set; } = "";
     public string WakeBroadcastAddress { get; set; } = "";
     public string PublicIpEndpoint { get; set; } = "";
+    /// <summary>
+    /// Base64 of exactly 32 bytes used to encrypt the fleet-wide Sunshine management credential
+    /// at rest. An empty value disables credential storage; any other malformed value is rejected
+    /// at startup. The key itself is never persisted or logged.
+    /// </summary>
+    public string SunshineCredentialKey { get; set; } = "";
     public string InternalUrl { get; set; } = "";
     public string AgentUrl { get; set; } = "";
     public string DatabasePath { get; set; } = "";
@@ -35,7 +41,8 @@ public sealed class ControllerOptions
         && !string.IsNullOrWhiteSpace(ServiceCredential)
         && (string.IsNullOrEmpty(AgentMaintenancePinnedHelperSha256) || IsHex64(AgentMaintenancePinnedHelperSha256))
         && (string.IsNullOrEmpty(AgentMaintenanceQualifiedAutoResumeStatus)
-            || AgentMaintenanceQualifiedAutoResumeStatus is "qualifiedNotApplicable" or "qualifiedDisabled");
+            || AgentMaintenanceQualifiedAutoResumeStatus is "qualifiedNotApplicable" or "qualifiedDisabled")
+        && (string.IsNullOrEmpty(SunshineCredentialKey) || SunshineCredentialProtector.IsValidKey(SunshineCredentialKey));
     private static bool IsHex64(string value) => value.Length == 64 && value.All(Uri.IsHexDigit);
 }
 public static class ControllerHost
@@ -46,7 +53,7 @@ public static class ControllerHost
         configure?.Invoke(builder);
         builder.Services.AddWindowsService(options => options.ServiceName = "KamenRaider Controller");
         builder.Services.AddOptions<ControllerOptions>().Bind(builder.Configuration)
-            .Validate(o => o.IsValid(), "InternalUrl (loopback HTTP), AgentUrl (separate HTTPS port), absolute DatabasePath and ServiceCredential are required.").ValidateOnStart();
+            .Validate(o => o.IsValid(), "InternalUrl (loopback HTTP), AgentUrl (separate HTTPS port), absolute DatabasePath and ServiceCredential are required; SunshineCredentialKey must be empty or base64 of 32 bytes.").ValidateOnStart();
         builder.Services.TryAddSingleton(TimeProvider.System);
         builder.Services.TryAddSingleton<IExternalRecoveryHistory, UnavailableExternalRecoveryHistory>();
         var settings = builder.Configuration.Get<ControllerOptions>() ?? new();
@@ -78,7 +85,8 @@ public static class ControllerHost
             agentReleaseRemediationEnabled: sp.GetRequiredService<IOptions<ControllerOptions>>().Value.AgentReleaseRemediationEnabled,
             agentMaintenancePinnedHelperSha256: sp.GetRequiredService<IOptions<ControllerOptions>>().Value.AgentMaintenancePinnedHelperSha256,
             agentMaintenanceExclusionProcedureQualified: sp.GetRequiredService<IOptions<ControllerOptions>>().Value.AgentMaintenanceExclusionProcedureQualified,
-            agentMaintenanceQualifiedAutoResumeStatus: sp.GetRequiredService<IOptions<ControllerOptions>>().Value.AgentMaintenanceQualifiedAutoResumeStatus));
+            agentMaintenanceQualifiedAutoResumeStatus: sp.GetRequiredService<IOptions<ControllerOptions>>().Value.AgentMaintenanceQualifiedAutoResumeStatus,
+            sunshineCredentialKey: sp.GetRequiredService<IOptions<ControllerOptions>>().Value.SunshineCredentialKey));
         builder.Services.AddSingleton<AgentReleaseStore>(sp => {
             var databasePath = sp.GetRequiredService<IOptions<ControllerOptions>>().Value.DatabasePath;
             var databaseDirectory = Path.GetDirectoryName(Path.GetFullPath(databasePath))!;

@@ -110,7 +110,7 @@ internal sealed class WindowsDpapiMachineSecretProtector : ISunshineCredentialPr
 }
 
 [SupportedOSPlatform("windows")]
-public sealed class WindowsSunshineCredentialStore
+public sealed class WindowsSunshineCredentialStore : ISunshineManagementCredentialSink
 {
     internal const string AgentServiceName = "KamenRaider Agent";
     internal const string CredentialDirectoryName = "sunshine";
@@ -352,4 +352,6 @@ public sealed class WindowsSunshineCredentialStore
         if (string.IsNullOrEmpty(credential.Password) || credential.Password.Length > 2048 || credential.Password.Any(c => c == '\0'))
             throw new ArgumentException("Sunshine password is invalid.", nameof(credential));
     }
+
+    void ISunshineManagementCredentialSink.Save(SunshineManagementCredential credential, bool replace) => Save(credential, replace);
 }

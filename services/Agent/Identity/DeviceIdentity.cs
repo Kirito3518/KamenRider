@@ -7,7 +7,7 @@ using System.Text.Json;
 
 namespace KamenRaider.Agent.Identity;
 
-public sealed class DeviceIdentity : IDisposable
+public sealed class DeviceIdentity : IAgentRequestSigner, IDisposable
 {
     private static readonly ConcurrentDictionary<string, object> LoadLocks = new(StringComparer.OrdinalIgnoreCase);
     private readonly ECDsa key;

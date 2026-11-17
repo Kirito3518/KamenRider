@@ -6,6 +6,8 @@ public record SyncRequest(string BootId,string LocalIp,string MacAddress,long Ap
     public string? AgentUpdateChallenge { get; init; }
     public int? SyncProofProtocol { get; init; }
     public ReadinessDiagnostic[]? ReadinessDiagnostics { get; init; }
+    public HardwareInfo? Hardware { get; init; }
+    public long? AppliedSunshineCredentialRevision { get; init; }
 }
 public record ReadinessDiagnostic(string CheckId,string Status);
 public static class ReadinessDiagnosticIds {
@@ -28,5 +30,7 @@ public static class ReadinessDiagnosticStatuses {
 public record ConfigurationDto(long Revision,int MoonlightPort,int SunshinePort);
 public record SyncResponse(DateTimeOffset ServerTimeUtc,ConfigurationDto Configuration,CommandEnvelope[] Commands,ActiveLeaseConfirmation? ActiveLease=null) {
     public string? AgentUpdateChallenge { get; init; }
+    /// <summary>Current fleet-wide Sunshine management credential revision; 0 means not configured.</summary>
+    public long SunshineCredentialRevision { get; init; }
 }
 public record SyncChallengeRequired(string AgentUpdateChallenge);

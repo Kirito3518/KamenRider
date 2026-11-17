@@ -563,6 +563,72 @@ describe("MachinesManager install command interactions", () => {
     expectNetworkIsolation(0);
   });
 
+  it("shows Agent-reported hostname, CPU, GPU, RAM and applied Sunshine revision", async () => {
+    machinesResponse = [
+      {
+        machineId: "spec-pc",
+        approvalStatus: "approved",
+        displayName: "DESKTOP-SPEC",
+        hostname: "DESKTOP-SPEC",
+        cpu: "AMD Ryzen 7 7800X3D",
+        gpu: "NVIDIA GeForce RTX 4080",
+        ramBytes: 34_359_738_368,
+        appliedSunshineCredentialRevision: 4,
+        localIp: "192.168.1.20",
+        vncLocalIp: null,
+        hourlyPriceMinorUnits: 100,
+        moonlightPort: 47989,
+        sunshinePort: 47990,
+        configRevision: 1,
+        appliedConfigRevision: 1,
+        readiness: "notReady",
+        canRent: false,
+        lastSeenAt: null,
+        agentVersion: "1.0.0",
+        activeAdminVncSessions: 0,
+      },
+      {
+        machineId: "no-spec-pc",
+        approvalStatus: "approved",
+        displayName: "No spec PC",
+        localIp: "192.168.1.21",
+        vncLocalIp: null,
+        hourlyPriceMinorUnits: 100,
+        moonlightPort: 47989,
+        sunshinePort: 47990,
+        configRevision: 1,
+        appliedConfigRevision: 1,
+        readiness: "notReady",
+        canRent: false,
+        lastSeenAt: null,
+        agentVersion: "1.0.0",
+        activeAdminVncSessions: 0,
+      },
+    ];
+
+    render(<MachinesManager actorId="test-admin" />);
+
+    expect(await screen.findByText("spec-pc · approved")).toBeDefined();
+    const paragraphWith = (fragment: string) =>
+      screen.getByText(
+        (_text, element) =>
+          element?.tagName === "P" &&
+          element.textContent?.includes(fragment) === true,
+      );
+    expect(paragraphWith("Hostname: DESKTOP-SPEC")).toBeDefined();
+    expect(paragraphWith("CPU: AMD Ryzen 7 7800X3D")).toBeDefined();
+    expect(paragraphWith("GPU: NVIDIA GeForce RTX 4080")).toBeDefined();
+    expect(paragraphWith("RAM: 32 GB")).toBeDefined();
+    expect(
+      paragraphWith("Sunshine credential revision ที่ Agent ใช้: 4"),
+    ).toBeDefined();
+    expect(paragraphWith("Hostname: — · CPU: — · GPU: — · RAM: —")).toBeDefined();
+    expect(
+      paragraphWith("Sunshine credential revision ที่ Agent ใช้: 0"),
+    ).toBeDefined();
+    expectNetworkIsolation(0);
+  });
+
   function expectNetworkIsolation(expectedInstallRequests: number) {
     const requestedUrls = fetchSpy.mock.calls.map(([input]) => String(input));
     expect(unexpectedUrls).toEqual([]);

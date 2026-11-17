@@ -1,4 +1,4 @@
-using KamenRaider.Contracts;
+﻿using KamenRaider.Contracts;
 using KamenRaider.Controller.Agents;
 using KamenRaider.Controller.Data;
 using KamenRaider.Controller.Machines;
@@ -26,8 +26,8 @@ public sealed class AgentRecoveryTests
         using var version = connection.CreateCommand();
         version.CommandText = "PRAGMA user_version";
 
-        Assert.Equal(23L, Convert.ToInt64(version.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture));
-        ControllerDatabaseMaintenance.ValidateCanonicalSchema(connection, 23);
+        Assert.Equal(24L, Convert.ToInt64(version.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture));
+        ControllerDatabaseMaintenance.ValidateCanonicalSchema(connection, 24);
         ControllerDatabaseMaintenance.ValidateRecoverySchema(connection);
         ControllerDatabaseMaintenance.ValidateRecoverySuccessorSchema(connection);
         ControllerDatabaseMaintenance.ValidateUpdateConfirmationSchema(connection);
@@ -634,9 +634,9 @@ public sealed class AgentRecoveryTests
         Assert.Equal(Encoding.UTF8.GetBytes(Encoding.UTF8.GetString(replacementBytes)), replacementBytes);
 
         var validUnicodeBytes = AgentUpdateRecoveryInspectionCanonicalizer.CanonicalBytes(
-            ValidInspection() with { IntentId = "intent-λ-🚀" });
+            ValidInspection() with { IntentId = "intent-ฮป-๐€" });
         var validUnicodeText = Encoding.UTF8.GetString(validUnicodeBytes);
-        Assert.Contains("intent-λ-🚀", validUnicodeText);
+        Assert.Contains("intent-ฮป-๐€", validUnicodeText);
         Assert.Equal(Encoding.UTF8.GetBytes(validUnicodeText), validUnicodeBytes);
     }
 

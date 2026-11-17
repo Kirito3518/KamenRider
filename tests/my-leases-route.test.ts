@@ -164,4 +164,47 @@ describe("GET /api/my-leases", () => {
     ])
       expect(responseData).not.toContain(privateValue);
   });
+
+  it("exposes a verified public connect address only for an active lease", async () => {
+    controllerCall.mockImplementation(async (path: string) => {
+      if (path === "/internal/users/renter-1/leases") return LEASES.slice(0, 2);
+      if (path === "/internal/machines")
+        return [
+          {
+            ...controllerMachine("pc-one", "ready", HEARTBEAT_AT),
+            displayName: "DESKTOP-ONE",
+          },
+          controllerMachine("pc-offline", "unreachable", HEARTBEAT_AT),
+        ];
+      const connection = path.match(
+        /^\/internal\/leases\/([^/]+)\/connection$/,
+      );
+      if (connection)
+        return {
+          address: "203.0.113.7:47989",
+          stale: true,
+          extra: "must not reach the browser",
+        };
+      throw new Error(`Unexpected Controller request: ${path}`);
+    });
+
+    const response = await GET(new Request("http://localhost/api/my-leases"));
+    const data = await response.json();
+
+    expect(data[0].connection).toEqual({
+      address: "203.0.113.7:47989",
+      stale: true,
+    });
+    expect(data[0].machineDisplayName).toBe("DESKTOP-ONE");
+    expect(data[1].connection).toEqual({ address: null, stale: false });
+    expect(controllerCall).toHaveBeenCalledWith(
+      "/internal/leases/rental-1/connection",
+    );
+    expect(
+      controllerCall.mock.calls.some(([path]) =>
+        String(path).includes("rental-2/connection"),
+      ),
+    ).toBe(false);
+    expect(JSON.stringify(data)).not.toContain("must not reach the browser");
+  });
 });

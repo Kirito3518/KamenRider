@@ -5,11 +5,14 @@ using KamenRaider.Contracts;
 
 namespace KamenRaider.Agent.Sync;
 
-public sealed class AgentSyncCycle(SyncClient client,Uri controller,IBootClock clock,AppliedConfiguration configuration,LeaseCommandDispatcher commands) {
+public sealed class AgentSyncCycle(SyncClient client,Uri controller,IBootClock clock,AppliedConfiguration configuration,LeaseCommandDispatcher commands,HardwareInfo? hardware=null,Func<long>? appliedSunshineCredentialRevision=null,Action<long>? observeSunshineCredentialRevision=null) {
     private string? agentUpdateChallenge;
     public async Task RunAsync(string bootId,string localIp,string macAddress,Readiness readiness,CancellationToken ct,ReadinessDiagnostic[]? readinessDiagnostics=null) {
         var pairingOffer=readiness==Readiness.Ready?await commands.GetPairingOfferAsync(ct):null;
-        var request=AgentSyncRequestFactory.Create(bootId,localIp,macAddress,configuration.Current?.Revision??0,readiness,commands.PendingResults,pairingOffer,readinessDiagnostics);
+        var request=AgentSyncRequestFactory.Create(bootId,localIp,macAddress,configuration.Current?.Revision??0,readiness,commands.PendingResults,pairingOffer,readinessDiagnostics) with {
+            Hardware=hardware,
+            AppliedSunshineCredentialRevision=appliedSunshineCredentialRevision?.Invoke()
+        };
         var verifiedConfigurationRevision=readiness==Readiness.Ready?configuration.Current?.Revision:null;
         SyncResponse response;long requestStartedUptimeMilliseconds;
         var challenges=0;
@@ -20,6 +23,9 @@ public sealed class AgentSyncCycle(SyncClient client,Uri controller,IBootClock c
             response=((AgentSyncExchange.Accepted)exchange).Response;break;
         }
         agentUpdateChallenge=response.AgentUpdateChallenge;
+        // Authenticated result of this sync: hand the fleet Sunshine credential revision to the hosted
+        // credential worker without blocking lease, configuration, or readiness processing.
+        observeSunshineCredentialRevision?.Invoke(response.SunshineCredentialRevision);
         // Authenticated time remains useful when local configuration cannot be saved.
         if(readiness==Readiness.Ready)await commands.ObserveResponseTimeAsync(response,requestStartedUptimeMilliseconds,ct);
         else await commands.AcceptBlockedAsync(response,requestStartedUptimeMilliseconds,ct);

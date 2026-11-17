@@ -14,9 +14,14 @@ export type MachineSort = "name" | "price-asc" | "price-desc";
 
 export type RentalMachine = {
   id: string;
+  /** Agent-reported display name (the Agent hostname by default). */
+  name: string;
   cpu: string;
   gpu: string;
+  /** RAM in whole GiB (legacy public-machine field). */
   ram: number;
+  /** Agent-reported RAM bytes from `/api/machines`. */
+  ramBytes: number;
   storage: string;
   price: number;
   status: MachineStatus;

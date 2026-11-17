@@ -9,7 +9,7 @@ public abstract record AgentSyncExchange {
  public sealed record Accepted(SyncResponse Response):AgentSyncExchange;
  public sealed record ChallengeRequired(string Token):AgentSyncExchange;
 }
-public sealed class SyncClient(HttpClient http,DeviceIdentity identity) {
+public sealed class SyncClient(HttpClient http,IAgentRequestSigner identity) {
  public async Task<AgentSyncExchange> SyncAsync(Uri controller,SyncRequest heartbeat,CancellationToken ct) {
  var body=JsonSerializer.Serialize(heartbeat with{SyncProofProtocol=2},new JsonSerializerOptions(JsonSerializerDefaults.Web));var timestamp=DateTimeOffset.UtcNow;var nonce=Guid.NewGuid().ToString("N");
  using var request=new HttpRequestMessage(HttpMethod.Post,new Uri(controller,"/agent/sync")){Content=new StringContent(body,Encoding.UTF8,"application/json")};

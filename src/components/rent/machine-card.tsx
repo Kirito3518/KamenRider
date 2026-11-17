@@ -8,6 +8,7 @@ import {
 } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { formatRamBytes, formatSpec } from "@/lib/machine-specs";
 import { machineStatusLabels, type RentalMachine } from "@/lib/rental-machines";
 
 export function MachineCard({
@@ -18,6 +19,13 @@ export function MachineCard({
   onSelect: (machine: RentalMachine, trigger: HTMLButtonElement) => void;
 }) {
   const available = machine.status === "available";
+  const displayName = machine.name || machine.id;
+  const ramLabel =
+    machine.ramBytes > 0
+      ? formatRamBytes(machine.ramBytes)
+      : machine.ram > 0
+        ? `${machine.ram} GB`
+        : formatRamBytes(undefined);
 
   return (
     <Card
@@ -36,29 +44,29 @@ export function MachineCard({
           </Badge>
         </div>
         <CardTitle>
-          <h2>{machine.id}</h2>
+          <h2>{displayName}</h2>
         </CardTitle>
       </CardHeader>
       <CardContent>
         <dl className="flex flex-col gap-2.5 text-xs sm:text-sm">
-          <div className="flex items-center gap-2">
-            <Cpu className="size-4 shrink-0 text-muted-foreground" />
-            <dt className="sr-only">CPU</dt>
-            <dd className="truncate">{machine.cpu}</dd>
-          </div>
-          <div className="flex items-center gap-2">
-            <Gpu className="size-4 shrink-0 text-muted-foreground" />
-            <dt className="sr-only">การ์ดจอ</dt>
-            <dd>{machine.gpu}</dd>
-          </div>
-          <div className="flex items-center gap-2">
-            <MemoryStick className="size-4 shrink-0 text-muted-foreground" />
-            <dt className="sr-only">หน่วยความจำและพื้นที่จัดเก็บ</dt>
-            <dd>
-              {machine.ram} GB{" "}
-              <span className="mx-1 text-muted-foreground">·</span>{" "}
-              {machine.storage}
+          <div className="flex min-w-0 items-center gap-2">
+            <Cpu aria-hidden className="size-4 shrink-0 text-muted-foreground" />
+            <dt className="shrink-0 text-muted-foreground">CPU</dt>
+            <dd className="ml-auto min-w-0 truncate text-right" title={formatSpec(machine.cpu)}>
+              {formatSpec(machine.cpu)}
             </dd>
+          </div>
+          <div className="flex min-w-0 items-center gap-2">
+            <Gpu aria-hidden className="size-4 shrink-0 text-muted-foreground" />
+            <dt className="shrink-0 text-muted-foreground">การ์ดจอ</dt>
+            <dd className="ml-auto min-w-0 truncate text-right" title={formatSpec(machine.gpu)}>
+              {formatSpec(machine.gpu)}
+            </dd>
+          </div>
+          <div className="flex min-w-0 items-center gap-2">
+            <MemoryStick aria-hidden className="size-4 shrink-0 text-muted-foreground" />
+            <dt className="shrink-0 text-muted-foreground">แรม</dt>
+            <dd className="ml-auto min-w-0 truncate text-right tabular-nums">{ramLabel}</dd>
           </div>
         </dl>
       </CardContent>
@@ -76,8 +84,8 @@ export function MachineCard({
           onClick={(event) => onSelect(machine, event.currentTarget)}
           aria-label={
             available
-              ? `เลือกเช่าเครื่อง ${machine.id}`
-              : `${machine.id} ${machineStatusLabels[machine.status]}`
+              ? `เลือกเช่าเครื่อง ${displayName}`
+              : `${displayName} ${machineStatusLabels[machine.status]}`
           }
         >
           {available ? "เลือกเครื่องนี้" : machineStatusLabels[machine.status]}

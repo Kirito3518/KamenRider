@@ -1,5 +1,7 @@
 namespace KamenRaider.Contracts;
-public record EnrollmentRequest(string MachineId, string PublicKey, string LocalIp, string MacAddress, int MoonlightPort, int SunshinePort);
+public record EnrollmentRequest(string MachineId, string PublicKey, string LocalIp, string MacAddress, int MoonlightPort, int SunshinePort) {
+    public HardwareInfo? Hardware { get; init; }
+}
 public record EnrollmentResult(string MachineId, string ApprovalStatus);
 public record EnrollmentTicketResponse(string Ticket, DateTimeOffset ExpiresAtUtc);
 public record AdminVncTicketResponse(string Ticket, DateTimeOffset ExpiresAtUtc);
@@ -18,6 +20,13 @@ public record MachineDto(string MachineId, string ApprovalStatus, string Display
     public string? AgentUpdateOperationId { get; init; }
     public string? AgentUpdateTargetVersion { get; init; }
     public string? AgentUpdateStatus { get; init; }
+    /// <summary>Agent-reported computer name; also used as the initial display name.</summary>
+    public string? Hostname { get; init; }
+    public string? Cpu { get; init; }
+    public string? Gpu { get; init; }
+    public long RamBytes { get; init; }
+    /// <summary>Sunshine management credential revision the Agent reports as applied.</summary>
+    public long AppliedSunshineCredentialRevision { get; init; }
 }
 
 public record MachineIdentityConfirmation(string Fingerprint);

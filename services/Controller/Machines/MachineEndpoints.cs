@@ -12,6 +12,17 @@ public static class MachineEndpoints
 
     public static void MapMachines(this WebApplication app) {
         app.MapGet("/internal/machines",(ControllerDatabase db)=>db.List());
+        app.MapGet("/internal/sunshine-credential",(HttpContext context,ControllerDatabase db)=>{
+            context.Response.Headers.CacheControl="no-store";
+            return Results.Ok(db.GetSunshineCredentialState());
+        });
+        app.MapPut("/internal/sunshine-credential",(SunshineCredentialUpdate? update,HttpContext context,ControllerDatabase db)=>{
+            context.Response.Headers.CacheControl="no-store";
+            var actor=context.Request.Headers["X-Authenticated-Actor-Id"].ToString();
+            if(string.IsNullOrWhiteSpace(actor))return Results.Unauthorized();
+            if(update is null)return Results.BadRequest();
+            return Execute(()=>db.SetSunshineCredential(update.UserName,update.Password,actor));
+        });
         app.MapPost("/internal/agent-enrollment-tickets",(ControllerDatabase db)=>Results.Ok(db.CreateEnrollmentTicket()));
         app.MapPost("/internal/machines/{id}/agent-updates",(string id,AgentUpdateReservationRequest request,HttpContext context,ControllerDatabase db)=>
             IsAdmin(context)?Execute(()=>db.ReserveAgentUpdate(id,request.ReleaseVersion,context.Request.Headers["X-Authenticated-Actor-Id"].ToString(),request.RequestId ?? context.TraceIdentifier)):Results.StatusCode(StatusCodes.Status403Forbidden));

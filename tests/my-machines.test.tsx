@@ -76,6 +76,88 @@ describe("MyMachines lease refresh", () => {
     expect(screen.getByText(`Heartbeat ล่าสุด: ${HEARTBEAT_AT}`)).toBeDefined();
   });
 
+  it("renders the Agent-reported machine display name when provided", async () => {
+    fetchSpy.mockImplementation(async () =>
+      response([{ ...LEASES[0], machineDisplayName: "DESKTOP-RENTER" }]),
+    );
+
+    render(<MyMachines />);
+
+    expect(await screen.findByText("DESKTOP-RENTER")).toBeDefined();
+  });
+
+  it("shows the verified connect address for the renter's active lease", async () => {
+    fetchSpy.mockImplementation(async () =>
+      response([
+        {
+          ...LEASES[0],
+          connection: { address: "203.0.113.7:47989", stale: false },
+        },
+      ]),
+    );
+
+    render(<MyMachines />);
+
+    expect(
+      await screen.findByText("เชื่อมต่อ: 203.0.113.7:47989"),
+    ).toBeDefined();
+    expect(
+      screen.queryByText(
+        "ข้อมูลที่อยู่เชื่อมต่ออาจล้าสมัย — ตรวจสอบกับผู้ดูแลก่อนใช้งาน",
+      ),
+    ).toBeNull();
+  });
+
+  it("flags a stale connect address", async () => {
+    fetchSpy.mockImplementation(async () =>
+      response([
+        {
+          ...LEASES[0],
+          connection: { address: "203.0.113.7:47989", stale: true },
+        },
+      ]),
+    );
+
+    render(<MyMachines />);
+
+    expect(
+      await screen.findByText("เชื่อมต่อ: 203.0.113.7:47989"),
+    ).toBeDefined();
+    expect(
+      screen.getByText(
+        "ข้อมูลที่อยู่เชื่อมต่ออาจล้าสมัย — ตรวจสอบกับผู้ดูแลก่อนใช้งาน",
+      ),
+    ).toBeDefined();
+  });
+
+  it("does not show a connect address unless the lease is active", async () => {
+    fetchSpy.mockImplementation(async () =>
+      response([
+        {
+          ...LEASES[0],
+          state: "ending",
+          connection: { address: "203.0.113.9:47989", stale: false },
+        },
+      ]),
+    );
+
+    render(<MyMachines />);
+
+    expect(await screen.findByText("pc-one")).toBeDefined();
+    expect(screen.queryByText(/203\.0\.113\.9/)).toBeNull();
+    expect(screen.queryByText(/^เชื่อมต่อ:/)).toBeNull();
+  });
+
+  it("explains when an active lease has no verified connect address", async () => {
+    render(<MyMachines />);
+
+    expect(
+      await screen.findByText(
+        "เชื่อมต่อ: ยังไม่มีที่อยู่สาธารณะที่ตรวจสอบแล้ว กรุณาติดต่อผู้ดูแล",
+      ),
+    ).toBeDefined();
+  });
+
   it("polls only while visible, skips overlapping requests, and clears its interval", async () => {
     const firstRequest = deferred<Response>();
     fetchSpy.mockReturnValueOnce(firstRequest.promise);

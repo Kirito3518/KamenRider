@@ -1,0 +1,12 @@
+<Project>
+  <!--
+    Isolated build/test artifacts (for example `obj-apply-isolated/` produced by maintenance
+    tests that redirect BaseIntermediateOutputPath) are intentionally not tracked by git, but
+    the SDK default source glob would still compile their generated AssemblyInfo files. Exclude
+    these artifact trees so ordinary `dotnet build`/`dotnet test` stays reproducible without
+    deleting local WIP provenance.
+  -->
+  <PropertyGroup>
+    <DefaultItemExcludes>$(DefaultItemExcludes);**/obj-*/**;**/bin-*/**;**/agentapply-isolated/**</DefaultItemExcludes>
+  </PropertyGroup>
+</Project>

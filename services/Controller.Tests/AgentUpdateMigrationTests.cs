@@ -1,4 +1,4 @@
-using KamenRaider.Controller.Data;
+﻿using KamenRaider.Controller.Data;
 using Microsoft.Data.Sqlite;
 using System.Security.Cryptography;
 using System.Text;
@@ -59,7 +59,7 @@ public sealed class AgentUpdateMigrationTests
             Assert.Equal(hash, listed.PackageSha256);
             using (var migrated = Open(path))
             {
-                Assert.Equal(23L, Scalar(migrated, "PRAGMA user_version"));
+                Assert.Equal(24L, Scalar(migrated, "PRAGMA user_version"));
                 Assert.Equal("unknown", Scalar(migrated, "SELECT target_runtime FROM agent_releases WHERE version='2.3.4'"));
                 Assert.Equal(1L, Scalar(migrated, "SELECT agent_update_challenge_protocol FROM agent_releases WHERE version='2.3.4'"));
                 Assert.Equal(1L, Scalar(migrated, "SELECT COUNT(*) FROM agent_releases WHERE version='2.3.4'"));
@@ -88,7 +88,7 @@ public sealed class AgentUpdateMigrationTests
             using (new ControllerDatabase(destination)) { }
             using (var connection = Open(source))
             {
-                Assert.Equal(23L, Scalar(connection, "PRAGMA user_version"));
+                Assert.Equal(24L, Scalar(connection, "PRAGMA user_version"));
                 using var weaken = connection.CreateCommand();
                 weaken.CommandText = "DROP TRIGGER agent_update_reports_immutable_delete";
                 weaken.ExecuteNonQuery();
@@ -161,7 +161,7 @@ public sealed class AgentUpdateMigrationTests
             CreateVersionElevenDatabase(path);
             using (new ControllerDatabase(path)) { }
             using var verify = Open(path);
-            Assert.Equal(23L, Scalar(verify, "PRAGMA user_version"));
+            Assert.Equal(24L, Scalar(verify, "PRAGMA user_version"));
             Assert.Equal("pc", Scalar(verify, "SELECT machine_id FROM machines"));
             using (var seed = verify.CreateCommand())
             {
@@ -184,7 +184,7 @@ public sealed class AgentUpdateMigrationTests
                 Assert.Throws<SqliteException>(() => duplicate.ExecuteNonQuery());
             }
             using (new ControllerDatabase(path)) { }
-            Assert.Equal(23L, Scalar(verify, "PRAGMA user_version"));
+            Assert.Equal(24L, Scalar(verify, "PRAGMA user_version"));
             Assert.Equal(1L, Scalar(verify, "SELECT COUNT(*) FROM agent_update_operations"));
         }
         finally { if (File.Exists(path)) File.Delete(path); }
@@ -220,7 +220,7 @@ public sealed class AgentUpdateMigrationTests
             using (var source = Open(path)) Assert.Equal(14L, Scalar(source, "PRAGMA user_version"));
             using (var database = new ControllerDatabase(path))
             {
-                using (var migrated = Open(path)) Assert.Equal(23L, Scalar(migrated, "PRAGMA user_version"));
+                using (var migrated = Open(path)) Assert.Equal(24L, Scalar(migrated, "PRAGMA user_version"));
                 var machine = Assert.Single(database.List());
                 Assert.False(machine.CanRent);
                 Assert.Null(machine.AgentVersion);
@@ -278,13 +278,13 @@ public sealed class AgentUpdateMigrationTests
             ControllerDatabaseMaintenance.Restore(backup, restored);
             using (var restoredV15 = Open(restored))
             {
-                Assert.Equal(23L, Scalar(restoredV15, "PRAGMA user_version"));
+                Assert.Equal(24L, Scalar(restoredV15, "PRAGMA user_version"));
                 Assert.Equal(1L, Scalar(restoredV15, $"SELECT COUNT(*) FROM agent_signed_request_nonces WHERE nonce_digest='{nonceDigest}' AND signed_second={futureSecond}"));
             }
 
             using (new ControllerDatabase(restored)) { }
             using var migrated = Open(restored);
-            Assert.Equal(23L, Scalar(migrated, "PRAGMA user_version"));
+            Assert.Equal(24L, Scalar(migrated, "PRAGMA user_version"));
             Assert.Equal(1L, Scalar(migrated, $"SELECT COUNT(*) FROM agent_signed_request_nonces WHERE machine_id='pc' AND key_fingerprint='{fingerprint}' AND path='/agent/sync' AND nonce_digest='{nonceDigest}' AND signed_second={futureSecond}"));
             Assert.Equal(futureSecond, Scalar(migrated, $"SELECT retention_second FROM agent_signed_request_nonces WHERE machine_id='pc' AND nonce_digest='{nonceDigest}'"));
             Assert.Equal(0L, Scalar(migrated, "SELECT challenge_response_count FROM agent_sync_proof_state WHERE machine_id='pc'"));

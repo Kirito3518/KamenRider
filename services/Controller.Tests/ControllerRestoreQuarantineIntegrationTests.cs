@@ -1,4 +1,4 @@
-using System.Runtime.Versioning;
+﻿using System.Runtime.Versioning;
 using System.Security.AccessControl;
 using System.Security.Principal;
 using System.Security.Cryptography;
@@ -31,7 +31,7 @@ public sealed class ControllerRestoreQuarantineIntegrationTests
         ControllerDatabaseMaintenance.Restore(backup, destination);
 
         using var restored = new ControllerDatabase(destination, agentReleaseRemediationEnabled: true);
-        Assert.Equal(23L, Scalar(destination, "PRAGMA user_version"));
+        Assert.Equal(24L, Scalar(destination, "PRAGMA user_version"));
         Assert.Equal(1L, Scalar(destination, "SELECT quarantine_active FROM controller_restore_state WHERE singleton=1"));
 
         SeedApprovedMachine(restored, "machine-added-after-restore");
@@ -362,7 +362,7 @@ public sealed class ControllerRestoreQuarantineIntegrationTests
 
         using (new ControllerDatabase(databasePath)) { }
 
-        Assert.Equal(23L, Scalar(databasePath, "PRAGMA user_version"));
+        Assert.Equal(24L, Scalar(databasePath, "PRAGMA user_version"));
         Assert.Equal(1L, Scalar(databasePath, "SELECT quarantine_active FROM controller_restore_state WHERE singleton=1"));
     }
 
@@ -379,7 +379,7 @@ public sealed class ControllerRestoreQuarantineIntegrationTests
 
         using (new ControllerDatabase(databasePath)) { }
 
-        Assert.Equal(23L, Scalar(databasePath, "PRAGMA user_version"));
+        Assert.Equal(24L, Scalar(databasePath, "PRAGMA user_version"));
         Assert.Equal(1L, Scalar(databasePath, "SELECT quarantine_active FROM controller_restore_state WHERE singleton=1"));
     }
 
@@ -398,7 +398,7 @@ public sealed class ControllerRestoreQuarantineIntegrationTests
         }
 
         Assert.Throws<InvalidDataException>(() => new ControllerDatabase(databasePath));
-        Assert.Equal(23L, Scalar(databasePath, "PRAGMA user_version"));
+        Assert.Equal(24L, Scalar(databasePath, "PRAGMA user_version"));
     }
 
     [Fact]

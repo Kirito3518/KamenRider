@@ -20,6 +20,11 @@ public sealed partial class ControllerDatabase
             || request.AgentUpdateChallenge is { Length: > 128 }
             || request.SyncProofProtocol is not (null or 2))
             throw new ArgumentException("Invalid heartbeat");
+        // Agent-reported hardware is bounded display data; a malformed profile rejects the sync
+        // before any state is written. A missing profile leaves the stored values untouched.
+        request = request with { Hardware = NormalizeReportedHardware(request.Hardware) };
+        if (request.AppliedSunshineCredentialRevision is < 0)
+            throw new ArgumentException("Invalid heartbeat");
         var diagnostics = ValidateReadinessDiagnostics(request.ReadinessDiagnostics);
 
         lock (gate)
@@ -93,6 +98,15 @@ public sealed partial class ControllerDatabase
         ExecuteLease(tx, "INSERT INTO machine_heartbeats(machine_id,last_seen,boot_id,readiness,agent_version) VALUES($id,$at,$boot,$ready,NULL) ON CONFLICT(machine_id) DO UPDATE SET last_seen=$at,boot_id=$boot,readiness=$ready,agent_version=NULL; UPDATE machines SET local_ip=$ip,mac_address=$mac WHERE machine_id=$id",
             ("$id", id), ("$at", now.ToString("O")), ("$boot", request.BootId), ("$ready", request.Readiness),
             ("$ip", request.LocalIp), ("$mac", request.MacAddress));
+        // Agent-reported hardware refreshes the stored profile on every sync; it never touches
+        // display_name, price, approval or the configuration revision.
+        if (request.Hardware is { } hardware)
+            ExecuteLease(tx, "UPDATE machines SET hostname=$hostname,cpu=$cpu,gpu=$gpu,ram_bytes=$ram WHERE machine_id=$id",
+                ("$hostname", hardware.Hostname), ("$cpu", hardware.Cpu), ("$gpu", hardware.Gpu),
+                ("$ram", hardware.RamBytes), ("$id", id));
+        if (request.AppliedSunshineCredentialRevision is { } appliedSunshineRevision)
+            ExecuteLease(tx, "UPDATE machines SET sunshine_credential_revision=$revision WHERE machine_id=$id",
+                ("$revision", appliedSunshineRevision), ("$id", id));
         if (diagnostics is null)
             ExecuteLease(tx, "DELETE FROM machine_readiness_diagnostics WHERE machine_id=$id", ("$id", id));
         else
@@ -100,10 +114,11 @@ public sealed partial class ControllerDatabase
                 ("$id", id), ("$diagnostics", JsonSerializer.Serialize(diagnostics)), ("$at", now.ToString("O")));
 
         var responseChallenge = isProven ? issueToken(tx, id, CurrentKeyFingerprint(tx, id)) : null;
+        var sunshineCredentialRevision = ReadSunshineCredentialRevision(tx);
         if (request.Readiness != "ready")
             return new(now, new(machine.ConfigRevision, machine.MoonlightPort, machine.SunshinePort),
                 PendingShutdownCommands(tx, id, request.BootId), null)
-            { AgentUpdateChallenge = responseChallenge };
+            { AgentUpdateChallenge = responseChallenge, SunshineCredentialRevision = sunshineCredentialRevision };
 
         string? unbound;
         using (var cmd = LeaseCommand(tx, "SELECT id FROM leases WHERE machine_id=$id AND state='preparing' AND boot_id IS NULL", ("$id", id)))
@@ -114,7 +129,7 @@ public sealed partial class ControllerDatabase
         PurgePairingSecrets(tx, now.ToUnixTimeMilliseconds());
         return new(now, new(machine.ConfigRevision, machine.MoonlightPort, machine.SunshinePort),
             PendingCommands(tx, id, request.BootId), ConfirmLease(tx, id, request.BootId, request.Readiness))
-        { AgentUpdateChallenge = responseChallenge };
+        { AgentUpdateChallenge = responseChallenge, SunshineCredentialRevision = sunshineCredentialRevision };
     }
 
     private string CurrentKeyFingerprint(SqliteTransaction tx, string machineId)

@@ -22,6 +22,26 @@ public static class AgentHost
             .Validate(o => o.IsValid(), "HTTPS ControllerUrl, absolute DataDirectory, valid MoonlightPort/SunshinePort and NetworkAdapterId are required.").ValidateOnStart();
         builder.Services.AddHostedService<KamenRaider.Agent.Enrollment.EnrollmentWorker>();
         builder.Services.AddSingleton(TimeProvider.System);
+        builder.Services.TryAddSingleton<KamenRaider.Agent.Hardware.IHardwareSource, KamenRaider.Agent.Hardware.WindowsHostHardwareSource>();
+        builder.Services.TryAddSingleton<KamenRaider.Agent.Hardware.HostHardwareCollector>();
+        builder.Services.TryAddSingleton<KamenRaider.Agent.Sunshine.SunshineCredentialSyncSignal>();
+        builder.Services.TryAddSingleton(sp =>
+        {
+            if (!OperatingSystem.IsWindows())
+                throw new PlatformNotSupportedException("Sunshine credential storage requires Windows ACLs.");
+            return new KamenRaider.Agent.Sunshine.SunshineAppliedCredentialStore(
+                sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<AgentOptions>>().Value.DataDirectory,
+                KamenRaider.Agent.Sunshine.WindowsSunshineCredentialStore.ResolveAgentServiceSid());
+        });
+        builder.Services.TryAddSingleton(typeof(KamenRaider.Agent.Sunshine.WindowsSunshineCredentialStore), sp =>
+        {
+            if (!OperatingSystem.IsWindows())
+                throw new PlatformNotSupportedException("Sunshine credential storage requires Windows ACLs.");
+            return new KamenRaider.Agent.Sunshine.WindowsSunshineCredentialStore(
+                sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<AgentOptions>>().Value.DataDirectory,
+                KamenRaider.Agent.Sunshine.WindowsSunshineCredentialStore.ResolveAgentServiceSid(),
+                new KamenRaider.Agent.Sunshine.WindowsDpapiMachineSecretProtector());
+        });
         builder.Services.TryAddSingleton<KamenRaider.Agent.Sunshine.IMaintenanceFenceReader, KamenRaider.Agent.Sunshine.WindowsMaintenanceFenceReader>();
         builder.Services.AddSingleton<KamenRaider.Agent.Leases.IBootClock,KamenRaider.Agent.Leases.WindowsBootClock>();
         builder.Services.TryAddSingleton<KamenRaider.Agent.Sunshine.StreamGuardPipeClient>();
@@ -45,21 +65,29 @@ public static class AgentHost
                 throw new PlatformNotSupportedException("Sunshine pairing credential storage requires Windows.");
             var options = sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<AgentOptions>>().Value;
             var configuration = sp.GetRequiredService<KamenRaider.Agent.Configuration.AppliedConfiguration>();
-            var credentialStore = new KamenRaider.Agent.Sunshine.WindowsSunshineCredentialStore(
-                options.DataDirectory,
-                KamenRaider.Agent.Sunshine.WindowsSunshineCredentialStore.ResolveAgentServiceSid(),
-                new KamenRaider.Agent.Sunshine.WindowsDpapiMachineSecretProtector());
+            var credentialStore = sp.GetRequiredService<KamenRaider.Agent.Sunshine.WindowsSunshineCredentialStore>();
+            var appliedCredentialStore = sp.GetRequiredService<KamenRaider.Agent.Sunshine.SunshineAppliedCredentialStore>();
             return new KamenRaider.Agent.Sunshine.LazySunshinePairingSession(
                 credentialStore,
                 () => configuration.Current?.SunshinePort ?? options.SunshinePort,
                 sp.GetRequiredService<KamenRaider.Agent.Sunshine.IPairingFence>(),
                 () => sp.GetRequiredService<KamenRaider.Agent.Leases.LeaseEnforcer>().CurrentPairingScope,
                 sp.GetRequiredService<TimeProvider>(),
-                sp.GetRequiredService<ILogger<KamenRaider.Agent.Sunshine.LazySunshinePairingSession>>());
+                sp.GetRequiredService<ILogger<KamenRaider.Agent.Sunshine.LazySunshinePairingSession>>(),
+                () =>
+                {
+                    // A rotated fleet credential is applied by the hosted credential worker; reading the
+                    // applied revision here lets the cached pairing session reload without a restart.
+                    try { return appliedCredentialStore.Read(); }
+                    catch (Exception) { return 0; }
+                });
         });
         builder.Services.AddSingleton<KamenRaider.Agent.Sync.LeaseCommandDispatcher>();
         builder.Services.AddHostedService<KamenRaider.Agent.Leases.LeaseEnforcementWorker>();
         builder.Services.AddHostedService<KamenRaider.Agent.Sync.SyncWorker>();
+        // Applies the fleet-wide Sunshine management credential delivered over signed HTTPS.
+        // This is Agent-only: it never runs Sunshine.exe --creds or edits Sunshine's own configuration.
+        builder.Services.AddHostedService<KamenRaider.Agent.Sunshine.SunshineCredentialWorker>();
         return builder.Build();
     }
 }

@@ -24,6 +24,27 @@ public static class SyncEndpoint {
   return Results.StatusCode(decision.StatusCode);
  }catch(Exception ex) when(ex is ArgumentException or JsonException){return Results.BadRequest();}
  });
+ app.MapPost("/agent/sunshine-credential",async (HttpContext context,ControllerDatabase db,AgentAuthentication auth)=> {
+  var id=context.Request.Headers["X-Agent-Id"].ToString();var key=db.PublicKey(id);
+  if(key is null)return Results.Unauthorized();
+  using var memory=new MemoryStream();await context.Request.Body.CopyToAsync(memory,context.RequestAborted);var bytes=memory.ToArray();
+  var verified=auth.VerifySignature(id,key,"POST","/agent/sunshine-credential",context.Request.Headers["X-Agent-Timestamp"].ToString(),context.Request.Headers["X-Agent-Nonce"].ToString(),bytes,context.Request.Headers["X-Agent-Signature"].ToString());
+  if(verified is null)return Results.Unauthorized();
+  // The response may carry the fleet management password; never let a cache retain it.
+  context.Response.Headers.CacheControl="no-store";
+  string body;try{body=new UTF8Encoding(false,true).GetString(bytes);}catch(DecoderFallbackException){return Results.BadRequest();}
+  try {
+   var request=JsonSerializer.Deserialize<SunshineCredentialFetchRequest>(body,new JsonSerializerOptions(JsonSerializerDefaults.Web));
+   if(request is null)return Results.BadRequest();
+   var delivery=db.FetchSunshineCredential(verified,request);
+   if(delivery is not null)return Results.Ok(delivery);
+   // A signed, approved Agent with nothing to apply is either already current or the fleet
+   // credential is not configured at all; only the second is "not found" for the Agent.
+   return db.GetSunshineCredentialState().Configured?Results.NoContent():Results.NotFound();
+  }catch(UnauthorizedAccessException){return Results.Unauthorized();}
+  catch(InvalidOperationException){return Results.Conflict();}
+  catch(Exception ex) when(ex is ArgumentException or JsonException){return Results.BadRequest();}
+ });
  app.MapPost("/agent/reconcile",async (HttpContext context,ControllerDatabase db,AgentAuthentication auth)=> {
  var id=context.Request.Headers["X-Agent-Id"].ToString();var key=db.PublicKey(id);
  if(key is null)return Results.Unauthorized();

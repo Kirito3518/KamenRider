@@ -23,6 +23,7 @@ import {
   InputGroupInput,
 } from "@/components/ui/input-group";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import { formatRamBytes, formatSpec } from "@/lib/machine-specs";
 import { type RentalMachine } from "@/lib/rental-machines";
 
 export function RentalDialog({
@@ -69,7 +70,7 @@ export function RentalDialog({
         finalFocus={returnFocusRef}
       >
         <DialogHeader className="pr-8">
-          <DialogTitle>เช่าเครื่อง {machine?.id}</DialogTitle>
+          <DialogTitle>เช่าเครื่อง {machine?.name || machine?.id}</DialogTitle>
           <DialogDescription>
             ระบบทดลอง — ติดต่อผู้ดูแลเพื่อเปิดสิทธิ์ทดลอง
           </DialogDescription>
@@ -78,12 +79,16 @@ export function RentalDialog({
           <>
             <dl className="grid grid-cols-[auto_1fr] gap-x-6 gap-y-3 text-sm">
               <dt className="text-muted-foreground">CPU</dt>
-              <dd>{machine.cpu}</dd>
-              <dt className="text-muted-foreground">GPU</dt>
-              <dd>{machine.gpu}</dd>
-              <dt className="text-muted-foreground">RAM / SSD</dt>
+              <dd>{formatSpec(machine.cpu)}</dd>
+              <dt className="text-muted-foreground">การ์ดจอ</dt>
+              <dd>{formatSpec(machine.gpu)}</dd>
+              <dt className="text-muted-foreground">แรม</dt>
               <dd>
-                {machine.ram} GB / {machine.storage}
+                {machine.ramBytes > 0
+                  ? formatRamBytes(machine.ramBytes)
+                  : machine.ram > 0
+                    ? `${machine.ram} GB`
+                    : formatRamBytes(undefined)}
               </dd>
               <dt className="text-muted-foreground">ราคา</dt>
               <dd>฿{machine.price} / ชั่วโมง</dd>
