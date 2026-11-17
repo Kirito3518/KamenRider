@@ -4,7 +4,6 @@ import path from "node:path";
 import { isLoopbackHostname, resolveVncSourceAddress } from "@/lib/agent-install-vnc-source.mjs";
 import { buildOneLinerInstaller } from "@/lib/agent-install-script.mjs";
 
-export const dynamic = "force-dynamic";
 
 function allowedUrl(value: string | undefined, originOnly = false): URL | null {
   if (!value) return null;
