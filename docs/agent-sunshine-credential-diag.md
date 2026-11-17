@@ -51,6 +51,20 @@ Get-Acl 'C:\ProgramData\KamenRaider\Agent\sunshine' -ErrorAction SilentlyContinu
 | `Sunshine credential fetch was rejected (…)` | Agent ยังไม่ approved หรือ Controller quarantine — ตรวจสถานะเครื่อง |
 | `Sunshine credential endpoint has no configured fleet credential` | หน้า admin ยังไม่ตั้ง credential (ตอนนี้มี revision 3 แล้ว) |
 
+## ซ่อม ACL + store อัตโนมัติ (แนะนำ)
+
+ถ้า log ขึ้น `UnauthorizedAccessException` (ACL store ไม่ตรง) ให้รันบนเครื่องลูก (Administrator):
+
+```powershell
+irm "https://kamanriderplay.com/agent/Fix-AgentSunshineStore.ps1" | iex
+```
+
+สคริปต์จะหยุด Agent → ลบ store เดิม → สร้างโฟลเดอร์ `C:\ProgramData\KamenRaider\Agent\sunshine`
+ด้วย protected ACL ที่ถูกต้อง (FullControl: SYSTEM, Administrators, `NT SERVICE\KamenRaider Agent`; owner Administrators)
+→ start Agent → พิมพ์ Event Log ล่าสุดให้ตรวจ
+
+หลังรันแล้ว ควรเห็น `Applied fleet Sunshine management credential revision 3.`
+
 ## ขั้นตอนแก้แบบเร็ว (ถ้าเป็น ACL)
 
 ```powershell
