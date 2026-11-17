@@ -79,6 +79,20 @@ function Mask-Token([string]$t) {
     if ($t.Length -le 12) { return '********' }
     return $t.Substring(0, 6) + '...' + $t.Substring($t.Length - 4) + " (len $($t.Length))"
 }
+function Invoke-Native([string]$Exe, [string[]]$Arguments, [string]$Label) {
+    # PowerShell 5.1 turns native stderr into a terminating error under
+    # $ErrorActionPreference = 'Stop'. cloudflared/winget write their progress/info logs to
+    # stderr, so capture with 'Continue' and decide on $LASTEXITCODE instead.
+    $savedEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $output = & $Exe @Arguments 2>&1
+        $exit = $LASTEXITCODE
+    } finally { $ErrorActionPreference = $savedEap }
+    if ($output) { $output | ForEach-Object { Write-Host "    $_" } }
+    return $exit
+}
+
 function Test-PortListening([int]$Port) {
     return [bool]@(Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue).Count
 }
@@ -119,7 +133,10 @@ if (-not $cloudflared) {
         $installed = $false
         if (Get-Command winget -ErrorAction SilentlyContinue) {
             try {
-                & winget install --id Cloudflare.cloudflared -e --accept-source-agreements --accept-package-agreements --silent 2>&1 | ForEach-Object { Write-Host "    $_" }
+                $wingetExe = (Get-Command winget -ErrorAction SilentlyContinue).Source
+                if ($wingetExe) {
+                    $null = Invoke-Native $wingetExe @('install', '--id', 'Cloudflare.cloudflared', '-e', '--accept-source-agreements', '--accept-package-agreements', '--silent') 'winget'
+                }
                 $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [Environment]::GetEnvironmentVariable('Path', 'User') + ';' + $env:Path
                 $cloudflared = (Get-Command cloudflared -ErrorAction SilentlyContinue).Source
                 $installed = [bool]$cloudflared
@@ -160,12 +177,12 @@ if ($SkipServiceInstall) {
     } else {
         if ($service) {
             Write-Step 'Removing the existing cloudflared service before reinstalling'
-            try { & $cloudflared service uninstall 2>&1 | ForEach-Object { Write-Host "    $_" } } catch { Write-Warn2 ("service uninstall failed: " + $_.Exception.Message) }
+            try { $null = Invoke-Native $cloudflared @('service', 'uninstall') 'cloudflared service uninstall' } catch { Write-Warn2 ("service uninstall failed: " + $_.Exception.Message) }
             Start-Sleep -Seconds 2
         }
         Write-Step 'Installing the cloudflared service with the tunnel token'
-        & $cloudflared service install $TunnelToken 2>&1 | ForEach-Object { Write-Host "    $_" }
-        if ($LASTEXITCODE -ne 0) { Write-Fail 'cloudflared service install failed.'; exit 1 }
+        $serviceExit = Invoke-Native $cloudflared @('service', 'install', $TunnelToken) 'cloudflared service install'
+        if ($serviceExit -ne 0) { Write-Fail "cloudflared service install failed (exit $serviceExit)."; exit 1 }
         Start-Service cloudflared -ErrorAction SilentlyContinue
         Set-Service cloudflared -StartupType Automatic -ErrorAction SilentlyContinue
         Start-Sleep -Seconds 3
@@ -194,8 +211,8 @@ if (-not $SkipAppConfigure) {
     if ($Plan) {
         Write-Host ('    would run: powershell ' + ($configureArgs -join ' '))
     } else {
-        & powershell @configureArgs 2>&1 | ForEach-Object { Write-Host "    $_" }
-        if ($LASTEXITCODE -ne 0) { Write-Warn2 'Configure-MotherLan.ps1 returned a non-zero exit code; read the messages above.' }
+        $configureExit = Invoke-Native 'powershell.exe' $configureArgs 'Configure-MotherLan.ps1'
+        if ($configureExit -ne 0) { Write-Warn2 "Configure-MotherLan.ps1 returned exit code $configureExit; read the messages above." }
     }
 }
 
