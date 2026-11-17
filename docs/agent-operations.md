@@ -103,3 +103,35 @@ Latest full-suite evidence is Agent 222/222 after the Task 8 fail-closed fixes a
 The 2026-11-07 read-only host check, before Task 16, found all three Windows firewall profiles enabled with local rules allowed, no KamenRaider Agent, Controller, or Stream Guard service, no package yet, and `AGENT_INSTALL_ENABLED=false`. Task 16 later built and verified the local package and enabled localhost Admin command generation; no Agent/Guard installation or live firewall/service Apply has occurred. Profile inventory is not evidence that the managed block rule exists or effectively stops new or established connections. No credentials were provisioned, no Sunshine stream test ran, and Reboot Restore Rx was not queried or changed.
 
 Keep readiness NOT READY. Boot cleanup is composed through the Guard-backed pairing session, but baseline, Restore Rx restoration, desktop-health and runtime-health evidence remain unavailable, and the Guard path is not live-qualified. Hardware rows for IPv4/IPv6 enforcement, existing streams, crash recovery, actual Moonlight pairing, expiry, and cold boot remain NOT TESTED.
+
+## Agent update recovery qualification (2026-11-17)
+
+Recovery supersession is deliberately fail-closed and requires three deployment/operator inputs before the Controller will create a successor operation for a held update chain:
+
+- `AgentMaintenancePinnedHelperSha256` — the exact 64-hex SHA-256 of the deployed maintenance helper build. Empty (the default) keeps every recovery inspection blocked as `helperBuildNotPinned`. The pin must come from the verified deployment manifest, never from the request or the Agent.
+- `AgentMaintenanceExclusionProcedureQualified` — set true only after the operator has actually completed the documented qualification (old updater proven not running, or a full host restart with a changed native boot ID). False (the default) blocks as `exclusionProvenanceUnavailable`.
+- `AgentMaintenanceQualifiedOldUpdaterAutoResumeStatus` — `qualifiedNotApplicable` (continuous shared lock) or `qualifiedDisabled` (verified full host restart). It must match the signed inspection.
+
+Qualified inspections additionally require the previous operation's immutable backup owner/digest, a protocol-2 release artifact that still validates, no held lease allocation, and a changed/same native boot ID consistent with the declared exclusion provenance. On success the Controller creates the successor operation and fresh recovery ticket, moves the held chain head/generation, marks the previous head `superseded`, closes the intent, and records an immutable successor evidence row (migration 021) plus a `recoveryInspectionQualified` audit entry in one transaction.
+
+`POST /internal/machines/{id}/agent-updates/{operationId}/recovery-ticket` remains intentionally fail-closed (409 Conflict): it never reissues or extends a ticket. Recovery authority is only the audited successor ticket returned by the inspection commit; an unstarted update whose ticket expired must be reserved again, and a failed update must go through the recovery-intent inspection path.
+## Update completion confirmation (2026-11-17)
+
+Migration 022 (canonical schema version 22) adds the immutable gent_update_confirmations table and relaxes the maintenance close guard so only a verified terminal head (completed, olledBack, expired) can release a chain. A held protocol-2 operation is confirmed only inside the same transaction that accepts a proven sync heartbeat:
+
+- waitingHeartbeat + proven Agent version equal to the immutable target version -> completed;
+- ollingBack + proven Agent version equal to the bound source_version -> olledBack.
+
+A target-version heartbeat before the helper reports an outcome, a mismatched version, an operation without a bound source version, and every protocol-1/legacy operation never release the chain. Client-visible machine status, chain release and the write-once confirmation row are atomic with the accepted proof; failed updates remain held until the audited recovery-intent/successor path completes.
+## Trusted Agent update wrapper workflow (2026-11-17)
+
+public/agent/Update-Agent.ps1 no longer stops after the read-only helper probe. After elevation, native-runtime and pinned-asset verification it creates/validates the protected %ProgramData%\KamenRaider.AgentMaintenance root (SYSTEM/Administrators/Agent-service ACL) and work store (SYSTEM/Administrators only), then drives the production helper through:
+
+1. start lifecycle request (ticket, chain/head/generation, enrolled key fingerprint, target hashes);
+2. pinned HTTPS package download with the ticket headers into the single-link protected work\target.zip (declared length + SHA-256 checked while streaming);
+3. archive extract;
+4. ind-source lifecycle request pinned to the verified helper build SHA-256;
+5. archive pply request bound to chain/head/generation;
+6. eport lifecycle request after the apply outcome, including the apply-failure path.
+
+An unconfirmed Controller start is reconciled by the helper and still fails the wrapper; any helper unavailable/ejected category surfaces as a hard error. Test-AgentUpdateBootstrap.ps1 now asserts this command/request sequence, the helper-build pin, the protected-package download and the ambiguous-start reconcile path under Windows PowerShell 5.1. A real elevated execution against a live Controller and an installed Agent service remains NOT RUN (it mutates the service/firewall/installation and therefore needs the qualified hardware window); the retired ZIP-replacement workflow scripts that still target Update-AgentPackage.ps1 (Test-AgentUpdatePlan, Test-AgentUpdatePublicWorkflow, Test-AgentUpdateServiceApi, Test-AgentUpdateArchiveFreshProcess, Test-AgentUpdateConcurrent) are stale and not evidence for this wrapper.

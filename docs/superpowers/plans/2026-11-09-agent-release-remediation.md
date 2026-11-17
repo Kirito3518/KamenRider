@@ -2,6 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. The user forbids separate worktrees for this follow-on; work in the existing checkout. This authoring pass makes no implementation edits, test runs, or commits.
 
+> **Execution status (2026-11-17, final software pass):** checkbox ทั้งไฟล์ยังไม่ถูก tick และไม่ใช่สถานะล่าสุด — Task 1–9 ฝั่ง software ทั้งหมด implement และ test ตามขอบเขตแล้ว (Task 6 helper composition + wrapper orchestration/workflow lock; Task 7 recovery successor CAS + helper successor start; Task 8 admin route/UI แบบ gated; Task 9 completion confirmation + recovery E2E) โดย default gates ยังปิดและ restore quarantine คงอยู่; สิ่งที่เหลือเป็น live/hardware/legacy-qualification และ structural blockers ที่บันทึกตามจริงในตารางท้าย `docs/superpowers/plans/STATUS-2026-11-17.md`
+
 **Goal:** Make Agent release publication, first legacy upgrade, and failed-update supersession safe under durable source proof, one exact ZIP contract, and an uninterrupted maintenance hold.
 
 **Architecture:** A shared .NET verifier supplies the Controller and a deployment-pinned local maintenance helper. A protocol-2 Agent uses a no-ack challenge exchange, while Controller SQLite transactions own proof, source binding, chain/head/generation and audit. The elevated helper maintains local lock, fence, immutable backup and fsynced journal across update/recovery; the web UI only issues explicit per-machine commands.
