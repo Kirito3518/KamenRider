@@ -218,6 +218,19 @@ http://192.168.1.100:3000/admin/settings/sunshine
 
 ### 11.1 Cloudflare Tunnel (แนะนำถ้ามี domain บน Cloudflare)
 
+**ใช้สคริปต์อัตโนมัติ (แนะนำ):** ต้องมี token จาก Dashboard ก่อน (ข้อ 2) แล้วรันใน **elevated PowerShell**:
+
+```powershell
+cd "$env:USERPROFILE\Desktop\KamenRider"
+git pull
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\agent\dev\Setup-CloudflareTunnel.ps1 -Domain kamanriderplay.com -TunnelToken '<PASTE_TOKEN_HERE>' -RestartWeb
+```
+
+สคริปต์จะ: ติดตั้ง/อัปเดต cloudflared service → หยุด web เก่า → ตั้ง `.env.local` เป็น `https://kamanriderplay.com` → สตาร์ท Controller/web → ตรวจ `/login` และ `/agent/AgentPackage.zip` → พิมพ์ checklist ที่เหลือใน Dashboard
+(ดูก่อนได้ด้วย `-Plan`)
+
+ถ้าอยากทำมือ ทุกขั้นอยู่ด้านล่าง:
+
 1. ติดตั้ง cloudflared บนเครื่องแม่ (PowerShell ปกติ):
 
 ```powershell
@@ -237,7 +250,7 @@ Get-Service cloudflared
 ```
 
 4. ใน Dashboard ของ tunnel → **Public Hostname → Add a public hostname**
-   - Subdomain: `kamen` (หรือตามต้องการ)
+   - Subdomain: เว้นว่าง (หรือใส่ `@` สำหรับ apex)
    - Domain: `kamanriderplay.com`
    - Service: **HTTP** → `127.0.0.1:3000`
    - บันทึก → Cloudflare สร้าง DNS record ให้อัตโนมัติ
@@ -245,22 +258,22 @@ Get-Service cloudflared
 5. ตรวจว่าออกจากภายนอกได้ (หลัง web รันอยู่):
 
 ```powershell
-(Invoke-WebRequest https://kamen.kamanriderplay.com -UseBasicParsing).StatusCode
+(Invoke-WebRequest https://kamanriderplay.com -UseBasicParsing).StatusCode
 ```
 
-6. ตั้งค่าแอปให้ใช้ domain (แก้ `kamen.kamanriderplay.com` เป็นโดเมนจริง):
+6. ตั้งค่าแอปให้ใช้ domain (แก้ `kamanriderplay.com` เป็นโดเมนจริง):
 
 ```powershell
 cd "$env:USERPROFILE\Desktop\KamenRider"
 git pull
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\agent\dev\Configure-MotherLan.ps1 -LanIp 192.168.1.100 -WebHttpsOrigin https://kamen.kamanriderplay.com -Force -Start
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\agent\dev\Configure-MotherLan.ps1 -LanIp 192.168.1.100 -WebHttpsOrigin https://kamanriderplay.com -Force -Start
 ```
 
 สคริปต์จะตั้ง `BETTER_AUTH_URL`, `AGENT_INSTALL_BASE_URL`, `AGENT_PACKAGE_URL` เป็นโดเมน HTTPS
 แต่คง `AGENT_CONTROLLER_URL=https://192.168.1.100:7443` ไว้สำหรับช่อง Agent
 (ถ้า web เดิมรันอยู่ ให้หยุด process บนพอร์ต 3000 ก่อนเพื่อให้สคริปต์ start ใหม่ด้วย env ใหม่)
 
-7. เปิด `https://kamen.kamanriderplay.com/login`
+7. เปิด `https://kamanriderplay.com/login`
 
 ### 11.2 หลังมี HTTPS แล้ว
 
@@ -276,7 +289,7 @@ Import-Certificate -FilePath 'C:\path\to\controller-root.cer' -CertStoreLocation
 C:\Users\PC\Desktop\KamenRider\.next-local\mother\controller-root.cer
 ```
 
-- ใช้คำสั่งติดตั้ง Agent จาก `https://kamen.kamanriderplay.com/admin/machines` ไปรันบนเครื่องลูก (elevated)
+- ใช้คำสั่งติดตั้ง Agent จาก `https://kamanriderplay.com/admin/machines` ไปรันบนเครื่องลูก (elevated)
 - เครื่องลูกต้องเข้าถึง `192.168.1.100:7443` ได้ (LAN เดียวกัน + firewall เปิด)
 
 ### 11.3.1 ตั้งค่า Cloudflare ให้เครื่องลูกดาวน์โหลดไฟล์ได้ (สำคัญ)
@@ -289,12 +302,12 @@ Cloudflare อาจ challenge คำขอจาก PowerShell ของเค�
    - Expression: `(http.request.uri.path contains "/agent/")`
    - Action: **Skip** → เลือก **Browser Integrity Check**, **Security Level**, **Bot Fight Mode** (ตามที่มี)
 3. ถ้ามี **Bot Fight Mode** เปิดอยู่ และยังไม่ผ่าน ให้ปิดชั่วคราวระหว่างทดสอบ (Security → Bots)
-4. ตรวจ: เปิด `https://kamen.kamanriderplay.com/agent/AgentPackage.zip` ต้องได้ไฟล์ ZIP (ไม่ใช่หน้า HTML challenge)
+4. ตรวจ: เปิด `https://kamanriderplay.com/agent/AgentPackage.zip` ต้องได้ไฟล์ ZIP (ไม่ใช่หน้า HTML challenge)
 
 ### 11.3.2 Cloudflare Access สำหรับหน้าแอดมิน (แนะนำ)
 
 - **Zero Trust → Access → Applications → Add an application → Self-hosted**
-- Application domain: `kamen.kamanriderplay.com` และ path `admin*` (หรือทั้ง hostname)
+- Application domain: `kamanriderplay.com` และ path `admin*` (หรือทั้ง hostname)
 - Policy: allow เฉพาะอีเมล/OTP ของคุณ
 - ผล: `/admin/*` ต้องผ่าน Cloudflare Access ก่อนถึงหน้า login ของแอป
 
