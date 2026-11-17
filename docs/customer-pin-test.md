@@ -21,7 +21,7 @@ irm "https://kamanriderplay.com/agent/Cleanup-AgentInstall.ps1" | iex
 2) ติดตั้งด้วย one-liner ใหม่ (ticket ปัจจุบัน ใช้ได้ครั้งเดียว ~24 ชม.):
 
 ```powershell
-irm "https://kamanriderplay.com/api/agent/install.ps1?k=XX6oLpy6wn_ws7OyvfKPzGiJOIuERjoLcHRmKoEmYMA" | iex
+irm "https://kamanriderplay.com/api/agent/install.ps1?k=YUczxgWS27epOY4jTpDYzzdTwifPh_v8MinIURtUMZY" | iex
 ```
 
 3) กลับไป `/admin/machines` → เครื่องใหม่จะขึ้น **pending** → **อนุมัติ**
