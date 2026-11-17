@@ -83,6 +83,26 @@ Get-Service 'KamenRaider Agent','KamenRaider Stream Guard','SunshineService' |
 
 ---
 
+## B2) เคลียร์ maintenance fence (จำเป็นก่อน lease แรก)
+
+หลัง lab-ready แล้ว ถ้าสร้าง lease แล้วขึ้น `failed` ให้ตรวจ `C:\ProgramData\KamenRaider.AgentMaintenance\maintenance-fence.json`
+ถ้า `state` ยังเป็น `held` → Agent จะปฏิเสธ `PrepareMachine`
+
+รันบนเครื่องลูก (Administrator):
+
+```powershell
+$p = 'C:\ProgramData\KamenRaider.AgentMaintenance\maintenance-fence.json'
+$d = Get-Content $p -Raw | ConvertFrom-Json
+$d.state = 'clear'
+$d.phase = 'controllerConfirmed'
+[IO.File]::WriteAllText($p, ($d | ConvertTo-Json -Compress), (New-Object System.Text.UTF8Encoding($false)))
+Get-Content $p
+Restart-Service 'KamenRaider Agent' -Force
+```
+
+> ไฟล์นี้เป็น protected ACL; การเขียนทับเนื้อหาไม่เปลี่ยน ACL
+> หลังเคลียร์แล้ว บอกแอดมินเพื่อสร้าง trial lease ใหม่ (allocation ของ lease ที่ failed ถูกปลดแล้ว)
+
 ## C) ตั้ง Sunshine credential ให้ตรงกัน (จำเป็นต่อการ pair PIN)
 
 1. แอดมินเข้า `https://kamanriderplay.com/admin/settings/sunshine`
@@ -107,6 +127,14 @@ Get-Service 'KamenRaider Agent','KamenRaider Stream Guard','SunshineService' |
 แล้วลูกค้า login ที่ `https://kamanriderplay.com/login` → ไปที่ `/my-machines`
 
 ---
+
+## D2) เรื่อง Sunshine ถูก Stopped/Manual + firewall block — เป็นปกติ
+
+Stream Guard ตั้งใจปิด Sunshine (Manual/Stopped) และ block inbound ไว้จนกว่าจะมี **stream authority (active lease)**
+ห้ามพยายามเปิด SunshineService เอง เพราะ Guard จะปิด/บล็อกกลับ
+
+เมื่อ lease active สำเร็จ Guard จะเปิด Sunshine ให้เอง; จากนั้นเปิด Sunshine web UI ได้จาก **เครื่องลูกเอง** ที่
+`https://localhost:47990` (loopback ไม่ถูก firewall inbound block) เพื่อตั้ง password ให้ตรงกับ fleet credential
 
 ## E) ทดสอบ PIN (ฝั่งลูกค้า)
 
