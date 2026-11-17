@@ -50,10 +50,13 @@ param(
     [switch]$Start,
     [switch]$TrustCertificate,
     [switch]$SkipInstall,
+    [string]$DotnetPath = '',
     [switch]$Force
 )
 
 $ErrorActionPreference = 'Stop'
+# Pick up PATH changes made after this PowerShell session started (e.g. a just-installed SDK).
+$env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User') + ';' + $env:Path
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..\..')).Path
 $legacyRepo = 'C:\Users\User\Documents\kamenraiderplay'   # committed in .env.local by the original dev machine
 $envFile = Join-Path $repo '.env.local'
@@ -139,7 +142,19 @@ function Add-ToolFallback([string]$Tool, [string[]]$Candidates) {
 }
 
 $missing = @()
-if (-not (Add-ToolFallback 'dotnet' @((Join-Path $env:ProgramFiles 'dotnet\dotnet.exe')))) { $missing += 'dotnet' }
+if ($DotnetPath) {
+    if (-not (Test-Path -LiteralPath $DotnetPath -PathType Leaf)) { Write-Fail "DotnetPath not found: $DotnetPath"; exit 1 }
+    $dotnetDir = Split-Path -Parent (Resolve-Path -LiteralPath $DotnetPath).Path
+    $env:Path = $dotnetDir + ';' + $env:Path
+    $env:DOTNET_ROOT = $dotnetDir
+    Write-Ok "Using dotnet from $dotnetDir"
+}
+$programFilesX86 = [Environment]::GetEnvironmentVariable('ProgramFiles(x86)')
+$dotnetCandidates = @((Join-Path $env:ProgramFiles 'dotnet\dotnet.exe'))
+if ($programFilesX86) { $dotnetCandidates += (Join-Path $programFilesX86 'dotnet\dotnet.exe') }
+$dotnetCandidates += (Join-Path $env:LOCALAPPDATA 'Microsoft\dotnet\dotnet.exe')
+$dotnetCandidates += (Join-Path $env:USERPROFILE '.dotnet\dotnet.exe')
+if (-not (Add-ToolFallback 'dotnet' $dotnetCandidates)) { $missing += 'dotnet' }
 if (-not (Add-ToolFallback 'node' @((Join-Path $env:ProgramFiles 'nodejs\node.exe')))) { $missing += 'node' }
 $pnpmCandidates = @(
     (Join-Path $env:APPDATA 'npm\pnpm.cmd'),
@@ -150,7 +165,7 @@ if (-not (Add-ToolFallback 'pnpm' $pnpmCandidates)) { $missing += 'pnpm' }
 if ($missing.Count -gt 0) {
     Write-Fail ("Missing tools: " + ($missing -join ', '))
     Write-Host 'Install Node.js 24 LTS and pnpm (npm install -g pnpm@11.8.0), plus the .NET 10 SDK, then rerun this script.'
-    Write-Host 'If you JUST installed a tool, this window still has the old PATH: open a NEW PowerShell window (or sign out/in) and rerun.'
+    Write-Host 'If you JUST installed a tool, this window still has the old PATH: run the PATH refresh shown in the docs, sign out/in, or pass -DotnetPath C:\Program Files\dotnet\dotnet.exe.'
     exit 1
 }
 $nodeVersion = (& node --version).Trim()

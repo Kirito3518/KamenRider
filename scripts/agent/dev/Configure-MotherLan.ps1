@@ -57,6 +57,8 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# Pick up PATH changes made after this PowerShell session started (e.g. a just-installed SDK).
+$env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User') + ';' + $env:Path
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..\..')).Path
 $legacyRepo = 'C:\Users\User\Documents\kamenraiderplay'
 $envFile = Join-Path $repo '.env.local'
