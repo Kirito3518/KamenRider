@@ -29,6 +29,39 @@ irm "https://kamanriderplay.com/api/agent/install.ps1?k=YUczxgWS27epOY4jTpDYzzdT
 
 ---
 
+## A2) อนุมัติเครื่อง (pending) + หมายเหตุ TightVNC
+
+หลัง one-liner สำเร็จ เครื่องจะขึ้น **pending** ใน `/admin/machines`:
+
+- MachineId: `1312ae4135954d3aa6a25bf818780b31`
+- Fingerprint: `94EA7919182EF4C1F05E0E96CF468D5A2073E5425CD4C1EEEB9F3F1E77F12AC1`
+- Hostname: `DESKTOP-S0ABVFV` (IP 192.168.1.25)
+
+กดอนุมัติด้วย fingerprint ด้านบน (ตั้งชื่อ/ราคาได้ตามต้องการ)
+
+### ถ้าขึ้น `An unmanaged or incompatible TightVNC installation exists`
+
+แปลว่าเครื่องมี TightVNC ติดตั้งแบบไม่ได้มาจาก Agent อยู่ก่อนแล้ว (ไม่ fatal — PIN/Moonlight ยังทดสอบได้)
+ถ้าต้องการให้ VNC ใช้งานได้:
+
+```powershell
+# ดูรายการ TightVNC ที่ติดตั้งอยู่
+Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+                 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*' |
+  Where-Object DisplayName -match 'TightVNC' |
+  Select-Object DisplayName, DisplayVersion, UninstallString, PSChildName
+
+# ถอดแบบ silent (แทน {ProductCode} ด้วย PSChildName ที่เห็น)
+# msiexec /x {ProductCode} /qn /norestart
+
+# หรือถ้าติดตั้งผ่าน winget
+# winget uninstall TightVNC.TightVNC
+```
+
+หลังถอดแล้ว ให้ **ขอ one-liner ใหม่** จาก `/admin/machines` แล้วรันซ้ำ เพื่อให้ installer ติดตั้ง TightVNC เวอร์ชัน managed ให้สมบูรณ์
+
+---
+
 ## B) เปิด lab-ready mode ให้ Agent
 
 รันบนเครื่องลูก (Administrator):
