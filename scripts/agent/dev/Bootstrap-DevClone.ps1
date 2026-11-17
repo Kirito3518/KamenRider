@@ -124,13 +124,33 @@ Write-Host ''
 
 # --- 1. Tools -----------------------------------------------------------------
 Write-Step 'Checking toolchain'
-$missing = @()
-foreach ($tool in @('node', 'pnpm', 'dotnet')) {
-    if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) { $missing += $tool }
+function Add-ToolFallback([string]$Tool, [string[]]$Candidates) {
+    if (Get-Command $Tool -ErrorAction SilentlyContinue) { return $true }
+    foreach ($candidate in $Candidates) {
+        if (-not $candidate) { continue }
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+            $directory = Split-Path -Parent $candidate
+            if (($env:Path -split ';') -notcontains $directory) { $env:Path = $directory + ';' + $env:Path }
+            Write-Warn2 "Found $Tool at $candidate but it is not on this window's PATH (normal right after installing it). New PowerShell windows find it automatically."
+            return $true
+        }
+    }
+    return $false
 }
+
+$missing = @()
+if (-not (Add-ToolFallback 'dotnet' @((Join-Path $env:ProgramFiles 'dotnet\dotnet.exe')))) { $missing += 'dotnet' }
+if (-not (Add-ToolFallback 'node' @((Join-Path $env:ProgramFiles 'nodejs\node.exe')))) { $missing += 'node' }
+$pnpmCandidates = @(
+    (Join-Path $env:APPDATA 'npm\pnpm.cmd'),
+    (Join-Path $env:ProgramFiles 'nodejs\pnpm.cmd'),
+    (Join-Path $env:ProgramFiles 'nodejs\pnpm.exe')
+)
+if (-not (Add-ToolFallback 'pnpm' $pnpmCandidates)) { $missing += 'pnpm' }
 if ($missing.Count -gt 0) {
     Write-Fail ("Missing tools: " + ($missing -join ', '))
-    Write-Host 'Install Node.js 24 LTS, pnpm 11.8.0/12.x and the .NET 10 SDK, then rerun this script.'
+    Write-Host 'Install Node.js 24 LTS and pnpm (npm install -g pnpm@11.8.0), plus the .NET 10 SDK, then rerun this script.'
+    Write-Host 'If you JUST installed a tool, this window still has the old PATH: open a NEW PowerShell window (or sign out/in) and rerun.'
     exit 1
 }
 $nodeVersion = (& node --version).Trim()
