@@ -63,5 +63,7 @@ export async function POST(request: Request) {
     return Response.json({ available: false, reason: "ออก ticket ลงทะเบียนจาก Controller ไม่สำเร็จ" }, { headers: { "Cache-Control": "no-store" } });
   }
   const command = `$u=${quoted(scriptUrl)}; $r=Invoke-WebRequest -UseBasicParsing -Uri $u -ErrorAction Stop; $m=New-Object System.IO.MemoryStream; try { $r.RawContentStream.CopyTo($m); $b=$m.ToArray() } finally { $m.Dispose(); $r.RawContentStream.Dispose() }; $h=[BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($b)).Replace('-',''); if($h -ne ${quoted(hash)}) { throw 'Installer script hash mismatch' }; $s=[Text.Encoding]::UTF8.GetString($b); & ([ScriptBlock]::Create($s)) -ControllerUrl ${quoted(controllerUrl.toString())} -PackageUrl ${quoted(packageUrl.toString())} -PackageSha256 ${quoted(packageHash!)} -TrustedRootThumbprint ${quoted(root!)} -EnrollmentTicket ${quoted(ticket)} -InstallReturnUrl ${quoted(returnUrl)} -VncAllowedSourceAddress ${quoted(vncAllowedSourceAddress)}`;
-  return Response.json({ available: true, command, scriptUrl, expiresAtUtc }, { headers: { "Cache-Control": "no-store" } });
+  const installUrl = new URL(`/api/agent/install.ps1?k=${encodeURIComponent(ticket)}`, base).toString();
+  const oneLiner = `irm "${installUrl}" | iex`;
+  return Response.json({ available: true, command, oneLiner, installUrl, scriptUrl, expiresAtUtc }, { headers: { "Cache-Control": "no-store" } });
 }

@@ -20,6 +20,8 @@ import { getInstallCommandExpiryState } from "@/lib/agent-install-expiry.mjs";
 type AgentInstallCommandResult = {
   available: boolean;
   command?: string;
+  oneLiner?: string;
+  installUrl?: string;
   expiresAtUtc?: string;
   reason?: string;
 };
@@ -41,20 +43,24 @@ export function AgentInstallDialog({
   onOpenChange: (open: boolean) => void;
 }) {
   const [installCommand, setInstallCommand] = useState<string | null>(null);
+  const [installOneLiner, setInstallOneLiner] = useState<string | null>(null);
   const [installExpiresAtUtc, setInstallExpiresAtUtc] = useState<string | null>(null);
   const [installClockNow, setInstallClockNow] = useState(0);
   const [isRefreshingInstallCommand, setIsRefreshingInstallCommand] = useState(false);
   const [installStatus, setInstallStatus] = useState("กดปุ่มเพื่อขอคำสั่งติดตั้ง");
   const [copyStatus, setCopyStatus] = useState("");
+  const [copyOneLinerStatus, setCopyOneLinerStatus] = useState("");
 
   const refreshInstallCommand = useCallback(async () => {
     setIsRefreshingInstallCommand(true);
     setInstallStatus("กำลังขอคำสั่งติดตั้ง…");
     setCopyStatus("");
+    setCopyOneLinerStatus("");
     try {
       const result = await fetchInstallCommand();
-      const available = result.available && Boolean(result.command) && Boolean(result.expiresAtUtc);
-      setInstallCommand(available ? result.command! : null);
+      const available = result.available && Boolean(result.oneLiner) && Boolean(result.expiresAtUtc);
+      setInstallCommand(available ? result.command ?? null : null);
+      setInstallOneLiner(available ? result.oneLiner! : null);
       setInstallExpiresAtUtc(available ? result.expiresAtUtc! : null);
       setInstallClockNow(Date.now());
       setInstallStatus(available ? "ชุดติดตั้งพร้อมใช้งาน" : result.reason || "ชุดติดตั้งยังไม่พร้อม");
@@ -103,6 +109,22 @@ export function AgentInstallDialog({
     }
   }
 
+  async function copyOneLiner() {
+    if (!installOneLiner || !installExpiresAtUtc) return;
+    const expiry = getInstallCommandExpiryState(installExpiresAtUtc, Date.now());
+    setInstallClockNow(Date.now());
+    if (expiry.expired) {
+      setCopyOneLinerStatus("คำสั่งหมดอายุแล้ว กรุณาขอคำสั่งใหม่");
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(installOneLiner);
+      setCopyOneLinerStatus("คัดลอกคำสั่งคลิกเดียวแล้ว");
+    } catch {
+      setCopyOneLinerStatus("คัดลอกอัตโนมัติไม่ได้ เลือกข้อความในช่องแล้วกด Ctrl+C");
+    }
+  }
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-h-[85dvh] overflow-y-auto sm:max-w-xl">
@@ -114,9 +136,9 @@ export function AgentInstallDialog({
         </DialogHeader>
         <div className="flex flex-col gap-4">
           <ol className="flex list-inside list-decimal flex-col gap-1 text-sm text-muted-foreground">
-            <li>เปิด PowerShell แบบ Administrator บนเครื่องลูก</li>
-            <li>คัดลอกคำสั่งด้านล่างไปรันบนเครื่องนั้น</li>
-            <li>หลังลงทะเบียนแล้ว หน้าแอดมินจะเปิดขึ้นและเครื่องจะแสดงเป็น pending</li>
+            <li>เปิด PowerShell บนเครื่องลูก (ไม่ต้อง Run as Administrator ตัวติดตั้งจะขอ UAC เอง)</li>
+            <li>วางคำสั่งคลิกเดียวด้านล่างแล้วกด Enter</li>
+            <li>รอจนติดตั้งเสร็จ (ถ้ายังไม่มี Sunshine ตัวติดตั้งจะติดตั้งให้) แล้วหน้าแอดมินจะเปิดขึ้น</li>
           </ol>
           <div className="flex flex-wrap items-center gap-2">
             <Button
@@ -139,9 +161,38 @@ export function AgentInstallDialog({
               ? "คำสั่งติดตั้งหมดอายุแล้ว กรุณาขอคำสั่งใหม่"
               : installStatus}
           </p>
+          {installOneLiner ? (
+            <div className="flex flex-col gap-2">
+              <p className="text-sm font-medium">คำสั่งติดตั้งคลิกเดียว (แนะนำ)</p>
+              <Textarea
+                id="agent-install-one-liner"
+                className="font-mono text-xs"
+                rows={2}
+                readOnly
+                spellCheck={false}
+                value={installOneLiner}
+                aria-label="คำสั่งติดตั้ง Agent แบบคลิกเดียว"
+              />
+              <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={isRefreshingInstallCommand || !installExpiresAtUtc || installExpiry?.expired !== false}
+                  onClick={() => void copyOneLiner()}
+                >
+                  คัดลอกคำสั่งคลิกเดียว
+                </Button>
+                <p role="status" aria-live="polite" className="text-sm text-muted-foreground">
+                  {copyOneLinerStatus}
+                </p>
+              </div>
+            </div>
+          ) : null}
           {installCommand ? (
             <div className="flex flex-col gap-3">
               <p className="text-sm">หมดอายุเมื่อ (UTC): {installExpiry?.displayUtc || "ไม่ทราบ"}</p>
+              <p className="text-sm font-medium">คำสั่งแบบละเอียด (สำรอง)</p>
               <Textarea
                 id="agent-install-command"
                 className="font-mono text-xs"
