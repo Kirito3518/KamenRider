@@ -63,7 +63,11 @@ $repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..\..')).Path
 $legacyRepo = 'C:\Users\User\Documents\kamenraiderplay'
 $envFile = Join-Path $repo '.env.local'
 $dataDir = Join-Path $repo 'data'
-$motherDir = Join-Path $repo '.next-local\mother'
+# Keep runtime files out of .next-local: that directory is Next's build output (distDir) and is
+# deleted/replaced on every "next build".
+$motherDir = Join-Path $env:ProgramData 'KamenRaider\mother'
+try { New-Item -ItemType Directory -Force -Path $motherDir -ErrorAction Stop | Out-Null }
+catch { $motherDir = Join-Path $env:LOCALAPPDATA 'KamenRaider\mother' }
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 
 function Write-Step([string]$m) { Write-Host "[*] $m" }
@@ -166,7 +170,7 @@ if ((Test-Path -LiteralPath $certPfx) -and (Test-Path -LiteralPath $certMeta)) {
     $meta = Get-Content -LiteralPath $certMeta -Raw | ConvertFrom-Json
     $pfxPassword = $meta.Password
     $thumbprint = $meta.Thumbprint
-    Write-Ok "Reusing Controller certificate $thumbprint (delete .next-local\mother\cert.json to regenerate)"
+    Write-Ok "Reusing Controller certificate $thumbprint (delete $motherDir\cert.json to regenerate)"
 } else {
     Write-Step "Creating a Controller TLS certificate for $LanIp"
     $pfxPassword = -join ((48..57) + (65..90) + (97..122) | Get-Random -Count 32 | ForEach-Object { [char]$_ })
@@ -305,7 +309,7 @@ if ($Start) {
             Write-Ok "Web (local) -> $status"
         } catch { Write-Warn2 ("Web listening but the first request failed: " + $_.Exception.Message) }
     } else {
-        Write-Warn2 'Web did not start listening; last lines of .next-local\mother\web-dev.log:'
+        Write-Warn2 "Web did not start listening; last lines of $webLog:"
         if (Test-Path -LiteralPath $webLog) { Get-Content -LiteralPath $webLog -Tail 25 | ForEach-Object { Write-Host "    $_" } }
         Write-Host "    Run manually: `"$webCmdPath`"   (or: cd `"$repo`"; pnpm dev)"
     }

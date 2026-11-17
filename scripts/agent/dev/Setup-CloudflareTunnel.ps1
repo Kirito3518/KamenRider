@@ -65,7 +65,7 @@ $ErrorActionPreference = 'Stop'
 $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [Environment]::GetEnvironmentVariable('Path', 'User') + ';' + $env:Path
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..\..')).Path
 $configureScript = Join-Path $PSScriptRoot 'Configure-MotherLan.ps1'
-$logDir = Join-Path $repo '.next-local\mother'
+$logDir = Join-Path $env:ProgramData 'KamenRaider\logs'
 $logFile = Join-Path $logDir 'cloudflare-setup.log'
 $origin = 'https://' + $Domain.Trim()
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
@@ -247,7 +247,7 @@ Write-Host "     skip: Browser Integrity Check, Security Level, Bot Fight Mode"
 Write-Host "5) Recommended: Zero Trust -> Access -> Applications -> Self-hosted $Domain path admin* (email/OTP policy)"
 Write-Host ''
 Write-Host "After the dashboard steps: open https://$Domain/login and sign in again (origin changed)." -ForegroundColor Green
-Write-Host "Agent PCs: import .next-local\mother\controller-root.cer into LocalMachine\Root, then run the install command from https://$Domain/admin/machines"
+Write-Host "Agent PCs: import C:\ProgramData\KamenRaider\mother\controller-root.cer into LocalMachine\Root, then run the install command from https://$Domain/admin/machines"
 Write-Host "They must still reach https://${LanIp}:7443 on the LAN for the Controller channel."
 Write-Host ''
 Write-Host 'Security reminder: rotate the secrets in .env.local before real use.' -ForegroundColor Yellow

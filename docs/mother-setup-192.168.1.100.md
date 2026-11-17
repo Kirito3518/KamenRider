@@ -286,7 +286,7 @@ Import-Certificate -FilePath 'C:\path\to\controller-root.cer' -CertStoreLocation
 ไฟล์ cert อยู่ที่เครื่องแม่:
 
 ```text
-C:\Users\PC\Desktop\KamenRider\.next-local\mother\controller-root.cer
+C:\Users\PC\Desktop\KamenRider\C:\ProgramData\KamenRaider\mother\controller-root.cer
 ```
 
 - ใช้คำสั่งติดตั้ง Agent จาก `https://kamanriderplay.com/admin/machines` ไปรันบนเครื่องลูก (elevated)
@@ -335,7 +335,7 @@ Import-Certificate -FilePath 'C:\path\to\controller-root.cer' -CertStoreLocation
 ไฟล์ cert อยู่ที่เครื่องแม่:
 
 ```text
-C:\Users\PC\Desktop\KamenRider\.next-local\mother\controller-root.cer
+C:\Users\PC\Desktop\KamenRider\C:\ProgramData\KamenRaider\mother\controller-root.cer
 ```
 
 แล้วใช้คำสั่งติดตั้ง Agent ที่สร้างจากหน้า `/admin/machines` ไปรันบนเครื่องลูก (elevated)
@@ -366,7 +366,7 @@ Get-Process node -ErrorAction SilentlyContinue | Select-Object Id,StartTime
 2. อ่าน log ของ web (ตั้งแต่ commit ใหม่ สคริปต์เขียน log ไว้):
 
 ```powershell
-Get-Content .\.next-local\mother\web-dev.log -Tail 50
+Get-Content .\C:\ProgramData\KamenRaider\mother\web-dev.log -Tail 50
 ```
 
 3. สตาร์ท web เองแบบเห็น error ชัด ๆ:
@@ -379,13 +379,13 @@ pnpm dev
 หรือใช้ตัวที่สคริปต์สร้างให้ (มี log):
 
 ```powershell
-.\.next-local\mother\web-dev.cmd
+.\C:\ProgramData\KamenRaider\mother\web-dev.cmd
 ```
 
 แล้วอ่าน log:
 
 ```powershell
-Get-Content .\.next-local\mother\web-dev.log -Tail 50
+Get-Content .\C:\ProgramData\KamenRaider\mother\web-dev.log -Tail 50
 ```
 
 4. สาเหตุที่พบบ่อย:
@@ -413,7 +413,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\agent\dev\Configur
 ลบไฟล์นี้แล้วรัน Configure ซ้ำ:
 
 ```powershell
-Remove-Item .\.next-local\mother\cert.json -Force
+Remove-Item .\C:\ProgramData\KamenRaider\mother\cert.json -Force
 ```
 
 ### ต้องการ stop stack ที่รันอยู่
@@ -457,5 +457,5 @@ Move-Item .\data\controller.sqlite* -Destination (New-Item -ItemType Directory -
 ## 14) หมายเหตุความปลอดภัย
 
 - `.env.local` และ `data/` ใน repo นี้เป็นข้อมูลทดสอบที่มี secret จริงจากเครื่อง dev — **rotate secret ก่อนใช้งานจริง**
-- ไฟล์ cert/รหัส PFX อยู่ที่ `.next-local\mother\` (อยู่ในเครื่องเท่านั้น)
+- ไฟล์ cert/รหัส PFX อยู่ที่ `C:\ProgramData\KamenRaider\mother\` (อยู่ในเครื่องเท่านั้น)
 - repo นี้ private แต่ค่าที่เคย push อยู่ใน git history แล้ว ตามที่ตกลงกันไว้
