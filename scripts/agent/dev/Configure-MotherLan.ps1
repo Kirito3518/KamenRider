@@ -309,7 +309,7 @@ if ($Start) {
             Write-Ok "Web (local) -> $status"
         } catch { Write-Warn2 ("Web listening but the first request failed: " + $_.Exception.Message) }
     } else {
-        Write-Warn2 "Web did not start listening; last lines of $webLog:"
+        Write-Warn2 "Web did not start listening; last lines of ${webLog}:"
         if (Test-Path -LiteralPath $webLog) { Get-Content -LiteralPath $webLog -Tail 25 | ForEach-Object { Write-Host "    $_" } }
         Write-Host "    Run manually: `"$webCmdPath`"   (or: cd `"$repo`"; pnpm dev)"
     }
