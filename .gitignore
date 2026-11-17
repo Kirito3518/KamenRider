@@ -54,6 +54,8 @@ next-env.d.ts
 # .NET service outputs and machine-local configuration
 **/bin/
 **/obj/
+**/obj-*/
+.restore-epoch-tests/
 public/agent/AgentPackage.zip
 public/agent/AgentPackage.sha256
 /agent-release-artifacts/

@@ -6,6 +6,9 @@ const nextConfig: NextConfig = {
   cacheComponents: true,
   partialPrefetching: true,
   reactCompiler: true,
+  outputFileTracingExcludes: {
+    "/*": ["./data/**"],
+  },
   turbopack: {
     rules: {
       "*.css": {
