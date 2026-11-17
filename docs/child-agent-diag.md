@@ -81,6 +81,25 @@ Get-WinEvent -LogName Application -MaxEvents 600 -ErrorAction SilentlyContinue |
 - ถ้าเป็น `...\sunshine.exe --service` หรืออยู่ในโฟลเดอร์อื่น = layout ไม่ตรง แล้วแต่ต้องรอแพ็กเกจแก้/ติดตั้ง Sunshine ใหม่ให้ถูก layout
 - `.NET Runtime` event จะบอก exception จริงว่า Guard crash เพราะอะไร (ข้อความต่อจากนี้)
 
+## ทดลองรัน Guard แบบ console (ดู exception ตรง ๆ)
+
+รันบนเครื่องลูก (Administrator) — จะดาวน์โหลดแพ็กเกจแล้วรัน `Agent.exe --stream-guard` ตรง ๆ
+เพื่อดูว่าเป็นบั๊กของ Guard หรือเป็นปัญหา .NET runtime บนเครื่อง:
+
+```powershell
+$zip = "$env:TEMP\kr-agent.zip"
+$dir = "$env:TEMP\kr-agent"
+Invoke-WebRequest "https://kamanriderplay.com/agent/AgentPackage.zip" -OutFile $zip
+Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue
+Expand-Archive $zip $dir -Force
+& "$dir\Agent\Agent.exe" --stream-guard --contentRoot "$dir\Agent"
+```
+
+ผลที่ได้:
+- **มี exception/stack ขึ้นมา** → guard crash ด้วย exception นั้น (แคปส่งมา)
+- **ขึ้น "internal error in the .NET Runtime" แล้วจบ** → เป็นปัญหา .NET runtime/OS (เครื่องนี้ Win10 build 19041 ซึ่ง .NET 10 ไม่รองรับจริง — จะต้องเปลี่ยนไปแพ็กเกจ .NET 8)
+- **ค้าง/รันเงียบ ๆ** → runtime ทำงานได้ ปัญหาอยู่ที่ service configuration/ACL (กด Ctrl+C เพื่อหยุด)
+
 ## ถ้าต้องการเก็บเป็นไฟล์ก่อนส่ง
 
 ```powershell
