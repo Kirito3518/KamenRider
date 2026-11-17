@@ -59,8 +59,9 @@ function Invoke-Native([string]$Exe, [string[]]$Arguments) {
 }
 function New-RandomPassword([int]$Length = 24) {
     $chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789'
-    $bytes = [byte[]]::new($Length)
-    [System.Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+    $bytes = New-Object 'byte[]' $Length
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
     -join ($bytes | ForEach-Object { $chars[$_ % $chars.Length] })
 }
 
