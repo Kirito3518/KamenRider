@@ -22,6 +22,8 @@ public sealed class LeaseCommandDispatcher(LeaseEnforcer enforcer,KamenRaider.Ag
   foreach(var command in response.Commands.Where(c=>c.Type=="ApplyLease"))pending=[..pending,await enforcer.ApplyAsync(command,ct)];
   await enforcer.ConfirmAsync(response.ActiveLease,ct);
   foreach(var command in response.Commands.Where(c=>c.Type=="PairPin"))pending=[..pending,await ExecutePairAsync(command,ct)];
+  foreach(var command in response.Commands.Where(c=>c.Type=="EndLease"))pending=[..pending,await enforcer.EndLeaseAsync(command,ct)];
+  foreach(var command in response.Commands.Where(c=>c.Type=="ShutdownMachine"))pending=[..pending,await enforcer.ShutdownMachineAsync(command,ct)];
  }
  private async Task<CommandResult> ExecutePreparationAsync(CommandEnvelope command,CancellationToken ct){
   var failed=new CommandResult(command.CommandId,"failed",command.LeaseRevision,"PreparationUnavailable");

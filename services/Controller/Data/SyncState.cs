@@ -60,6 +60,8 @@ public sealed partial class ControllerDatabase
                     return challengeDecision;
                 }
                 MarkSyncProofAccepted(tx, verified, state, request.AgentVersion);
+                ConfirmUpdateFromProvenVersion(tx, verified.MachineId, request.AgentVersion,
+                    state.TokenSequence ?? throw new InvalidOperationException("Accepted Agent proof has no token sequence."));
                 var accepted = ApplyAcceptedSync(tx, verified.MachineId, machine, request, diagnostics,
                     IssueOrReconstructSyncToken, isProven: true);
                 tx.Commit();
@@ -99,7 +101,8 @@ public sealed partial class ControllerDatabase
 
         var responseChallenge = isProven ? issueToken(tx, id, CurrentKeyFingerprint(tx, id)) : null;
         if (request.Readiness != "ready")
-            return new(now, new(machine.ConfigRevision, machine.MoonlightPort, machine.SunshinePort), [], null)
+            return new(now, new(machine.ConfigRevision, machine.MoonlightPort, machine.SunshinePort),
+                PendingShutdownCommands(tx, id, request.BootId), null)
             { AgentUpdateChallenge = responseChallenge };
 
         string? unbound;
@@ -119,6 +122,106 @@ public sealed partial class ControllerDatabase
         using var command = LeaseCommand(tx, "SELECT public_key FROM machines WHERE machine_id=$machine", ("$machine", machineId));
         var publicKey = command.ExecuteScalar() as string ?? throw new KeyNotFoundException();
         return PublicKeyFingerprint(publicKey);
+    }
+
+    /// <summary>
+    /// A proven protocol-2 heartbeat is the only evidence that may release a held maintenance
+    /// chain. The current head operation must be awaiting the outcome and the proven Agent
+    /// version must match its immutable target (completed) or rollback source (rolled back).
+    /// Confirmation, terminal status, chain close and the immutable confirmation record are
+    /// committed in the same transaction as the accepted proof.
+    /// </summary>
+    private void ConfirmUpdateFromProvenVersion(SqliteTransaction tx, string machineId, string? provenVersion,
+        long proofSequence)
+    {
+        if (string.IsNullOrWhiteSpace(provenVersion)) return;
+        string operationId;
+        string chainId;
+        string status;
+        string targetVersion;
+        string? sourceVersion;
+        long generation;
+        using (var operation = Command("SELECT o.operation_id,o.chain_id,o.status,o.target_version,o.source_version,c.generation " +
+            "FROM agent_update_operations o JOIN agent_maintenance_chains c ON c.chain_id=o.chain_id AND c.machine_id=o.machine_id " +
+            "WHERE o.machine_id=$machine AND c.held=1 AND c.current_head_operation_id=o.operation_id " +
+            "AND c.generation=o.ticket_generation AND o.target_protocol=2 AND o.status IN ('awaitingHeartbeat','rollingBack') LIMIT 1",
+            ("$machine", machineId)))
+        {
+            operation.Transaction = tx;
+            using var row = operation.ExecuteReader();
+            if (!row.Read()) return;
+            operationId = row.GetString(0);
+            chainId = row.GetString(1);
+            status = row.GetString(2);
+            targetVersion = row.GetString(3);
+            sourceVersion = row.IsDBNull(4) ? null : row.GetString(4);
+            generation = row.GetInt64(5);
+        }
+
+        string outcome;
+        if (status == "awaitingHeartbeat" && string.Equals(provenVersion, targetVersion, StringComparison.Ordinal))
+            outcome = "completed";
+        else if (status == "rollingBack" && sourceVersion is not null && string.Equals(provenVersion, sourceVersion, StringComparison.Ordinal))
+            outcome = "rolledBack";
+        else
+            return;
+
+        var nowMs = clock.GetUtcNow().ToUnixTimeMilliseconds();
+        using (var confirm = Command("UPDATE agent_update_operations SET status=$outcome,updated_at_unix_ms=$now " +
+            "WHERE operation_id=$operation AND machine_id=$machine AND chain_id=$chain AND status=$expected AND ticket_generation=$generation",
+            ("$outcome", outcome), ("$now", nowMs), ("$operation", operationId), ("$machine", machineId),
+            ("$chain", chainId), ("$expected", status), ("$generation", generation)))
+        {
+            confirm.Transaction = tx;
+            if (confirm.ExecuteNonQuery() != 1)
+                throw new InvalidOperationException("The maintenance operation changed during confirmation.");
+        }
+        using (var close = Command("UPDATE agent_maintenance_chains SET held=0,updated_at_unix_ms=$now " +
+            "WHERE chain_id=$chain AND machine_id=$machine AND held=1 AND current_head_operation_id=$operation AND generation=$generation",
+            ("$now", nowMs), ("$chain", chainId), ("$machine", machineId), ("$operation", operationId),
+            ("$generation", generation)))
+        {
+            close.Transaction = tx;
+            if (close.ExecuteNonQuery() != 1)
+                throw new InvalidOperationException("The maintenance chain changed during confirmation.");
+        }
+        using (var confirmation = Command("INSERT INTO agent_update_confirmations(confirmation_id,machine_id,chain_id,operation_id,generation,outcome,proven_version,proof_sequence,proof_runtime_epoch,created_at_unix_ms) " +
+            "VALUES($id,$machine,$chain,$operation,$generation,$outcome,$version,$sequence,$epoch,$now)",
+            ("$id", Guid.NewGuid().ToString("N")), ("$machine", machineId), ("$chain", chainId),
+            ("$operation", operationId), ("$generation", generation), ("$outcome", outcome),
+            ("$version", provenVersion), ("$sequence", proofSequence), ("$epoch", syncProofRuntimeEpoch), ("$now", nowMs)))
+        {
+            confirmation.Transaction = tx;
+            if (confirmation.ExecuteNonQuery() != 1)
+                throw new InvalidOperationException("The update confirmation could not be recorded.");
+        }
+        var oldBinding = JsonSerializer.Serialize(new
+        {
+            machineId,
+            chainId,
+            operationId,
+            generation,
+            previousStatus = status,
+        });
+        var newBinding = JsonSerializer.Serialize(new
+        {
+            machineId,
+            chainId,
+            operationId,
+            generation,
+            outcome,
+            provenVersion,
+            proofSequence,
+        });
+        using (var audit = Command("INSERT INTO agent_update_audit(audit_id,chain_id,operation_id,actor_id,request_id,event_type,old_binding_json,new_binding_json,created_at_unix_ms) " +
+            "VALUES($id,$chain,$operation,'agent:' || $machine,$request,'updateConfirmed',$old,$new,$now)",
+            ("$id", Guid.NewGuid().ToString("N")), ("$chain", chainId), ("$operation", operationId),
+            ("$machine", machineId), ("$request", "confirm:" + operationId), ("$old", oldBinding),
+            ("$new", newBinding), ("$now", nowMs)))
+        {
+            audit.Transaction = tx;
+            audit.ExecuteNonQuery();
+        }
     }
 
     private static ReadinessDiagnostic[]? ValidateReadinessDiagnostics(ReadinessDiagnostic[]? diagnostics)

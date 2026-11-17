@@ -89,6 +89,30 @@ private DateTimeOffset EffectiveNow(){var now=time.GetUtcNow();if(serverTime is 
   try{await store.SaveAsync(next,ct);}catch(Exception ex) when(ex is IOException or UnauthorizedAccessException){lock(state){fault="LeaseStorageFailed";}return false;}
   lock(state){importSaved=true;if(IsMaintenanceFenceHeld()||!ReferenceEquals(current,next)||fault!="ImportPending"||boot.BootId!=next.BootId||boot.UptimeMilliseconds>=next.DeadlineUptimeMilliseconds)return false;fault=null;return true;}
  }finally{commands.Release();}}
+ public async Task<CommandResult> EndLeaseAsync(CommandEnvelope command,CancellationToken ct){await commands.WaitAsync(ct);try{
+  await InitializeCoreAsync(ct,false);var failed=new CommandResult(command.CommandId,"failed",command.LeaseRevision,"LeaseRejected");LeaseSnapshot? target;
+  lock(state){
+   if(IsMaintenanceFenceHeld()||fault is not null||command.Type!="EndLease"||command.BootId!=boot.BootId||string.IsNullOrWhiteSpace(command.RentalId)||command.LeaseRevision<=0||command.ValidUntilUtc<=EffectiveNow())return failed;
+   if(current is not {} s||s.BootId!=boot.BootId||s.RentalId!=command.RentalId||s.Revision!=command.LeaseRevision||boot.UptimeMilliseconds>=EnforcementDeadline(s))return failed;
+   target=s;confirmed=false;
+  }
+  await gate.BlockAsync(ct);
+  lock(state){if(!ReferenceEquals(current,target)||fault is not null||IsMaintenanceFenceHeld()||command.ValidUntilUtc<=EffectiveNow())return failed;}
+  try{await store.ClearAsync(ct);}catch(Exception ex) when(ex is IOException or UnauthorizedAccessException){lock(state){fault="LeaseStorageFailed";}return failed;}
+  lock(state){
+   if(!ReferenceEquals(current,target)||boot.BootId!=target.BootId)return failed;
+   current=null;pendingInitial=null;fault=null;requiresControllerTime=false;controllerTimeObserved=false;importSaved=false;recoveryDeadline=null;serverTime=null;serverUptime=0;confirmed=false;shutdownState=0;initialized=true;
+   return new(command.CommandId,"applied",command.LeaseRevision);
+  }
+ }finally{commands.Release();}}
+ public async Task<CommandResult> ShutdownMachineAsync(CommandEnvelope command,CancellationToken ct){await commands.WaitAsync(ct);try{
+  await InitializeCoreAsync(ct,false);var failed=new CommandResult(command.CommandId,"failed",command.LeaseRevision,"ShutdownRejected");
+  if(IsMaintenanceFenceHeld()||command.Type!="ShutdownMachine"||command.BootId!=boot.BootId||!string.IsNullOrWhiteSpace(command.RentalId)||command.LeaseRevision!=0||command.ValidUntilUtc<=EffectiveNow())return failed;
+  try{await gate.BlockAsync(ct);}catch{return failed;}
+  try{await shutdown.RequestImmediateShutdownAsync(ct);return new(command.CommandId,"applied",command.LeaseRevision);}
+  catch(OperationCanceledException) when(ct.IsCancellationRequested){throw;}
+  catch{return failed;}
+ }finally{commands.Release();}}
  public async Task<CommandResult> ApplyAsync(CommandEnvelope command,CancellationToken ct){await commands.WaitAsync(ct);LeaseSnapshot? initialCandidate=null;var initialMayBeDurable=false;try{
   await InitializeCoreAsync(ct,false);var failed=new CommandResult(command.CommandId,"failed",command.LeaseRevision,"LeaseRejected");LeaseSnapshot? previous;LeaseSnapshot next;
   lock(state){
@@ -98,7 +122,7 @@ private DateTimeOffset EffectiveNow(){var now=time.GetUtcNow();if(serverTime is 
    previous=current;
    if(previous is not null){if(previous.BootId!=boot.BootId||boot.UptimeMilliseconds>=EnforcementDeadline(previous))return failed;
     if(command.CommandId==previous.LastCommandId)return command.RentalId==previous.RentalId&&command.LeaseRevision==previous.Revision&&expires==previous.ExpiresAtUtc?new(command.CommandId,"applied",previous.Revision):failed;
-    if(command.RentalId!=previous.RentalId||command.LeaseRevision!=previous.Revision+1||expires<=previous.ExpiresAtUtc)return failed;}
+    if(command.RentalId!=previous.RentalId||command.LeaseRevision!=previous.Revision+1)return failed;}
    confirmed=false;var deadline=checked(boot.UptimeMilliseconds+(long)(expires-EffectiveNow()).TotalMilliseconds);
    next=new(command.RentalId,command.LeaseRevision,expires,boot.BootId,command.CommandId,deadline,previous?.RecoveryDeadlineUptimeMilliseconds??previous?.DeadlineUptimeMilliseconds);
    if(previous is null)pendingInitial=initialCandidate=next;

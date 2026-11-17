@@ -22,11 +22,21 @@ public sealed class ControllerOptions
     public string DatabasePath { get; set; } = "";
     public string ServiceCredential { get; set; } = "";
     public bool AgentReleaseRemediationEnabled { get; set; }
+    /// <summary>Deployment-pinned helper build SHA-256; empty keeps recovery qualification blocked.</summary>
+    public string AgentMaintenancePinnedHelperSha256 { get; set; } = "";
+    /// <summary>Operator attestation that the local exclusion procedure was qualified (full restart done).</summary>
+    public bool AgentMaintenanceExclusionProcedureQualified { get; set; }
+    /// <summary>Qualified old-updater auto-resume status (qualifiedNotApplicable / qualifiedDisabled).</summary>
+    public string AgentMaintenanceQualifiedAutoResumeStatus { get; set; } = "";
     public bool IsValid() => Uri.TryCreate(InternalUrl, UriKind.Absolute, out var local)
         && local.Scheme == "http" && IPAddress.TryParse(local.Host, out var ip) && IPAddress.IsLoopback(ip)
         && Uri.TryCreate(AgentUrl, UriKind.Absolute, out var agent) && agent.Scheme == "https"
         && local.Port > 0 && agent.Port > 0 && local.Port != agent.Port && Path.IsPathFullyQualified(DatabasePath)
-        && !string.IsNullOrWhiteSpace(ServiceCredential);
+        && !string.IsNullOrWhiteSpace(ServiceCredential)
+        && (string.IsNullOrEmpty(AgentMaintenancePinnedHelperSha256) || IsHex64(AgentMaintenancePinnedHelperSha256))
+        && (string.IsNullOrEmpty(AgentMaintenanceQualifiedAutoResumeStatus)
+            || AgentMaintenanceQualifiedAutoResumeStatus is "qualifiedNotApplicable" or "qualifiedDisabled");
+    private static bool IsHex64(string value) => value.Length == 64 && value.All(Uri.IsHexDigit);
 }
 public static class ControllerHost
 {
@@ -65,7 +75,10 @@ public static class ControllerHost
         builder.Services.AddSingleton<ControllerDatabase>(sp => new ControllerDatabase(
             sp.GetRequiredService<IOptions<ControllerOptions>>().Value.DatabasePath,
             clock: sp.GetRequiredService<TimeProvider>(),
-            agentReleaseRemediationEnabled: sp.GetRequiredService<IOptions<ControllerOptions>>().Value.AgentReleaseRemediationEnabled));
+            agentReleaseRemediationEnabled: sp.GetRequiredService<IOptions<ControllerOptions>>().Value.AgentReleaseRemediationEnabled,
+            agentMaintenancePinnedHelperSha256: sp.GetRequiredService<IOptions<ControllerOptions>>().Value.AgentMaintenancePinnedHelperSha256,
+            agentMaintenanceExclusionProcedureQualified: sp.GetRequiredService<IOptions<ControllerOptions>>().Value.AgentMaintenanceExclusionProcedureQualified,
+            agentMaintenanceQualifiedAutoResumeStatus: sp.GetRequiredService<IOptions<ControllerOptions>>().Value.AgentMaintenanceQualifiedAutoResumeStatus));
         builder.Services.AddSingleton<AgentReleaseStore>(sp => {
             var databasePath = sp.GetRequiredService<IOptions<ControllerOptions>>().Value.DatabasePath;
             var databaseDirectory = Path.GetDirectoryName(Path.GetFullPath(databasePath))!;
@@ -99,6 +112,7 @@ public static class ControllerHost
         });
         app.MapGet("/internal/health", () => new HealthResponse(Protocol.Version, "ok"));
         app.MapMachines();
+    app.MapPcControl();
         app.MapSync();
         app.MapLeases();
         app.MapPairing();

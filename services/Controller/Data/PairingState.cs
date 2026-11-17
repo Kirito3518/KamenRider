@@ -48,5 +48,31 @@ public sealed partial class ControllerDatabase {
  }
  private PairingCommandStatus ReadPairStatus(SqliteTransaction tx,string id,string commandId){using var cmd=LeaseCommand(tx,"SELECT status FROM command_outbox WHERE rental_id=$rental AND command_id=$command AND type='PairPin'",("$rental",id),("$command",commandId));return new(commandId,(cmd.ExecuteScalar() as string) switch{"pending"=>"queued","applied"=>"succeeded","failed"=>"failed","expired" or "invalidated"=>"expired",_=>throw new KeyNotFoundException()});}
  public PairingCommandStatus PairingStatus(string id,string commandId,string actor){lock(gate){using var tx=connection.BeginTransaction();EnsureNotRestoreQuarantined(tx);ExpireLeases(tx,clock.GetUtcNow().ToUnixTimeMilliseconds());PurgePairingSecrets(tx,clock.GetUtcNow().ToUnixTimeMilliseconds());PairOwner(tx,id,actor);var result=ReadPairStatus(tx,id,commandId);tx.Commit();return result;}}
+ // Admin PC-control variants. They act on the machine's current allocation-holding lease and
+ // never persist or echo pairing PINs.
+ public AdminPairingOfferDto? GetAdminPairingOffer(string machineId,string actorId){
+  Identifier(machineId);Identifier(actorId);
+  lock(gate){using var tx=connection.BeginTransaction();EnsureNotRestoreQuarantined(tx);var now=clock.GetUtcNow().ToUnixTimeMilliseconds();ExpireLeases(tx,now);PurgePairingSecrets(tx,now);
+   var lease=FindAllocationLeaseForMachine(tx,machineId,"active");if(lease.Dto.PendingRevision is not null){tx.Commit();return null;}
+   using var cmd=LeaseCommand(tx,"SELECT valid_until,ids FROM pairing_offers WHERE rental_id=$id AND boot_id=$boot AND revision=$revision AND valid_until>$now",("$id",lease.Dto.Id),("$boot",lease.Boot),("$revision",lease.Dto.Revision),("$now",now));
+   using var row=cmd.ExecuteReader();AdminPairingOfferDto? result=null;if(row.Read())result=new(lease.Dto.Id,lease.Dto.Revision,DateTimeOffset.FromUnixTimeMilliseconds(row.GetInt64(0)),JsonSerializer.Deserialize<string[]>(row.GetString(1))??[]);tx.Commit();return result;}}
+ public AdminPairingStatusDto QueueAdminPairing(string machineId,string actorId,AdminPairingRequestDto request){
+  Identifier(machineId);Identifier(actorId);Identifier(request.IdempotencyKey);if(!PairId(request.PairingId)||request.Pin is not {Length:4}||request.Pin.Any(c=>c<'0'||c>'9'))throw new ArgumentException("Invalid pairing request");
+  lock(gate){using var tx=connection.BeginTransaction();EnsureNotRestoreQuarantined(tx);var now=clock.GetUtcNow().ToUnixTimeMilliseconds();ExpireLeases(tx,now);PurgePairingSecrets(tx,now);
+   var lease=FindAllocationLeaseForMachine(tx,machineId,"active");
+   using(var prior=LeaseCommand(tx,"SELECT command_id,pairing_id FROM pairing_requests WHERE rental_id=$rental AND request_key=$key",("$rental",lease.Dto.Id),("$key",request.IdempotencyKey))){using var row=prior.ExecuteReader();if(row.Read()){var command=row.GetString(0);if(row.GetString(1)!=request.PairingId)throw new InvalidOperationException("Idempotency conflict");row.Close();var result=ReadPairStatus(tx,lease.Dto.Id,command);tx.Commit();return new(result.CommandId,result.Status);}}
+   if(lease.Dto.PendingRevision is not null)throw new InvalidOperationException("Lease not active");
+   using var offer=LeaseCommand(tx,"SELECT valid_until,ids FROM pairing_offers WHERE rental_id=$rental AND revision=$revision AND boot_id=$boot AND valid_until>$now",("$rental",lease.Dto.Id),("$revision",lease.Dto.Revision),("$boot",lease.Boot),("$now",now));long until;using(var row=offer.ExecuteReader()){if(!row.Read())throw new InvalidOperationException("No current pairing offer");until=row.GetInt64(0);if(!(JsonSerializer.Deserialize<string[]>(row.GetString(1))??[]).Contains(request.PairingId))throw new InvalidOperationException("Selection not offered");}
+   using(var pending=LeaseCommand(tx,"SELECT COUNT(*) FROM command_outbox WHERE rental_id=$rental AND type='PairPin' AND status='pending'",("$rental",lease.Dto.Id)))if((long)pending.ExecuteScalar()!>0)throw new InvalidOperationException("Pairing already pending");
+   var commandId=Guid.NewGuid().ToString("N");ExecuteLease(tx,"INSERT INTO command_outbox(command_id,type,rental_id,machine_id,lease_revision,boot_id,valid_until,payload) VALUES($command,'PairPin',$rental,$machine,$revision,$boot,$until,$payload)",("$command",commandId),("$rental",lease.Dto.Id),("$machine",machineId),("$revision",lease.Dto.Revision),("$boot",lease.Boot),("$until",until),("$payload",JsonSerializer.Serialize(new{pairingId=request.PairingId})));
+   ExecuteLease(tx,"INSERT INTO pairing_requests VALUES($rental,$key,$pairing,$command)",("$rental",lease.Dto.Id),("$key",request.IdempotencyKey),("$pairing",request.PairingId),("$command",commandId));
+   RecordMachineAdminAction(tx,machineId,actorId,request.IdempotencyKey,"pairPin",commandId,Digest(machineId,request.PairingId,"pairPin"),now);
+   tx.Commit();pairingPins[commandId]=(request.Pin,until);
+   try{pairingPinTimers[commandId]=clock.CreateTimer(_=>ExpirePairingSecret(commandId),null,TimeSpan.FromMilliseconds(Math.Max(0,until-clock.GetUtcNow().ToUnixTimeMilliseconds())),Timeout.InfiniteTimeSpan);}
+   catch{RemovePairingSecret(commandId);throw;}
+   return new(commandId,"queued");}}
+ public AdminPairingStatusDto GetAdminPairingStatus(string machineId,string commandId,string actorId){
+  Identifier(machineId);Identifier(commandId);Identifier(actorId);
+  lock(gate){using var tx=connection.BeginTransaction();EnsureNotRestoreQuarantined(tx);ExpireLeases(tx,clock.GetUtcNow().ToUnixTimeMilliseconds());PurgePairingSecrets(tx,clock.GetUtcNow().ToUnixTimeMilliseconds());var lease=FindAllocationLeaseForMachine(tx,machineId,"active");var result=ReadPairStatus(tx,lease.Dto.Id,commandId);tx.Commit();return new(result.CommandId,result.Status);}}
 }
 

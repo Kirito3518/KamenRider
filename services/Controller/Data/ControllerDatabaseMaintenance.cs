@@ -164,7 +164,7 @@ public static class ControllerDatabaseMaintenance
             new("pending_expires_at", "INTEGER"), new("boot_id", "TEXT"), new("allocation_held", "INTEGER", true)
         ],
         ["command_outbox"] = [
-            new("command_id", "TEXT"), new("type", "TEXT", true), new("rental_id", "TEXT", true), new("machine_id", "TEXT", true),
+            new("command_id", "TEXT"), new("type", "TEXT", true), new("rental_id", "TEXT"), new("machine_id", "TEXT", true),
             new("lease_revision", "INTEGER", true), new("boot_id", "TEXT", true), new("valid_until", "INTEGER", true),
             new("payload", "TEXT", true), new("status", "TEXT", true), new("error_code", "TEXT")
         ]
@@ -504,11 +504,14 @@ public static class ControllerDatabaseMaintenance
             if (userVersion >= 15) ValidateSyncProofSchema(connection);
             if (userVersion >= 19) ValidateRestoreStateSchema(connection);
             if (userVersion >= 20) ValidateRecoverySchema(connection);
+            if (userVersion >= 21) ValidateRecoverySuccessorSchema(connection);
+            if (userVersion >= 22) ValidateUpdateConfirmationSchema(connection);
+            if (userVersion >= 23) ValidatePcControlSchema(connection);
             // These uniqueness constraints enforce allocation and command-revision invariants.
             ValidateIndex(connection, "leases", "leases_machine_allocation", ["machine_id"], "allocation_held=1", required: true);
             var hasCommandRevisionIndex = HasIndex(connection, "command_outbox", "lease_command_revision");
             if (userVersion >= 3 || hasCommandRevisionIndex)
-                ValidateIndex(connection, "command_outbox", "lease_command_revision", ["rental_id", "type", "lease_revision"], "type!='PairPin'", required: true);
+                ValidateIndex(connection, "command_outbox", "lease_command_revision", ["rental_id", "type", "lease_revision"], "type NOT IN ('PairPin','ShutdownMachine')", required: true);
             else
                 // Before pairing, this same uniqueness rule is a table-level UNIQUE constraint.
                 ValidateLegacyCommandRevisionUniqueness(connection);
@@ -519,7 +522,12 @@ public static class ControllerDatabaseMaintenance
         }
     }
 
-    private static readonly Lazy<IReadOnlyDictionary<string, string>> maintenanceSchema = new(() =>
+    private static readonly ConcurrentDictionary<long, IReadOnlyDictionary<string, string>> maintenanceSchemas = new();
+
+    private static IReadOnlyDictionary<string, string> MaintenanceSchema(long schemaVersion) =>
+        maintenanceSchemas.GetOrAdd(schemaVersion, BuildMaintenanceSchema);
+
+    private static IReadOnlyDictionary<string, string> BuildMaintenanceSchema(long schemaVersion)
     {
         using var reference = new SqliteConnection("Data Source=:memory:;Foreign Keys=True");
         reference.Open();
@@ -527,7 +535,8 @@ public static class ControllerDatabaseMaintenance
         var assembly = typeof(ControllerDatabase).Assembly;
         foreach (var resourceName in assembly.GetManifestResourceNames()
             .Where(name => name.StartsWith("KamenRaider.Controller.Data.Migrations.", StringComparison.Ordinal)
-                && int.TryParse(name.AsSpan("KamenRaider.Controller.Data.Migrations.".Length, 3), out var version) && version <= 14)
+                && int.TryParse(name.AsSpan("KamenRaider.Controller.Data.Migrations.".Length, 3), out var migrationVersion)
+                && migrationVersion <= schemaVersion)
             .Order(StringComparer.Ordinal))
         {
             using var resource = assembly.GetManifestResourceStream(resourceName)!;
@@ -553,15 +562,22 @@ public static class ControllerDatabaseMaintenance
             result.Add(name, NormalizeCanonicalSql((string)command.ExecuteScalar()!));
         }
         return result;
-    });
+    }
 
     internal static void ValidateMaintenanceChainSchema(SqliteConnection connection, SqliteTransaction? transaction = null)
     {
+        long userVersion;
+        using (var version = connection.CreateCommand())
+        {
+            version.Transaction = transaction;
+            version.CommandText = "PRAGMA user_version";
+            userVersion = Convert.ToInt64(version.ExecuteScalar(), CultureInfo.InvariantCulture);
+        }
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = "SELECT sql FROM sqlite_schema WHERE name=$name";
         var parameter = command.Parameters.Add("$name", SqliteType.Text);
-        foreach (var (name, expected) in maintenanceSchema.Value)
+        foreach (var (name, expected) in MaintenanceSchema(userVersion))
         {
             parameter.Value = name;
             if (command.ExecuteScalar() is not string actual || NormalizeCanonicalSql(actual) != expected)
@@ -715,6 +731,146 @@ public static class ControllerDatabaseMaintenance
         return result;
     });
 
+    internal static void ValidatePcControlSchema(SqliteConnection connection, SqliteTransaction? transaction = null)
+    {
+        long userVersion;
+        using (var version = connection.CreateCommand())
+        {
+            version.Transaction = transaction;
+            version.CommandText = "PRAGMA user_version";
+            userVersion = Convert.ToInt64(version.ExecuteScalar(), CultureInfo.InvariantCulture);
+        }
+        if (userVersion < 23)
+            throw new InvalidDataException("Controller database is missing the version 23 PC-control schema.");
+
+        const string table = "machine_admin_actions";
+        using (var exists = connection.CreateCommand())
+        {
+            exists.Transaction = transaction;
+            exists.CommandText = "SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name=$name";
+            exists.Parameters.AddWithValue("$name", table);
+            if (Convert.ToInt64(exists.ExecuteScalar(), CultureInfo.InvariantCulture) != 1)
+                throw new InvalidDataException("Controller database is missing the machine admin action table.");
+        }
+        ValidateColumns(connection, table, [
+            new("action_id", "TEXT"), new("machine_id", "TEXT", true), new("actor_id", "TEXT", true),
+            new("request_id", "TEXT", true), new("action_type", "TEXT", true), new("command_id", "TEXT"),
+            new("payload_digest", "TEXT", true), new("created_at_unix_ms", "INTEGER", true)
+        ], ["action_id"]);
+        foreach (var name in new[]
+        {
+            "machine_admin_action_machine", "machine_admin_action_immutable_update", "machine_admin_action_immutable_delete"
+        })
+        {
+            using var objectCheck = connection.CreateCommand();
+            objectCheck.Transaction = transaction;
+            objectCheck.CommandText = "SELECT COUNT(*) FROM sqlite_schema WHERE name=$name";
+            objectCheck.Parameters.AddWithValue("$name", name);
+            if (Convert.ToInt64(objectCheck.ExecuteScalar(), CultureInfo.InvariantCulture) != 1)
+                throw new InvalidDataException($"Controller database is missing PC-control schema object '{name}'.");
+        }
+        foreach (var name in new[] { "lease_command_revision", "machine_shutdown_pending" })
+        {
+            using var indexCheck = connection.CreateCommand();
+            indexCheck.Transaction = transaction;
+            indexCheck.CommandText = "SELECT COUNT(*) FROM sqlite_schema WHERE type='index' AND name=$name";
+            indexCheck.Parameters.AddWithValue("$name", name);
+            if (Convert.ToInt64(indexCheck.ExecuteScalar(), CultureInfo.InvariantCulture) != 1)
+                throw new InvalidDataException($"Controller database is missing PC-control command index '{name}'.");
+        }
+    }
+
+    internal static void ValidateUpdateConfirmationSchema(SqliteConnection connection, SqliteTransaction? transaction = null)
+    {
+        long userVersion;
+        using (var version = connection.CreateCommand())
+        {
+            version.Transaction = transaction;
+            version.CommandText = "PRAGMA user_version";
+            userVersion = Convert.ToInt64(version.ExecuteScalar(), CultureInfo.InvariantCulture);
+        }
+        if (userVersion < 22)
+            throw new InvalidDataException("Controller database is missing the version 22 update-confirmation schema.");
+
+        const string table = "agent_update_confirmations";
+        using (var exists = connection.CreateCommand())
+        {
+            exists.Transaction = transaction;
+            exists.CommandText = "SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name=$name";
+            exists.Parameters.AddWithValue("$name", table);
+            if (Convert.ToInt64(exists.ExecuteScalar(), CultureInfo.InvariantCulture) != 1)
+                throw new InvalidDataException("Controller database is missing the update confirmation table.");
+        }
+        ValidateColumns(connection, table, [
+            new("confirmation_id", "TEXT"), new("machine_id", "TEXT", true), new("chain_id", "TEXT", true),
+            new("operation_id", "TEXT", true), new("generation", "INTEGER", true), new("outcome", "TEXT", true),
+            new("proven_version", "TEXT", true), new("proof_sequence", "INTEGER", true),
+            new("proof_runtime_epoch", "TEXT", true), new("created_at_unix_ms", "INTEGER", true)
+        ], ["confirmation_id"]);
+        foreach (var name in new[]
+        {
+            "agent_update_confirmation_machine",
+            "agent_update_confirmation_immutable_update",
+            "agent_update_confirmation_immutable_delete"
+        })
+        {
+            using var objectCheck = connection.CreateCommand();
+            objectCheck.Transaction = transaction;
+            objectCheck.CommandText = "SELECT COUNT(*) FROM sqlite_schema WHERE name=$name";
+            objectCheck.Parameters.AddWithValue("$name", name);
+            if (Convert.ToInt64(objectCheck.ExecuteScalar(), CultureInfo.InvariantCulture) != 1)
+                throw new InvalidDataException($"Controller database is missing update confirmation schema object '{name}'.");
+        }
+    }
+
+    internal static void ValidateRecoverySuccessorSchema(SqliteConnection connection, SqliteTransaction? transaction = null)
+    {
+        long userVersion;
+        using (var version = connection.CreateCommand())
+        {
+            version.Transaction = transaction;
+            version.CommandText = "PRAGMA user_version";
+            userVersion = Convert.ToInt64(version.ExecuteScalar(), CultureInfo.InvariantCulture);
+        }
+        if (userVersion < 21)
+            throw new InvalidDataException("Controller database is missing the version 21 recovery-successor schema.");
+
+        const string table = "agent_update_recovery_successors";
+        using (var exists = connection.CreateCommand())
+        {
+            exists.Transaction = transaction;
+            exists.CommandText = "SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name=$name";
+            exists.Parameters.AddWithValue("$name", table);
+            if (Convert.ToInt64(exists.ExecuteScalar(), CultureInfo.InvariantCulture) != 1)
+                throw new InvalidDataException("Controller database is missing the recovery successor table.");
+        }
+        ValidateColumns(connection, table, [
+            new("inspection_id", "TEXT"), new("intent_id", "TEXT", true), new("machine_id", "TEXT", true),
+            new("chain_id", "TEXT", true), new("previous_head_operation_id", "TEXT", true),
+            new("successor_operation_id", "TEXT", true), new("generation", "INTEGER", true),
+            new("request_id", "TEXT", true), new("key_fingerprint", "TEXT", true),
+            new("request_body_digest", "TEXT", true), new("evidence_digest", "TEXT", true),
+            new("helper_build_sha256", "TEXT", true), new("helper_runtime", "TEXT", true),
+            new("helper_protocol", "INTEGER", true), new("exclusion_provenance", "TEXT", true),
+            new("old_updater_auto_resume_status", "TEXT", true), new("actual_installed_version", "TEXT", true),
+            new("actual_installed_digest", "TEXT", true), new("native_boot_id_before", "TEXT", true),
+            new("native_boot_id_after", "TEXT", true), new("ticket_hash", "TEXT", true),
+            new("created_at_unix_ms", "INTEGER", true)
+        ], ["inspection_id"]);
+        foreach (var name in new[]
+        {
+            "agent_update_recovery_successor_machine", "agent_update_recovery_successor_chain",
+            "agent_update_recovery_successor_identity_immutable", "agent_update_recovery_successor_no_delete"
+        })
+        {
+            using var objectCheck = connection.CreateCommand();
+            objectCheck.Transaction = transaction;
+            objectCheck.CommandText = "SELECT COUNT(*) FROM sqlite_schema WHERE name=$name";
+            objectCheck.Parameters.AddWithValue("$name", name);
+            if (Convert.ToInt64(objectCheck.ExecuteScalar(), CultureInfo.InvariantCulture) != 1)
+                throw new InvalidDataException($"Controller database is missing recovery successor schema object '{name}'.");
+        }
+    }
     internal static void ValidateRecoverySchema(SqliteConnection connection, SqliteTransaction? transaction = null)
     {
         long userVersion;
@@ -914,7 +1070,7 @@ public static class ControllerDatabaseMaintenance
 
     internal static void ValidateCanonicalSchema(SqliteConnection connection, long expectedVersion, SqliteTransaction? transaction = null)
     {
-        if (expectedVersion is < 0 or > 20)
+        if (expectedVersion is < 0 or > 23)
             throw new InvalidDataException("Controller database version is outside the supported migration range.");
 
         var checkpoints = expectedSchemas.GetOrAdd(expectedVersion, BuildCanonicalSchemas);
@@ -997,7 +1153,7 @@ public static class ControllerDatabaseMaintenance
 
     private static IReadOnlyList<IReadOnlyDictionary<string, SchemaObject>> BuildCanonicalSchemas(long version)
     {
-        if (version is not (0 or 2 or 3 or >= 4 and <= 20))
+        if (version is not (0 or 2 or 3 or >= 4 and <= 23))
             return [];
 
         var connectionString = new SqliteConnectionStringBuilder { DataSource = ":memory:", ForeignKeys = true, Pooling = false }.ToString();

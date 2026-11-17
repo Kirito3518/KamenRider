@@ -27,7 +27,7 @@ public sealed class LeaseCompletionMigrationTests
                 Assert.Equal("extend-once", Scalar(verify, "SELECT request_key FROM lease_requests WHERE rental_id='expired'"));
                 Assert.Equal(42L, Scalar(verify, "SELECT rowid FROM command_outbox WHERE command_id='command'"));
                 Assert.Equal("pair-once", Scalar(verify, "SELECT request_key FROM pairing_requests WHERE rental_id='expired'"));
-                Assert.Equal(20L, Scalar(verify, "PRAGMA user_version"));
+                Assert.Equal(23L, Scalar(verify, "PRAGMA user_version"));
 
                 using var foreignKeys = verify.CreateCommand();
                 foreignKeys.CommandText = "PRAGMA foreign_key_check";
@@ -42,7 +42,7 @@ public sealed class LeaseCompletionMigrationTests
             Assert.Throws<InvalidDataException>(() => new ControllerDatabase(path));
             using (var restarted = Open(path))
             {
-                Assert.Equal(20L, Scalar(restarted, "PRAGMA user_version"));
+                Assert.Equal(23L, Scalar(restarted, "PRAGMA user_version"));
                 Assert.Equal(1L, Scalar(restarted, "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name='migration_restart_marker'"));
             }
         }

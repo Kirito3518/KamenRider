@@ -3,9 +3,12 @@ using Microsoft.Data.Sqlite;
 using System.Text.Json;
 namespace KamenRaider.Controller.Data;
 public sealed partial class ControllerDatabase {
-    private void AddCommand(SqliteTransaction tx,LeaseRow lease,string type,long revision,string boot,long validUntil,object payload) =>
+    private string AddCommand(SqliteTransaction tx,LeaseRow lease,string type,long revision,string boot,long validUntil,object payload) {
+        var commandId=Guid.NewGuid().ToString("N");
         ExecuteLease(tx,"INSERT INTO command_outbox(command_id,type,rental_id,machine_id,lease_revision,boot_id,valid_until,payload) VALUES($id,$type,$rental,$machine,$revision,$boot,$until,$payload)",
-            ("$id",Guid.NewGuid().ToString("N")),("$type",type),("$rental",lease.Dto.Id),("$machine",lease.Dto.MachineId),("$revision",revision),("$boot",boot),("$until",validUntil),("$payload",JsonSerializer.Serialize(payload)));
+            ("$id",commandId),("$type",type),("$rental",lease.Dto.Id),("$machine",lease.Dto.MachineId),("$revision",revision),("$boot",boot),("$until",validUntil),("$payload",JsonSerializer.Serialize(payload)));
+        return commandId;
+    }
     private void PrepareCommand(SqliteTransaction tx,LeaseRow lease,string boot) {
         ExecuteLease(tx,"UPDATE leases SET boot_id=$boot WHERE id=$id",("$boot",boot),("$id",lease.Dto.Id));
         AddCommand(tx,lease,"PrepareMachine",1,boot,lease.PreparationDeadline,new {});
@@ -14,8 +17,16 @@ public sealed partial class ControllerDatabase {
         if (IsRestoreQuarantined(tx)) return [];
         using var cmd=LeaseCommand(tx,"SELECT command_id,type,rental_id,lease_revision,boot_id,valid_until,payload FROM command_outbox WHERE machine_id=$id AND boot_id=$boot AND status='pending' ORDER BY rowid",("$id",machineId),("$boot",boot));
         using var r=cmd.ExecuteReader();var commands=new List<CommandEnvelope>();
-        while(r.Read()) commands.Add(new(r.GetString(0),r.GetString(1),r.GetString(2),r.GetInt64(3),r.GetString(4),DateTimeOffset.FromUnixTimeMilliseconds(r.GetInt64(5)),JsonSerializer.Deserialize<JsonElement>(r.GetString(6))));
+        while(r.Read()) commands.Add(new(r.GetString(0),r.GetString(1),r.IsDBNull(2)?"":r.GetString(2),r.GetInt64(3),r.GetString(4),DateTimeOffset.FromUnixTimeMilliseconds(r.GetInt64(5)),JsonSerializer.Deserialize<JsonElement>(r.GetString(6))));
                 return commands.Select(c=>c.Type=="PairPin"&&pairingPins.TryGetValue(c.CommandId,out var secret)?c with{Payload=JsonSerializer.SerializeToElement(new{pairingId=c.Payload.GetProperty("pairingId").GetString(),pin=secret.Pin})}:c).ToArray();
+    }
+
+    private CommandEnvelope[] PendingShutdownCommands(SqliteTransaction tx,string machineId,string boot) {
+        if (IsRestoreQuarantined(tx)) return [];
+        using var cmd=LeaseCommand(tx,"SELECT command_id,type,rental_id,lease_revision,boot_id,valid_until,payload FROM command_outbox WHERE machine_id=$id AND boot_id=$boot AND type='ShutdownMachine' AND status='pending' ORDER BY rowid",("$id",machineId),("$boot",boot));
+        using var r=cmd.ExecuteReader();var commands=new List<CommandEnvelope>();
+        while(r.Read()) commands.Add(new(r.GetString(0),r.GetString(1),r.IsDBNull(2)?"":r.GetString(2),r.GetInt64(3),r.GetString(4),DateTimeOffset.FromUnixTimeMilliseconds(r.GetInt64(5)),JsonSerializer.Deserialize<JsonElement>(r.GetString(6))));
+        return commands.ToArray();
     }
     private void RejectRetiredBoot(SqliteTransaction tx,string machineId,string boot) {
         using(var check=LeaseCommand(tx,"SELECT retired FROM machine_boots WHERE machine_id=$id AND boot_id=$boot",("$id",machineId),("$boot",boot)))
@@ -34,6 +45,24 @@ public sealed partial class ControllerDatabase {
             // A result can affect only its persisted pending command, current boot and exact revision.
             var command=PendingCommands(tx,machineId,request.BootId).SingleOrDefault(c=>c.CommandId==result.CommandId);
             if(command is null||command.ValidUntilUtc.ToUnixTimeMilliseconds()<=now||result.AppliedRevision!=command.LeaseRevision) continue;
+            if(command.Type=="ShutdownMachine"){
+                if(result.Status=="applied") ExecuteLease(tx,"UPDATE command_outbox SET status='applied',error_code=NULL WHERE command_id=$id",("$id",command.CommandId));
+                else if(result.Status=="failed") ExecuteLease(tx,"UPDATE command_outbox SET status='failed',error_code='AgentFailure' WHERE command_id=$id",("$id",command.CommandId));
+                continue;
+            }
+            if(command.Type=="EndLease"){
+                if(result.Status=="failed"){
+                    ExecuteLease(tx,"UPDATE command_outbox SET status='failed',error_code='AgentFailure' WHERE command_id=$id",("$id",command.CommandId));
+                    continue;
+                }
+                if(result.Status!="applied") continue;
+                var ending=FindLease(tx,command.RentalId);
+                if(ending is not null&&ending.Dto.Revision==command.LeaseRevision){
+                    ExecuteLease(tx,"UPDATE leases SET state='completed',allocation_held=0,pending_revision=NULL,pending_expires_at=NULL WHERE id=$id AND revision=$revision",("$id",ending.Dto.Id),("$revision",command.LeaseRevision));
+                }
+                ExecuteLease(tx,"UPDATE command_outbox SET status='applied' WHERE command_id=$id",("$id",command.CommandId));
+                continue;
+            }
             var lease=FindLease(tx,command.RentalId)!;
                         if(command.Type=="PairPin"){
                 if(lease.Boot==request.BootId&&lease.Dto.State=="active"&&lease.Dto.Revision==command.LeaseRevision&&result.Status is "applied" or "failed"){

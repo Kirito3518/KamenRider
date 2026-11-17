@@ -16,15 +16,26 @@ public sealed partial class ControllerDatabase : IDisposable
     private readonly TimeProvider clock;
     private readonly string agentReleaseRoot;
     private readonly bool agentReleaseRemediationEnabled;
+    private readonly string agentMaintenancePinnedHelperSha256;
+    private readonly bool agentMaintenanceExclusionProcedureQualified;
+    private readonly string agentMaintenanceQualifiedAutoResumeStatus;
     private readonly string databasePath;
     private readonly string syncProofRuntimeEpoch = Guid.NewGuid().ToString("N");
     private readonly byte[] syncProofHmacKey = RandomNumberGenerator.GetBytes(32);
-    public ControllerDatabase(string path, EnrollmentPolicy? policy = null, TimeProvider? clock = null, bool agentReleaseRemediationEnabled = false)
-        : this(path, policy, clock, agentReleaseRemediationEnabled, invalidateRuntimeProofsOnOpen: true) { }
+    public ControllerDatabase(string path, EnrollmentPolicy? policy = null, TimeProvider? clock = null, bool agentReleaseRemediationEnabled = false,
+        string agentMaintenancePinnedHelperSha256 = "", bool agentMaintenanceExclusionProcedureQualified = false,
+        string agentMaintenanceQualifiedAutoResumeStatus = "")
+        : this(path, policy, clock, agentReleaseRemediationEnabled, invalidateRuntimeProofsOnOpen: true,
+            agentMaintenancePinnedHelperSha256, agentMaintenanceExclusionProcedureQualified, agentMaintenanceQualifiedAutoResumeStatus) { }
 
-    internal ControllerDatabase(string path, EnrollmentPolicy? policy, TimeProvider? clock, bool agentReleaseRemediationEnabled, bool invalidateRuntimeProofsOnOpen) {
+    internal ControllerDatabase(string path, EnrollmentPolicy? policy, TimeProvider? clock, bool agentReleaseRemediationEnabled, bool invalidateRuntimeProofsOnOpen,
+        string agentMaintenancePinnedHelperSha256 = "", bool agentMaintenanceExclusionProcedureQualified = false,
+        string agentMaintenanceQualifiedAutoResumeStatus = "") {
         this.policy = policy ?? new(); this.clock = clock ?? TimeProvider.System;
         this.agentReleaseRemediationEnabled = agentReleaseRemediationEnabled;
+        this.agentMaintenancePinnedHelperSha256 = agentMaintenancePinnedHelperSha256 ?? string.Empty;
+        this.agentMaintenanceExclusionProcedureQualified = agentMaintenanceExclusionProcedureQualified;
+        this.agentMaintenanceQualifiedAutoResumeStatus = agentMaintenanceQualifiedAutoResumeStatus ?? string.Empty;
         databasePath = Path.GetFullPath(path);
         var databaseExistedBeforeOpen = File.Exists(databasePath);
         agentReleaseRoot=Path.Combine(Path.GetDirectoryName(databasePath)!,"agent-releases");
@@ -39,7 +50,7 @@ public sealed partial class ControllerDatabase : IDisposable
             }
             ControllerDatabaseMaintenance.ValidateCanonicalSchema(connection, startingUserVersion);
             using var transaction=connection.BeginTransaction();
-            foreach (var name in new[] { "001-machines.sql", "002-leases-commands.sql", "003-pairing.sql", "004-boot-challenges.sql", "005-config-acks.sql", "006-enrollment-tickets.sql", "007-admin-vnc-sessions.sql", "008-vnc-approved-target.sql", "009-agent-version.sql", "010-completed-leases.sql", "011-readiness-diagnostics.sql", "012-agent-releases.sql", "013-agent-update-downloads.sql", "014-agent-maintenance-chains.sql", "015-agent-sync-proof.sql", "016-agent-sync-challenge-rate-limit.sql", "017-agent-release-contract.sql", "018-agent-update-source-binding.sql", "019-controller-restore-quarantine.sql", "020-agent-update-recovery-intents.sql" }) {
+            foreach (var name in new[] { "001-machines.sql", "002-leases-commands.sql", "003-pairing.sql", "004-boot-challenges.sql", "005-config-acks.sql", "006-enrollment-tickets.sql", "007-admin-vnc-sessions.sql", "008-vnc-approved-target.sql", "009-agent-version.sql", "010-completed-leases.sql", "011-readiness-diagnostics.sql", "012-agent-releases.sql", "013-agent-update-downloads.sql", "014-agent-maintenance-chains.sql", "015-agent-sync-proof.sql", "016-agent-sync-challenge-rate-limit.sql", "017-agent-release-contract.sql", "018-agent-update-source-binding.sql", "019-controller-restore-quarantine.sql", "020-agent-update-recovery-intents.sql", "021-agent-update-recovery-successors.sql", "022-agent-update-confirmations.sql", "023-pc-control-commands.sql" }) {
                 if(name=="003-pairing.sql"){using var version=connection.CreateCommand();version.Transaction=transaction;version.CommandText="PRAGMA user_version";if((long)version.ExecuteScalar()!>=3)continue;}
                 if(name=="004-boot-challenges.sql"){using var version=connection.CreateCommand();version.Transaction=transaction;version.CommandText="PRAGMA user_version";if((long)version.ExecuteScalar()!>=4)continue;}
                 if(name=="010-completed-leases.sql"){using var version=connection.CreateCommand();version.Transaction=transaction;version.CommandText="PRAGMA user_version";if((long)version.ExecuteScalar()!>=10)continue;}
@@ -53,6 +64,9 @@ public sealed partial class ControllerDatabase : IDisposable
                 if(name=="018-agent-update-source-binding.sql"){using var version=connection.CreateCommand();version.Transaction=transaction;version.CommandText="PRAGMA user_version";if((long)version.ExecuteScalar()!>=18)continue;}
                 if(name=="019-controller-restore-quarantine.sql"){using var version=connection.CreateCommand();version.Transaction=transaction;version.CommandText="PRAGMA user_version";if((long)version.ExecuteScalar()!>=19)continue;}
                 if(name=="020-agent-update-recovery-intents.sql"){using var version=connection.CreateCommand();version.Transaction=transaction;version.CommandText="PRAGMA user_version";if((long)version.ExecuteScalar()!>=20)continue;}
+                if(name=="021-agent-update-recovery-successors.sql"){using var version=connection.CreateCommand();version.Transaction=transaction;version.CommandText="PRAGMA user_version";if((long)version.ExecuteScalar()!>=21)continue;}
+                if(name=="022-agent-update-confirmations.sql"){using var version=connection.CreateCommand();version.Transaction=transaction;version.CommandText="PRAGMA user_version";if((long)version.ExecuteScalar()!>=22)continue;}
+                if(name=="023-pc-control-commands.sql"){using var version=connection.CreateCommand();version.Transaction=transaction;version.CommandText="PRAGMA user_version";if((long)version.ExecuteScalar()!>=23)continue;}
                 if(name=="008-vnc-approved-target.sql") {
                     using var columns=connection.CreateCommand();columns.Transaction=transaction;columns.CommandText="PRAGMA table_info(machines)";using var rows=columns.ExecuteReader();
                     var hasVncLocalIp=false;while(rows.Read())if(rows.GetString(1)=="vnc_local_ip")hasVncLocalIp=true;
@@ -67,7 +81,7 @@ public sealed partial class ControllerDatabase : IDisposable
                 using var reader=new StreamReader(resource);
                 using var cmd=connection.CreateCommand(); cmd.Transaction=transaction; cmd.CommandText=reader.ReadToEnd(); cmd.ExecuteNonQuery();
             }
-            ControllerDatabaseMaintenance.ValidateCanonicalSchema(connection, 20, transaction);
+            ControllerDatabaseMaintenance.ValidateCanonicalSchema(connection, 23, transaction);
             ControllerDatabaseMaintenance.ValidateMaintenanceChainSchema(connection,transaction);
             ControllerDatabaseMaintenance.ValidateSyncProofSchema(connection,transaction);
             ControllerDatabaseMaintenance.ValidateRestoreStateSchema(connection, transaction);
@@ -82,7 +96,7 @@ public sealed partial class ControllerDatabase : IDisposable
                 invalidateRuntimeProofs.ExecuteNonQuery();
             }
             transaction.Commit();
-            ControllerDatabaseMaintenance.ValidateCanonicalSchema(connection, 20);
+            ControllerDatabaseMaintenance.ValidateCanonicalSchema(connection, 23);
             ControllerDatabaseMaintenance.ValidateRestoreStateSchema(connection);
             ControllerDatabaseMaintenance.ValidateRecoverySchema(connection);
         } catch { connection.Dispose(); throw; }
