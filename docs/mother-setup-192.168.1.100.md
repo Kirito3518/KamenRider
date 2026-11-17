@@ -247,6 +247,54 @@ C:\Users\PC\Desktop\KamenRider\.next-local\mother\controller-root.cer
 ### Controller ไม่ขึ้น / พอร์ตชน
 ดู process ด้วยคำสั่งในหัวข้อ 7 แล้ว `Stop-Process` หรือรันซ้ำด้วย `-Force`
 
+### Web ไม่ขึ้น (`Web did not start listening`)
+1. ตรวจก่อนว่าอาจ start ช้า/ฟังพอร์ตอื่น:
+
+```powershell
+Get-NetTCPConnection -State Listen -LocalPort 3000,3001 -ErrorAction SilentlyContinue | Select-Object LocalPort,OwningProcess
+Get-Process node -ErrorAction SilentlyContinue | Select-Object Id,StartTime
+```
+
+2. อ่าน log ของ web (ตั้งแต่ commit ใหม่ สคริปต์เขียน log ไว้):
+
+```powershell
+Get-Content .\.next-local\mother\web-dev.log -Tail 50
+```
+
+3. สตาร์ท web เองแบบเห็น error ชัด ๆ:
+
+```powershell
+cd "$env:USERPROFILE\Desktop\KamenRider"
+pnpm dev
+```
+
+หรือใช้ตัวที่สคริปต์สร้างให้ (มี log):
+
+```powershell
+.\.next-local\mother\web-dev.cmd
+```
+
+แล้วอ่าน log:
+
+```powershell
+Get-Content .\.next-local\mother\web-dev.log -Tail 50
+```
+
+4. สาเหตุที่พบบ่อย:
+- `Port 3000 is in use` → ปิด process เดิม (หัวข้อ 7)
+- `Cannot find module 'next'` / module หาย → `pnpm install --frozen-lockfile`
+- `EPERM`/`EACCES` ที่ `.next` → ปิด node ทั้งหมดแล้วลบโฟลเดอร์ `.next` (`Remove-Item .next -Recurse -Force -ErrorAction SilentlyContinue`) แล้ว start ใหม่
+- เปิดในหน้าต่าง elevated แล้ว path ของ pnpm หาย → เปิดหน้าต่างใหม่ (ไม่ elevated) หรือรัน `pnpm --version` ก่อน
+
+5. หลัง web ขึ้นแล้ว รันซ้ำแบบมี log/ตรวจให้:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\agent\dev\Configure-MotherLan.ps1 -LanIp 192.168.1.100 -Force -Start
+```
+
+(ถ้า Controller ยังรันอยู่ สคริปต์จะข้ามการ start Controller และเริ่มเฉพาะ web)
+
+
 ### Agent sync 409 / quarantine
 อย่าใช้ DB ที่แนบมากับ repo — ให้ Bootstrap archive แล้วปล่อยให้ Controller สร้าง DB ใหม่ (หัวข้อ 6)
 
