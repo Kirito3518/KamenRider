@@ -482,16 +482,138 @@ public sealed partial class ControllerDatabase
             }
 
             var blockReason = RecoveryQualificationBlockReason(scope, inspection);
-            using (var insert = Command("INSERT INTO agent_update_recovery_inspections(inspection_id,intent_id,request_id,key_fingerprint,request_body_digest,evidence_digest,outcome,block_reason,recorded_at_unix_ms) VALUES($id,$intent,$request,$fingerprint,$bodyDigest,$evidenceDigest,'blocked',$reason,$now)",
-                ("$id", Guid.NewGuid().ToString("N")), ("$intent", intentId), ("$request", requestId),
-                ("$fingerprint", verified.KeyFingerprint.ToUpperInvariant()), ("$bodyDigest", requestBodyDigest),
-                ("$evidenceDigest", evidenceDigest), ("$reason", blockReason), ("$now", now.ToUnixTimeMilliseconds())))
+            if (blockReason is not null)
             {
-                insert.Transaction = tx;
-                insert.ExecuteNonQuery();
+                using (var insert = Command("INSERT INTO agent_update_recovery_inspections(inspection_id,intent_id,request_id,key_fingerprint,request_body_digest,evidence_digest,outcome,block_reason,recorded_at_unix_ms) VALUES($id,$intent,$request,$fingerprint,$bodyDigest,$evidenceDigest,'blocked',$reason,$now)",
+                    ("$id", Guid.NewGuid().ToString("N")), ("$intent", intentId), ("$request", requestId),
+                    ("$fingerprint", verified.KeyFingerprint.ToUpperInvariant()), ("$bodyDigest", requestBodyDigest),
+                    ("$evidenceDigest", evidenceDigest), ("$reason", blockReason), ("$now", now.ToUnixTimeMilliseconds())))
+                {
+                    insert.Transaction = tx;
+                    insert.ExecuteNonQuery();
+                }
+
+                var blockedOldBinding = JsonSerializer.Serialize(new
+                {
+                    machineId = scope.MachineId,
+                    chainId = scope.ChainId,
+                    headOperationId = scope.PreviousHeadOperationId,
+                    generation = scope.Generation,
+                    held = scope.Held,
+                }, RecoveryIntentJsonOptions);
+                var blockedNewBinding = JsonSerializer.Serialize(new
+                {
+                    intentId,
+                    requestId,
+                    outcome = "blocked",
+                    blockReason,
+                    keyFingerprint = verified.KeyFingerprint.ToUpperInvariant(),
+                    requestBodyDigest,
+                    evidenceDigest,
+                    oldBackupOwnerOperationId = inspection.OldBackupOwnerOperationId,
+                    oldBackupDigest = inspection.OldBackupDigest,
+                    actualInstalledDigest = inspection.ActualInstalledDigest,
+                    nativeBootIdBefore = inspection.NativeBootIdBefore,
+                    nativeBootIdAfter = inspection.NativeBootIdAfter,
+                    exclusionProvenance = inspection.ExclusionProvenance,
+                    helperBuildSha256 = inspection.HelperBuildSha256,
+                }, RecoveryIntentJsonOptions);
+                using (var audit = Command("INSERT INTO agent_update_audit(audit_id,chain_id,operation_id,actor_id,request_id,event_type,old_binding_json,new_binding_json,created_at_unix_ms) VALUES($audit,$chain,$head,$actor,$request,'recoveryInspectionBlocked',$old,$new,$now)",
+                    ("$audit", Guid.NewGuid().ToString("N")), ("$chain", scope.ChainId), ("$head", scope.PreviousHeadOperationId),
+                    ("$actor", auditActor), ("$request", requestId), ("$old", blockedOldBinding),
+                    ("$new", blockedNewBinding), ("$now", now.ToUnixTimeMilliseconds())))
+                {
+                    audit.Transaction = tx;
+                    audit.ExecuteNonQuery();
+                }
+
+                tx.Commit();
+                throw new AgentRecoveryQualificationUnavailableException(blockReason);
             }
 
-            var oldBinding = JsonSerializer.Serialize(new
+            // Qualified recovery: create the audited successor operation and its fresh ticket in
+            // the same transaction that supersedes the failed head and closes the intent.
+            if (HeldAllocationExists(tx, scope.MachineId))
+                throw new InvalidOperationException("Machine has a held lease; the recovery successor remains held.");
+            var release = ReadRecoveryTargetRelease(tx, scope);
+            using (var artifact = OpenUpdateArtifact(release.PackagePath, release.PackageSha256,
+                release.PackageSizeBytes, release.TargetVersion, out _))
+            {
+                _ = artifact;
+            }
+
+            var ticket = NewAgentUpdateTicket(out var ticketHash);
+            var successorOperationId = Guid.NewGuid().ToString("N");
+            var inspectionId = Guid.NewGuid().ToString("N");
+            var nowMs = now.ToUnixTimeMilliseconds();
+            var successorGeneration = checked(scope.Generation + 1);
+            var expires = now.AddMinutes(10);
+
+            using (var insertOperation = Command("INSERT INTO agent_update_operations(operation_id,machine_id,chain_id,parent_operation_id,release_version,target_version,target_package_sha256,target_runtime,target_protocol,previous_version,backup_owner_operation_id,backup_digest,status,ticket_hash,ticket_generation,ticket_purpose,ticket_expires_at_unix_ms,created_at_unix_ms,updated_at_unix_ms) VALUES($operation,$machine,$chain,$parent,$release,$target,$hash,$runtime,2,$previous,$backupOwner,$backupDigest,'awaitingInstaller',$ticketHash,$generation,'recovery',$expires,$now,$now)",
+                ("$operation", successorOperationId), ("$machine", scope.MachineId), ("$chain", scope.ChainId),
+                ("$parent", scope.PreviousHeadOperationId), ("$release", scope.TargetReleaseVersion),
+                ("$target", scope.TargetVersion), ("$hash", scope.TargetPackageSha256.ToLowerInvariant()),
+                ("$runtime", scope.TargetRuntime), ("$previous", scope.SourceVersion),
+                ("$backupOwner", scope.BackupOwnerOperationId), ("$backupDigest", scope.BackupDigest!.ToLowerInvariant()),
+                ("$ticketHash", ticketHash), ("$generation", successorGeneration),
+                ("$expires", expires.ToUnixTimeMilliseconds()), ("$now", nowMs)))
+            {
+                insertOperation.Transaction = tx;
+                if (insertOperation.ExecuteNonQuery() != 1)
+                    throw new InvalidOperationException("The recovery successor operation could not be recorded.");
+            }
+            using (var epoch = Command("INSERT INTO agent_update_ticket_runtime_epochs(operation_id,controller_runtime_epoch,issued_monotonic_tick) VALUES($operation,$epoch,$tick)",
+                ("$operation", successorOperationId), ("$epoch", syncProofRuntimeEpoch), ("$tick", clock.GetTimestamp())))
+            {
+                epoch.Transaction = tx;
+                epoch.ExecuteNonQuery();
+            }
+            using (var updateChain = Command("UPDATE agent_maintenance_chains SET current_head_operation_id=$new,generation=$next,updated_at_unix_ms=$now WHERE chain_id=$chain AND machine_id=$machine AND current_head_operation_id=$old AND generation=$generation AND held=1",
+                ("$new", successorOperationId), ("$next", successorGeneration), ("$now", nowMs),
+                ("$chain", scope.ChainId), ("$machine", scope.MachineId),
+                ("$old", scope.PreviousHeadOperationId), ("$generation", scope.Generation)))
+            {
+                updateChain.Transaction = tx;
+                if (updateChain.ExecuteNonQuery() != 1)
+                    throw new AgentRecoveryIntentConflictException(scope.ChainId, scope.CurrentHeadOperationId,
+                        scope.CurrentGeneration, "The maintenance head changed while issuing the successor.");
+            }
+            using (var supersede = Command("UPDATE agent_update_operations SET status='superseded',updated_at_unix_ms=$now WHERE operation_id=$old AND chain_id=$chain AND machine_id=$machine AND status=$status",
+                ("$now", nowMs), ("$old", scope.PreviousHeadOperationId), ("$chain", scope.ChainId),
+                ("$machine", scope.MachineId), ("$status", scope.PreviousOperationStatus)))
+            {
+                supersede.Transaction = tx;
+                if (supersede.ExecuteNonQuery() != 1)
+                    throw new AgentRecoveryIntentConflictException(scope.ChainId, scope.CurrentHeadOperationId,
+                        scope.CurrentGeneration, "The previous operation changed while issuing the successor.");
+            }
+            using (var intentUpdate = Command("UPDATE agent_update_recovery_intents SET status='superseded' WHERE intent_id=$intent AND status='awaitingInspection'",
+                ("$intent", intentId)))
+            {
+                intentUpdate.Transaction = tx;
+                if (intentUpdate.ExecuteNonQuery() != 1)
+                    throw new AgentRecoveryIntentConflictException(scope.ChainId, scope.CurrentHeadOperationId,
+                        scope.CurrentGeneration, "The recovery intent changed while issuing the successor.");
+            }
+            using (var successor = Command("INSERT INTO agent_update_recovery_successors(inspection_id,intent_id,machine_id,chain_id,previous_head_operation_id,successor_operation_id,generation,request_id,key_fingerprint,request_body_digest,evidence_digest,helper_build_sha256,helper_runtime,helper_protocol,exclusion_provenance,old_updater_auto_resume_status,actual_installed_version,actual_installed_digest,native_boot_id_before,native_boot_id_after,ticket_hash,created_at_unix_ms) VALUES($inspection,$intent,$machine,$chain,$previous,$successor,$generation,$request,$fingerprint,$bodyDigest,$evidenceDigest,$helper,$runtime,$protocol,$exclusion,$autoResume,$actualVersion,$actualDigest,$bootBefore,$bootAfter,$ticketHash,$now)",
+                ("$inspection", inspectionId), ("$intent", intentId), ("$machine", scope.MachineId),
+                ("$chain", scope.ChainId), ("$previous", scope.PreviousHeadOperationId),
+                ("$successor", successorOperationId), ("$generation", successorGeneration),
+                ("$request", requestId), ("$fingerprint", verified.KeyFingerprint.ToUpperInvariant()),
+                ("$bodyDigest", requestBodyDigest), ("$evidenceDigest", evidenceDigest),
+                ("$helper", inspection.HelperBuildSha256.ToLowerInvariant()), ("$runtime", inspection.HelperRuntime),
+                ("$protocol", inspection.HelperProtocol), ("$exclusion", inspection.ExclusionProvenance),
+                ("$autoResume", inspection.OldUpdaterAutoResumeStatus),
+                ("$actualVersion", inspection.ActualInstalledVersion),
+                ("$actualDigest", inspection.ActualInstalledDigest.ToLowerInvariant()),
+                ("$bootBefore", inspection.NativeBootIdBefore), ("$bootAfter", inspection.NativeBootIdAfter),
+                ("$ticketHash", ticketHash), ("$now", nowMs)))
+            {
+                successor.Transaction = tx;
+                if (successor.ExecuteNonQuery() != 1)
+                    throw new InvalidOperationException("The recovery successor evidence could not be recorded.");
+            }
+            var qualifiedOldBinding = JsonSerializer.Serialize(new
             {
                 machineId = scope.MachineId,
                 chainId = scope.ChainId,
@@ -499,12 +621,13 @@ public sealed partial class ControllerDatabase
                 generation = scope.Generation,
                 held = scope.Held,
             }, RecoveryIntentJsonOptions);
-            var newBinding = JsonSerializer.Serialize(new
+            var qualifiedNewBinding = JsonSerializer.Serialize(new
             {
                 intentId,
                 requestId,
-                outcome = "blocked",
-                blockReason,
+                outcome = "successorCreated",
+                successorOperationId,
+                generation = successorGeneration,
                 keyFingerprint = verified.KeyFingerprint.ToUpperInvariant(),
                 requestBodyDigest,
                 evidenceDigest,
@@ -514,22 +637,41 @@ public sealed partial class ControllerDatabase
                 nativeBootIdBefore = inspection.NativeBootIdBefore,
                 nativeBootIdAfter = inspection.NativeBootIdAfter,
                 exclusionProvenance = inspection.ExclusionProvenance,
+                oldUpdaterAutoResumeStatus = inspection.OldUpdaterAutoResumeStatus,
                 helperBuildSha256 = inspection.HelperBuildSha256,
+                ticketHash,
             }, RecoveryIntentJsonOptions);
-            using (var audit = Command("INSERT INTO agent_update_audit(audit_id,chain_id,operation_id,actor_id,request_id,event_type,old_binding_json,new_binding_json,created_at_unix_ms) VALUES($audit,$chain,$head,$actor,$request,'recoveryInspectionBlocked',$old,$new,$now)",
-                ("$audit", Guid.NewGuid().ToString("N")), ("$chain", scope.ChainId), ("$head", scope.PreviousHeadOperationId),
-                ("$actor", auditActor), ("$request", requestId), ("$old", oldBinding),
-                ("$new", newBinding), ("$now", now.ToUnixTimeMilliseconds())))
+            using (var audit = Command("INSERT INTO agent_update_audit(audit_id,chain_id,operation_id,actor_id,request_id,event_type,old_binding_json,new_binding_json,created_at_unix_ms) VALUES($audit,$chain,$head,$actor,$request,'recoveryInspectionQualified',$old,$new,$now)",
+                ("$audit", Guid.NewGuid().ToString("N")), ("$chain", scope.ChainId),
+                ("$head", scope.PreviousHeadOperationId), ("$actor", auditActor), ("$request", requestId),
+                ("$old", qualifiedOldBinding), ("$new", qualifiedNewBinding), ("$now", nowMs)))
             {
                 audit.Transaction = tx;
-                audit.ExecuteNonQuery();
+                if (audit.ExecuteNonQuery() != 1)
+                    throw new InvalidOperationException("The qualified recovery audit could not be recorded.");
+            }
+            using (var revoke = Command("UPDATE agent_update_evidence_challenges SET consumed_at_unix_ms=COALESCE(consumed_at_unix_ms,$now) WHERE machine_id=$machine AND chain_id=$chain AND head_operation_id=$old AND purpose='recoveryInspection' AND consumed_at_unix_ms IS NULL",
+                ("$now", nowMs), ("$machine", scope.MachineId), ("$chain", scope.ChainId),
+                ("$old", scope.PreviousHeadOperationId)))
+            {
+                revoke.Transaction = tx;
+                revoke.ExecuteNonQuery();
             }
 
+            string machinePublicKey;
+            using (var machineKey = Command("SELECT public_key FROM machines WHERE machine_id=$id", ("$id", scope.MachineId)))
+            {
+                machineKey.Transaction = tx;
+                machinePublicKey = machineKey.ExecuteScalar() as string
+                    ?? throw new InvalidOperationException("The enrolled Agent key is unavailable.");
+            }
+            var successorKeyFingerprint = PublicKeyFingerprint(machinePublicKey);
             tx.Commit();
-            throw new AgentRecoveryQualificationUnavailableException(blockReason);
+            return new AgentUpdateTicketResponse(successorOperationId, scope.MachineId, ticket, expires,
+                scope.TargetReleaseVersion, scope.TargetVersion, scope.TargetPackageSha256,
+                scope.ChainId, successorOperationId, successorGeneration, release.PackageSizeBytes, successorKeyFingerprint);
         }
     }
-
     public AgentUpdateRecoveryIntentDto? GetRecoveryByRequestId(string machineId, string actorId, string requestId)
     {
         RecoveryIdentifier(machineId, nameof(machineId));
@@ -617,7 +759,7 @@ public sealed partial class ControllerDatabase
             throw new InvalidOperationException("Recovery intent is not attached to an eligible held update operation.");
     }
 
-    private static string RecoveryQualificationBlockReason(RecoveryIntentScope scope,
+    private string? RecoveryQualificationBlockReason(RecoveryIntentScope scope,
         SignedRecoveryInspection inspection)
     {
         if (scope.BackupOwnerOperationId is null || scope.BackupDigest is null
@@ -630,8 +772,55 @@ public sealed partial class ControllerDatabase
                 || !FixedHexEquals(scope.SourceEvidenceDigest, inspection.BoundSourceEvidenceDigest ?? string.Empty)))
             return "originalBackupBindingUnavailable";
 
-        // No independently pinned helper or exclusion qualification source is configured yet.
-        return "helperBuildNotPinned";
+        if (string.IsNullOrWhiteSpace(agentMaintenancePinnedHelperSha256) ||
+            !FixedHexEquals(inspection.HelperBuildSha256, agentMaintenancePinnedHelperSha256) ||
+            inspection.HelperProtocol != 1)
+            return "helperBuildNotPinned";
+
+        var sameBoot = string.Equals(inspection.NativeBootIdBefore, inspection.NativeBootIdAfter, StringComparison.Ordinal);
+        if (!agentMaintenanceExclusionProcedureQualified ||
+            string.IsNullOrWhiteSpace(agentMaintenanceQualifiedAutoResumeStatus) ||
+            !string.Equals(inspection.OldUpdaterAutoResumeStatus, agentMaintenanceQualifiedAutoResumeStatus, StringComparison.Ordinal) ||
+            inspection.ExclusionProvenance is not ("continuousSharedLock" or "verifiedFullHostRestart") ||
+            (inspection.ExclusionProvenance == "verifiedFullHostRestart" && sameBoot) ||
+            (inspection.ExclusionProvenance == "continuousSharedLock" && !sameBoot))
+            return "exclusionProvenanceUnavailable";
+
+        return null;
+    }
+
+    private sealed record RecoveryTargetRelease(string PackagePath, string PackageSha256, long PackageSizeBytes,
+        string TargetVersion, string TargetRuntime, int ChallengeProtocol);
+
+    private RecoveryTargetRelease ReadRecoveryTargetRelease(SqliteTransaction tx, RecoveryIntentScope scope)
+    {
+        using var release = Command("SELECT version,package_sha256,package_path,package_size_bytes,target_runtime,agent_update_challenge_protocol FROM agent_releases WHERE version=$version",
+            ("$version", scope.TargetReleaseVersion));
+        release.Transaction = tx;
+        using var row = release.ExecuteReader();
+        if (!row.Read())
+            throw new AgentReleaseUnavailableException(AgentReleaseUnavailableKind.InvalidArchive);
+        var version = row.GetString(0);
+        var hash = row.GetString(1);
+        var path = row.GetString(2);
+        var size = row.GetInt64(3);
+        var runtime = row.GetString(4);
+        var protocol = row.GetInt32(5);
+        if (!string.Equals(version, scope.TargetReleaseVersion, StringComparison.Ordinal) ||
+            !string.Equals(version, scope.TargetVersion, StringComparison.Ordinal) ||
+            !FixedHexEquals(hash, scope.TargetPackageSha256) ||
+            !string.Equals(runtime, scope.TargetRuntime, StringComparison.Ordinal) ||
+            protocol != 2 || scope.TargetProtocol != 2)
+            throw new AgentReleaseUnavailableException(AgentReleaseUnavailableKind.UnsupportedProtocolOrRuntime);
+        return new(path, hash, size, version, runtime, protocol);
+    }
+
+    private bool HeldAllocationExists(SqliteTransaction tx, string machineId)
+    {
+        using var allocation = Command("SELECT EXISTS(SELECT 1 FROM leases WHERE machine_id=$id AND allocation_held=1)",
+            ("$id", machineId));
+        allocation.Transaction = tx;
+        return Convert.ToInt64(allocation.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture) != 0;
     }
 
     private static string RecoveryInspectionChallengeBindingDigest(string intentId, string keyFingerprint,

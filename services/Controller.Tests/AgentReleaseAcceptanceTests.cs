@@ -985,17 +985,112 @@ public sealed class AgentReleaseAcceptanceTests
         Assert.Equal(HttpStatusCode.PreconditionRequired, response.StatusCode);
         await fixture.AssertLockedAsync(ticket, outcome);
     }
-    [Theory]
-    [InlineData("awaitingHeartbeat", "2.3.4")]
-    [InlineData("rollingBack", "1.2.3")]
-    public async Task StartedReleaseRemainsHeldAfterReportedVersionHeartbeat(string outcome, string version)
+    [Fact]
+    public async Task ReportedAppliedOutcomeIsConfirmedOnlyByAProvenMatchingHeartbeat()
     {
         await using var fixture = await AcceptanceFixture.CreateAsync();
         var ticket = await fixture.PublishAndReserveAsync();
         await fixture.StartAndDownloadAsync(ticket);
-        await fixture.ReportAsync(ticket, outcome);
-        await fixture.HeartbeatAsync(version);
-        await fixture.AssertLockedAsync(ticket, outcome);
+        await fixture.ReportAsync(ticket, "awaitingHeartbeat");
+
+        // A heartbeat that does not prove the target version cannot release the held chain.
+        await fixture.HeartbeatAsync("1.2.3");
+        await fixture.AssertLockedAsync(ticket, "awaitingHeartbeat");
+
+        await fixture.HeartbeatAsync("2.3.4");
+        var machine = await fixture.MachineAsync();
+        Assert.Equal("completed", machine.AgentUpdateStatus);
+        Assert.False(machine.AllocationHeld);
+        await fixture.AssertRentalCreatedAsync();
+    }
+
+    [Fact]
+    public async Task ReportedRollbackOutcomeIsConfirmedOnlyAfterSigningTheBoundSourceVersion()
+    {
+        await using var fixture = await AcceptanceFixture.CreateAsync();
+        var ticket = await fixture.PublishAndReserveAsync();
+        var operation = await fixture.StartAndDownloadAsync(ticket);
+        var challengeRequest = new AgentUpdateSourceChallengeRequest(ticket.Ticket, ticket.ReleaseVersion,
+            ticket.TargetVersion, ticket.TargetPackageSha256, "rollback-source-challenge", new string('a', 64), "win-x64", 1);
+        using var challengeResponse = await fixture.SendSignedAsync(AcceptanceFixture.UpdatePath(ticket, "source-challenge"),
+            challengeRequest, nonce: "rollback-source-challenge-nonce");
+        Assert.Equal(HttpStatusCode.OK, challengeResponse.StatusCode);
+        var challenge = Assert.IsType<AgentUpdateSourceChallengeResponse>(
+            await challengeResponse.Content.ReadFromJsonAsync<AgentUpdateSourceChallengeResponse>());
+        var binding = fixture.CreateSignedSourceBinding(ticket, operation, challengeRequest, challenge,
+            "rollback-source-binding", "rollback-boot");
+        using var bound = await fixture.SendSignedAsync(AcceptanceFixture.UpdatePath(ticket, "source-binding"), binding,
+            nonce: "rollback-source-binding-nonce");
+        Assert.Equal(HttpStatusCode.OK, bound.StatusCode);
+
+        await fixture.ReportAsync(ticket, "rollingBack");
+        await fixture.HeartbeatAsync("2.3.4");
+        await fixture.AssertLockedAsync(ticket, "rollingBack");
+
+        await fixture.HeartbeatAsync("1.2.3");
+        var machine = await fixture.MachineAsync();
+        Assert.Equal("rolledBack", machine.AgentUpdateStatus);
+        Assert.False(machine.AllocationHeld);
+        await fixture.AssertRentalCreatedAsync();
+    }
+
+    [Fact]
+    public async Task FailedUpdateIsSupersededByAnAuditedRecoverySuccessorUnderTheSameHold()
+    {
+        const string machineId = "0123456789abcdef0123456789abcdef";
+        await using var fixture = await AcceptanceFixture.CreateAsync();
+        var failed = await fixture.PublishAndReserveAsync();
+        var failedOperation = await fixture.StartAndDownloadAsync(failed);
+
+        // Bind the source/backup provenance that qualified recovery depends on.
+        var challengeRequest = new AgentUpdateSourceChallengeRequest(failed.Ticket, failed.ReleaseVersion,
+            failed.TargetVersion, failed.TargetPackageSha256, "successor-source-challenge", new string('a', 64), "win-x64", 1);
+        using var challengeResponse = await fixture.SendSignedAsync(AcceptanceFixture.UpdatePath(failed, "source-challenge"),
+            challengeRequest, nonce: "successor-source-challenge-nonce");
+        Assert.Equal(HttpStatusCode.OK, challengeResponse.StatusCode);
+        var challenge = Assert.IsType<AgentUpdateSourceChallengeResponse>(
+            await challengeResponse.Content.ReadFromJsonAsync<AgentUpdateSourceChallengeResponse>());
+        var binding = fixture.CreateSignedSourceBinding(failed, failedOperation, challengeRequest, challenge,
+            "successor-source-binding", "successor-boot");
+        using var bound = await fixture.SendSignedAsync(AcceptanceFixture.UpdatePath(failed, "source-binding"), binding,
+            nonce: "successor-source-binding-nonce");
+        Assert.Equal(HttpStatusCode.OK, bound.StatusCode);
+
+        await fixture.ReportAsync(failed, "failed");
+        var target = await fixture.PublishReleaseVersionAsync("3.0.0");
+        var intent = fixture.Database.CreateRecoveryIntent(machineId, failedOperation.ChainId,
+            failedOperation.CurrentHeadOperationId, failedOperation.Generation, target.Version,
+            "acceptance recovery successor", "successor-recovery-intent", "acceptance-admin");
+        var bootId = Guid.NewGuid().ToString("N");
+        var inspection = fixture.SignRecoveryEvidence(new SignedRecoveryInspection(
+            machineId, fixture.KeyFingerprint, intent.IntentId, intent.ChainId, intent.PreviousHeadOperationId,
+            intent.Generation, "successor-recovery-inspection", target.Version, target.PackageSha256,
+            "1.2.3", "verifiedOriginalBackup", null, null, failedOperation.OperationId, binding.BackupDigest,
+            new string('D', 64), bootId, bootId, "continuousSharedLock", "qualifiedNotApplicable",
+            new string('E', 64), "win-x64", 1, string.Empty));
+        var inspectionPath = $"/agent/machines/{machineId}/agent-update-recovery/{intent.IntentId}/inspection";
+        using var issued = await fixture.SendSignedAsync(
+            $"/agent/machines/{machineId}/agent-update-recovery/{intent.IntentId}/challenge",
+            new AgentUpdateRecoveryInspectionChallengeRequest(inspection), nonce: "successor-recovery-challenge-nonce");
+        Assert.Equal(HttpStatusCode.OK, issued.StatusCode);
+        var issuedChallenge = Assert.IsType<AgentUpdateRecoveryInspectionChallengeResponse>(
+            await issued.Content.ReadFromJsonAsync<AgentUpdateRecoveryInspectionChallengeResponse>());
+        using var committed = await fixture.SendSignedAsync(inspectionPath, inspection,
+            nonce: issuedChallenge.Challenge);
+        Assert.Equal(HttpStatusCode.OK, committed.StatusCode);
+        var successor = Assert.IsType<AgentUpdateTicketResponse>(
+            await committed.Content.ReadFromJsonAsync<AgentUpdateTicketResponse>());
+        Assert.NotEqual(failedOperation.OperationId, successor.OperationId);
+        Assert.Equal("awaitingInstaller", (await fixture.MachineAsync()).AgentUpdateStatus);
+
+        await fixture.StartAndDownloadAsync(successor, fixture.PackageFor("3.0.0"));
+        await fixture.ReportAsync(successor, "awaitingHeartbeat");
+        await fixture.HeartbeatAsync("3.0.0");
+        var machine = await fixture.MachineAsync();
+        Assert.Equal("completed", machine.AgentUpdateStatus);
+        Assert.Equal(successor.OperationId, machine.AgentUpdateOperationId);
+        Assert.False(machine.AllocationHeld);
+        await fixture.AssertRentalCreatedAsync();
     }
 
     [Fact]
@@ -1157,12 +1252,22 @@ public sealed class AgentReleaseAcceptanceTests
         private HttpClient agent = null!;
         private HttpClient renter = null!;
         private readonly byte[] package = AgentPackageCorpus.Valid();
+        private readonly Dictionary<string, byte[]> publishedPackages = new(StringComparer.Ordinal);
         private int rentalAttempt;
         private string? syncChallenge;
         public AcceptanceClock Clock { get; }
         public HttpClient Admin { get; private set; } = null!;
         public string Root => root;
         public string? CurrentSyncChallenge => syncChallenge;
+        public ControllerDatabase Database => app.Services.GetRequiredService<ControllerDatabase>();
+        public string KeyFingerprint => Convert.ToHexString(SHA256.HashData(key.ExportSubjectPublicKeyInfo()));
+
+        public SignedRecoveryInspection SignRecoveryEvidence(SignedRecoveryInspection inspection) =>
+            inspection with
+            {
+                EvidenceSignature = Convert.ToBase64String(key.SignData(
+                    AgentUpdateRecoveryInspectionCanonicalizer.CanonicalBytes(inspection), HashAlgorithmName.SHA256))
+            };
 
         private AcceptanceFixture(string root, AcceptanceClock clock, WebApplication app)
         {
@@ -1207,6 +1312,9 @@ public sealed class AgentReleaseAcceptanceTests
                     ["ServiceCredential"] = "acceptance-fixture-only",
                     ["PublicIpEndpoint"] = "",
                     ["AgentReleaseRemediationEnabled"] = "true",
+                    ["AgentMaintenancePinnedHelperSha256"] = new string('E', 64),
+                    ["AgentMaintenanceExclusionProcedureQualified"] = "true",
+                    ["AgentMaintenanceQualifiedAutoResumeStatus"] = "qualifiedNotApplicable",
                 });
                 builder.WebHost.UseTestServer();
                 builder.Services.AddTransient<IStartupFilter, LoopbackTestFilter>();
@@ -1253,6 +1361,20 @@ public sealed class AgentReleaseAcceptanceTests
             }
             return sourceRoot;
         }
+
+        public async Task<AgentReleaseDto> PublishReleaseVersionAsync(string version)
+        {
+            var bytes = AgentUpdateTestPackage.Create(version);
+            var hash = Convert.ToHexString(SHA256.HashData(bytes));
+            var artifact = Path.Combine(root, "agent-releases", "sha256", hash[..2].ToLowerInvariant(), hash.ToLowerInvariant() + ".zip");
+            Directory.CreateDirectory(Path.GetDirectoryName(artifact)!);
+            await File.WriteAllBytesAsync(artifact, bytes);
+            publishedPackages[version] = bytes;
+            return Database.PublishAgentRelease(new(version, "stable", "fixture", hash, artifact, bytes.Length,
+                "0123456789ab", false, true, "win-x64", 2));
+        }
+
+        public byte[] PackageFor(string version) => publishedPackages[version];
 
         public async Task<AgentUpdateTicketResponse> PublishAndReserveAsync()
         {
@@ -1305,7 +1427,8 @@ public sealed class AgentReleaseAcceptanceTests
             return ticket;
         }
 
-        public async Task<AgentUpdateOperationDto> StartAndDownloadAsync(AgentUpdateTicketResponse ticket)
+        public async Task<AgentUpdateOperationDto> StartAndDownloadAsync(AgentUpdateTicketResponse ticket,
+            byte[]? expectedPackage = null)
         {
             using var started = await agent.PostAsJsonAsync(UpdatePath(ticket, "start"),
                 new AgentUpdateTicketRequest(ticket.Ticket, ticket.ReleaseVersion, ticket.TargetVersion, ticket.TargetPackageSha256,
@@ -1323,7 +1446,7 @@ public sealed class AgentReleaseAcceptanceTests
             Assert.Equal(HttpStatusCode.OK, download.StatusCode);
             Assert.Equal("no-store", download.Headers.CacheControl?.ToString());
             Assert.Equal("application/zip", download.Content.Headers.ContentType?.MediaType);
-            Assert.Equal(package, await download.Content.ReadAsByteArrayAsync());
+            Assert.Equal(expectedPackage ?? package, await download.Content.ReadAsByteArrayAsync());
             return operation;
         }
 

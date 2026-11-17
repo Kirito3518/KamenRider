@@ -26,9 +26,12 @@ public sealed class AgentRecoveryTests
         using var version = connection.CreateCommand();
         version.CommandText = "PRAGMA user_version";
 
-        Assert.Equal(20L, Convert.ToInt64(version.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture));
-        ControllerDatabaseMaintenance.ValidateCanonicalSchema(connection, 20);
+        Assert.Equal(23L, Convert.ToInt64(version.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture));
+        ControllerDatabaseMaintenance.ValidateCanonicalSchema(connection, 23);
         ControllerDatabaseMaintenance.ValidateRecoverySchema(connection);
+        ControllerDatabaseMaintenance.ValidateRecoverySuccessorSchema(connection);
+        ControllerDatabaseMaintenance.ValidateUpdateConfirmationSchema(connection);
+        ControllerDatabaseMaintenance.ValidatePcControlSchema(connection);
     }
 
     [Fact]
@@ -720,6 +723,135 @@ public sealed class AgentRecoveryTests
             inspection, expected with { SourceAuthority = "unverifiedLegacyHint" }));
     }
 
+    private static void SetRecoveryBackupBinding(string databasePath, string operationId, string digest)
+    {
+        using var connection = Open(databasePath);
+        using var update = connection.CreateCommand();
+        update.CommandText = "UPDATE agent_update_operations SET backup_owner_operation_id=$owner,backup_digest=$digest WHERE operation_id=$operation";
+        update.Parameters.AddWithValue("$owner", operationId);
+        update.Parameters.AddWithValue("$digest", digest);
+        update.Parameters.AddWithValue("$operation", operationId);
+        Assert.Equal(1, update.ExecuteNonQuery());
+    }
+
+    [Fact]
+    public void QualifiedRecoveryInspectionCreatesSuccessorTicketAndSupersedesTheHeldChain()
+    {
+        using var fixture = new LeaseFixture(agentReleaseRemediationEnabled: true,
+            pinnedHelperSha256: new string('E', 64), exclusionProcedureQualified: true,
+            qualifiedAutoResumeStatus: "qualifiedNotApplicable");
+        AddRelease(fixture.Path, "2.0.0");
+        var ticket = fixture.Db.ReserveAgentUpdate("pc", "2.0.0", "admin", "qualified-recovery-seed");
+        var operation = fixture.Db.StartAgentUpdate("pc", ticket.OperationId, ticket.Ticket,
+            ticket.ReleaseVersion, ticket.TargetVersion, ticket.TargetPackageSha256, "qualified-recovery-start");
+        SetRecoveryBackupBinding(fixture.Path, operation.OperationId, new string('C', 64));
+        var intent = CreateIntent(fixture.Db, operation, operation.Generation, "qualified-recovery-intent");
+        var fingerprint = Convert.ToHexString(SHA256.HashData(Convert.FromBase64String(fixture.Db.PublicKey("pc")!)));
+        const string requestId = "qualified-inspection-1";
+        var path = $"/agent/machines/pc/agent-update-recovery/{Get<string>(intent, "IntentId")}/inspection";
+        var inspection = CreateSignedInspection(intent, operation, fingerprint, requestId, fixture.AgentKey);
+        var challenge = CreateRecoveryChallenge(fixture, intent, inspection);
+        var generationBefore = Scalar(fixture.Path,
+            "SELECT generation FROM agent_maintenance_chains WHERE chain_id=$chain", ("$chain", operation.ChainId));
+
+        var successor = Assert.IsType<AgentUpdateTicketResponse>(InvokeRequired(fixture.Db, "CommitRecoveryInspection",
+            VerifiedAgentRequestFixture.CreateWithNonce(fixture.Db, "pc", path, inspection, Get<string>(challenge, "Challenge")),
+            Get<string>(intent, "IntentId"), requestId, inspection));
+
+        Assert.NotEqual(operation.OperationId, successor.OperationId);
+        Assert.True(System.Text.RegularExpressions.Regex.IsMatch(successor.Ticket, @"\A[A-Za-z0-9_-]{43}\z"),
+            $"successor ticket has length {successor.Ticket.Length}");
+        Assert.Equal(operation.MachineId, successor.MachineId);
+        Assert.Equal(operation.TargetVersion, successor.TargetVersion);
+        Assert.Equal(1L, Scalar(fixture.Path, "SELECT COUNT(*) FROM agent_update_recovery_successors"));
+        Assert.Equal(1L, Scalar(fixture.Path,
+            "SELECT COUNT(*) FROM agent_update_operations WHERE operation_id=$successor AND parent_operation_id=$old",
+            ("$successor", successor.OperationId), ("$old", operation.OperationId)));
+        Assert.Equal(1L, Scalar(fixture.Path,
+            "SELECT COUNT(*) FROM agent_maintenance_chains WHERE chain_id=$chain AND generation=$expectedGeneration AND held=1 AND current_head_operation_id=$successor",
+            ("$chain", operation.ChainId), ("$expectedGeneration", generationBefore + 1), ("$successor", successor.OperationId)));
+        Assert.Equal(1L, Scalar(fixture.Path,
+            "SELECT COUNT(*) FROM agent_update_operations WHERE operation_id=$old AND status='superseded'",
+            ("$old", operation.OperationId)));
+        Assert.Equal(1L, Scalar(fixture.Path,
+            "SELECT COUNT(*) FROM agent_update_recovery_intents WHERE intent_id=$intent AND status='superseded'",
+            ("$intent", Get<string>(intent, "IntentId"))));
+        Assert.Equal(0L, Scalar(fixture.Path, "SELECT COUNT(*) FROM agent_update_recovery_inspections"));
+        Assert.Equal(1L, Scalar(fixture.Path,
+            "SELECT COUNT(*) FROM agent_update_audit WHERE event_type='recoveryInspectionQualified'"));
+        Assert.Equal(1L, Scalar(fixture.Path,
+            "SELECT COUNT(*) FROM agent_update_evidence_challenges WHERE purpose='recoveryInspection' AND consumed_at_unix_ms IS NOT NULL"));
+        Assert.False(Assert.Single(fixture.Db.List()).CanRent);
+
+        var started = fixture.Db.StartAgentUpdate("pc", successor.OperationId, successor.Ticket,
+            successor.ReleaseVersion, successor.TargetVersion, successor.TargetPackageSha256,
+            "qualified-recovery-successor-start");
+        Assert.Equal("installing", started.Status);
+        Assert.NotNull(Record.Exception(() => fixture.Db.StartAgentUpdate("pc", ticket.OperationId, ticket.Ticket,
+            ticket.ReleaseVersion, ticket.TargetVersion, ticket.TargetPackageSha256, "old-ticket-after-successor")));
+        Assert.NotNull(Record.Exception(() => InvokeRequired(fixture.Db, "CommitRecoveryInspection",
+            VerifiedAgentRequestFixture.Create(fixture.Db, "pc", path, inspection),
+            Get<string>(intent, "IntentId"), requestId, inspection)));
+        Assert.Equal(1L, Scalar(fixture.Path, "SELECT COUNT(*) FROM agent_update_recovery_successors"));
+    }
+
+    [Fact]
+    public void QualifiedRecoveryInspectionBlocksWhenTheHelperBuildIsNotThePinnedBuild()
+    {
+        using var fixture = new LeaseFixture(agentReleaseRemediationEnabled: true,
+            pinnedHelperSha256: new string('E', 64), exclusionProcedureQualified: true,
+            qualifiedAutoResumeStatus: "qualifiedNotApplicable");
+        AddRelease(fixture.Path, "2.0.0");
+        var ticket = fixture.Db.ReserveAgentUpdate("pc", "2.0.0", "admin", "pin-mismatch-seed");
+        var operation = fixture.Db.StartAgentUpdate("pc", ticket.OperationId, ticket.Ticket,
+            ticket.ReleaseVersion, ticket.TargetVersion, ticket.TargetPackageSha256, "pin-mismatch-start");
+        SetRecoveryBackupBinding(fixture.Path, operation.OperationId, new string('C', 64));
+        var intent = CreateIntent(fixture.Db, operation, operation.Generation, "pin-mismatch-intent");
+        var fingerprint = Convert.ToHexString(SHA256.HashData(Convert.FromBase64String(fixture.Db.PublicKey("pc")!)));
+        const string requestId = "pin-mismatch-inspection";
+        var path = $"/agent/machines/pc/agent-update-recovery/{Get<string>(intent, "IntentId")}/inspection";
+        var inspection = CreateSignedInspection(intent, operation, fingerprint, requestId, fixture.AgentKey);
+        var mismatched = SignRecoveryInspection(inspection with { HelperBuildSha256 = new string('9', 64) }, fixture.AgentKey);
+        var challenge = CreateRecoveryChallenge(fixture, intent, mismatched);
+
+        var blocked = Record.Exception(() => InvokeRequired(fixture.Db, "CommitRecoveryInspection",
+            VerifiedAgentRequestFixture.CreateWithNonce(fixture.Db, "pc", path, mismatched, Get<string>(challenge, "Challenge")),
+            Get<string>(intent, "IntentId"), requestId, mismatched));
+
+        Assert.NotNull(blocked);
+        Assert.Equal("AgentRecoveryQualificationUnavailableException", blocked!.GetType().Name);
+        Assert.Equal("helperBuildNotPinned", Get<string>(blocked, "BlockReason"));
+        Assert.Equal(0L, Scalar(fixture.Path, "SELECT COUNT(*) FROM agent_update_recovery_successors"));
+        Assert.Equal(1L, Scalar(fixture.Path, "SELECT COUNT(*) FROM agent_update_recovery_inspections"));
+    }
+
+    [Fact]
+    public void QualifiedRecoveryInspectionBlocksWhenTheExclusionProcedureIsNotQualified()
+    {
+        using var fixture = new LeaseFixture(agentReleaseRemediationEnabled: true,
+            pinnedHelperSha256: new string('E', 64), exclusionProcedureQualified: false,
+            qualifiedAutoResumeStatus: "qualifiedNotApplicable");
+        AddRelease(fixture.Path, "2.0.0");
+        var ticket = fixture.Db.ReserveAgentUpdate("pc", "2.0.0", "admin", "exclusion-missing-seed");
+        var operation = fixture.Db.StartAgentUpdate("pc", ticket.OperationId, ticket.Ticket,
+            ticket.ReleaseVersion, ticket.TargetVersion, ticket.TargetPackageSha256, "exclusion-missing-start");
+        SetRecoveryBackupBinding(fixture.Path, operation.OperationId, new string('C', 64));
+        var intent = CreateIntent(fixture.Db, operation, operation.Generation, "exclusion-missing-intent");
+        var fingerprint = Convert.ToHexString(SHA256.HashData(Convert.FromBase64String(fixture.Db.PublicKey("pc")!)));
+        const string requestId = "exclusion-missing-inspection";
+        var path = $"/agent/machines/pc/agent-update-recovery/{Get<string>(intent, "IntentId")}/inspection";
+        var inspection = CreateSignedInspection(intent, operation, fingerprint, requestId, fixture.AgentKey);
+        var challenge = CreateRecoveryChallenge(fixture, intent, inspection);
+
+        var blocked = Record.Exception(() => InvokeRequired(fixture.Db, "CommitRecoveryInspection",
+            VerifiedAgentRequestFixture.CreateWithNonce(fixture.Db, "pc", path, inspection, Get<string>(challenge, "Challenge")),
+            Get<string>(intent, "IntentId"), requestId, inspection));
+
+        Assert.NotNull(blocked);
+        Assert.Equal("AgentRecoveryQualificationUnavailableException", blocked!.GetType().Name);
+        Assert.Equal("exclusionProvenanceUnavailable", Get<string>(blocked, "BlockReason"));
+        Assert.Equal(0L, Scalar(fixture.Path, "SELECT COUNT(*) FROM agent_update_recovery_successors"));
+    }
     private static SignedRecoveryInspection ValidInspection() => new(
         "0123456789abcdef0123456789abcdef",
         new string('A', 64),

@@ -24,10 +24,20 @@ public sealed class LeaseFixture : IDisposable {
     public ControllerDatabase Db;
     public ECDsa AgentKey { get; } = ECDsa.Create();
     private readonly bool agentReleaseRemediationEnabled;
+    private readonly string pinnedHelperSha256;
+    private readonly bool exclusionProcedureQualified;
+    private readonly string qualifiedAutoResumeStatus;
     public LeaseService Leases => new(Db);
-    public LeaseFixture(bool agentReleaseRemediationEnabled = false) {
+    public LeaseFixture(bool agentReleaseRemediationEnabled = false, string pinnedHelperSha256 = "",
+        bool exclusionProcedureQualified = false, string qualifiedAutoResumeStatus = "") {
         this.agentReleaseRemediationEnabled = agentReleaseRemediationEnabled;
-        Db = new(Path, clock: Time, agentReleaseRemediationEnabled: agentReleaseRemediationEnabled);
+        this.pinnedHelperSha256 = pinnedHelperSha256;
+        this.exclusionProcedureQualified = exclusionProcedureQualified;
+        this.qualifiedAutoResumeStatus = qualifiedAutoResumeStatus;
+        Db = new(Path, clock: Time, agentReleaseRemediationEnabled: agentReleaseRemediationEnabled,
+            agentMaintenancePinnedHelperSha256: pinnedHelperSha256,
+            agentMaintenanceExclusionProcedureQualified: exclusionProcedureQualified,
+            agentMaintenanceQualifiedAutoResumeStatus: qualifiedAutoResumeStatus);
         Db.EnrollWithTicket(new("pc",Convert.ToBase64String(AgentKey.ExportSubjectPublicKeyInfo()),"192.0.2.1","001122334455",1,2));
         Db.Update("pc",new("PC",500,1,2),1); Db.Approve("pc","admin");
         Sync();
@@ -47,7 +57,9 @@ public sealed class LeaseFixture : IDisposable {
         Sync("boot",new CommandResult(apply.CommandId,"applied",apply.LeaseRevision));
         return (await Leases.GetLeaseAsync(lease.Id,default))!;
     }
-    public void Reopen() { Db.Dispose(); Db=new(Path,clock:Time,agentReleaseRemediationEnabled:agentReleaseRemediationEnabled); }
+    public void Reopen() { Db.Dispose(); Db=new(Path,clock:Time,agentReleaseRemediationEnabled:agentReleaseRemediationEnabled,
+        agentMaintenancePinnedHelperSha256:pinnedHelperSha256,agentMaintenanceExclusionProcedureQualified:exclusionProcedureQualified,
+        agentMaintenanceQualifiedAutoResumeStatus:qualifiedAutoResumeStatus); }
     public void Dispose() { Db.Dispose(); AgentKey.Dispose(); var directory=System.IO.Path.GetDirectoryName(Path)!; if(Directory.Exists(directory))Directory.Delete(directory,true); }
 }
 public class LeaseTests {

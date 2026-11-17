@@ -52,12 +52,13 @@ public sealed partial class ControllerDatabase
     {
         lock (gate)
         {
-            using var command = Command("SELECT version,channel,release_notes,package_sha256,package_size_bytes,source_commit,source_dirty,published_at_unix_ms FROM agent_releases ORDER BY published_at_unix_ms DESC,version DESC");
+            using var command = Command("SELECT version,channel,release_notes,package_sha256,package_size_bytes,source_commit,source_dirty,published_at_unix_ms,target_runtime,agent_update_challenge_protocol FROM agent_releases ORDER BY published_at_unix_ms DESC,version DESC");
             using var rows = command.ExecuteReader();
             var releases = new List<AgentReleaseDto>();
             while (rows.Read())
                 releases.Add(new(rows.GetString(0), rows.GetString(1), rows.GetString(2), rows.GetString(3), rows.GetInt64(4),
-                    rows.GetString(5), rows.GetInt32(6) != 0, DateTimeOffset.FromUnixTimeMilliseconds(rows.GetInt64(7))));
+                    rows.GetString(5), rows.GetInt32(6) != 0, DateTimeOffset.FromUnixTimeMilliseconds(rows.GetInt64(7)),
+                    rows.GetString(8), rows.GetInt32(9)));
             return releases.ToArray();
         }
     }
@@ -83,11 +84,13 @@ public sealed partial class ControllerDatabase
                 if (prior.ExecuteScalar() is not null) throw new InvalidOperationException("Reservation request was already used");
             }
 
-            using (var machine = Command("SELECT 1 FROM machines WHERE machine_id=$id", ("$id", machineId)))
+            string machinePublicKey;
+            using (var machine = Command("SELECT public_key FROM machines WHERE machine_id=$id", ("$id", machineId)))
             {
                 machine.Transaction = tx;
-                if (machine.ExecuteScalar() is null) throw new KeyNotFoundException();
+                machinePublicKey = machine.ExecuteScalar() as string ?? throw new KeyNotFoundException();
             }
+            var keyFingerprint = PublicKeyFingerprint(machinePublicKey);
 
             using (var allocation = Command("SELECT EXISTS(SELECT 1 FROM leases WHERE machine_id=$id AND allocation_held=1)", ("$id", machineId)))
             {
@@ -139,7 +142,8 @@ public sealed partial class ControllerDatabase
                 insert.ExecuteNonQuery();
             }
             tx.Commit();
-            return new(operationId, machineId, ticket, expires, releaseVersion, targetVersion, packageHash);
+            return new(operationId, machineId, ticket, expires, releaseVersion, targetVersion, packageHash,
+                chainId, operationId, 1, packageSize, keyFingerprint);
         }
     }
 
@@ -254,7 +258,7 @@ public sealed partial class ControllerDatabase
 
             long expiresAt;
             long? ticketStartedAt;
-            using (var operation = Command("SELECT ticket_expires_at_unix_ms,ticket_started_at_unix_ms FROM agent_update_operations WHERE operation_id=$operation AND ticket_hash=$ticket AND machine_id=$machine AND release_version=$release AND target_version=$target AND upper(target_package_sha256)=upper($hash) AND status='awaitingInstaller' AND started_at_unix_ms IS NULL AND ticket_package_downloaded_at_unix_ms IS NULL AND EXISTS(SELECT 1 FROM agent_maintenance_chains c WHERE c.chain_id=agent_update_operations.chain_id AND c.current_head_operation_id=agent_update_operations.operation_id AND c.held=1 AND c.generation=agent_update_operations.ticket_generation AND agent_update_operations.ticket_purpose='apply')",
+            using (var operation = Command("SELECT ticket_expires_at_unix_ms,ticket_started_at_unix_ms FROM agent_update_operations WHERE operation_id=$operation AND ticket_hash=$ticket AND machine_id=$machine AND release_version=$release AND target_version=$target AND upper(target_package_sha256)=upper($hash) AND status='awaitingInstaller' AND started_at_unix_ms IS NULL AND ticket_package_downloaded_at_unix_ms IS NULL AND EXISTS(SELECT 1 FROM agent_maintenance_chains c WHERE c.chain_id=agent_update_operations.chain_id AND c.current_head_operation_id=agent_update_operations.operation_id AND c.held=1 AND c.generation=agent_update_operations.ticket_generation AND agent_update_operations.ticket_purpose IN ('apply','recovery'))",
                 ("$operation", operationId), ("$ticket", ticketHash), ("$machine", machineId), ("$release", releaseVersion), ("$target", targetVersion), ("$hash", expectedHash)))
             {
                 operation.Transaction = tx;
@@ -264,7 +268,7 @@ public sealed partial class ControllerDatabase
                 ticketStartedAt = row.IsDBNull(1) ? null : row.GetInt64(1);
             }
             if (ticketStartedAt is not null || expiresAt <= nowMs) throw new UnauthorizedAccessException("Update ticket is expired or already used");
-            using (var start = Command("UPDATE agent_update_operations SET status='installing',ticket_started_at_unix_ms=$now,started_at_unix_ms=COALESCE(started_at_unix_ms,$now),updated_at_unix_ms=$now WHERE operation_id=$id AND machine_id=$machine AND ticket_hash=$ticket AND release_version=$release AND target_version=$target AND upper(target_package_sha256)=upper($hash) AND ticket_started_at_unix_ms IS NULL AND ticket_expires_at_unix_ms > $now AND status='awaitingInstaller' AND started_at_unix_ms IS NULL AND ticket_package_downloaded_at_unix_ms IS NULL AND EXISTS(SELECT 1 FROM agent_maintenance_chains c WHERE c.chain_id=agent_update_operations.chain_id AND c.current_head_operation_id=agent_update_operations.operation_id AND c.held=1 AND c.generation=agent_update_operations.ticket_generation AND agent_update_operations.ticket_purpose='apply')",
+            using (var start = Command("UPDATE agent_update_operations SET status='installing',ticket_started_at_unix_ms=$now,started_at_unix_ms=COALESCE(started_at_unix_ms,$now),updated_at_unix_ms=$now WHERE operation_id=$id AND machine_id=$machine AND ticket_hash=$ticket AND release_version=$release AND target_version=$target AND upper(target_package_sha256)=upper($hash) AND ticket_started_at_unix_ms IS NULL AND ticket_expires_at_unix_ms > $now AND status='awaitingInstaller' AND started_at_unix_ms IS NULL AND ticket_package_downloaded_at_unix_ms IS NULL AND EXISTS(SELECT 1 FROM agent_maintenance_chains c WHERE c.chain_id=agent_update_operations.chain_id AND c.current_head_operation_id=agent_update_operations.operation_id AND c.held=1 AND c.generation=agent_update_operations.ticket_generation AND agent_update_operations.ticket_purpose IN ('apply','recovery'))",
                 ("$now", nowMs), ("$id", operationId), ("$machine", machineId), ("$ticket", ticketHash), ("$release", releaseVersion), ("$target", targetVersion), ("$hash", expectedHash)))
             {
                 start.Transaction = tx;
@@ -302,13 +306,13 @@ public sealed partial class ControllerDatabase
             var nowMs = clock.GetUtcNow().ToUnixTimeMilliseconds();
             using var tx = connection.BeginTransaction();
             EnsureNotRestoreQuarantined(tx);
-            using (var operation = Command("SELECT 1 FROM agent_update_operations WHERE operation_id=$operation AND machine_id=$machine AND ticket_hash=$ticket AND release_version=$release AND target_version=$target AND upper(target_package_sha256)=upper($hash) AND ticket_started_at_unix_ms IS NOT NULL AND ticket_package_downloaded_at_unix_ms IS NULL AND status IN ('installing','awaitingHeartbeat','rollingBack') AND EXISTS(SELECT 1 FROM agent_maintenance_chains c WHERE c.chain_id=agent_update_operations.chain_id AND c.current_head_operation_id=agent_update_operations.operation_id AND c.held=1 AND c.generation=agent_update_operations.ticket_generation AND agent_update_operations.ticket_purpose='apply')",
+            using (var operation = Command("SELECT 1 FROM agent_update_operations WHERE operation_id=$operation AND machine_id=$machine AND ticket_hash=$ticket AND release_version=$release AND target_version=$target AND upper(target_package_sha256)=upper($hash) AND ticket_started_at_unix_ms IS NOT NULL AND ticket_package_downloaded_at_unix_ms IS NULL AND status IN ('installing','awaitingHeartbeat','rollingBack') AND EXISTS(SELECT 1 FROM agent_maintenance_chains c WHERE c.chain_id=agent_update_operations.chain_id AND c.current_head_operation_id=agent_update_operations.operation_id AND c.held=1 AND c.generation=agent_update_operations.ticket_generation AND agent_update_operations.ticket_purpose IN ('apply','recovery'))",
                 ("$operation", operationId), ("$machine", machineId), ("$ticket", ticketHash), ("$release", releaseVersion), ("$target", targetVersion), ("$hash", expectedHash)))
             {
                 operation.Transaction = tx;
                 if (operation.ExecuteScalar() is null) throw new UnauthorizedAccessException("Update ticket is invalid or has no package download remaining");
             }
-            using (var consume = Command("UPDATE agent_update_operations SET ticket_package_downloaded_at_unix_ms=$now,updated_at_unix_ms=$now WHERE operation_id=$operation AND machine_id=$machine AND ticket_hash=$ticket AND release_version=$release AND target_version=$target AND upper(target_package_sha256)=upper($hash) AND ticket_package_downloaded_at_unix_ms IS NULL AND ticket_started_at_unix_ms IS NOT NULL AND status IN ('installing','awaitingHeartbeat','rollingBack') AND EXISTS(SELECT 1 FROM agent_maintenance_chains c WHERE c.chain_id=agent_update_operations.chain_id AND c.current_head_operation_id=agent_update_operations.operation_id AND c.held=1 AND c.generation=agent_update_operations.ticket_generation AND agent_update_operations.ticket_purpose='apply')",
+            using (var consume = Command("UPDATE agent_update_operations SET ticket_package_downloaded_at_unix_ms=$now,updated_at_unix_ms=$now WHERE operation_id=$operation AND machine_id=$machine AND ticket_hash=$ticket AND release_version=$release AND target_version=$target AND upper(target_package_sha256)=upper($hash) AND ticket_package_downloaded_at_unix_ms IS NULL AND ticket_started_at_unix_ms IS NOT NULL AND status IN ('installing','awaitingHeartbeat','rollingBack') AND EXISTS(SELECT 1 FROM agent_maintenance_chains c WHERE c.chain_id=agent_update_operations.chain_id AND c.current_head_operation_id=agent_update_operations.operation_id AND c.held=1 AND c.generation=agent_update_operations.ticket_generation AND agent_update_operations.ticket_purpose IN ('apply','recovery'))",
                 ("$now", nowMs), ("$operation", operationId), ("$machine", machineId), ("$ticket", ticketHash), ("$release", releaseVersion), ("$target", targetVersion), ("$hash", expectedHash)))
             {
                 consume.Transaction = tx;
@@ -344,7 +348,7 @@ public sealed partial class ControllerDatabase
             var reportDigest = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonicalReport)));
             var reportRequestId = reportDigest;
             string currentStatus;
-            using (var operation = Command("SELECT status FROM agent_update_operations WHERE operation_id=$operation AND ticket_hash=$ticket AND machine_id=$machine AND release_version=$release AND target_version=$target AND upper(target_package_sha256)=upper($hash) AND ticket_started_at_unix_ms IS NOT NULL AND status IN ('installing','awaitingHeartbeat','rollingBack','failed') AND EXISTS(SELECT 1 FROM agent_maintenance_chains c WHERE c.chain_id=agent_update_operations.chain_id AND c.current_head_operation_id=agent_update_operations.operation_id AND c.held=1 AND c.generation=agent_update_operations.ticket_generation AND agent_update_operations.ticket_purpose='apply')",
+            using (var operation = Command("SELECT status FROM agent_update_operations WHERE operation_id=$operation AND ticket_hash=$ticket AND machine_id=$machine AND release_version=$release AND target_version=$target AND upper(target_package_sha256)=upper($hash) AND ticket_started_at_unix_ms IS NOT NULL AND status IN ('installing','awaitingHeartbeat','rollingBack','failed') AND EXISTS(SELECT 1 FROM agent_maintenance_chains c WHERE c.chain_id=agent_update_operations.chain_id AND c.current_head_operation_id=agent_update_operations.operation_id AND c.held=1 AND c.generation=agent_update_operations.ticket_generation AND agent_update_operations.ticket_purpose IN ('apply','recovery'))",
                 ("$operation", operationId), ("$ticket", ticketHash), ("$machine", machineId), ("$release", releaseVersion), ("$target", targetVersion), ("$hash", expectedHash)))
             {
                 operation.Transaction = tx;
@@ -388,7 +392,7 @@ public sealed partial class ControllerDatabase
                 _ => false,
             };
             if (!transitionAllowed) throw new InvalidOperationException("Update status cannot move backwards");
-            using (var update = Command("UPDATE agent_update_operations SET status=$status,updated_at_unix_ms=$now WHERE operation_id=$id AND machine_id=$machine AND ticket_hash=$ticket AND release_version=$release AND target_version=$target AND upper(target_package_sha256)=upper($hash) AND EXISTS(SELECT 1 FROM agent_maintenance_chains c WHERE c.chain_id=agent_update_operations.chain_id AND c.current_head_operation_id=agent_update_operations.operation_id AND c.held=1 AND c.generation=agent_update_operations.ticket_generation AND agent_update_operations.ticket_purpose='apply')",
+            using (var update = Command("UPDATE agent_update_operations SET status=$status,updated_at_unix_ms=$now WHERE operation_id=$id AND machine_id=$machine AND ticket_hash=$ticket AND release_version=$release AND target_version=$target AND upper(target_package_sha256)=upper($hash) AND EXISTS(SELECT 1 FROM agent_maintenance_chains c WHERE c.chain_id=agent_update_operations.chain_id AND c.current_head_operation_id=agent_update_operations.operation_id AND c.held=1 AND c.generation=agent_update_operations.ticket_generation AND agent_update_operations.ticket_purpose IN ('apply','recovery'))",
                 ("$status", status), ("$now", nowMs), ("$id", operationId), ("$machine", machineId), ("$ticket", ticketHash), ("$release", releaseVersion), ("$target", targetVersion), ("$hash", expectedHash)))
             {
                 update.Transaction = tx;
@@ -415,7 +419,7 @@ public sealed partial class ControllerDatabase
         var ticketHash = AgentUpdateTicketHash(ticket) ?? throw new UnauthorizedAccessException("Update ticket is invalid");
         lock (gate)
         {
-            using var operation = Command("SELECT operation_id,release_version,target_version,target_package_sha256 FROM agent_update_operations WHERE ticket_hash=$ticket AND machine_id=$machine AND EXISTS(SELECT 1 FROM agent_maintenance_chains c WHERE c.chain_id=agent_update_operations.chain_id AND c.current_head_operation_id=agent_update_operations.operation_id AND c.held=1 AND c.generation=agent_update_operations.ticket_generation AND agent_update_operations.ticket_purpose='apply')", ("$ticket", ticketHash), ("$machine", machineId));
+            using var operation = Command("SELECT operation_id,release_version,target_version,target_package_sha256 FROM agent_update_operations WHERE ticket_hash=$ticket AND machine_id=$machine AND EXISTS(SELECT 1 FROM agent_maintenance_chains c WHERE c.chain_id=agent_update_operations.chain_id AND c.current_head_operation_id=agent_update_operations.operation_id AND c.held=1 AND c.generation=agent_update_operations.ticket_generation AND agent_update_operations.ticket_purpose IN ('apply','recovery'))", ("$ticket", ticketHash), ("$machine", machineId));
             using var row = operation.ExecuteReader();
             if (!row.Read()) throw new UnauthorizedAccessException("Update ticket is invalid");
             return (row.GetString(0), row.GetString(1), row.GetString(2), row.GetString(3));

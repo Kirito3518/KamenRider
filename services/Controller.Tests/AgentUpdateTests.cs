@@ -635,7 +635,7 @@ public sealed class AgentUpdateTests
     }
 
     [Fact]
-    public async Task TargetHeartbeatAfterReportCannotReleaseTheStartedChain()
+    public async Task TargetHeartbeatAfterReportConfirmsTheReportedAppliedOutcome()
     {
         using var fixture = new LeaseFixture(agentReleaseRemediationEnabled: true);
         AddRelease(fixture.Path, "2.0.0");
@@ -643,14 +643,17 @@ public sealed class AgentUpdateTests
         var update = fixture.Db.ReserveAgentUpdate("pc", "2.0.0", "admin", Guid.NewGuid().ToString("N"));
         fixture.Db.StartAgentUpdate("pc", update.Ticket);
 
+        // A target-version heartbeat before the helper reports an outcome is not confirmation evidence.
         fixture.SyncVersion("2.0.0");
         Assert.Equal("installing", OperationStatus(fixture.Path, update.OperationId));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Create("before-report-heartbeat"));
         fixture.Db.ReportAgentUpdateStatus("pc", update.Ticket, "awaitingHeartbeat");
         Assert.False(Assert.Single(fixture.Db.List()).CanRent);
-        await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Create("before-target-heartbeat"));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Create("before-confirming-heartbeat"));
         fixture.SyncVersion("2.0.0");
-        Assert.Equal("awaitingHeartbeat", OperationStatus(fixture.Path, update.OperationId));
-        Assert.False(Assert.Single(fixture.Db.List()).CanRent);
+        Assert.Equal("completed", OperationStatus(fixture.Path, update.OperationId));
+        Assert.True(Assert.Single(fixture.Db.List()).CanRent);
+        await fixture.Create("after-confirmed-update");
     }
 
     [Fact]
