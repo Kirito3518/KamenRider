@@ -2,11 +2,11 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Monitor, RefreshCw } from "lucide-react";
+import { AdminPage, AdminPageHeader } from "@/components/admin/admin-page";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
-import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { PcControlCard } from "@/components/admin/pc-control-card";
@@ -127,23 +127,19 @@ export function PcControl() {
   const machines = snapshot?.machines ?? [];
 
   return (
-    <div className="flex flex-col gap-6">
-      <header className="flex flex-wrap items-end justify-between gap-4">
-        <div className="flex flex-col gap-1">
-          <div className="flex items-center gap-2">
-            <Monitor aria-hidden className="size-5 text-primary" />
-            <h1 className="text-2xl font-semibold">PC Control</h1>
-            <Badge variant="outline">{machines.length} เครื่อง</Badge>
-          </div>
-          <p className="text-sm text-muted-foreground">
-            ควบคุมเครื่องที่ให้เช่า เปิดจอ VNC เมื่อต้องการ และจัดการเวลา/การเช่าได้จากการ์ดเดียว
-          </p>
-        </div>
-        <Button variant="outline" size="sm" onClick={() => void load()} disabled={loading}>
-          {loading ? <Spinner data-icon="inline-start" /> : <RefreshCw data-icon="inline-start" />}
-          รีเฟรช
-        </Button>
-      </header>
+    <AdminPage>
+      <AdminPageHeader
+        icon={Monitor}
+        title="PC Control"
+        titleSuffix={<Badge variant="outline">{machines.length} เครื่อง</Badge>}
+        description="ควบคุมเครื่องที่ให้เช่า เปิดจอ VNC เมื่อต้องการ และจัดการเวลา/การเช่าได้จากการ์ดเดียว"
+        actions={
+          <Button variant="outline" size="sm" onClick={() => void load()} disabled={loading}>
+            {loading ? <Spinner data-icon="inline-start" /> : <RefreshCw data-icon="inline-start" />}
+            รีเฟรช
+          </Button>
+        }
+      />
 
       {error ? (
         <Alert variant="destructive">
@@ -158,12 +154,10 @@ export function PcControl() {
         </Alert>
       ) : null}
 
-      <Separator />
-
       {loading && !snapshot ? (
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
           {Array.from({ length: 3 }, (_, index) => (
-            <Skeleton key={index} className="h-96 w-full rounded-4xl" />
+            <Skeleton key={index} className="h-80 w-full rounded-2xl" />
           ))}
         </div>
       ) : machines.length === 0 ? (
@@ -224,6 +218,6 @@ export function PcControl() {
           setTimeTarget(null);
         }}
       />
-    </div>
+    </AdminPage>
   );
 }

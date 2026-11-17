@@ -54,7 +54,7 @@ export function PcControlCard({
   const remaining = lease?.remainingSeconds ?? null;
 
   return (
-    <Card>
+    <Card size="sm" className="rounded-2xl border shadow-none ring-0">
       <CardHeader>
         <CardTitle className="truncate">{machine.displayName || machine.machineId}</CardTitle>
         <CardDescription className="truncate font-mono text-xs">{machine.machineId}</CardDescription>

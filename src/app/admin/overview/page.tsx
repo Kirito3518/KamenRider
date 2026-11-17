@@ -1,23 +1,70 @@
 import Link from "next/link";
 import { Suspense } from "react";
+import { LayoutDashboard, ShieldCheck, Users, Wallet } from "lucide-react";
+import {
+  AdminCard,
+  AdminPage,
+  AdminPageHeader,
+  AdminStatCard,
+  AdminStatGrid,
+} from "@/components/admin/admin-page";
+import { MemberTable } from "@/components/admin/member-table";
+import { Button } from "@/components/ui/button";
+import { CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { getAdminData } from "@/lib/admin";
 import { formatBalance } from "@/lib/money";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
-import { MemberTable } from "@/components/admin/member-table";
 
 async function AdminOverview() {
   const { summary, members } = await getAdminData();
-  return <><div><p className="text-sm text-muted-foreground">KamenRaiderPlay Admin</p><h1 className="mt-1 text-2xl font-semibold">ภาพรวมระบบ</h1><p className="mt-2 text-sm text-muted-foreground">ข้อมูลบัญชีและยอดเงินปัจจุบันของสมาชิก</p></div>
-    <div className="grid gap-4 sm:grid-cols-3">{[
-      ["สมาชิกทั้งหมด", summary.members.toLocaleString("th-TH"), "บัญชีในระบบ"],
-      ["ผู้ดูแลระบบ", summary.admins.toLocaleString("th-TH"), "บัญชีที่มีสิทธิ์ admin"],
-      ["ยอดเงินสมาชิกรวม", formatBalance(summary.totalBalanceSatang), "ยอดคงเหลือรวมทุกบัญชี"],
-    ].map(([title, value, description]) => <Card key={title}><CardHeader><CardTitle>{title}</CardTitle><CardDescription>{description}</CardDescription></CardHeader><CardContent><p className="text-3xl font-semibold tabular-nums">{value}</p></CardContent></Card>)}</div>
-    <Card><CardHeader><div className="flex items-center justify-between gap-4"><CardTitle>สมาชิกที่สมัครล่าสุด</CardTitle><Button variant="outline" size="sm" nativeButton={false} render={<Link href="/admin/users" />}>ดูสมาชิก</Button></div><CardDescription>แสดง 5 บัญชีล่าสุด</CardDescription></CardHeader><CardContent><MemberTable members={members.slice(0, 5)} /></CardContent></Card>
-  </>;
+  return (
+    <AdminPage>
+      <AdminPageHeader
+        icon={LayoutDashboard}
+        title="ภาพรวมระบบ"
+        description="ข้อมูลบัญชีและยอดเงินปัจจุบันของสมาชิก"
+      />
+      <AdminStatGrid className="sm:grid-cols-3 xl:grid-cols-3">
+        <AdminStatCard
+          label="สมาชิกทั้งหมด"
+          value={summary.members.toLocaleString("th-TH")}
+          hint="บัญชีในระบบ"
+          icon={Users}
+        />
+        <AdminStatCard
+          label="ผู้ดูแลระบบ"
+          value={summary.admins.toLocaleString("th-TH")}
+          hint="บัญชีที่มีสิทธิ์ admin"
+          icon={ShieldCheck}
+        />
+        <AdminStatCard
+          label="ยอดเงินสมาชิกรวม"
+          value={formatBalance(summary.totalBalanceSatang)}
+          hint="ยอดคงเหลือรวมทุกบัญชี"
+          icon={Wallet}
+        />
+      </AdminStatGrid>
+      <AdminCard>
+        <CardHeader>
+          <CardTitle>สมาชิกที่สมัครล่าสุด</CardTitle>
+          <CardDescription>แสดง 5 บัญชีล่าสุด</CardDescription>
+          <CardAction>
+            <Button variant="outline" size="sm" nativeButton={false} render={<Link href="/admin/users" />}>
+              ดูสมาชิก
+            </Button>
+          </CardAction>
+        </CardHeader>
+        <CardContent>
+          <MemberTable members={members.slice(0, 5)} />
+        </CardContent>
+      </AdminCard>
+    </AdminPage>
+  );
 }
 
-export default function AdminPage() {
-  return <Suspense fallback={<p role="status">กำลังโหลดภาพรวมระบบ…</p>}><AdminOverview /></Suspense>;
+export default function OverviewPage() {
+  return (
+    <Suspense fallback={<p role="status">กำลังโหลดภาพรวมระบบ…</p>}>
+      <AdminOverview />
+    </Suspense>
+  );
 }

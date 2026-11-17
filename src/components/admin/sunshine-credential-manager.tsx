@@ -9,11 +9,11 @@ import {
   type FormEvent,
 } from "react";
 import { Info, KeyRound, RefreshCw } from "lucide-react";
+import { AdminCard, AdminPage, AdminPageHeader } from "@/components/admin/admin-page";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
-  Card,
   CardContent,
   CardDescription,
   CardHeader,
@@ -177,43 +177,40 @@ export function SunshineCredentialManager() {
   const configured = credential?.configured === true;
 
   return (
-    <div className="mx-auto flex w-full max-w-3xl flex-col gap-6">
-      <header className="flex flex-wrap items-end justify-between gap-4">
-        <div className="flex flex-col gap-1">
-          <div className="flex items-center gap-2">
-            <KeyRound aria-hidden className="size-5 text-primary" />
-            <h1 className="text-2xl font-semibold">ตั้งค่า Sunshine</h1>
-            <Badge variant={configured ? "available" : "outline"}>
-              {credential
-                ? configured
-                  ? "ตั้งค่าแล้ว"
-                  : "ยังไม่ได้ตั้งค่า"
-                : loading
-                  ? "กำลังโหลด"
-                  : "ไม่ทราบสถานะ"}
-            </Badge>
-          </div>
-          <p className="text-sm text-muted-foreground">
-            บัญชีจัดการ Sunshine ใช้ร่วมกันทั้งระบบ ตั้งครั้งเดียวแล้ว Controller
-            จะส่งให้เฉพาะ Agent ที่อนุมัติแล้ว
-          </p>
-        </div>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => void load()}
-          disabled={loading || busy}
-        >
-          {loading ? (
-            <Spinner data-icon="inline-start" />
-          ) : (
-            <RefreshCw data-icon="inline-start" />
-          )}
-          รีเฟรชสถานะ
-        </Button>
-      </header>
+    <AdminPage>
+      <AdminPageHeader
+        icon={KeyRound}
+        title="ตั้งค่า Sunshine"
+        titleSuffix={
+          <Badge variant={configured ? "available" : "outline"}>
+            {credential
+              ? configured
+                ? "ตั้งค่าแล้ว"
+                : "ยังไม่ได้ตั้งค่า"
+              : loading
+                ? "กำลังโหลด"
+                : "ไม่ทราบสถานะ"}
+          </Badge>
+        }
+        description="บัญชีจัดการ Sunshine ใช้ร่วมกันทั้งระบบ ตั้งครั้งเดียวแล้ว Controller จะส่งให้เฉพาะ Agent ที่อนุมัติแล้ว"
+        actions={
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => void load()}
+            disabled={loading || busy}
+          >
+            {loading ? (
+              <Spinner data-icon="inline-start" />
+            ) : (
+              <RefreshCw data-icon="inline-start" />
+            )}
+            รีเฟรชสถานะ
+          </Button>
+        }
+      />
 
-      <Card>
+      <AdminCard>
         <CardHeader>
           <CardTitle>สถานะปัจจุบัน</CardTitle>
           <CardDescription>
@@ -259,9 +256,9 @@ export function SunshineCredentialManager() {
             </dl>
           ) : null}
         </CardContent>
-      </Card>
+      </AdminCard>
 
-      <Card>
+      <AdminCard>
         <CardHeader>
           <CardTitle>ตั้งค่าบัญชี Sunshine ของทั้งระบบ</CardTitle>
           <CardDescription>
@@ -273,7 +270,7 @@ export function SunshineCredentialManager() {
             <Info aria-hidden />
             <AlertTitle>คำเตือนก่อนบันทึก</AlertTitle>
             <AlertDescription>
-              <ul className="list-disc space-y-1 pl-4">
+              <ul className="flex list-disc flex-col gap-1 pl-4">
                 <li>บัญชีนี้ใช้ร่วมกันทั้งระบบ (fleet-wide) ไม่ใช่รายเครื่อง</li>
                 <li>หน้านี้จะไม่แสดงรหัสผ่านซ้ำหลังบันทึก ควรเก็บรหัสผ่านไว้ในที่ปลอดภัย</li>
                 <li>Controller จะส่งข้อมูลให้เฉพาะ Agent ที่อนุมัติแล้วเท่านั้น</li>
@@ -287,7 +284,7 @@ export function SunshineCredentialManager() {
             onSubmit={(event) => void handleSubmit(event)}
             noValidate
           >
-            <FieldGroup>
+            <FieldGroup className="max-w-2xl gap-4">
               <Field data-invalid={Boolean(errors.userName)}>
                 <FieldLabel htmlFor="sunshine-username">
                   ชื่อผู้ใช้ Sunshine
@@ -397,7 +394,7 @@ export function SunshineCredentialManager() {
             </Alert>
           ) : null}
         </CardContent>
-      </Card>
-    </div>
+      </AdminCard>
+    </AdminPage>
   );
 }
