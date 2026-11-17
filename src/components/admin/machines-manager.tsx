@@ -1,9 +1,8 @@
 "use client";
+import Link from "next/link";
 import { useCallback, useEffect, useRef, useState, type ChangeEventHandler } from "react";
-import { AdminVncViewerButton } from "@/components/admin/admin-vnc-viewer";
 import { AgentUpdateControl } from "@/components/admin/agent-update-control";
 import type {
-  Lease,
   Machine,
   ReadinessDiagnosticCheckId,
   ReadinessDiagnosticStatus,
@@ -75,7 +74,6 @@ export function MachinesManager({ actorId }: { actorId: string }) {
   const [isRefreshingInstallCommand, setIsRefreshingInstallCommand] = useState(false);
   const [installStatus, setInstallStatus] = useState("กดปุ่มเพื่อขอคำสั่งติดตั้ง");
   const [copyStatus, setCopyStatus] = useState("");
-  const [trialLease, setTrialLease] = useState<Lease | null>(null);
   const [loadStatus, setLoadStatus] = useState("กำลังโหลด…");
   const [message, setMessage] = useState("");
   const latestLoad = useRef(0);
@@ -175,8 +173,7 @@ export function MachinesManager({ actorId }: { actorId: string }) {
   async function act(path: string, body: unknown, method = "POST") {
     try {
       setMessage("กำลังส่ง…");
-      const result = await request(path, body, method);
-      if (path === "/api/admin/trial-leases" || path.includes("/extend")) setTrialLease(result);
+      await request(path, body, method);
       await load();
       setMessage("บันทึกคำขอแล้ว ตรวจสถานะ Agent ก่อนใช้งาน");
       return true;
@@ -483,82 +480,15 @@ export function MachinesManager({ actorId }: { actorId: string }) {
               </button>
             </form>
           ) : (
-            <div className="flex flex-wrap gap-2">
-              <button
-                className="rounded border p-2"
-                onClick={() =>
-                  act(
-                    `/api/admin/machines/${encodeURIComponent(m.machineId)}/wake`,
-                    {},
-                  )
-                }
-              >
-                Wake-on-LAN
-              </button>
-              <AdminVncViewerButton machineId={m.machineId} />
-            </div>
+            <p className="text-sm text-muted-foreground">
+              ควบคุมเครื่อง เปิดจอ VNC ตรวจเวลา และจัดการการเช่าที่{" "}
+              <Link href="/admin/pc-control" className="underline underline-offset-4">
+                PC Control
+              </Link>
+            </p>
           )}
         </section>
       ))}
-      <form
-        className="grid gap-3 rounded border p-4"
-        onSubmit={(e) => {
-          e.preventDefault();
-          const d = new FormData(e.currentTarget);
-          void act("/api/admin/trial-leases", {
-            userId: d.get("user"),
-            machineId: d.get("machine"),
-            durationSeconds: Number(d.get("duration")),
-            idempotencyKey: crypto.randomUUID(),
-          });
-        }}
-      >
-        <h2>ให้สิทธิ์ทดลอง (ไม่หักเงิน)</h2>
-        <label>
-          User ID
-          <Input name="user" value="" />
-        </label>
-        <label>
-          Machine ID
-          <Input name="machine" value="" />
-        </label>
-        <label>
-          ระยะเวลา (วินาที 1–86400)
-          <Input name="duration" type="number" value={600} />
-        </label>
-        <button className="rounded border p-2">สร้างสิทธิ์ทดลอง</button>
-      </form>
-      {trialLease && <p role="status">Rental ID: {trialLease.id} · Revision: {trialLease.revision}{trialLease.pendingRevision !== null ? ` · รอ ACK ${trialLease.pendingRevision}` : ""}</p>}
-      <form
-        className="grid gap-3 rounded border p-4"
-        onSubmit={(e) => {
-          e.preventDefault();
-          const d = new FormData(e.currentTarget);
-          void act(
-            `/api/admin/leases/${encodeURIComponent(String(d.get("rental")))}/extend`,
-            {
-              additionalSeconds: Number(d.get("duration")),
-              expectedRevision: Number(d.get("revision")),
-              idempotencyKey: crypto.randomUUID(),
-            },
-          );
-        }}
-      >
-        <h2>ต่อเวลาทดลอง</h2>
-        <label>
-          Rental ID
-          <Input name="rental" value="" />
-        </label>
-        <label>
-          Revision
-          <Input name="revision" type="number" value={1} />
-        </label>
-        <label>
-          เพิ่ม (วินาที)
-          <Input name="duration" type="number" value={600} />
-        </label>
-        <button className="rounded border p-2">ขอต่อเวลาทดลอง</button>
-      </form>
     </main>
   );
 }

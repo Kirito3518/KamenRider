@@ -16,7 +16,8 @@ export function AppSidebar() {
     </SidebarMenuItem></SidebarMenu></SidebarHeader>
     <SidebarContent><ScrollArea className="h-full"><nav aria-label="เมนูผู้ดูแล">
       <NavMain title="จัดการระบบ" items={[
-        { title: "ภาพรวม", href: "/admin", icon: LayoutDashboard },
+        { title: "PC Control", href: "/admin/pc-control", icon: Monitor },
+        { title: "ภาพรวม", href: "/admin/overview", icon: LayoutDashboard },
         { title: "เครื่องและ Agent", href: "/admin/machines", icon: Monitor },
         { title: "Agent releases", href: "/admin/agent-releases", icon: Package },
         { title: "สมาชิก", href: "/admin/users", icon: Users },
