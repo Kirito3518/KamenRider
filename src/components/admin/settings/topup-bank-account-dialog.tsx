@@ -52,7 +52,7 @@ const CUSTOM_BANK_VALUE = "custom";
 const BANK_SELECT_ITEMS = [
   ...BANK_PRESETS.map((preset) => ({
     value: preset.code,
-    label: `${preset.shortName} · ${preset.name} (${preset.code})`,
+    label: `${preset.name} (${preset.code})`,
   })),
   { value: CUSTOM_BANK_VALUE, label: "ธนาคารอื่น (กำหนดรหัสเอง)" },
 ];
@@ -64,7 +64,7 @@ function defaultForm(): BankAccountFormValues {
     bankName: preset.name,
     accountNumber: "",
     accountName: "",
-    logoKey: preset.logoKey,
+    logoKey: preset.key,
     logoDataUrl: null,
     isActive: true,
   };
@@ -160,7 +160,7 @@ function BankAccountDialogForm({
       update({
         bankCode: preset.code,
         bankName: preset.name,
-        logoKey: preset.logoKey,
+        logoKey: preset.key,
         logoDataUrl: null,
       });
     }
@@ -262,11 +262,11 @@ function BankAccountDialogForm({
                       <BankLogoTile
                         bankCode={preset.code}
                         bankName={preset.name}
-                        logoKey={preset.logoKey}
+                        logoKey={preset.key}
                         className="size-6 rounded-md text-[8px]"
                       />
                       <span>
-                        {preset.shortName} · {preset.name} ({preset.code})
+                        {preset.name} ({preset.code})
                       </span>
                     </span>
                   </SelectItem>
@@ -394,15 +394,15 @@ function BankAccountDialogForm({
           >
             {BANK_PRESETS.map((preset) => {
               const selected =
-                !values.logoDataUrl && values.logoKey === preset.logoKey;
+                !values.logoDataUrl && values.logoKey === preset.key;
               return (
                 <button
-                  key={preset.logoKey}
+                  key={preset.key}
                   type="button"
                   aria-label={`ใช้โลโก้ ${preset.name}`}
                   aria-pressed={selected}
                   onClick={() => {
-                    update({ logoKey: preset.logoKey, logoDataUrl: null });
+                    update({ logoKey: preset.key, logoDataUrl: null });
                     setErrors((current) => ({ ...current, logo: undefined }));
                     setLogoError("");
                   }}
@@ -415,11 +415,11 @@ function BankAccountDialogForm({
                   <BankLogoTile
                     bankCode={preset.code}
                     bankName={preset.name}
-                    logoKey={preset.logoKey}
+                    logoKey={preset.key}
                     className="size-8"
                   />
                   <span className="text-[10px] text-muted-foreground">
-                    {preset.shortName}
+                    {preset.key.toUpperCase()}
                   </span>
                 </button>
               );
@@ -459,7 +459,7 @@ function BankAccountDialogForm({
                   onClick={() =>
                     update({
                       logoDataUrl: null,
-                      logoKey: getBankPreset(values.bankCode)?.logoKey ?? null,
+                      logoKey: getBankPreset(values.bankCode)?.key ?? null,
                     })
                   }
                 >

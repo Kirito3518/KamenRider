@@ -14,7 +14,13 @@ import {
 import { Input } from "@/components/ui/input";
 import type { TopupPublicConfig } from "@/lib/topup/types";
 
-export function CouponForm({ config }: { config: TopupPublicConfig }) {
+export function CouponForm({
+  config,
+  embedded = false,
+}: {
+  config: TopupPublicConfig;
+  embedded?: boolean;
+}) {
   const [code, setCode] = useState("");
   const [message, setMessage] = useState("");
   const [fieldError, setFieldError] = useState("");
@@ -35,15 +41,17 @@ export function CouponForm({ config }: { config: TopupPublicConfig }) {
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex items-start gap-3 rounded-2xl border bg-card p-4">
-        <TicketPercent aria-hidden className="mt-0.5 size-5 text-primary" />
-        <div>
-          <p className="font-medium">ใช้รหัสคูปอง</p>
-          <p className="text-sm text-muted-foreground">
-            ระบบคูปองอยู่ระหว่างการพัฒนา UI นี้พร้อมเชื่อมต่อระบบจริงในอนาคต
-          </p>
+      {!embedded ? (
+        <div className="flex items-start gap-3 rounded-2xl border bg-card p-4">
+          <TicketPercent aria-hidden className="mt-0.5 size-5 text-primary" />
+          <div>
+            <p className="font-medium">ใช้รหัสคูปอง</p>
+            <p className="text-sm text-muted-foreground">
+              ระบบคูปองอยู่ระหว่างการพัฒนา UI นี้พร้อมเชื่อมต่อระบบจริงในอนาคต
+            </p>
+          </div>
         </div>
-      </div>
+      ) : null}
 
       <Alert>
         <CircleAlert aria-hidden />

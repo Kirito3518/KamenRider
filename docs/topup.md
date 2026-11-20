@@ -31,6 +31,7 @@
 1. **TrueMoney**: เปิด/ปิด, เบอร์ผู้รับ 10 หลัก
 2. **PromptPay QR**: เปิด/ปิด, ประเภท `msisdn`/`natId`, หมายเลข, ชื่อบัญชีสำหรับตรวจสลิป
 3. **บัญชีธนาคาร**: เปิด/ปิดช่องทาง, เพิ่ม/แก้ไข/archive บัญชี, ชื่อธนาคาร/รหัส/เลขบัญชี/ชื่อบัญชี, โลโก้ preset หรืออัปโหลด (PNG/JPEG/WebP ≤ 32 KB)
+   - Bank Select ใช้ preset: BBL `002`, KBANK `004`, KTB `006`, TMB `011`, SCB `014`, BAY `025`, GSB `030`, KK `069` พร้อมโลโก้จาก `public/topup/bank/`; ยังเพิ่มธนาคารอื่นด้วยรหัส/ชื่อเองได้
 4. **ตรวจสอบสลิป**: เลือกผู้ให้บริการ (ค่าเดียว), EasySlip API Key, SlipOk API Key + Branch ID, ปุ่มทดสอบการเชื่อมต่อ
 5. **คูปอง**: เปิด/ปิด + ข้อความแจ้ง
 
@@ -166,6 +167,8 @@ $env:NEXT_DIST_DIR='.next-verify'; pnpm build
 > `pnpm build` runs `next build --webpack`. Webpack obeys `outputFileTracingExcludes`
 > for `data/**`; the current Turbopack production trace tries to hash the live
 > Controller SQLite lock file and aborts the build while the dev Controller runs.
+> Webpack uses `@tailwindcss/postcss` via `postcss.config.mjs`; Turbopack dev keeps
+> the existing `@tailwindcss/turbopack` loader from `next.config.ts`.
 
 - Tests ใช้ mocked provider responses; live E2E ต้องตั้ง key จริงใน Admin แล้วทดสอบด้วยยอดเล็ก ๆ
 - `tests/topup-routes.test.ts` ครอบคลุม auth/origin/owner, idempotency, QR, slip success/amount mismatch/duplicate/timeout+retry, admin routes, no key leak

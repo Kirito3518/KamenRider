@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TopupPage } from "@/components/topup/topup-page";
 
@@ -96,34 +96,49 @@ describe("TopupPage", () => {
     vi.unstubAllGlobals();
   });
 
-  it("renders the three top-up channels", async () => {
+  it("renders the channel list with TrueMoney selected by default", async () => {
     render(<TopupPage initialBalance={100_000} />);
-    expect(await screen.findByText("TrueMoney")).toBeDefined();
-    expect(screen.getByText("PromptPay QR")).toBeDefined();
+
+    expect(await screen.findByText("ช่องทางการเติมเงิน")).toBeDefined();
+    expect(screen.getByText("TrueMoney อั่งเปา")).toBeDefined();
+    expect(screen.getByText("PromptPay QR Code")).toBeDefined();
     expect(screen.getByText("คูปอง")).toBeDefined();
     expect(screen.getByText("฿1,000.00")).toBeDefined();
+    expect(screen.getByLabelText("ลิงก์ซองอั่งเปา TrueMoney")).toBeDefined();
   });
 
-  it("shows the coupon placeholder without calling an API", async () => {
+  it("opens the coupon dialog without calling an API", async () => {
     render(<TopupPage initialBalance={100_000} />);
-    const couponTab = await screen.findByRole("tab", { name: /คูปอง/ });
-    fireEvent.click(couponTab);
-    expect(await screen.findByText("คูปองอยู่ระหว่างเปิดให้บริการ")).toBeDefined();
-    expect(screen.getByText("คูปองจะเปิดให้บริการเร็ว ๆ นี้")).toBeDefined();
+    await screen.findByText("ช่องทางการเติมเงิน");
+
+    fireEvent.click(screen.getByRole("button", { name: /คูปอง/ }));
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText("ใช้รหัสคูปอง")).toBeDefined();
+    expect(within(dialog).getByText("คูปองอยู่ระหว่างเปิดให้บริการ")).toBeDefined();
+    expect(within(dialog).getByText("คูปองจะเปิดให้บริการเร็ว ๆ นี้")).toBeDefined();
+
     const calls = fetchSpy.mock.calls.map((call) => String(call[0]));
     expect(calls.some((url) => url.includes("coupon"))).toBe(false);
   });
 
-  it("creates a PromptPay transaction and renders a large QR", async () => {
+  it("creates a PromptPay transaction and renders the QR upload flow", async () => {
     render(<TopupPage initialBalance={100_000} />);
-    await screen.findByText("PromptPay QR");
-    fireEvent.click(screen.getByText("PromptPay QR"));
-    const amount = await screen.findByLabelText("จำนวนเงินที่ต้องการเติม (บาท)");
+    await screen.findByText("ช่องทางการเติมเงิน");
+
+    fireEvent.click(screen.getByRole("button", { name: /PromptPay QR Code/ }));
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText("เติมเงินด้วย PromptPay QR Code")).toBeDefined();
+
+    const amount = within(dialog).getByLabelText("จำนวนเงินที่ต้องการเติม (บาท)");
     fireEvent.change(amount, { target: { value: "100" } });
-    fireEvent.click(screen.getByText("สร้าง QR PromptPay"));
-    expect(await screen.findByAltText(/QR PromptPay/)).toBeDefined();
-    expect(screen.getByText("บันทึกรูป QR")).toBeDefined();
-    expect(screen.getByLabelText("อัปโหลดสลิปการโอน")).toBeDefined();
+    fireEvent.click(within(dialog).getByText("สร้าง QR PromptPay"));
+
+    expect(await within(dialog).findByAltText(/QR PromptPay/)).toBeDefined();
+    expect(within(dialog).getByText("บันทึกรูป QR")).toBeDefined();
+    expect(
+      within(dialog).getByText("อัปโหลดสลิปใบเสร็จ หรือวางไฟล์ที่นี่"),
+    ).toBeDefined();
+    expect(within(dialog).getByRole("button", { name: "ยืนยันสลิป" })).toBeDefined();
   });
 
   it("shows a configuration error with retry", async () => {

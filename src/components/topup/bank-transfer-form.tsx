@@ -41,9 +41,11 @@ const PRESETS = [100, 300, 500, 1_000];
 export function BankTransferForm({
   config,
   onBalance,
+  embedded = false,
 }: {
   config: TopupPublicConfig;
   onBalance: (balanceSatang: number) => void;
+  embedded?: boolean;
 }) {
   const accounts = config.bankTransfer.accounts;
   const [amount, setAmount] = useState("100");
@@ -121,15 +123,17 @@ export function BankTransferForm({
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex items-start gap-3 rounded-2xl border bg-card p-4">
-        <Banknote aria-hidden className="mt-0.5 size-5 text-primary" />
-        <div>
-          <p className="font-medium">โอนเงินผ่านบัญชีธนาคาร</p>
-          <p className="text-sm text-muted-foreground">
-            เลือกบัญชีที่ต้องการโอน กรอกจำนวนเงิน แล้วอัปโหลดสลิปหลังโอนเพื่อให้ระบบตรวจสอบ
-          </p>
+      {!embedded ? (
+        <div className="flex items-start gap-3 rounded-2xl border bg-card p-4">
+          <Banknote aria-hidden className="mt-0.5 size-5 text-primary" />
+          <div>
+            <p className="font-medium">โอนเงินผ่านบัญชีธนาคาร</p>
+            <p className="text-sm text-muted-foreground">
+              เลือกบัญชีที่ต้องการโอน กรอกจำนวนเงิน แล้วอัปโหลดสลิปหลังโอนเพื่อให้ระบบตรวจสอบ
+            </p>
+          </div>
         </div>
-      </div>
+      ) : null}
 
       {unavailable ? (
         <Alert>

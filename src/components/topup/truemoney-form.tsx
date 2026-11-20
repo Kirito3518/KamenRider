@@ -36,9 +36,11 @@ import {
 export function TrueMoneyForm({
   config,
   onBalance,
+  embedded = false,
 }: {
   config: TopupPublicConfig;
   onBalance: (balanceSatang: number) => void;
+  embedded?: boolean;
 }) {
   const [link, setLink] = useState("");
   const [pending, setPending] = useState(false);
@@ -202,15 +204,17 @@ export function TrueMoneyForm({
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex items-start gap-3 rounded-2xl border bg-card p-4">
-        <Gift aria-hidden className="mt-0.5 size-5 text-primary" />
-        <div>
-          <p className="font-medium">รับเงินจากซองอั่งเปา TrueMoney</p>
-          <p className="text-sm text-muted-foreground">
-            วางลิงก์ซองอั่งเปาหรือรหัสซอง ระบบจะตรวจสอบและเพิ่มเงินตามยอดที่ได้รับจริง
-          </p>
+      {!embedded ? (
+        <div className="flex items-start gap-3 rounded-2xl border bg-card p-4">
+          <Gift aria-hidden className="mt-0.5 size-5 text-primary" />
+          <div>
+            <p className="font-medium">รับเงินจากซองอั่งเปา TrueMoney</p>
+            <p className="text-sm text-muted-foreground">
+              วางลิงก์ซองอั่งเปาหรือรหัสซอง ระบบจะตรวจสอบและเพิ่มเงินตามยอดที่ได้รับจริง
+            </p>
+          </div>
         </div>
-      </div>
+      ) : null}
 
       {!config.truemoney.enabled ? (
         <Alert>
@@ -259,13 +263,15 @@ export function TrueMoneyForm({
         </FieldGroup>
       </form>
 
-      <div className="flex items-start gap-3 rounded-2xl border border-dashed p-4 text-sm text-muted-foreground">
-        <ShieldCheck aria-hidden className="mt-0.5 size-4 shrink-0" />
-        <p>
-          ระบบไม่เชื่อยอดเงินจากเบราว์เซอร์ แต่จะใช้ยอดที่ผู้ให้บริการยืนยันแล้วเท่านั้น
-          และจะเพิ่มยอดเงินเพียงครั้งเดียว
-        </p>
-      </div>
+      {!embedded ? (
+        <div className="flex items-start gap-3 rounded-2xl border border-dashed p-4 text-sm text-muted-foreground">
+          <ShieldCheck aria-hidden className="mt-0.5 size-4 shrink-0" />
+          <p>
+            ระบบไม่เชื่อยอดเงินจากเบราว์เซอร์ แต่จะใช้ยอดที่ผู้ให้บริการยืนยันแล้วเท่านั้น
+            และจะเพิ่มยอดเงินเพียงครั้งเดียว
+          </p>
+        </div>
+      ) : null}
 
       {error ? (
         <Alert variant="destructive" role="alert">

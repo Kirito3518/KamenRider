@@ -32,9 +32,11 @@ const PRESETS = [100, 300, 500, 1_000];
 export function PromptpayForm({
   config,
   onBalance,
+  embedded = false,
 }: {
   config: TopupPublicConfig;
   onBalance: (balanceSatang: number) => void;
+  embedded?: boolean;
 }) {
   const [amount, setAmount] = useState("100");
   const [active, setActive] = useState<TopupDetail | null>(null);
@@ -101,21 +103,28 @@ export function PromptpayForm({
 
   if (active) {
     return (
-      <QrPanel topup={active} onUpdated={updated} onReset={reset} />
+      <QrPanel
+        topup={active}
+        onUpdated={updated}
+        onReset={reset}
+        inDialog={embedded}
+      />
     );
   }
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex items-start gap-3 rounded-2xl border bg-card p-4">
-        <QrCode aria-hidden className="mt-0.5 size-5 text-primary" />
-        <div>
-          <p className="font-medium">สร้าง QR PromptPay ตามจำนวนที่ต้องการ</p>
-          <p className="text-sm text-muted-foreground">
-            สแกนจ่ายด้วยแอปธนาคาร แล้วกลับมาอัปโหลดสลิปเพื่อให้ระบบตรวจสอบอัตโนมัติ
-          </p>
+      {!embedded ? (
+        <div className="flex items-start gap-3 rounded-2xl border bg-card p-4">
+          <QrCode aria-hidden className="mt-0.5 size-5 text-primary" />
+          <div>
+            <p className="font-medium">สร้าง QR PromptPay ตามจำนวนที่ต้องการ</p>
+            <p className="text-sm text-muted-foreground">
+              สแกนจ่ายด้วยแอปธนาคาร แล้วกลับมาอัปโหลดสลิปเพื่อให้ระบบตรวจสอบอัตโนมัติ
+            </p>
+          </div>
         </div>
-      </div>
+      ) : null}
 
       {unavailable ? (
         <Alert>
@@ -205,7 +214,7 @@ export function PromptpayForm({
           <AlertDescription>{error}</AlertDescription>
         </Alert>
       ) : null}
-      {config.promptpay.accountName ? (
+      {!embedded && config.promptpay.accountName ? (
         <p className="text-xs text-muted-foreground">
           ผู้รับเงิน: {config.promptpay.accountName}
         </p>

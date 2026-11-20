@@ -72,11 +72,22 @@ export function BankLogoTile({
       <img
         src={logoDataUrl}
         alt={`โลโก้ ${bankName ?? preset?.name ?? "ธนาคาร"}`}
+        className={cn("size-9 shrink-0 rounded-xl bg-white object-contain p-1", className)}
+      />
+    );
+  }
+  if (preset) {
+    return (
+      // Local, trusted SVG bank logo bundled with the app.
+      // eslint-disable-next-line @next/next/no-img-element
+      <img
+        src={preset.logoUrl}
+        alt={`โลโก้ ${bankName ?? preset.name}`}
         className={cn("size-9 shrink-0 rounded-xl object-contain", className)}
       />
     );
   }
-  const shortName = preset?.shortName ?? bankName?.slice(0, 4) ?? bankCode;
+  const shortName = bankName?.slice(0, 4) ?? bankCode;
   return (
     <span
       aria-hidden
@@ -85,8 +96,8 @@ export function BankLogoTile({
         className,
       )}
       style={{
-        backgroundColor: preset?.color ?? "var(--primary)",
-        color: preset?.foreground ?? "var(--primary-foreground)",
+        backgroundColor: "var(--primary)",
+        color: "var(--primary-foreground)",
       }}
     >
       {shortName}
