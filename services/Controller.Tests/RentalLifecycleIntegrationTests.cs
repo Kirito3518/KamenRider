@@ -125,8 +125,8 @@ public sealed class RentalLifecycleIntegrationTests
                 Assert.True(readyMachine.CanRent);
 
                 using var createLease = await owner.PostAsJsonAsync(
-                    "/internal/trial-leases",
-                    new TrialLeaseRequest("renter-1", identity.MachineId, 60, "create-round-1"));
+                    "/internal/leases",
+                    new CreateLeaseRequest("renter-1", identity.MachineId, 60, "create-round-1"));
                 Assert.Equal(HttpStatusCode.OK, createLease.StatusCode);
                 var firstLease = Assert.IsType<LeaseDto>(await createLease.Content.ReadFromJsonAsync<LeaseDto>());
                 Assert.Equal("preparing", firstLease.State);
@@ -190,6 +190,9 @@ public sealed class RentalLifecycleIntegrationTests
                 await syncCycle.RunAsync(clock.BootId, LocalIp, MacAddress, Readiness.NotReady, default);
                 var endingLease = Assert.Single((await owner.GetFromJsonAsync<LeaseDto[]>("/internal/users/renter-1/leases"))!);
                 Assert.Equal("ending", endingLease.State);
+                // The natural end of the rental window is recorded as its expiry instant.
+                Assert.NotNull(endingLease.EndedAtUtc);
+                Assert.Equal(endingLease.ExpiresAtUtc, endingLease.EndedAtUtc);
 
                 clock.Reboot("boot-2");
                 var afterReboot = new BootReconciler(clock, gate, configuration, reconciliation, bootEnvironment, importer, new IntegrationBaselineEvidence(BootEvidenceStatus.Passed));
@@ -199,10 +202,12 @@ public sealed class RentalLifecycleIntegrationTests
                 await syncCycle.RunAsync(clock.BootId, LocalIp, MacAddress, Readiness.Ready, default);
                 var completedLease = Assert.Single((await owner.GetFromJsonAsync<LeaseDto[]>("/internal/users/renter-1/leases"))!);
                 Assert.Equal("completed", completedLease.State);
+                // The reboot that completes the lease must not move the recorded end instant.
+                Assert.Equal(endingLease.EndedAtUtc, completedLease.EndedAtUtc);
 
                 using var nextLeaseResponse = await owner.PostAsJsonAsync(
-                    "/internal/trial-leases",
-                    new TrialLeaseRequest("renter-1", identity.MachineId, 60, "create-round-2"));
+                    "/internal/leases",
+                    new CreateLeaseRequest("renter-1", identity.MachineId, 60, "create-round-2"));
                 Assert.Equal(HttpStatusCode.OK, nextLeaseResponse.StatusCode);
                 var nextLease = Assert.IsType<LeaseDto>(await nextLeaseResponse.Content.ReadFromJsonAsync<LeaseDto>());
                 Assert.Equal("preparing", nextLease.State);

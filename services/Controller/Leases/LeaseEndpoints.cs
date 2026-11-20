@@ -14,11 +14,25 @@ public static class LeaseEndpoints {
             var address=lease.State=="active"&&ip?.Address is string publicIp?$"{publicIp}:{machine.MoonlightPort}":null;
             return Results.Ok(new {address,stale=ip?.Stale??true});
         });
-        app.MapPost("/internal/trial-leases",async (TrialLeaseRequest request,HttpContext context,LeaseService leases,CancellationToken ct)=> {
-            if(string.IsNullOrWhiteSpace(Actor(context))||(!IsAdmin(context)&&Actor(context)!=request.UserId)) return Results.StatusCode(403);
-            try { return Results.Ok(await leases.CreateTrialLeaseAsync(request.UserId,request.MachineId,request.DurationSeconds,request.IdempotencyKey,ct)); }
+        // Only the authenticated owner may rent for themselves; administrators never rent on behalf
+        // of a customer.
+        app.MapPost("/internal/leases",async (CreateLeaseRequest request,HttpContext context,LeaseService leases,CancellationToken ct)=> {
+            var actor=Actor(context);
+            if(string.IsNullOrWhiteSpace(actor)||actor!=request.UserId) return Results.StatusCode(403);
+            try { return Results.Ok(await leases.CreateLeaseAsync(request.UserId,request.MachineId,request.DurationSeconds,request.IdempotencyKey,ct)); }
             catch(ArgumentException) { return Results.BadRequest(new {error="Invalid lease request"}); }
             catch(InvalidOperationException) { return Results.Conflict(new {error="Lease conflict"}); }
+        });
+        // Administrative history is lease data, so it is never cached by intermediaries.
+        app.MapGet("/internal/leases",async (HttpContext context,LeaseService leases,CancellationToken ct)=> {
+            if(string.IsNullOrWhiteSpace(Actor(context))||!IsAdmin(context)) return Results.StatusCode(403);
+            var take=200;
+            if(context.Request.Query.TryGetValue("take",out var values)
+                && (values.Count!=1||!int.TryParse(values[0],System.Globalization.NumberStyles.None,System.Globalization.CultureInfo.InvariantCulture,out take)||take is <1 or >500))
+                return Results.BadRequest(new {error="Invalid take"});
+            context.Response.Headers["Cache-Control"]="no-store";
+            try { return Results.Ok(await leases.GetAllLeasesAsync(take,ct)); }
+            catch(ArgumentException) { return Results.BadRequest(new {error="Invalid take"}); }
         });
         app.MapPost("/internal/leases/{id}/extend",async (string id,ExtendLeaseRequest request,HttpContext context,LeaseService leases,CancellationToken ct)=> {
             var actor=Actor(context);if(string.IsNullOrWhiteSpace(actor)) return Results.StatusCode(403);

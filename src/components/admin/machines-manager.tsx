@@ -197,7 +197,7 @@ export function MachinesManager({ actorId }: { actorId: string }) {
       />
 
       <p className="text-xs text-muted-foreground">
-        ระบบทดลอง ไม่มีการหักยอดเงิน — ความพร้อมจริงยังต้องผ่านการตรวจสอบ Agent
+        ระบบเช่าจริง — ราคาต่อชั่วโมงจะถูกหักจากยอดเงินสมาชิกเมื่อมีการเช่า และความพร้อมจริงยังต้องผ่านการตรวจสอบ Agent
       </p>
       <p role="status" aria-live="polite" className="sr-only">
         {message}

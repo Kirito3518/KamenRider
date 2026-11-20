@@ -259,7 +259,7 @@ public sealed class AgentReleaseAcceptanceTests
         Assert.False(sameSecond.IsSuccessStatusCode);
         Assert.NotEqual("1.0.0", Assert.Single(fixture.Database.List()).AgentVersion);
         Assert.False(Assert.Single(fixture.Database.List()).CanRent);
-        Assert.Throws<InvalidOperationException>(() => fixture.Database.CreateTrialLease("renter", "pc", 60, "request"));
+        Assert.Throws<InvalidOperationException>(() => fixture.Database.CreateLease("renter", "pc", 60, "request"));
     }
 
     [Theory]
@@ -327,7 +327,7 @@ public sealed class AgentReleaseAcceptanceTests
         Assert.Equal(0L, fixture.Scalar("SELECT COUNT(*) FROM pairing_offers WHERE machine_id='pc'"));
         Assert.Equal(nonceRowsBefore, fixture.Scalar("SELECT COUNT(*) FROM agent_signed_request_nonces WHERE machine_id='pc' AND path='/agent/sync'"));
         Assert.Equal(proofStateBefore, fixture.ReadText("SELECT mode||'|'||sequence||'|'||COALESCE(last_proven_sequence,'')||'|'||COALESCE(last_proven_tick,'')||'|'||COALESCE(last_proven_version,'')||'|'||COALESCE(legacy_last_second,'')||'|'||COALESCE(legacy_reported_version,'') FROM agent_sync_proof_state WHERE machine_id='pc'"));
-        Assert.Throws<InvalidOperationException>(() => fixture.Database.CreateTrialLease("renter", "pc", 60, "after-captured-legacy"));
+        Assert.Throws<InvalidOperationException>(() => fixture.Database.CreateLease("renter", "pc", 60, "after-captured-legacy"));
     }
 
     [Fact]
@@ -1561,8 +1561,8 @@ public sealed class AgentReleaseAcceptanceTests
             await AssertRentalRejectedAsync();
         }
 
-        private Task<HttpResponseMessage> CreateRentalAsync() => renter.PostAsJsonAsync("/internal/trial-leases",
-            new TrialLeaseRequest("acceptance-renter", MachineId, 60, "acceptance-rental-" + ++rentalAttempt));
+        private Task<HttpResponseMessage> CreateRentalAsync() => renter.PostAsJsonAsync("/internal/leases",
+            new CreateLeaseRequest("acceptance-renter", MachineId, 60, "acceptance-rental-" + ++rentalAttempt));
 
         public async Task AssertRentalRejectedAsync()
         {

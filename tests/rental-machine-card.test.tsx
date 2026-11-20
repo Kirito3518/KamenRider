@@ -11,7 +11,7 @@ const MACHINE: RentalMachine = {
   ram: 32,
   ramBytes: 34_359_738_368,
   storage: "—",
-  price: 40,
+  priceSatang: 4000,
   status: "available",
   game: "",
 };

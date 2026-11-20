@@ -743,7 +743,7 @@ public sealed class AgentUpdateTests
             await start.Task;
             try
             {
-                await fixture.Leases.CreateTrialLeaseAsync("alice", "pc", 60, "race", default);
+                await fixture.Leases.CreateLeaseAsync("alice", "pc", 60, "race", default);
                 return true;
             }
             catch (InvalidOperationException)

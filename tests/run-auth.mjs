@@ -21,7 +21,7 @@ try {
     await new Promise(resolve => setTimeout(resolve, 200));
   }
   if (!ready) throw new Error("Test server did not become ready");
-  const tests = spawn(process.execPath, ["--test", "tests/auth.test.mjs", "tests/avatars.test.mjs", "tests/roles.test.mjs", "tests/admin-members.test.mjs"], { env, stdio: "inherit" });
+  const tests = spawn(process.execPath, ["--test", "tests/auth.test.mjs", "tests/avatars.test.mjs", "tests/roles.test.mjs", "tests/admin-members.test.mjs", "tests/rental-ledger.test.mjs"], { env, stdio: "inherit" });
   process.exitCode = await new Promise(resolve => tests.on("exit", code => resolve(code ?? 1)));
 } finally {
   server.kill();

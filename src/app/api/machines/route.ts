@@ -7,6 +7,10 @@ import { formatSpec, ramGibibytes } from "@/lib/machine-specs";
  * Controller reports as rentable are exposed, and only display-safe fields are
  * returned: no private IPs, MAC address, ports, fingerprints or readiness
  * diagnostics. Hardware specs (CPU/GPU/RAM) are Agent-reported display data.
+ *
+ * Rentals are billed in whole baht, so a machine whose price is not a positive
+ * whole-baht amount is treated as not rentable instead of exposing an invalid
+ * price to the customer.
  */
 export function GET(request: Request) {
   return machineApi(
@@ -14,12 +18,19 @@ export function GET(request: Request) {
     false,
     async (_, call) =>
       (await call<Machine[]>("/internal/machines"))
-        .filter((m) => m.approvalStatus === "approved" && m.canRent === true)
+        .filter(
+          (m) =>
+            m.approvalStatus === "approved" &&
+            m.canRent === true &&
+            Number.isSafeInteger(m.hourlyPriceMinorUnits) &&
+            m.hourlyPriceMinorUnits >= 100 &&
+            m.hourlyPriceMinorUnits % 100 === 0,
+        )
         .map((m) => ({
           id: m.machineId,
           name: m.displayName,
-          price: m.hourlyPriceMinorUnits / 100,
-          status: m.canRent === true ? "available" : m.readiness === "ready" ? "busy" : m.readiness,
+          priceSatang: m.hourlyPriceMinorUnits,
+          status: "available",
           cpu: formatSpec(m.cpu),
           gpu: formatSpec(m.gpu),
           ram: ramGibibytes(m.ramBytes),

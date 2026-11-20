@@ -4,7 +4,6 @@ import { useEffect, useRef, useState } from "react";
 import { MonitorX } from "lucide-react";
 import { Navbar } from "@/components/ui/layout/Navbar";
 import { Footer } from "@/components/ui/layout/Footer";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
@@ -118,7 +117,6 @@ export function RentalBrowser() {
               แล้วไปเล่น<span className="text-primary">เกมที่ชอบ</span>
             </h1>
             <div className="mt-5 flex flex-wrap items-center gap-2">
-              <Badge variant="outline">ระบบทดลอง</Badge>
               <p className="text-sm text-muted-foreground">
                 เลือกสเปกและราคาที่เหมาะกับคุณ แต่ละเครื่องมีราคาของตัวเอง
               </p>

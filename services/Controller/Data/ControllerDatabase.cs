@@ -55,7 +55,7 @@ public sealed partial class ControllerDatabase : IDisposable
             }
             ControllerDatabaseMaintenance.ValidateCanonicalSchema(connection, startingUserVersion);
             using var transaction=connection.BeginTransaction();
-            foreach (var name in new[] { "001-machines.sql", "002-leases-commands.sql", "003-pairing.sql", "004-boot-challenges.sql", "005-config-acks.sql", "006-enrollment-tickets.sql", "007-admin-vnc-sessions.sql", "008-vnc-approved-target.sql", "009-agent-version.sql", "010-completed-leases.sql", "011-readiness-diagnostics.sql", "012-agent-releases.sql", "013-agent-update-downloads.sql", "014-agent-maintenance-chains.sql", "015-agent-sync-proof.sql", "016-agent-sync-challenge-rate-limit.sql", "017-agent-release-contract.sql", "018-agent-update-source-binding.sql", "019-controller-restore-quarantine.sql", "020-agent-update-recovery-intents.sql", "021-agent-update-recovery-successors.sql", "022-agent-update-confirmations.sql", "023-pc-control-commands.sql", "024-machine-profile-sunshine.sql" }) {
+            foreach (var name in new[] { "001-machines.sql", "002-leases-commands.sql", "003-pairing.sql", "004-boot-challenges.sql", "005-config-acks.sql", "006-enrollment-tickets.sql", "007-admin-vnc-sessions.sql", "008-vnc-approved-target.sql", "009-agent-version.sql", "010-completed-leases.sql", "011-readiness-diagnostics.sql", "012-agent-releases.sql", "013-agent-update-downloads.sql", "014-agent-maintenance-chains.sql", "015-agent-sync-proof.sql", "016-agent-sync-challenge-rate-limit.sql", "017-agent-release-contract.sql", "018-agent-update-source-binding.sql", "019-controller-restore-quarantine.sql", "020-agent-update-recovery-intents.sql", "021-agent-update-recovery-successors.sql", "022-agent-update-confirmations.sql", "023-pc-control-commands.sql", "024-machine-profile-sunshine.sql", "025-lease-ended-at.sql" }) {
                 if(name=="003-pairing.sql"){using var version=connection.CreateCommand();version.Transaction=transaction;version.CommandText="PRAGMA user_version";if((long)version.ExecuteScalar()!>=3)continue;}
                 if(name=="004-boot-challenges.sql"){using var version=connection.CreateCommand();version.Transaction=transaction;version.CommandText="PRAGMA user_version";if((long)version.ExecuteScalar()!>=4)continue;}
                 if(name=="010-completed-leases.sql"){using var version=connection.CreateCommand();version.Transaction=transaction;version.CommandText="PRAGMA user_version";if((long)version.ExecuteScalar()!>=10)continue;}
@@ -73,6 +73,7 @@ public sealed partial class ControllerDatabase : IDisposable
                 if(name=="022-agent-update-confirmations.sql"){using var version=connection.CreateCommand();version.Transaction=transaction;version.CommandText="PRAGMA user_version";if((long)version.ExecuteScalar()!>=22)continue;}
                 if(name=="023-pc-control-commands.sql"){using var version=connection.CreateCommand();version.Transaction=transaction;version.CommandText="PRAGMA user_version";if((long)version.ExecuteScalar()!>=23)continue;}
                 if(name=="024-machine-profile-sunshine.sql"){using var version=connection.CreateCommand();version.Transaction=transaction;version.CommandText="PRAGMA user_version";if((long)version.ExecuteScalar()!>=24)continue;}
+                if(name=="025-lease-ended-at.sql"){using var version=connection.CreateCommand();version.Transaction=transaction;version.CommandText="PRAGMA user_version";if((long)version.ExecuteScalar()!>=25)continue;}
                 if(name=="008-vnc-approved-target.sql") {
                     using var columns=connection.CreateCommand();columns.Transaction=transaction;columns.CommandText="PRAGMA table_info(machines)";using var rows=columns.ExecuteReader();
                     var hasVncLocalIp=false;while(rows.Read())if(rows.GetString(1)=="vnc_local_ip")hasVncLocalIp=true;
@@ -87,7 +88,7 @@ public sealed partial class ControllerDatabase : IDisposable
                 using var reader=new StreamReader(resource);
                 using var cmd=connection.CreateCommand(); cmd.Transaction=transaction; cmd.CommandText=reader.ReadToEnd(); cmd.ExecuteNonQuery();
             }
-            ControllerDatabaseMaintenance.ValidateCanonicalSchema(connection, 24, transaction);
+            ControllerDatabaseMaintenance.ValidateCanonicalSchema(connection, 25, transaction);
             ControllerDatabaseMaintenance.ValidateMaintenanceChainSchema(connection,transaction);
             ControllerDatabaseMaintenance.ValidateSyncProofSchema(connection,transaction);
             ControllerDatabaseMaintenance.ValidateRestoreStateSchema(connection, transaction);
@@ -102,7 +103,7 @@ public sealed partial class ControllerDatabase : IDisposable
                 invalidateRuntimeProofs.ExecuteNonQuery();
             }
             transaction.Commit();
-            ControllerDatabaseMaintenance.ValidateCanonicalSchema(connection, 24);
+            ControllerDatabaseMaintenance.ValidateCanonicalSchema(connection, 25);
             ControllerDatabaseMaintenance.ValidateRestoreStateSchema(connection);
             ControllerDatabaseMaintenance.ValidateRecoverySchema(connection);
             ControllerDatabaseMaintenance.ValidateMachineProfileSchema(connection);
@@ -397,7 +398,7 @@ public sealed partial class ControllerDatabase : IDisposable
         return rows.ToArray();
     }}
     public MachineDto Update(string id, MachineUpdate update,long expectedRevision) {lock(gate) {
-        Ports(update.MoonlightPort,update.SunshinePort); if(string.IsNullOrWhiteSpace(update.DisplayName)||update.HourlyPriceMinorUnits<=0)throw new ArgumentException("Name and positive price required");
+        Ports(update.MoonlightPort,update.SunshinePort); if(string.IsNullOrWhiteSpace(update.DisplayName)||update.HourlyPriceMinorUnits<=0||update.HourlyPriceMinorUnits%100!=0)throw new ArgumentException("Name and a positive whole-baht price required");
         var vncLocalIp=VncTargetAddress(update.VncLocalIp);
         using var cmd=Command("UPDATE machines SET display_name=$name,hourly_price=$price,moonlight_port=$moon,sunshine_port=$sun,vnc_local_ip=$vnc,revision=revision+1 WHERE machine_id=$id AND revision=$revision",("$name",update.DisplayName.Trim()),("$price",update.HourlyPriceMinorUnits),("$moon",update.MoonlightPort),("$sun",update.SunshinePort),("$vnc",vncLocalIp),("$id",id),("$revision",expectedRevision));
         if(cmd.ExecuteNonQuery()!=1)throw new InvalidOperationException("Revision conflict or missing machine"); return List().Single(x=>x.MachineId==id);

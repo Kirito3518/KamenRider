@@ -31,13 +31,13 @@ public sealed class ControllerRestoreQuarantineIntegrationTests
         ControllerDatabaseMaintenance.Restore(backup, destination);
 
         using var restored = new ControllerDatabase(destination, agentReleaseRemediationEnabled: true);
-        Assert.Equal(24L, Scalar(destination, "PRAGMA user_version"));
+        Assert.Equal(25L, Scalar(destination, "PRAGMA user_version"));
         Assert.Equal(1L, Scalar(destination, "SELECT quarantine_active FROM controller_restore_state WHERE singleton=1"));
 
         SeedApprovedMachine(restored, "machine-added-after-restore");
 
         Assert.False(Assert.Single(restored.List()).CanRent);
-        Assert.Throws<InvalidOperationException>(() => restored.CreateTrialLease("renter", "machine-added-after-restore", 60, "rent-after-restore"));
+        Assert.Throws<InvalidOperationException>(() => restored.CreateLease("renter", "machine-added-after-restore", 60, "rent-after-restore"));
         Assert.Throws<InvalidOperationException>(() => restored.ReserveAgentUpdate("machine-added-after-restore", "missing-release", "admin", "reserve-after-restore"));
         Assert.Equal(0L, Scalar(destination, "SELECT COUNT(*) FROM leases WHERE allocation_held=1"));
         Assert.Equal(0L, Scalar(destination, "SELECT COUNT(*) FROM agent_maintenance_chains WHERE held=1"));
@@ -158,7 +158,7 @@ public sealed class ControllerRestoreQuarantineIntegrationTests
         Assert.Equal(1L, Scalar(databasePath, "SELECT quarantine_active FROM controller_restore_state WHERE singleton=1"));
         SeedApprovedMachine(restored, "machine-added-after-snapshot-rollback");
         Assert.False(Assert.Single(restored.List()).CanRent);
-        Assert.Throws<InvalidOperationException>(() => restored.CreateTrialLease("renter", "machine-added-after-snapshot-rollback", 60, "rollback-rent"));
+        Assert.Throws<InvalidOperationException>(() => restored.CreateLease("renter", "machine-added-after-snapshot-rollback", 60, "rollback-rent"));
         Assert.Throws<InvalidOperationException>(() => restored.ReserveAgentUpdate("machine-added-after-snapshot-rollback", "missing-release", "admin", "rollback-update"));
     }
 
@@ -177,7 +177,7 @@ public sealed class ControllerRestoreQuarantineIntegrationTests
             ControllerDatabaseMaintenance.Backup(databasePath, snapshotPath);
             using var changedDatabase = new ControllerDatabase(databasePath, agentReleaseRemediationEnabled: true);
             SeedRentableMachine(changedDatabase, "machine-added-after-snapshot");
-            changedDatabase.CreateTrialLease("renter", "machine-added-after-snapshot", 60, "lease-after-snapshot");
+            changedDatabase.CreateLease("renter", "machine-added-after-snapshot", 60, "lease-after-snapshot");
         }
 
         Assert.Equal(1L, ControllerRestoreEpoch.ValidateExistingEpoch(databasePath));
@@ -192,7 +192,7 @@ public sealed class ControllerRestoreQuarantineIntegrationTests
         Assert.Equal(1L, Scalar(databasePath, "SELECT quarantine_active FROM controller_restore_state WHERE singleton=1"));
         SeedApprovedMachine(restored, "machine-added-after-same-run-rollback");
         Assert.False(Assert.Single(restored.List()).CanRent);
-        Assert.Throws<InvalidOperationException>(() => restored.CreateTrialLease("renter", "machine-added-after-same-run-rollback", 60, "same-run-rollback-rent"));
+        Assert.Throws<InvalidOperationException>(() => restored.CreateLease("renter", "machine-added-after-same-run-rollback", 60, "same-run-rollback-rent"));
     }
 
     [Fact]
@@ -362,7 +362,7 @@ public sealed class ControllerRestoreQuarantineIntegrationTests
 
         using (new ControllerDatabase(databasePath)) { }
 
-        Assert.Equal(24L, Scalar(databasePath, "PRAGMA user_version"));
+        Assert.Equal(25L, Scalar(databasePath, "PRAGMA user_version"));
         Assert.Equal(1L, Scalar(databasePath, "SELECT quarantine_active FROM controller_restore_state WHERE singleton=1"));
     }
 
@@ -379,7 +379,7 @@ public sealed class ControllerRestoreQuarantineIntegrationTests
 
         using (new ControllerDatabase(databasePath)) { }
 
-        Assert.Equal(24L, Scalar(databasePath, "PRAGMA user_version"));
+        Assert.Equal(25L, Scalar(databasePath, "PRAGMA user_version"));
         Assert.Equal(1L, Scalar(databasePath, "SELECT quarantine_active FROM controller_restore_state WHERE singleton=1"));
     }
 
@@ -398,7 +398,7 @@ public sealed class ControllerRestoreQuarantineIntegrationTests
         }
 
         Assert.Throws<InvalidDataException>(() => new ControllerDatabase(databasePath));
-        Assert.Equal(24L, Scalar(databasePath, "PRAGMA user_version"));
+        Assert.Equal(25L, Scalar(databasePath, "PRAGMA user_version"));
     }
 
     [Fact]

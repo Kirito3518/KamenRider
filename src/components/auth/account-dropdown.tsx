@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
-import { ChevronsUpDown, LogOut, MonitorPlay, UserRound, Wallet, ShieldCheck } from "lucide-react";
+import { ChevronsUpDown, History, LogOut, MonitorPlay, UserRound, Wallet, ShieldCheck } from "lucide-react";
 import { formatBalance } from "@/lib/money";
 import toast from "react-hot-toast";
 import { authClient } from "@/lib/auth-client";
@@ -52,6 +52,7 @@ export function AccountDropdown({ user, onNavigate }: {
         {user.role === "admin" && <DropdownMenuItem render={<Link href="/admin" />} onClick={onNavigate}><ShieldCheck />จัดการระบบ</DropdownMenuItem>}
         <DropdownMenuItem render={<Link href="/account" />} onClick={onNavigate}><UserRound />บัญชีของฉัน</DropdownMenuItem>
         <DropdownMenuItem render={<Link href="/my-machines" />} onClick={onNavigate}><MonitorPlay />เครื่องของฉัน</DropdownMenuItem>
+        <DropdownMenuItem render={<Link href="/history" />} onClick={onNavigate}><History />ประวัติการเช่า</DropdownMenuItem>
       </DropdownMenuGroup>
       <DropdownMenuSeparator />
       <DropdownMenuGroup><DropdownMenuItem variant="destructive" disabled={pending} onClick={logout}><LogOut />{pending ? "กำลังออกจากระบบ…" : "ออกจากระบบ"}</DropdownMenuItem></DropdownMenuGroup>

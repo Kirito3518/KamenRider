@@ -26,7 +26,7 @@ public class SyncHttpTests {
  var challenge=(await initial.Content.ReadFromJsonAsync<SyncChallengeRequired>())!.AgentUpdateChallenge;
  using var proven=await Send(request with { AgentUpdateChallenge=challenge });Assert.Equal(HttpStatusCode.OK,proven.StatusCode);
  var nextChallenge=(await proven.Content.ReadFromJsonAsync<SyncResponse>())!.AgentUpdateChallenge;
- var lease=db.CreateTrialLease("alice","pc",600,"verified-lease");
+ var lease=db.CreateLease("alice","pc",600,"verified-lease");
 
  using var poll=await Send(request with { AgentUpdateChallenge=nextChallenge });Assert.Equal(HttpStatusCode.OK,poll.StatusCode);
  var pollResult=(await poll.Content.ReadFromJsonAsync<SyncResponse>())!;var prepare=Assert.Single(pollResult.Commands);
@@ -91,7 +91,7 @@ public class SyncHttpTests {
  var nextChallenge=(await proven.Content.ReadFromJsonAsync<SyncResponse>())!.AgentUpdateChallenge;
  Assert.True(Assert.Single(db.List()).CanRent);
 
- var lease=db.CreateTrialLease("alice","pc",60,"old-agent-held-lease");
+ var lease=db.CreateLease("alice","pc",60,"old-agent-held-lease");
  using var poll=await Send(request with { AgentUpdateChallenge=nextChallenge });Assert.Equal(HttpStatusCode.OK,poll.StatusCode);
  var pollResult=(await poll.Content.ReadFromJsonAsync<SyncResponse>())!;var prepare=Assert.Single(pollResult.Commands);
  nextChallenge=pollResult.AgentUpdateChallenge;

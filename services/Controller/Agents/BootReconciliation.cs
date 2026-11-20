@@ -71,11 +71,11 @@ public sealed partial class ControllerDatabase
 
             // Consume with the state transition: replay cannot affect this or a replacement allocation.
             ExecuteLease(tx, "DELETE FROM boot_reconciliation_challenges WHERE machine_id=$id", ("$id", verified.MachineId));
-            RegisterBoot(tx, verified.MachineId, request.BootId, preserveActive: true);
+            RegisterBoot(tx, verified.MachineId, request.BootId, now.ToUnixTimeMilliseconds(), preserveActive: true);
             ExecuteLease(tx, "UPDATE command_outbox SET status='invalidated',payload=CASE WHEN type='PairPin' THEN '{}' ELSE payload END WHERE machine_id=$id AND status='pending'; DELETE FROM pairing_offers WHERE machine_id=$id",
                 ("$id", verified.MachineId));
-            ExecuteLease(tx, "UPDATE leases SET state='failed',pending_revision=NULL,pending_expires_at=NULL WHERE machine_id=$id AND state='preparing'; UPDATE leases SET boot_id=$boot,pending_revision=NULL,pending_expires_at=NULL WHERE machine_id=$id AND state='active'; UPDATE leases SET state='completed',allocation_held=0 WHERE machine_id=$id AND state='ending'; UPDATE leases SET allocation_held=0 WHERE machine_id=$id AND state='failed'",
-                ("$id", verified.MachineId), ("$boot", request.BootId));
+            ExecuteLease(tx, "UPDATE leases SET state='failed',ended_at=COALESCE(ended_at,$now),pending_revision=NULL,pending_expires_at=NULL WHERE machine_id=$id AND state='preparing'; UPDATE leases SET boot_id=$boot,pending_revision=NULL,pending_expires_at=NULL WHERE machine_id=$id AND state='active'; UPDATE leases SET state='completed',allocation_held=0,ended_at=COALESCE(ended_at,$now) WHERE machine_id=$id AND state='ending'; UPDATE leases SET allocation_held=0 WHERE machine_id=$id AND state='failed'",
+                ("$id", verified.MachineId), ("$boot", request.BootId), ("$now", now.ToUnixTimeMilliseconds()));
             PurgePairingSecrets(tx, now.ToUnixTimeMilliseconds());
             ExecuteLease(tx, "INSERT INTO machine_heartbeats(machine_id,last_seen,boot_id,readiness,agent_version) VALUES($id,$at,$boot,'notReady',NULL) ON CONFLICT(machine_id) DO UPDATE SET last_seen=$at,boot_id=$boot,readiness='notReady',agent_version=NULL",
                 ("$id", verified.MachineId), ("$at", now.ToString("O")), ("$boot", request.BootId));

@@ -89,7 +89,7 @@ public sealed partial class ControllerDatabase
         ReadinessDiagnostic[]? diagnostics, Func<SqliteTransaction, string, string, string> issueToken, bool isProven)
     {
         var now = clock.GetUtcNow();
-        if (request.Readiness == "ready") RegisterBoot(tx, id, request.BootId);
+        if (request.Readiness == "ready") RegisterBoot(tx, id, request.BootId, now.ToUnixTimeMilliseconds());
         else RejectRetiredBoot(tx, id, request.BootId);
         if (request.AppliedConfigRevision >= 0)
             ExecuteLease(tx, "INSERT INTO machine_config_acks(machine_id,applied_revision) VALUES($id,$revision) ON CONFLICT(machine_id) DO UPDATE SET applied_revision=$revision",

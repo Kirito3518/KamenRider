@@ -34,6 +34,7 @@ const links = [
   { label: "หน้าแรก", href: "/", icon: Home },
   { label: "เช่าคอมพิวเตอร์", href: "/rent", icon: Monitor },
   { label: "เครื่องของฉัน", href: "/my-machines", icon: MonitorPlay },
+  { label: "ประวัติการเช่า", href: "/history", icon: History },
   { label: "วิธีใช้งาน", href: "/#how-it-works", icon: CircleHelp },
 ];
 
@@ -154,14 +155,6 @@ export function Navbar() {
                 {label}
               </Link>
             ))}
-            <Link
-              className="flex items-center gap-2.5 rounded-xl px-3 py-2.5 text-sm hover:bg-accent"
-              href="/history"
-              onClick={() => setMenuOpen(false)}
-            >
-              <History className="size-[18px]" />
-              ประวัติการเช่า
-            </Link>
           </nav>
         </MobileNavMenu>
       </MobileNav>

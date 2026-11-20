@@ -1,10 +1,25 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
-import type { Lease, Offer } from "@/lib/machine-contracts";
-import { Navbar } from "@/components/ui/layout/Navbar";
+import Link from "next/link";
+import { Wallet } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Footer } from "@/components/ui/layout/Footer";
+import { Navbar } from "@/components/ui/layout/Navbar";
+import { authClient } from "@/lib/auth-client";
+import { formatBalance } from "@/lib/money";
+import {
+  formatRentalDateTime,
+  formatRentalDuration,
+  rentalStateLabel,
+  rentalStateTone,
+} from "@/lib/rental-history";
+import type { Lease, Offer } from "@/lib/machine-contracts";
+
 const foundationSunshineSlot = "foundation-sunshine-single-pending-slot";
 const leaseRefreshIntervalMs = 15_000;
+const maxExtensionHours = 24;
+
 async function api(path: string, body?: unknown) {
   const r = await fetch(path, {
     method: body ? "POST" : "GET",
@@ -15,11 +30,13 @@ async function api(path: string, body?: unknown) {
   const data = await r.json();
   if (!r.ok)
     throw new Error(
-      r.status === 401 ? "กรุณาเข้าสู่ระบบ" : `${r.status}: ${data.error}`,
+      r.status === 401 ? "กรุณาเข้าสู่ระบบ" : data.error || `${r.status}: คำขอไม่สำเร็จ`,
     );
   return data;
 }
+
 export function MyMachines() {
+  const { data: session, refetch: refetchSession } = authClient.useSession();
   const [leases, setLeases] = useState<Lease[]>([]);
   const [message, setMessage] = useState("กำลังโหลด…");
   const refreshLeasesRef = useRef<(() => Promise<void>) | null>(null);
@@ -96,22 +113,48 @@ export function MyMachines() {
     <div className="flex min-h-screen flex-col">
       <Navbar />
       <main className="mx-auto w-full max-w-4xl flex-1 space-y-5 p-5">
-        <h1 className="text-3xl font-bold">เครื่องของฉัน</h1>
-        <p>ระบบทดลอง — สิทธิ์และการจับคู่ขึ้นกับสถานะจริงของ Agent</p>
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <h1 className="text-3xl font-bold">เครื่องของฉัน</h1>
+            <p className="text-sm text-muted-foreground">
+              รายการเช่าของคุณ — สถานะและการจับคู่มาจากเครื่องจริง
+            </p>
+          </div>
+          <div className="flex items-center gap-2 rounded-xl border px-3 py-2 text-sm">
+            <Wallet aria-hidden className="size-4 text-muted-foreground" />
+            <span className="text-muted-foreground">ยอดเงินคงเหลือ</span>
+            <span className="font-medium tabular-nums">
+              {formatBalance(session?.user.balanceSatang ?? 0)}
+            </span>
+          </div>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => void refreshLeasesRef.current?.()}
+          >
+            รีเฟรช
+          </Button>
+          <Button variant="outline" size="sm" nativeButton={false} render={<Link href="/history" />}>
+            ประวัติการเช่า
+          </Button>
+          <Button variant="outline" size="sm" nativeButton={false} render={<Link href="/rent" />}>
+            เช่าเครื่องเพิ่ม
+          </Button>
+        </div>
         <p role="status">{message}</p>
-        <button
-          className="rounded border p-2"
-          onClick={() => void refreshLeasesRef.current?.()}
-        >
-          รีเฟรช
-        </button>
         {!message && !leases.length ? (
-          <p>คุณยังไม่มีสิทธิ์ทดลอง ติดต่อผู้ดูแล</p>
+          <div className="flex flex-col items-center gap-3 rounded-xl border border-dashed p-8 text-center">
+            <p>คุณยังไม่มีรายการเช่า</p>
+            <Button nativeButton={false} render={<Link href="/rent" />}>เลือกเครื่องที่หน้าเช่า</Button>
+          </div>
         ) : null}
         {leases.map((lease) => (
           <LeaseCard
             key={lease.id}
             lease={lease}
+            balanceSatang={session?.user.balanceSatang ?? 0}
             onLeaseMutationStart={beginLeaseMutation}
             onLeaseMutationEnd={endLeaseMutation}
             onLeaseUpdate={(updated) => {
@@ -123,6 +166,7 @@ export function MyMachines() {
                 ),
               );
             }}
+            onBalanceRefresh={() => void refetchSession()}
           />
         ))}
       </main>
@@ -130,16 +174,21 @@ export function MyMachines() {
     </div>
   );
 }
+
 function LeaseCard({
   lease,
+  balanceSatang,
   onLeaseMutationStart,
   onLeaseMutationEnd,
   onLeaseUpdate,
+  onBalanceRefresh,
 }: {
   lease: Lease;
+  balanceSatang: number;
   onLeaseMutationStart: () => void;
   onLeaseMutationEnd: () => void;
   onLeaseUpdate: (lease: Lease) => void;
+  onBalanceRefresh: () => void;
 }) {
   const [offer, setOffer] = useState<Offer>(null);
   useEffect(() => {
@@ -152,10 +201,24 @@ function LeaseCard({
   }, [offer]);
   const [message, setMessage] = useState("");
   const [command, setCommand] = useState("");
-  const [extensionMinutes, setExtensionMinutes] = useState(60);
+  const [extensionHours, setExtensionHours] = useState(1);
   const [extensionBusy, setExtensionBusy] = useState(false);
   const extensionRequestKey = useRef<string | null>(null);
   const path = `/api/my-leases/${encodeURIComponent(lease.id)}/pair`;
+  const validExtensionHours =
+    Number.isSafeInteger(extensionHours) &&
+    extensionHours >= 1 &&
+    extensionHours <= maxExtensionHours;
+  const extensionCost = lease.payment
+    ? lease.payment.hourlyPriceSatang * extensionHours
+    : null;
+  const extensionAffordable =
+    extensionCost !== null && extensionCost <= balanceSatang;
+  const canExtend =
+    lease.state === "active" &&
+    lease.pendingRevision === null &&
+    lease.payment?.extendable === true;
+
   async function pending() {
     try {
       setOffer(await api(path));
@@ -165,18 +228,57 @@ function LeaseCard({
       setMessage(String(e));
     }
   }
+
+  async function extend() {
+    if (!validExtensionHours || !canExtend || extensionBusy) return;
+    setExtensionBusy(true);
+    onLeaseMutationStart();
+    try {
+      const updated = (await api(
+        `/api/my-leases/${encodeURIComponent(lease.id)}/extend`,
+        {
+          additionalSeconds: extensionHours * 3_600,
+          expectedRevision: lease.revision,
+          idempotencyKey:
+            extensionRequestKey.current ??
+            (extensionRequestKey.current = crypto.randomUUID()),
+        },
+      )) as Lease;
+      onLeaseUpdate(updated);
+      extensionRequestKey.current = null;
+      setMessage("ต่อเวลาแล้ว รอเครื่องยืนยันการเปลี่ยนแปลง");
+      onBalanceRefresh();
+    } catch (error) {
+      setMessage(String(error));
+    } finally {
+      onLeaseMutationEnd();
+      setExtensionBusy(false);
+    }
+  }
+
   return (
     <section className="space-y-3 rounded-xl border p-4">
-      <h2 className="text-xl font-bold">
-        {lease.machineDisplayName || lease.machineId}
-      </h2>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h2 className="text-xl font-bold">
+          {lease.machineDisplayName || lease.machineId}
+        </h2>
+        <Badge variant={rentalStateTone(lease.state)}>
+          {rentalStateLabel(lease.state)}
+        </Badge>
+      </div>
       <p>
-        สถานะ: {lease.state} · Revision {lease.revision}
+        Revision {lease.revision}
         {lease.pendingRevision !== null
           ? ` · รอ ACK ${lease.pendingRevision}`
           : ""}
       </p>
-      <p>สิ้นสุด: {lease.expiresAtUtc || "ยังไม่เริ่มนับเวลา"}</p>
+      <p>
+        สิ้นสุด:{" "}
+        {lease.expiresAtUtc
+          ? formatRentalDateTime(lease.expiresAtUtc)
+          : "ยังไม่เริ่มนับเวลา"}
+        {lease.endedAtUtc ? ` · สิ้นสุดจริง ${formatRentalDateTime(lease.endedAtUtc)}` : ""}
+      </p>
       <p>
         {lease.agent?.reachability === "reachable"
           ? "Agent ติดต่อได้"
@@ -187,6 +289,42 @@ function LeaseCard({
       <p className="text-sm text-muted-foreground">
         Heartbeat ล่าสุด: {lease.agent?.lastSeenAt || "ไม่มีข้อมูล"}
       </p>
+
+      {lease.payment ? (
+        <dl className="grid grid-cols-2 gap-3 rounded-lg bg-muted/50 p-3 text-sm sm:grid-cols-4">
+          <div>
+            <dt className="text-muted-foreground">ราคา/ชม.</dt>
+            <dd className="font-medium tabular-nums">
+              {formatBalance(lease.payment.hourlyPriceSatang)}
+            </dd>
+          </div>
+          <div>
+            <dt className="text-muted-foreground">เวลาที่ชำระ</dt>
+            <dd className="font-medium">
+              {formatRentalDuration(
+                lease.payment.durationSeconds + lease.payment.extensionSeconds,
+              )}
+            </dd>
+          </div>
+          <div>
+            <dt className="text-muted-foreground">ชำระแล้ว</dt>
+            <dd className="font-medium tabular-nums">
+              {formatBalance(lease.payment.paidSatang)}
+            </dd>
+          </div>
+          <div>
+            <dt className="text-muted-foreground">คืนเงินแล้ว</dt>
+            <dd className="font-medium tabular-nums">
+              {formatBalance(lease.payment.refundedSatang)}
+            </dd>
+          </div>
+        </dl>
+      ) : lease.state !== "pending" ? (
+        <p className="text-sm text-muted-foreground">
+          รายการนี้ไม่มีข้อมูลการชำระเงิน (สร้างก่อนเปิดระบบเช่าจริง) จึงไม่สามารถต่อเวลาได้
+        </p>
+      ) : null}
+
       {lease.state === "active" ? (
         <>
           <p className="break-all">
@@ -199,10 +337,6 @@ function LeaseCard({
               ข้อมูลที่อยู่เชื่อมต่ออาจล้าสมัย — ตรวจสอบกับผู้ดูแลก่อนใช้งาน
             </p>
           ) : null}
-        </>
-      ) : null}
-      {lease.state === "active" ? (
-        <>
           <button className="rounded border p-2" onClick={pending}>
             โหลดช่องจับคู่จาก Agent
           </button>
@@ -284,60 +418,63 @@ function LeaseCard({
           ) : null}
           <form
             className="space-y-3 rounded-lg border p-3"
-            onSubmit={async (event) => {
+            onSubmit={(event) => {
               event.preventDefault();
-              setExtensionBusy(true);
-              onLeaseMutationStart();
-              try {
-                const updated = (await api(
-                  `/api/my-leases/${encodeURIComponent(lease.id)}/extend`,
-                  {
-                    additionalSeconds: extensionMinutes * 60,
-                    expectedRevision: lease.revision,
-                    idempotencyKey:
-                      extensionRequestKey.current ??
-                      (extensionRequestKey.current = crypto.randomUUID()),
-                  },
-                )) as Lease;
-                onLeaseUpdate(updated);
-                extensionRequestKey.current = null;
-                setMessage("ส่งคำขอต่อเวลาทดลองแล้ว รอเครื่องยืนยัน");
-              } catch (error) {
-                setMessage(String(error));
-              } finally {
-                onLeaseMutationEnd();
-                setExtensionBusy(false);
-              }
+              void extend();
             }}
           >
             <label className="block">
-              เพิ่มเวลา (นาที)
+              ต่อเวลา (ชั่วโมง)
               <input
                 className="ml-2 w-24 rounded border p-2"
                 type="number"
-                name="extensionMinutes"
+                name="extensionHours"
                 min={1}
-                max={1440}
+                max={maxExtensionHours}
                 step={1}
-                value={extensionMinutes}
+                value={extensionHours}
                 onChange={(event) => {
                   extensionRequestKey.current = null;
-                  setExtensionMinutes(Number(event.target.value));
+                  setExtensionHours(Number(event.target.value));
                 }}
                 required
               />
             </label>
+            {extensionCost !== null ? (
+              <p className="text-sm">
+                ค่าใช้จ่ายครั้งนี้{" "}
+                <span className="font-medium tabular-nums">
+                  {formatBalance(extensionCost)}
+                </span>{" "}
+                · ยอดเงินคงเหลือ{" "}
+                <span className="font-medium tabular-nums">
+                  {formatBalance(balanceSatang)}
+                </span>
+              </p>
+            ) : null}
+            {extensionCost !== null && !extensionAffordable ? (
+              <p className="text-sm text-status-maintenance">
+                ยอดเงินไม่เพียงพอ กรุณาติดต่อผู้ดูแลเพื่อเติมเงิน
+              </p>
+            ) : null}
             <button
-              disabled={extensionBusy || lease.pendingRevision !== null}
+              disabled={
+                extensionBusy ||
+                !canExtend ||
+                !validExtensionHours ||
+                !extensionAffordable
+              }
               className="rounded border p-2 disabled:opacity-50"
             >
-              ต่อเวลาทดลอง
+              ต่อเวลา
             </button>
             <p className="text-sm text-muted-foreground">
-              ช่วงทดลองยังไม่มีการหักเงิน การต่อเวลาจะมีผลเมื่อเครื่องยืนยันคำสั่งแล้ว
+              ระบบหักค่าเช่าตามชั่วโมงที่ต่อทันที และจะคืนเงินตามเวลาที่ไม่ได้ใช้ให้อัตโนมัติเมื่อสิ้นสุดการเช่า
             </p>
           </form>
         </>
+      ) : lease.state === "pending" ? (
+        <p>ระบบกำลังยืนยันการเช่ากับเครื่อง กรุณารอสักครู่แล้วรีเฟรชอีกครั้ง</p>
       ) : (
         <p>รอเครื่องและสิทธิ์พร้อมก่อนจับคู่</p>
       )}

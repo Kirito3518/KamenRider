@@ -43,7 +43,15 @@ public sealed class LeaseFixture : IDisposable {
         Sync();
     }
     public SyncResponse Sync(string boot="boot", params CommandResult[] results) => Db.Sync("pc",new(boot,"192.0.2.1","001122334455",Db.List().Single().ConfigRevision,"ready",results));
-    public Task<LeaseDto> Create(string key="create",string user="alice") => Leases.CreateTrialLeaseAsync(user,"pc",60,key,default);
+    /// <summary>Enrolls, prices, approves and heartbeats an additional rentable machine.</summary>
+    public void AddRentableMachine(string machineId, string boot="boot-2") {
+        using var key=ECDsa.Create();
+        Db.EnrollWithTicket(new(machineId,Convert.ToBase64String(key.ExportSubjectPublicKeyInfo()),"192.0.2.1","001122334455",1,2));
+        Db.Update(machineId,new("PC-"+machineId,500,1,2),1);
+        Db.Approve(machineId,"admin");
+        Db.Sync(machineId,new(boot,"192.0.2.1","001122334455",Db.List().Single(machine=>machine.MachineId==machineId).ConfigRevision,"ready",[]));
+    }
+    public Task<LeaseDto> Create(string key="create",string user="alice") => Leases.CreateLeaseAsync(user,"pc",60,key,default);
     public async Task<(LeaseDto,CommandEnvelope)> Prepare() {
         var lease = await Create();
         var prepare = Assert.Single(Sync().Commands);
@@ -66,7 +74,7 @@ public class LeaseTests {
     [Theory]
     [InlineData("notReady")]
     [InlineData("unknown")]
-    public async Task CreateTrialLeaseRejectsUnreadyHeartbeatWithoutCreatingAllocation(string readiness) {
+    public async Task CreateLeaseRejectsUnreadyHeartbeatWithoutCreatingAllocation(string readiness) {
         using var f=new LeaseFixture();
         f.Db.Sync("pc",new("boot","192.0.2.1","001122334455",3,readiness,[]));
 
@@ -75,7 +83,7 @@ public class LeaseTests {
         Assert.Empty(await f.Leases.GetUserLeasesAsync("alice",default));
     }
 
-    [Fact] public async Task CreateTrialLeaseRejectsHeartbeatOlderThanTwentySeconds() {
+    [Fact] public async Task CreateLeaseRejectsHeartbeatOlderThanTwentySeconds() {
         using var f=new LeaseFixture();
         f.Time.Now=f.Time.Now.AddSeconds(21);
 
@@ -84,7 +92,7 @@ public class LeaseTests {
         Assert.Empty(await f.Leases.GetUserLeasesAsync("alice",default));
     }
 
-    [Fact] public async Task CreateTrialLeaseRequiresCurrentConfigurationAcknowledgment() {
+    [Fact] public async Task CreateLeaseRequiresCurrentConfigurationAcknowledgment() {
         using var f=new LeaseFixture();
         var current=Assert.Single(f.Db.List());
         f.Db.Update("pc",new("PC",500,5000,6000),current.ConfigRevision);
@@ -130,7 +138,7 @@ public class LeaseTests {
         var start=new TaskCompletionSource();
         async Task<LeaseDto?> Attempt(LeaseService service,string key) {
             await start.Task;
-            try { return await service.CreateTrialLeaseAsync("alice","pc",60,key,default); }
+            try { return await service.CreateLeaseAsync("alice","pc",60,key,default); }
             catch(InvalidOperationException) { return null; }
         }
         var attempts=new[]{Task.Run(()=>Attempt(f.Leases,"one")),Task.Run(()=>Attempt(new(other),"two"))};
@@ -139,7 +147,7 @@ public class LeaseTests {
         f.Reopen();
         var key=results[0] is not null?"one":"two";
         Assert.Equal(lease.Id,(await f.Create(key)).Id);
-        await Assert.ThrowsAsync<InvalidOperationException>(()=>f.Leases.CreateTrialLeaseAsync("alice","pc",61,key,default));
+        await Assert.ThrowsAsync<InvalidOperationException>(()=>f.Leases.CreateLeaseAsync("alice","pc",61,key,default));
     }
     [Fact] public async Task ReadyStartsFixedDeadlineButOnlyApplyAckActivates() {
         using var f=new LeaseFixture(); var lease=await f.Create();

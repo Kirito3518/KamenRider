@@ -32,11 +32,11 @@ public sealed partial class ControllerDatabase {
         using(var check=LeaseCommand(tx,"SELECT retired FROM machine_boots WHERE machine_id=$id AND boot_id=$boot",("$id",machineId),("$boot",boot)))
             if(check.ExecuteScalar() is long retired && retired==1) throw new ArgumentException("Retired boot");
     }
-    private void RegisterBoot(SqliteTransaction tx,string machineId,string boot,bool preserveActive=false) {
+    private void RegisterBoot(SqliteTransaction tx,string machineId,string boot,long now,bool preserveActive=false) {
         RejectRetiredBoot(tx,machineId,boot);
         // Boot history is durable: a signed old heartbeat cannot resurrect a retired process after a restart.
         ExecuteLease(tx,"UPDATE machine_boots SET retired=1 WHERE machine_id=$id AND boot_id<>$boot; INSERT OR IGNORE INTO machine_boots(machine_id,boot_id) VALUES($id,$boot)",("$id",machineId),("$boot",boot));
-        if(!preserveActive) ExecuteLease(tx,"UPDATE leases SET state=CASE WHEN state='active' THEN 'ending' ELSE 'failed' END,pending_revision=NULL,pending_expires_at=NULL WHERE machine_id=$id AND boot_id IS NOT NULL AND boot_id<>$boot AND state IN ('preparing','active')",("$id",machineId),("$boot",boot));
+        if(!preserveActive) ExecuteLease(tx,"UPDATE leases SET state=CASE WHEN state='active' THEN 'ending' ELSE 'failed' END,ended_at=COALESCE(ended_at,$now),pending_revision=NULL,pending_expires_at=NULL WHERE machine_id=$id AND boot_id IS NOT NULL AND boot_id<>$boot AND state IN ('preparing','active')",("$id",machineId),("$boot",boot),("$now",now));
         ExecuteLease(tx,"UPDATE command_outbox SET status='invalidated' WHERE machine_id=$id AND boot_id<>$boot AND status='pending'",("$id",machineId),("$boot",boot));
     }
     private void ApplyResults(SqliteTransaction tx,string machineId,SyncRequest request,long now) {
@@ -58,7 +58,7 @@ public sealed partial class ControllerDatabase {
                 if(result.Status!="applied") continue;
                 var ending=FindLease(tx,command.RentalId);
                 if(ending is not null&&ending.Dto.Revision==command.LeaseRevision){
-                    ExecuteLease(tx,"UPDATE leases SET state='completed',allocation_held=0,pending_revision=NULL,pending_expires_at=NULL WHERE id=$id AND revision=$revision",("$id",ending.Dto.Id),("$revision",command.LeaseRevision));
+                    ExecuteLease(tx,"UPDATE leases SET state='completed',allocation_held=0,ended_at=COALESCE(ended_at,$now),pending_revision=NULL,pending_expires_at=NULL WHERE id=$id AND revision=$revision",("$id",ending.Dto.Id),("$revision",command.LeaseRevision),("$now",now));
                 }
                 ExecuteLease(tx,"UPDATE command_outbox SET status='applied' WHERE command_id=$id",("$id",command.CommandId));
                 continue;
@@ -73,7 +73,7 @@ public sealed partial class ControllerDatabase {
             if(result.Status=="failed") {
                 // Do not persist or echo arbitrary agent text (it can contain secrets).
                 ExecuteLease(tx,"UPDATE command_outbox SET status='failed',error_code='AgentFailure' WHERE command_id=$id",("$id",command.CommandId));
-                ExecuteLease(tx,"UPDATE leases SET state=CASE WHEN state='active' THEN 'ending' ELSE 'failed' END,pending_revision=NULL,pending_expires_at=NULL WHERE id=$id",("$id",command.RentalId));
+                ExecuteLease(tx,"UPDATE leases SET state=CASE WHEN state='active' THEN 'ending' ELSE 'failed' END,ended_at=COALESCE(ended_at,$now),pending_revision=NULL,pending_expires_at=NULL WHERE id=$id",("$id",command.RentalId),("$now",now));
                 continue;
             }
             if(result.Status!="applied"||request.Readiness!="ready") continue;

@@ -92,7 +92,7 @@ function GeneralTab({
   onReject: (machine: Machine) => Promise<void>;
 }) {
   const [displayName, setDisplayName] = useState(machine.displayName || machine.machineId);
-  const [price, setPrice] = useState(String(machine.hourlyPriceMinorUnits));
+  const [price, setPrice] = useState(String(machine.hourlyPriceMinorUnits / 100));
   const [busy, setBusy] = useState(false);
   const [submitted, setSubmitted] = useState(false);
   const [error, setError] = useState("");
@@ -108,7 +108,7 @@ function GeneralTab({
       : "";
   const priceValue = Number(price);
   const priceInvalid = !Number.isSafeInteger(priceValue) || priceValue < 1;
-  const priceError = priceInvalid ? "ราคาต้องเป็นจำนวนเต็มตั้งแต่ 1 สตางค์" : "";
+  const priceError = priceInvalid ? "ราคาต้องเป็นจำนวนเต็มบาทตั้งแต่ 1 บาท" : "";
   const pending = isPendingMachine(machine);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
@@ -120,7 +120,7 @@ function GeneralTab({
     try {
       await onSave(machine, {
         displayName: trimmedName,
-        hourlyPriceMinorUnits: priceValue,
+        hourlyPriceMinorUnits: priceValue * 100,
         moonlightPort: machine.moonlightPort,
         sunshinePort: machine.sunshinePort,
         vncLocalIp: getSavedVncTargetForMetadataUpdate(machine),
@@ -168,7 +168,7 @@ function GeneralTab({
               )}
             </Field>
             <Field data-invalid={submitted && priceInvalid}>
-              <FieldLabel htmlFor="machine-hourly-price">ราคา (สตางค์/ชั่วโมง)</FieldLabel>
+              <FieldLabel htmlFor="machine-hourly-price">ราคา (บาท/ชั่วโมง)</FieldLabel>
               <Input
                 id="machine-hourly-price"
                 type="number"
@@ -183,7 +183,7 @@ function GeneralTab({
               {submitted && priceError ? (
                 <FieldError>{priceError}</FieldError>
               ) : (
-                <FieldDescription>ราคาต้องเป็นจำนวนเต็มหน่วยสตางค์</FieldDescription>
+                <FieldDescription>ราคาต้องเป็นจำนวนเต็มบาท (เช่น 10, 20, 30)</FieldDescription>
               )}
             </Field>
           </div>

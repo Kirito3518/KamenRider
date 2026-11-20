@@ -634,13 +634,13 @@ describe("MachinesManager dashboard", () => {
     await openSettings("edit-pc");
 
     fireEvent.change(screen.getByLabelText("ชื่อที่แสดง"), { target: { value: "Edit PC 2" } });
-    fireEvent.change(screen.getByLabelText("ราคา (สตางค์/ชั่วโมง)"), { target: { value: "250" } });
+    fireEvent.change(screen.getByLabelText("ราคา (บาท/ชั่วโมง)"), { target: { value: "250" } });
     fireEvent.click(screen.getByRole("button", { name: "บันทึกข้อมูลทั่วไป" }));
 
     await waitFor(() =>
       expect(patchBody).toEqual({
         displayName: "Edit PC 2",
-        hourlyPriceMinorUnits: 250,
+        hourlyPriceMinorUnits: 25000,
         moonlightPort: 47989,
         sunshinePort: 47990,
         vncLocalIp: "192.168.1.60",

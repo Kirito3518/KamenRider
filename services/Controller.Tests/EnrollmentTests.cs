@@ -22,7 +22,7 @@ public class EnrollmentTests
             Assert.Equal(5000, db.List()[0].MoonlightPort);
             using var other = ECDsa.Create();
             Assert.Throws<UnauthorizedAccessException>(() => db.EnrollWithTicket(request with {PublicKey=Convert.ToBase64String(other.ExportSubjectPublicKeyInfo())}));
-            Assert.Throws<InvalidOperationException>(() => db.Update("machine", new("Stale", 2, 1, 2), 1));
+            Assert.Throws<InvalidOperationException>(() => db.Update("machine", new("Stale", 200, 1, 2), 1));
         }
         using (var restarted = new ControllerDatabase(path)) {
             var machine = restarted.List().Single();

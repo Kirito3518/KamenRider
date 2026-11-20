@@ -10,7 +10,7 @@
     3. rewrites absolute paths in the tracked .env.local to this clone's location
        (the committed file contains the original dev machine path),
     4. protects the data directory with a Controller-acceptable DACL,
-    5. by default archives the bundled Controller database so a fresh v24 database
+    5. by default archives the bundled Controller database so a fresh v25 database
        starts outside restore quarantine (the bundled auth database with the admin
        accounts is kept),
     6. verifies the bundled Agent package hash matches AGENT_PACKAGE_SHA256,
@@ -279,7 +279,7 @@ if ($KeepBundledDatabase) {
     Protect-FileAcl (Join-Path $dataDir 'controller.sqlite.restore-epoch')
     Write-Warn2 'Agent sync will return 409 until the restore-quarantine design is resolved.'
 } else {
-    Write-Step 'Archiving the bundled Controller database for a fresh v24 start (no quarantine)'
+    Write-Step 'Archiving the bundled Controller database for a fresh v25 start (no quarantine)'
     if ($listening.Count -gt 0 -and -not $Force) {
         Write-Fail ("Ports already in use: " + ($listening -join ', '))
         Write-Host 'Stop the running Controller/web first (or use -KeepBundledDatabase / -Force).'

@@ -8,6 +8,7 @@ import {
 } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { formatBalance } from "@/lib/money";
 import { formatRamBytes, formatSpec } from "@/lib/machine-specs";
 import { machineStatusLabels, type RentalMachine } from "@/lib/rental-machines";
 
@@ -73,7 +74,7 @@ export function MachineCard({
       <CardFooter className="mt-auto flex flex-col items-stretch gap-3">
         <p>
           <span className="text-2xl font-bold tracking-tight text-primary">
-            ฿{machine.price}
+            {formatBalance(machine.priceSatang)}
           </span>
           <span className="ml-1 text-xs text-muted-foreground">/ ชั่วโมง</span>
         </p>

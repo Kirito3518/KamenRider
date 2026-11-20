@@ -140,6 +140,8 @@ An unconfirmed Controller start is reconciled by the helper and still fails the 
 
 Migration 024 (canonical schema version 24) adds the Agent-reported `machines.hostname/cpu/gpu/ram_bytes/sunshine_credential_revision` columns and the singleton `sunshine_management_credential` table. Neither feature changes approval, readiness, configuration revision or rentability: the profile is display/diagnostic data and the credential is an out-of-band management secret.
 
+Migration 025 (canonical schema version 25) adds the nullable `leases.ended_at` column. The Controller records the effective end instant once (`COALESCE`) when a lease leaves the active window: natural expiry stores `expires_at`, while preparation failure, admin power-off/cancel, reboot detection and Agent failure store the observation time. The web layer uses it only to compute prorated refunds for paid rentals; it does not change Agent commands, lease deadlines or readiness. Older v24 binaries reject a v25 database.
+
 ### Machine profile and display name
 
 - `POST /agent/enroll` accepts optional `Hardware { hostname, cpu, gpu, ramBytes }`. The values are trimmed and bounded before persistence: hostname 1..64 characters is required when a profile is reported, CPU and GPU are optional and capped at 128/256 characters, and RAM must be 0..2^40 bytes. Control characters are rejected; a malformed profile fails the request without inserting or updating anything (no implicit truncation).

@@ -23,7 +23,8 @@ export type RentalMachine = {
   /** Agent-reported RAM bytes from `/api/machines`. */
   ramBytes: number;
   storage: string;
-  price: number;
+  /** Hourly price in satang; always a positive whole-baht amount. */
+  priceSatang: number;
   status: MachineStatus;
   game: string;
 };
@@ -32,7 +33,7 @@ export const machineStatusLabels: Record<MachineStatus, string> = {
   notReady: "ยังไม่พร้อม",
   unknown: "ยังไม่ยืนยันความพร้อม",
   unreachable: "ติดต่อไม่ได้",
-  ready: "พร้อม (ทดลอง)",
+  ready: "พร้อม",
   preparing: "กำลังเตรียม",
   pending: "รออนุมัติ",
   ending: "กำลังสิ้นสุด",
@@ -57,9 +58,9 @@ export function filterMachines(
     })
     .sort((a, b) =>
       sort === "price-asc"
-        ? a.price - b.price
+        ? a.priceSatang - b.priceSatang
         : sort === "price-desc"
-          ? b.price - a.price
+          ? b.priceSatang - a.priceSatang
           : a.id.localeCompare(b.id),
     );
 }

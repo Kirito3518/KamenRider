@@ -77,7 +77,7 @@ describe("GET /api/machines customer machine list", () => {
     expect(data[0]).toEqual({
       id: "pc-1",
       name: "DESKTOP-ONE",
-      price: 40,
+      priceSatang: 4_000,
       status: "available",
       cpu: "AMD Ryzen 7 7800X3D",
       gpu: "NVIDIA GeForce RTX 4080",

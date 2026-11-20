@@ -19,7 +19,7 @@ async function AdminBalances() {
       <AdminPageHeader
         icon={Wallet}
         title="ยอดเงินสมาชิก"
-        description="ยอดคงเหลือปัจจุบันของสมาชิก · หน้านี้ใช้ตรวจสอบยอดเงิน ยังไม่มีการปรับยอด"
+        description="ยอดคงเหลือปัจจุบันของสมาชิก · ระบบหักค่าเช่าและคืนเงินตามเวลาที่ไม่ได้ใช้ให้อัตโนมัติ"
       />
       <AdminStatGrid className="sm:grid-cols-3 xl:grid-cols-3">
         <AdminStatCard

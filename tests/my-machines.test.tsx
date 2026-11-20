@@ -11,6 +11,24 @@ import { MyMachines } from "@/components/my-machines/my-machines";
 
 vi.mock("@/components/ui/layout/Navbar", () => ({ Navbar: () => null }));
 vi.mock("@/components/ui/layout/Footer", () => ({ Footer: () => null }));
+vi.mock("@/lib/auth-client", () => ({
+  authClient: {
+    useSession: () => ({
+      data: {
+        user: {
+          id: "renter-1",
+          name: "Renter",
+          email: "renter@example.com",
+          image: null,
+          balanceSatang: 100_000,
+          role: "user",
+        },
+      },
+      isPending: false,
+      refetch: vi.fn(async () => ({ data: null })),
+    }),
+  },
+}));
 
 const HEARTBEAT_AT = "2026-11-08T03:04:05.000Z";
 const LEASES = [
@@ -23,6 +41,14 @@ const LEASES = [
     expiresAtUtc: "2026-11-08T04:00:00.000Z",
     connection: { address: null, stale: false },
     agent: { reachability: "reachable", lastSeenAt: HEARTBEAT_AT },
+    payment: {
+      hourlyPriceSatang: 40_000,
+      durationSeconds: 3600,
+      extensionSeconds: 0,
+      paidSatang: 40_000,
+      refundedSatang: 0,
+      extendable: true,
+    },
   },
 ];
 
@@ -240,9 +266,9 @@ describe("MyMachines lease refresh", () => {
     });
     expect(leaseListRequests).toBe(2);
 
-    fireEvent.click(screen.getByRole("button", { name: "ต่อเวลาทดลอง" }));
+    fireEvent.click(screen.getByRole("button", { name: "ต่อเวลา" }));
     expect(
-      await screen.findByText("ส่งคำขอต่อเวลาทดลองแล้ว รอเครื่องยืนยัน"),
+      await screen.findByText("ต่อเวลาแล้ว รอเครื่องยืนยันการเปลี่ยนแปลง"),
     ).toBeDefined();
     const showsPendingRevision = (_text: string, element: Element | null) =>
       element?.tagName === "P" &&
@@ -263,7 +289,7 @@ describe("MyMachines lease refresh", () => {
       screen.getByText(showsPendingRevision),
     ).toBeDefined();
     expect(
-      (screen.getByRole("button", { name: "ต่อเวลาทดลอง" }) as HTMLButtonElement)
+      (screen.getByRole("button", { name: "ต่อเวลา" }) as HTMLButtonElement)
         .disabled,
     ).toBe(true);
     expect(screen.getByText("Agent ติดต่อได้")).toBeDefined();
@@ -328,7 +354,7 @@ describe("MyMachines lease refresh", () => {
       element.textContent?.includes("รอ ACK 2") === true;
     expect(screen.getByText(showsPendingAck)).toBeDefined();
     const extendButton = screen.getByRole("button", {
-      name: "ต่อเวลาทดลอง",
+      name: "ต่อเวลา",
     }) as HTMLButtonElement;
     expect(extendButton.disabled).toBe(true);
 
@@ -368,9 +394,9 @@ describe("MyMachines lease refresh", () => {
 
     render(<MyMachines />);
     expect(await screen.findByText("pc-one")).toBeDefined();
-    fireEvent.click(screen.getByRole("button", { name: "ต่อเวลาทดลอง" }));
+    fireEvent.click(screen.getByRole("button", { name: "ต่อเวลา" }));
     expect(
-      (screen.getByRole("button", { name: "ต่อเวลาทดลอง" }) as HTMLButtonElement)
+      (screen.getByRole("button", { name: "ต่อเวลา" }) as HTMLButtonElement)
         .disabled,
     ).toBe(true);
 
@@ -394,7 +420,7 @@ describe("MyMachines lease refresh", () => {
       response({ ...LEASES[0], pendingRevision: 2 }),
     );
     expect(
-      await screen.findByText("ส่งคำขอต่อเวลาทดลองแล้ว รอเครื่องยืนยัน"),
+      await screen.findByText("ต่อเวลาแล้ว รอเครื่องยืนยันการเปลี่ยนแปลง"),
     ).toBeDefined();
     await waitFor(() => expect(leaseListRequests).toBe(3));
     const showsAcknowledgedRevision = (
@@ -406,7 +432,7 @@ describe("MyMachines lease refresh", () => {
       !element.textContent.includes("รอ ACK");
     expect(screen.getByText(showsAcknowledgedRevision)).toBeDefined();
     expect(
-      (screen.getByRole("button", { name: "ต่อเวลาทดลอง" }) as HTMLButtonElement)
+      (screen.getByRole("button", { name: "ต่อเวลา" }) as HTMLButtonElement)
         .disabled,
     ).toBe(false);
   });

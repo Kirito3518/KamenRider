@@ -109,7 +109,7 @@ public sealed partial class ControllerDatabase
             }
             if (leaseId is not null)
             {
-                ExecuteLease(tx, "UPDATE leases SET state=CASE WHEN state IN ('preparing','active') THEN 'ending' ELSE state END,expires_at=$now,pending_revision=NULL,pending_expires_at=NULL WHERE id=$lease",
+                ExecuteLease(tx, "UPDATE leases SET state=CASE WHEN state IN ('preparing','active') THEN 'ending' ELSE state END,expires_at=$now,ended_at=COALESCE(ended_at,CASE WHEN state IN ('preparing','active') THEN $now END),pending_revision=NULL,pending_expires_at=NULL WHERE id=$lease",
                     ("$now", nowMs), ("$lease", leaseId));
                 ExecuteLease(tx, "UPDATE command_outbox SET status='expired' WHERE rental_id=$lease AND status='pending' AND type<>'ShutdownMachine'",
                     ("$lease", leaseId));
@@ -204,6 +204,9 @@ public sealed partial class ControllerDatabase
                 throw new InvalidOperationException("Lease state or revision conflict");
             if (HasPendingCommand(tx, lease.Dto.Id, "EndLease"))
                 throw new InvalidOperationException("Lease cancellation is already in progress");
+            // The effective end of a cancelled lease is the cancellation request, not the Agent ack.
+            ExecuteLease(tx, "UPDATE leases SET ended_at=COALESCE(ended_at,$now) WHERE id=$lease",
+                ("$now", nowMs), ("$lease", lease.Dto.Id));
             var validUntil = Math.Min(nowMs + PcControlCommandValidityMilliseconds,
                 lease.Dto.ExpiresAtUtc?.ToUnixTimeMilliseconds() ?? nowMs + PcControlCommandValidityMilliseconds);
             var commandId = AddCommand(tx, lease, "EndLease", lease.Dto.Revision, lease.Boot!, validUntil, new { });

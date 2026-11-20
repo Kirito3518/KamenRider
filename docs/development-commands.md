@@ -16,7 +16,7 @@ After `git clone` + `pnpm install` on a new machine:
 
 ```powershell
 # USER ยท repo root โ€” fixes .env.local paths, dev HTTPS cert, data ACL,
-# archives the bundled Controller DB for a clean v24 start, verifies the package hash
+# archives the bundled Controller DB for a clean v25 start, verifies the package hash
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\agent\dev\Bootstrap-DevClone.ps1 -Start
 ```
 
@@ -109,7 +109,7 @@ Invoke-RestMethod http://127.0.0.1:5081/internal/machines -Headers @{ 'X-Service
 & 'C:\Users\User\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\python\python.exe' -c "import sqlite3;c=sqlite3.connect(r'file:C:\Users\User\Documents\kamenraiderplay\data\controller.sqlite?mode=ro',uri=True);print('user_version',c.execute('pragma user_version').fetchone()[0]);print('quarantine',c.execute('select quarantine_active,quarantine_reason from controller_restore_state').fetchall())"
 ```
 
-Expected on this host after the latest work: `user_version 24`, quarantine active on the existing database, machine `c24afโ€ฆ` pending/unreachable with empty hostname until the installed Agent is upgraded.
+Expected on this host after the latest work: `user_version 25`, quarantine active on the existing database, machine `c24afโ€ฆ` pending/unreachable with empty hostname until the installed Agent is upgraded.
 
 ---
 

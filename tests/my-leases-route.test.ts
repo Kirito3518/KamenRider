@@ -22,6 +22,17 @@ vi.mock("@/lib/machine-api", () => ({
     ),
 }));
 
+vi.mock("@/lib/rental-payments", () => ({
+  listRentalPayments: () => [],
+  reconcilePendingRentals: async () => [],
+  settleRentalRefunds: () => ({ refundedSatang: 0, refundedPayments: 0 }),
+}));
+
+vi.mock("@/lib/rental-service", () => ({
+  authDatabase: async () => ({}),
+  createControllerLease: async () => ({ kind: "unknown" }),
+}));
+
 import { GET } from "@/app/api/my-leases/route";
 
 const HEARTBEAT_AT = "2026-11-08T03:04:05.000Z";

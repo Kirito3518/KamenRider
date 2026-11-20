@@ -130,8 +130,8 @@ describe("admin recovery context proxy", () => {
 
     expect(response.status).toBe(200);
     const body = await response.json();
-    expect(body).toMatchObject([{ id: "pc-1", name: "PC 1", price: 1, status: "available" }]);
-    expect(Object.keys(body[0]).sort()).toEqual(["cpu", "game", "gpu", "id", "name", "price", "ram", "ramBytes", "status", "storage"].sort());
+    expect(body).toMatchObject([{ id: "pc-1", name: "PC 1", priceSatang: 100, status: "available" }]);
+    expect(Object.keys(body[0]).sort()).toEqual(["cpu", "game", "gpu", "id", "name", "priceSatang", "ram", "ramBytes", "status", "storage"].sort());
     expect(JSON.stringify(body)).not.toContain("private-chain");
     expect(JSON.stringify(body)).not.toContain("private-head");
     expect(JSON.stringify(body)).not.toContain("private-operation");

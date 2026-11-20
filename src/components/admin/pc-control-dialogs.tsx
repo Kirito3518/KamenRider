@@ -276,7 +276,7 @@ export function PcControlTimeDialog({
       <DialogContent>
         <DialogHeader>
           <DialogTitle>กำหนดเวลา {machine?.displayName || machine?.machineId}</DialogTitle>
-          <DialogDescription>เพิ่มหรือลดเวลาที่เหลือ โดยไม่มีการคืนเงินหรือปรับยอดเงิน</DialogDescription>
+          <DialogDescription>ลดเวลาแล้วระบบจะคืนเงินตามเวลาที่ไม่ได้ใช้เมื่อสิ้นสุดการเช่า ส่วนการเพิ่มเวลาไม่มีค่าใช้จ่าย</DialogDescription>
         </DialogHeader>
         <FieldGroup className="gap-4">
           <Field>

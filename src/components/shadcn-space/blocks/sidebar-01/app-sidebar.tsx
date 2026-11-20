@@ -1,6 +1,6 @@
 "use client";
 import Link from "next/link";
-import { Home, KeyRound, LayoutDashboard, Monitor, Package, ShieldCheck, UserRound, Users, Wallet } from "lucide-react";
+import { History, Home, KeyRound, LayoutDashboard, Monitor, Package, ShieldCheck, UserRound, Users, Wallet } from "lucide-react";
 import { Sidebar, SidebarContent, SidebarFooter, SidebarHeader, SidebarMenu, SidebarMenuItem } from "@/components/ui/sidebar";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { NavMain } from "@/components/shadcn-space/blocks/sidebar-01/nav-main";
@@ -19,6 +19,7 @@ export function AppSidebar() {
         { title: "PC Control", href: "/admin/pc-control", icon: Monitor },
         { title: "ภาพรวม", href: "/admin/overview", icon: LayoutDashboard },
         { title: "เครื่องและ Agent", href: "/admin/machines", icon: Monitor },
+        { title: "ประวัติการเช่า", href: "/admin/rentals", icon: History },
         { title: "Agent releases", href: "/admin/agent-releases", icon: Package },
         { title: "ตั้งค่า Sunshine", href: "/admin/settings/sunshine", icon: KeyRound },
         { title: "สมาชิก", href: "/admin/users", icon: Users },

@@ -1113,7 +1113,7 @@ public static class ControllerDatabaseMaintenance
 
     internal static void ValidateCanonicalSchema(SqliteConnection connection, long expectedVersion, SqliteTransaction? transaction = null)
     {
-        if (expectedVersion is < 0 or > 24)
+        if (expectedVersion is < 0 or > 25)
             throw new InvalidDataException("Controller database version is outside the supported migration range.");
 
         var checkpoints = expectedSchemas.GetOrAdd(expectedVersion, BuildCanonicalSchemas);
@@ -1196,7 +1196,7 @@ public static class ControllerDatabaseMaintenance
 
     private static IReadOnlyList<IReadOnlyDictionary<string, SchemaObject>> BuildCanonicalSchemas(long version)
     {
-        if (version is not (0 or 2 or 3 or >= 4 and <= 24))
+        if (version is not (0 or 2 or 3 or >= 4 and <= 25))
             return [];
 
         var connectionString = new SqliteConnectionStringBuilder { DataSource = ":memory:", ForeignKeys = true, Pooling = false }.ToString();

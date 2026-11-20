@@ -55,6 +55,15 @@ export type AgentHeartbeat = {
   reachability: AgentReachability;
   lastSeenAt: string | null;
 };
+export type LeasePaymentInfo = {
+  hourlyPriceSatang: number;
+  durationSeconds: number;
+  extensionSeconds: number;
+  paidSatang: number;
+  refundedSatang: number;
+  /** False for leases created before paid rentals existed (no payment record). */
+  extendable: boolean;
+};
 export type Lease = {
   agent?: AgentHeartbeat;
   connection?: { address: string | null; stale: boolean };
@@ -65,7 +74,10 @@ export type Lease = {
   state: string;
   revision: number;
   pendingRevision: number | null;
+  startsAtUtc?: string | null;
   expiresAtUtc: string | null;
+  endedAtUtc?: string | null;
+  payment?: LeasePaymentInfo | null;
 };
 export type Offer = { pairingIds: string[]; validUntilUtc: string } | null;
 /**

@@ -398,7 +398,7 @@ public class DatabaseMaintenanceTests
                 Assert.Equal("approved", machine.ApprovalStatus);
                 Assert.Equal("ready", machine.Readiness);
                 Assert.False(machine.CanRent);
-                Assert.Throws<InvalidOperationException>(() => database.CreateTrialLease("user", "legacy-pc", 60, "rent"));
+                Assert.Throws<InvalidOperationException>(() => database.CreateLease("user", "legacy-pc", 60, "rent"));
             }
             Assert.Equal(File.ReadAllBytes(ArtifactPath(source, hash)), File.ReadAllBytes(ArtifactPath(destination, hash)));
             using var connection = OpenDatabase(destination);
@@ -448,7 +448,7 @@ public class DatabaseMaintenanceTests
             Assert.Equal("approved", machine.ApprovalStatus);
             Assert.Equal("ready", machine.Readiness);
             Assert.False(machine.CanRent);
-            Assert.Throws<InvalidOperationException>(() => restored.CreateTrialLease("user", "legacy-pc", 60, "rent"));
+            Assert.Throws<InvalidOperationException>(() => restored.CreateLease("user", "legacy-pc", 60, "rent"));
             Assert.Equal(File.ReadAllBytes(ArtifactPath(source, hash)), File.ReadAllBytes(ArtifactPath(destination, hash)));
         }
         finally { DeleteRoot(root); }
@@ -510,7 +510,7 @@ public class DatabaseMaintenanceTests
 
             using (var snapshot = OpenDatabase(destination))
             {
-                Assert.Equal(24L, Scalar(snapshot, "PRAGMA user_version"));
+                Assert.Equal(25L, Scalar(snapshot, "PRAGMA user_version"));
                 Assert.Equal(1L, Scalar(snapshot, $"SELECT COUNT(*) FROM agent_sync_proof_state WHERE machine_id='source-machine' AND sequence=8 AND token_sequence=8 AND token_digest='{tokenDigest}' AND last_proven_sequence=7 AND last_proven_version='1.2.3'"));
                 Assert.Equal(1L, Scalar(snapshot, "SELECT COUNT(*) FROM agent_signed_request_scopes WHERE machine_id='source-machine' AND key_fingerprint='" + fingerprint + "' AND path='/agent/sync' AND cutoff_second=1000"));
                 Assert.Equal(1L, Scalar(snapshot, $"SELECT COUNT(*) FROM agent_signed_request_nonces WHERE machine_id='source-machine' AND nonce_digest='{syncNonceDigest}' AND signed_second=1001 AND retention_second=1001"));
@@ -784,7 +784,7 @@ public class DatabaseMaintenanceTests
             Assert.Equal("ready", machine.Readiness);
             Assert.Equal("awaitingInstaller", machine.AgentUpdateStatus);
             Assert.False(machine.CanRent);
-            Assert.Throws<InvalidOperationException>(() => restored.CreateTrialLease("user", "source-machine", 60, "rent"));
+            Assert.Throws<InvalidOperationException>(() => restored.CreateLease("user", "source-machine", 60, "rent"));
         }
         finally { DeleteRoot(root); }
     }
@@ -1098,7 +1098,7 @@ public class DatabaseMaintenanceTests
             restored.Open();
             using var version = restored.CreateCommand();
             version.CommandText = "PRAGMA user_version";
-            Assert.Equal(24L, version.ExecuteScalar());
+            Assert.Equal(25L, version.ExecuteScalar());
         }
         finally { DeleteRoot(root); }
     }
@@ -1146,7 +1146,7 @@ public class DatabaseMaintenanceTests
                 restored.Open();
                 using var version = restored.CreateCommand();
                 version.CommandText = "PRAGMA user_version";
-                Assert.Equal(24L, version.ExecuteScalar());
+                Assert.Equal(25L, version.ExecuteScalar());
             }
             using var recovery = new ControllerDatabase(recoveryPath!);
             Assert.Equal("preserved-machine", Assert.Single(recovery.List()).MachineId);

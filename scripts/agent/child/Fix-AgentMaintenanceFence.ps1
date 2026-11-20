@@ -127,5 +127,5 @@ try {
 }
 
 Write-Host ''
-Write-Host 'DONE. The maintenance fence is clear; ask the admin to create the trial lease again.' -ForegroundColor Green
+Write-Host 'DONE. The maintenance fence is clear; ask the customer to rent the machine again.' -ForegroundColor Green
 Write-Host 'LAB ONLY: this bypasses the production fresh-install fence semantics.' -ForegroundColor Yellow

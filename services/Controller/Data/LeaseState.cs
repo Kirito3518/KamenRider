@@ -3,10 +3,10 @@ using Microsoft.Data.Sqlite;
 using System.Text.Json;
 namespace KamenRaider.Controller.Data;
 public sealed partial class ControllerDatabase {
-    private const string LeaseColumns="id,user_id,machine_id,state,revision,starts_at,expires_at,pending_revision,duration_seconds,preparation_deadline,pending_expires_at,boot_id";
-    private record LeaseRow(LeaseDto Dto,int Duration,long PreparationDeadline,long? PendingExpiry,string? Boot);
+    private const string LeaseColumns="id,user_id,machine_id,state,revision,starts_at,expires_at,pending_revision,duration_seconds,preparation_deadline,pending_expires_at,boot_id,ended_at";
+    private record LeaseRow(LeaseDto Dto,int Duration,long PreparationDeadline,long? PendingExpiry,string? Boot,DateTimeOffset? EndedAt);
     private static DateTimeOffset? Instant(SqliteDataReader r,int i) => r.IsDBNull(i)?null:DateTimeOffset.FromUnixTimeMilliseconds(r.GetInt64(i));
-    private static LeaseRow ReadLease(SqliteDataReader r) => new(new(r.GetString(0),r.GetString(1),r.GetString(2),r.GetString(3),r.GetInt64(4),Instant(r,5),Instant(r,6),r.IsDBNull(7)?null:r.GetInt64(7)),r.GetInt32(8),r.GetInt64(9),r.IsDBNull(10)?null:r.GetInt64(10),r.IsDBNull(11)?null:r.GetString(11));
+    private static LeaseRow ReadLease(SqliteDataReader r) => new(new(r.GetString(0),r.GetString(1),r.GetString(2),r.GetString(3),r.GetInt64(4),Instant(r,5),Instant(r,6),r.IsDBNull(7)?null:r.GetInt64(7),Instant(r,12)),r.GetInt32(8),r.GetInt64(9),r.IsDBNull(10)?null:r.GetInt64(10),r.IsDBNull(11)?null:r.GetString(11),Instant(r,12));
     private SqliteCommand LeaseCommand(SqliteTransaction tx,string sql,params (string,object?)[] values) {
         var cmd=Command(sql,values); cmd.Transaction=tx; return cmd;
     }
@@ -34,10 +34,12 @@ public sealed partial class ControllerDatabase {
 
     // These deadlines are checked under the same immediate transaction as every state transition.
     private void ExpireLeases(SqliteTransaction tx,long now) {
-        ExecuteLease(tx,"UPDATE leases SET state=CASE WHEN state='preparing' THEN 'failed' ELSE 'ending' END,pending_revision=NULL,pending_expires_at=NULL WHERE (state='preparing' AND preparation_deadline <= $now) OR (state IN ('preparing','active') AND expires_at <= $now)",("$now",now));
+        // The natural end of a rented window is its expiry instant, so it leaves zero unused time;
+        // a preparation that never activated ends at the deadline check instant.
+        ExecuteLease(tx,"UPDATE leases SET state=CASE WHEN state='preparing' THEN 'failed' ELSE 'ending' END,ended_at=COALESCE(ended_at,CASE WHEN state='preparing' THEN $now ELSE COALESCE(expires_at,$now) END),pending_revision=NULL,pending_expires_at=NULL WHERE (state='preparing' AND preparation_deadline <= $now) OR (state IN ('preparing','active') AND expires_at <= $now)",("$now",now));
         ExecuteLease(tx,"UPDATE command_outbox SET status='expired' WHERE status='pending' AND (valid_until <= $now OR rental_id IN (SELECT id FROM leases WHERE state IN ('failed','ending')))",("$now",now));
     }
-    public LeaseDto CreateTrialLease(string userId,string machineId,int durationSeconds,string idempotencyKey) {
+    public LeaseDto CreateLease(string userId,string machineId,int durationSeconds,string idempotencyKey) {
         Identifier(userId); Identifier(machineId); Identifier(idempotencyKey); Duration(durationSeconds);
         lock(gate) {
             using var tx=connection.BeginTransaction(); EnsureNotRestoreQuarantined(tx); var nowUtc=clock.GetUtcNow();var now=nowUtc.ToUnixTimeMilliseconds(); ExpireLeases(tx,now);ExpireUnstartedAgentUpdates(tx,now);
@@ -84,6 +86,17 @@ public sealed partial class ControllerDatabase {
         lock(gate) {
             using var tx=connection.BeginTransaction();if(IsRestoreQuarantined(tx)){tx.Commit();return [];}ExpireLeases(tx,clock.GetUtcNow().ToUnixTimeMilliseconds());
             using var cmd=LeaseCommand(tx,$"SELECT {LeaseColumns} FROM leases WHERE user_id=$id ORDER BY rowid",("$id",userId));
+            var leases=new List<LeaseDto>();using(var r=cmd.ExecuteReader())while(r.Read()) leases.Add(ReadLease(r).Dto);
+            tx.Commit();return leases.ToArray();
+        }
+    }
+    // Administrative history view: newest rows first so the most recent rentals lead the page.
+    public LeaseDto[] GetAllLeases(int take) {
+        if(take is <1 or >500) throw new ArgumentException("Take must be between 1 and 500",nameof(take));
+        lock(gate) {
+            using var tx=connection.BeginTransaction();if(IsRestoreQuarantined(tx)){tx.Commit();return [];}
+            ExpireLeases(tx,clock.GetUtcNow().ToUnixTimeMilliseconds());
+            using var cmd=LeaseCommand(tx,$"SELECT {LeaseColumns} FROM leases ORDER BY rowid DESC LIMIT $take",("$take",take));
             var leases=new List<LeaseDto>();using(var r=cmd.ExecuteReader())while(r.Read()) leases.Add(ReadLease(r).Dto);
             tx.Commit();return leases.ToArray();
         }
