@@ -17,6 +17,12 @@ import {
   summarizeRentalHistory,
 } from "@/lib/rental-history-data";
 import {
+  filterRentalEntries,
+  paginateRentalEntries,
+  parseRentalFilters,
+  sortRentalEntries,
+} from "@/lib/rental-history-query";
+import {
   authDatabase,
   createControllerLease,
   createControllerLeaseWithRetry,
@@ -154,11 +160,36 @@ export function GET(request: Request) {
 
     const payments = listRentalPayments(database, actor.id);
     const entries = buildRentalHistoryEntries({ leases, machines, payments });
+    const raw: Record<string, string | undefined> = {};
+    for (const [key, value] of new URL(request.url).searchParams.entries()) {
+      raw[key] = value;
+    }
+    const { filters, range, page, pageSize } = parseRentalFilters(raw, {
+      allowAll: true,
+      defaultPeriod: "all",
+    });
+    const filtered = sortRentalEntries(
+      filterRentalEntries(entries, filters, range),
+      filters.sort,
+    );
+    const paginated = paginateRentalEntries(filtered, page, pageSize);
+    const machineMap = new Map<string, string>();
+    for (const entry of entries) {
+      if (!machineMap.has(entry.machineId)) {
+        machineMap.set(entry.machineId, entry.machineName);
+      }
+    }
     return {
       balanceSatang: getMemberBalance(database, actor.id),
       controllerAvailable,
       summary: summarizeRentalHistory(entries),
-      entries,
+      entries: paginated.entries,
+      pagination: paginated.pagination,
+      filters,
+      rangeError: range.error,
+      machines: [...machineMap.entries()]
+        .map(([machineId, displayName]) => ({ machineId, displayName }))
+        .sort((left, right) => left.displayName.localeCompare(right.displayName)),
     };
   });
 }

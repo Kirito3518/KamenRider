@@ -52,7 +52,8 @@ export function AccountDropdown({ user, onNavigate }: {
         {user.role === "admin" && <DropdownMenuItem render={<Link href="/admin" />} onClick={onNavigate}><ShieldCheck />จัดการระบบ</DropdownMenuItem>}
         <DropdownMenuItem render={<Link href="/account" />} onClick={onNavigate}><UserRound />บัญชีของฉัน</DropdownMenuItem>
         <DropdownMenuItem render={<Link href="/my-machines" />} onClick={onNavigate}><MonitorPlay />เครื่องของฉัน</DropdownMenuItem>
-        <DropdownMenuItem render={<Link href="/history" />} onClick={onNavigate}><History />ประวัติการเช่า</DropdownMenuItem>
+        <DropdownMenuItem render={<Link href="/topup" />} onClick={onNavigate}><Wallet />เติมเงิน</DropdownMenuItem>
+        <DropdownMenuItem render={<Link href="/history" />} onClick={onNavigate}><History />ประวัติการใช้งาน</DropdownMenuItem>
       </DropdownMenuGroup>
       <DropdownMenuSeparator />
       <DropdownMenuGroup><DropdownMenuItem variant="destructive" disabled={pending} onClick={logout}><LogOut />{pending ? "กำลังออกจากระบบ…" : "ออกจากระบบ"}</DropdownMenuItem></DropdownMenuGroup>

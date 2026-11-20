@@ -454,7 +454,10 @@ function LeaseCard({
             ) : null}
             {extensionCost !== null && !extensionAffordable ? (
               <p className="text-sm text-status-maintenance">
-                ยอดเงินไม่เพียงพอ กรุณาติดต่อผู้ดูแลเพื่อเติมเงิน
+                ยอดเงินไม่เพียงพอ{" "}
+                <Link href="/topup" className="underline underline-offset-4">
+                  ไปหน้าเติมเงิน
+                </Link>
               </p>
             ) : null}
             <button

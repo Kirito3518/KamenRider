@@ -20,7 +20,7 @@ VNC/noVNC เป็นความสามารถของระบบฉบ�
 - ใช้ Moonlight/Sunshine สำหรับผู้เช่า; noVNC/VNC ใช้ดูเครื่องในฐานะแอดมิน
 - Public IP เป็นค่าระดับร้าน; ผู้ดูแลตั้ง port forwarding เอง
 - Restore Rx ทำงานตามการตั้งค่าที่มีอยู่แล้ว ผู้พัฒนา Agent ไม่เข้าไปควบคุมผลิตภัณฑ์นี้
-- Parsec และ payment gateway/ระบบเติมเงินออนไลน์ยังไม่รวมในรุ่นนี้; การหักเงินค่าเช่าจาก `balanceSatang` (prepaid + คืนเงิน prorate) เริ่มใช้แล้ว ดู [rental.md](rental.md) — การให้/ถอนสิทธิ์ผ่านบัตรหรือบัญชีธนาคารต้องวางแผนแยก
+- Parsec ยังไม่รวมในรุ่นนี้; ระบบเติมเงินออนไลน์ (TrueMoney, PromptPay QR/โอนธนาคาร, ตรวจสลิป) เริ่มใช้แล้ว ดู [topup.md](topup.md) และการหักเงินค่าเช่าจาก `balanceSatang` (prepaid + คืนเงิน prorate) ดู [rental.md](rental.md) — การให้/ถอนสิทธิ์ผ่านบัตรหรือบัญชีธนาคารต้องวางแผนแยก
 - การอัปเดต Agent ใช้ปุ่ม **Update Agent** แยกต่อเครื่อง พร้อม maintenance lock และ rollback ตามที่ผู้ใช้อนุมัติ; การ publish release ไม่เริ่ม rollout และไม่ทำให้เครื่องผ่าน approval/readiness โดยอัตโนมัติ
 
 ## Roadmap และสถานะ
@@ -84,7 +84,7 @@ VNC/noVNC เป็นความสามารถของระบบฉบ�
 - Agent บันทึก deadline ที่สั้นลงจาก Controller ก่อนรอ stream gate; regression tests ครอบคลุม restart ระหว่าง gate ค้าง, extension ที่ยังไม่ยืนยัน, confirmation ที่ storage ค้างข้าม recovery deadline และ shutdown timeout/retry ด้วย fake adapter; production shutdown adapter จำกัดเวลารอไว้ 15 วินาที; Task 21 เพิ่ม software restart-state tests สำหรับ orphaned staging files และ snapshot ที่ publish/clear แล้ว โดยไม่จำลอง physical power loss หรือพิสูจน์ Windows filesystem crash semantics; process crash จริงระหว่าง atomic replacement และการทดสอบ shutdown/retry บนเครื่องจริงยังเป็น acceptance แยกต่างหาก
 - ระบบเช่าจริงแบบ prepaid: ลูกค้าหักค่าเช่าจาก `balanceSatang` ตอนสร้าง lease และต่อเวลา (เป็นชั่วโมงเต็ม ราคาเต็มบาท); trial lease ของแอดมินถูกถอดออกแล้ว เงินเก็บใน auth DB ไม่ใช่ Controller (ดู [rental.md](rental.md))
 - migration 025 เพิ่ม `leases.ended_at` (schema 25) เพื่อให้คืนเงินตามเวลาที่ไม่ได้ใช้ได้จริงเมื่อเลิกก่อนกำหนด; การคืนเงินเป็น prorate ตามวินาทีและคืนเป็นสตางค์
-- ยังไม่มีระบบเติมเงิน/ชำระเงินออนไลน์; การเติมเงินยังทำผ่านหน้าแอดมินสมาชิก
+- ระบบเติมเงินออนไลน์อยู่ที่ `/topup` และหน้าประวัติ; การปรับยอดโดยแอดมินยังทำผ่านหน้าแอดมินสมาชิก (ดู [topup.md](topup.md))
 - เมื่อ boot transition ผ่าน proof และ Controller ยืนยัน `PrepareAvailable` แล้ว reconciliation ปิด lease เก่าเป็น `completed` และปล่อย allocation; migration 010 เปลี่ยน constraint แบบรักษา rowid และ child references
 
 ### 6. Moonlight/Sunshine และ stream fence — Guard/adapter และ installer Plan/mock ผ่าน; live installation และ hardware qualification ยังขาด
@@ -141,11 +141,11 @@ VNC/noVNC เป็นความสามารถของระบบฉบ�
 - หน้า rent แสดงเฉพาะเครื่อง approved, ready, config ACK ตรง, ไม่มี allocation และราคาเป็นจำนวนเต็มบาท
 - เจ้าของ lease ดูเวลา/สถานะ/ยอดชำระและส่ง PIN ได้; API ตรวจ owner ทุกครั้ง
 - ลูกค้าสร้างรายการเช่าและต่อเวลาที่หน้า `/rent` และ `/my-machines`: ตรวจ session, origin, ชั่วโมงเต็ม 1–24 และราคาเต็มบาท; ระบบหักเงินก่อน แล้วสร้าง lease ผ่าน Controller ด้วย idempotency key (ถ้า Controller ปฏิเสธจะคืนเงินทันที)
-- มีหน้าประวัติการเช่าทั้งลูกค้า `/history` และแอดมิน `/admin/rentals` แสดงเวลาเริ่ม/สิ้นสุดจริง ยอดชำระ เงินคืน และสถานะ; คืนเงิน prorate ตามเวลาที่ไม่ได้ใช้เมื่อสิ้นสุดการเช่า
+- มีหน้าประวัติการใช้งานลูกค้า `/history` (Tabs เติมเงิน/เช่า) และแอดมิน `/admin/rentals` + `/admin/topups` แสดงเวลาเริ่ม/สิ้นสุดจริง ยอดชำระ เงินคืน สถานะ และผลตรวจสลิป; คืนเงิน prorate ตามเวลาที่ไม่ได้ใช้เมื่อสิ้นสุดการเช่า
 - แสดง public IP และ Moonlight port ให้เฉพาะเจ้าของ lease
 - เตรียม/ต่อเวลา/หมดเวลา/unreachable ต้องแสดงสถานะจริงจาก Controller ไม่ใช้ข้อมูล mock
 - ตั้ง router port forwarding เอง; ทดสอบ public IP, CGNAT, TCP/UDP ports และจากเครือข่ายนอก LAN
-- ยังไม่มี payment gateway/ระบบเติมเงินออนไลน์หรือใบเสร็จ; หนี้สิน/การคืนเงินผ่านบัตรหรือบัญชีธนาคารยังอยู่นอกขอบเขต
+- ระบบเติมเงินออนไลน์เริ่มใช้แล้ว แต่ยังไม่มีใบเสร็จ/ภาษี; หนี้สิน/การคืนเงินผ่านบัตรหรือบัญชีธนาคารยังอยู่นอกขอบเขต
 
 ### 10. Acceptance, operations และส่งมอบ — ยังไม่ครบ
 

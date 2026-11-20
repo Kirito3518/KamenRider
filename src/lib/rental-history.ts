@@ -36,7 +36,110 @@ export type RentalHistoryEntry = {
   refundedSatang: number;
   /** paidSatang - refundedSatang; null when the amount is unknown. */
   netSatang: number | null;
+  /** Prorated refund note from the payment record, when present. */
+  refundNote?: string | null;
+  /** Reason a pending rental payment was rejected/refunded, when present. */
+  rejectReason?: string | null;
 };
+
+export type RentalDisplayState =
+  | "active"
+  | "completed"
+  | "expired"
+  | "cancelled"
+  | "pending"
+  | "unknown";
+
+export type RentalHistorySort =
+  | "newest"
+  | "oldest"
+  | "amount_desc"
+  | "amount_asc";
+
+export type RentalHistoryPeriod =
+  | "today"
+  | "7d"
+  | "30d"
+  | "90d"
+  | "custom"
+  | "all";
+
+export type RentalHistoryFilters = {
+  q: string;
+  state: RentalDisplayState | "all";
+  machineId: string;
+  period: RentalHistoryPeriod;
+  from: string;
+  to: string;
+  sort: RentalHistorySort;
+};
+
+export const rentalDisplayStateLabels: Record<RentalDisplayState, string> = {
+  active: "กำลังเช่า",
+  completed: "เสร็จสิ้น",
+  expired: "หมดอายุ",
+  cancelled: "ยกเลิก/ไม่สำเร็จ",
+  pending: "รอยืนยัน",
+  unknown: "ไม่ทราบสถานะ",
+};
+
+/**
+ * Display-level state for filters and badges. The underlying Controller state is
+ * kept intact; "expired" means the lease ended at/after its scheduled expiry and
+ * "cancelled" covers Controller failures/rejected payments.
+ */
+export function rentalDisplayState(
+  entry: Pick<
+    RentalHistoryEntry,
+    "state" | "expiresAtUtc" | "endedAtUtc"
+  >,
+): RentalDisplayState {
+  if (entry.state === "preparing" || entry.state === "active" || entry.state === "ending") {
+    return "active";
+  }
+  if (entry.state === "completed") {
+    if (entry.endedAtUtc && entry.expiresAtUtc) {
+      const ended = Date.parse(entry.endedAtUtc);
+      const expires = Date.parse(entry.expiresAtUtc);
+      if (Number.isFinite(ended) && Number.isFinite(expires) && ended >= expires) {
+        return "expired";
+      }
+    }
+    return "completed";
+  }
+  if (entry.state === "failed" || entry.state === "rejected") return "cancelled";
+  if (entry.state === "pending") return "pending";
+  return "unknown";
+}
+
+export function rentalDisplayStateLabel(state: RentalDisplayState) {
+  return rentalDisplayStateLabels[state];
+}
+
+export function rentalDisplayStateTone(state: RentalDisplayState): RentalStateTone {
+  switch (state) {
+    case "active":
+    case "completed":
+      return "available";
+    case "expired":
+      return "secondary";
+    case "cancelled":
+      return "destructive";
+    case "pending":
+      return "busy";
+    default:
+      return "outline";
+  }
+}
+
+export function rentalEntryCreatedAtMs(entry: RentalHistoryEntry): number {
+  const parsed = Date.parse(entry.createdAtUtc);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+export function rentalEntryAmountSatang(entry: RentalHistoryEntry): number {
+  return entry.netSatang ?? 0;
+}
 
 export type AdminRentalHistoryEntry = RentalHistoryEntry & {
   userId: string;
@@ -52,6 +155,54 @@ export type RentalHistorySummary = {
   refundedSatang: number;
   /** paidSatang - refundedSatang (shop revenue). */
   netSatang: number;
+};
+
+export type RentalHistoryPagination = {
+  page: number;
+  pageSize: number;
+  total: number;
+  pageCount: number;
+};
+
+export type RentalHistoryResponse = {
+  balanceSatang: number;
+  controllerAvailable: boolean;
+  summary: RentalHistorySummary;
+  entries: RentalHistoryEntry[];
+  pagination: RentalHistoryPagination;
+  filters: RentalHistoryFilters;
+  rangeError: string;
+  machines: { machineId: string; displayName: string }[];
+};
+
+export type RentalChartPoint = {
+  key: string;
+  label: string;
+  revenueSatang: number;
+  count: number;
+};
+
+export type AdminRentalStats = {
+  totalRentals: number;
+  activeRentals: number;
+  completedRentals: number;
+  expiredRentals: number;
+  revenueSatang: number;
+  rentalCount: number;
+};
+
+export type AdminRentalHistoryResponse = {
+  controllerAvailable: boolean;
+  summary: RentalHistorySummary;
+  stats: AdminRentalStats;
+  previous: AdminRentalStats;
+  chart: RentalChartPoint[];
+  chartPrevious: { revenueSatang: number; count: number };
+  entries: AdminRentalHistoryEntry[];
+  pagination: RentalHistoryPagination;
+  filters: RentalHistoryFilters;
+  rangeError: string;
+  machines: { machineId: string; displayName: string }[];
 };
 
 export const rentalStateLabels: Record<string, string> = {

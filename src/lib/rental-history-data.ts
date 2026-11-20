@@ -99,6 +99,8 @@ function baseEntry(
     paidSatang,
     refundedSatang,
     netSatang: paidSatang === null ? null : rentalNetSatang({ paidSatang, refundedSatang }),
+    refundNote: payment?.refundNote ?? null,
+    rejectReason: payment?.rejectReason ?? null,
   };
   return entry;
 }

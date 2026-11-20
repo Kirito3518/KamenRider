@@ -13,6 +13,7 @@ import {
   MonitorPlay,
   Moon,
   Sun,
+  Wallet,
   X,
 } from "lucide-react";
 import { useRef, useState, type MouseEventHandler } from "react";
@@ -34,7 +35,8 @@ const links = [
   { label: "หน้าแรก", href: "/", icon: Home },
   { label: "เช่าคอมพิวเตอร์", href: "/rent", icon: Monitor },
   { label: "เครื่องของฉัน", href: "/my-machines", icon: MonitorPlay },
-  { label: "ประวัติการเช่า", href: "/history", icon: History },
+  { label: "เติมเงิน", href: "/topup", icon: Wallet },
+  { label: "ประวัติ", href: "/history", icon: History },
   { label: "วิธีใช้งาน", href: "/#how-it-works", icon: CircleHelp },
 ];
 
@@ -94,14 +96,14 @@ export function Navbar() {
     <ResizableNavbar className="top-0 pt-3.5 sm:pt-6">
       <NavBody className="h-[58px] border bg-card px-6 py-0 pl-7 shadow-[0_12px_35px_rgb(0_0_0/4%)]">
         <Brand />
-        <nav className="flex items-center gap-1" aria-label="เมนูหลัก">
+        <nav className="flex items-center gap-0.5" aria-label="เมนูหลัก">
           {links.map(({ label, href, icon: Icon }) => (
             <Link
               key={label}
               href={href}
               aria-current={pathname === href ? "page" : undefined}
               className={cn(
-                "inline-flex items-center gap-2 rounded-full px-3 py-[7px] text-sm font-medium whitespace-nowrap text-muted-foreground transition-colors hover:bg-accent hover:text-foreground",
+                "inline-flex items-center gap-1.5 rounded-full px-2.5 py-[7px] text-[13px] font-medium whitespace-nowrap text-muted-foreground transition-colors hover:bg-accent hover:text-foreground xl:gap-2 xl:px-3 xl:text-sm",
                 pathname === href && "bg-accent text-foreground",
               )}
             >

@@ -6,8 +6,11 @@ const nextConfig: NextConfig = {
   cacheComponents: true,
   partialPrefetching: true,
   reactCompiler: true,
+  // SQLite databases, WAL files and runtime locks are machine-local and must
+  // never be pulled into a production trace (a locked DB would abort the build).
   outputFileTracingExcludes: {
-    "/*": ["./data/**"],
+    "/*": ["./data/**/*", "./data/*"],
+    "/**": ["./data/**/*", "./data/*"],
   },
   turbopack: {
     rules: {

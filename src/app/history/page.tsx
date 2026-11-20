@@ -1,16 +1,16 @@
 import type { Metadata } from "next";
 import { Suspense } from "react";
-import { RentalHistory } from "@/components/my-rentals/rental-history";
+import { CustomerHistory } from "@/components/history/customer-history";
 import { requireSession } from "@/lib/session";
 
 export const metadata: Metadata = {
-  title: "ประวัติการเช่า | KamenRaiderPlay",
-  description: "ดูประวัติการเช่าเครื่อง ยอดชำระ และเงินคืนย้อนหลังของคุณ",
+  title: "ประวัติการใช้งาน | KamenRaiderPlay",
+  description: "ดูประวัติการเติมเงินและประวัติการเช่าเครื่องของคุณ",
 };
 
 async function ProtectedHistory() {
-  await requireSession();
-  return <RentalHistory />;
+  const session = await requireSession();
+  return <CustomerHistory initialBalance={session.user.balanceSatang} />;
 }
 
 export default function HistoryPage() {

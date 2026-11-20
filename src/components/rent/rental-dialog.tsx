@@ -249,7 +249,17 @@ export function RentalDialog({
                     <AlertTitle>ยอดเงินไม่เพียงพอ</AlertTitle>
                     <AlertDescription>
                       ต้องการ {formatBalance(totalSatang)} แต่คงเหลือ{" "}
-                      {formatBalance(balanceSatang)} กรุณาติดต่อผู้ดูแลเพื่อเติมเงิน
+                      {formatBalance(balanceSatang)} กรุณาเติมเงินก่อนเช่า
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="mt-2"
+                        nativeButton={false}
+                        render={<Link href="/topup" />}
+                      >
+                        <Wallet data-icon="inline-start" />
+                        ไปหน้าเติมเงิน
+                      </Button>
                     </AlertDescription>
                   </Alert>
                 ) : null}

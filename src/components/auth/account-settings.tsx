@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, type ReactNode } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import toast from "react-hot-toast";
 import { KeyRound, Link2, Link2Off, LogOut, Info, Wallet } from "lucide-react";
@@ -182,9 +183,13 @@ export function AccountSettings({
       </CardHeader>
 
       <CardContent className="flex flex-col gap-5 p-5 sm:p-6">
-        <div className="flex items-center gap-3 rounded-2xl border p-4">
+        <div className="flex flex-wrap items-center gap-3 rounded-2xl border p-4">
           <Wallet className="size-5 text-muted-foreground" aria-hidden="true" />
-          <div><p className="text-sm text-muted-foreground">ยอดเงินคงเหลือ</p><p className="text-2xl font-semibold tabular-nums">{formatBalance(user.balanceSatang)}</p></div>
+          <div className="min-w-0 flex-1"><p className="text-sm text-muted-foreground">ยอดเงินคงเหลือ</p><p className="text-2xl font-semibold tabular-nums">{formatBalance(user.balanceSatang)}</p></div>
+          <Button size="sm" nativeButton={false} render={<Link href="/topup" />}>
+            <Wallet className="size-4" />
+            เติมเงิน
+          </Button>
         </div>
         <div>
           <h3 className="text-base font-semibold">ช่องทางเข้าสู่ระบบ</h3>
