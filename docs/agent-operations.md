@@ -1,5 +1,7 @@
 # Agent operations and Restore Rx qualification
 
+> **สถาปัตยกรรมเปลี่ยนเมื่อ 2026-11-20**: ไม่มี Stream Guard แล้ว; ดู [0jay-migration-2026-11-20.md](0jay-migration-2026-11-20.md), [sunshine-local-control.md](sunshine-local-control.md) และ [parsec.md](parsec.md)
+
 ## Deployment status
 
 This repository is **not operationally ready for rentals**. There is no qualified default-closed stream gate, restoration evidence, or desktop health provider. The Agent remains fail-closed pending those providers; cross-boot import and offline crash-time deadline durability are not fully qualified. For the current localhost test, Admin install-command generation is enabled after the local package and SHA-256 record were verified. This web setting controls command generation only; it is not an installer-side safety lock. No Agent service installation has been run. Do not enable Sunshine or claim rental readiness based on a green unit test, a successful HTTP call, or service recovery.

@@ -29,6 +29,27 @@ export type AdminPairingOffer = {
 
 export type AdminPairingStatus = { commandId: string; status: string };
 
+/** Machine-scoped Sunshine maintenance actions; no rental or lease revision is involved. */
+export type SunshineCommandAction = "restart" | "unpair";
+
+export type SunshineCommandStatus = {
+  commandId: string;
+  action: SunshineCommandAction | string;
+  status: "requested" | "applied" | "failed" | "expired" | string;
+  expiresAtUtc: string;
+};
+
+export const sunshineCommandStatusLabels: Record<string, string> = {
+  requested: "รอ Agent ดำเนินการ",
+  applied: "ดำเนินการแล้ว",
+  failed: "ดำเนินการไม่สำเร็จ",
+  expired: "หมดเวลารอ Agent",
+};
+
+export function sunshineCommandLabel(action: SunshineCommandAction) {
+  return action === "restart" ? "รีสตาร์ท Sunshine" : "ยกเลิกการจับคู่ Sunshine";
+}
+
 export const pcControlStatusLabels: Record<string, string> = {
   preparing: "กำลังเตรียมเครื่อง",
   active: "กำลังเช่า",

@@ -36,7 +36,7 @@ public sealed class AgentPackageConformanceTests
     [InlineData("Install-AgentPackage.ps1")]
     [InlineData("Install-Service.ps1")]
     [InlineData("Install-TightVncServer.ps1")]
-    [InlineData("Prepare-SunshineStreamGate.ps1")]
+    [InlineData("Remove-StreamGuard.ps1")]
     [InlineData("PrivateInstallFiles.ps1")]
     [InlineData("ServiceInstallTransaction.ps1")]
     [InlineData("Update-AgentPackage.ps1")]

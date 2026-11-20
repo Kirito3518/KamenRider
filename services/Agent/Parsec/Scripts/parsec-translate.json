@@ -1,0 +1,356 @@
+{
+  "messageLimit": 200,
+  "unknownBannerPrefix": "ข้อความแจ้งเตือนจาก Parsec:",
+  "loginSucceededText": "เข้าสู่ระบบ Parsec สำเร็จแล้ว ระบบตรวจพบ session ของบัญชีบนเครื่องนี้",
+  "rules": [
+    {
+      "keywords": ["successfully", "logged", "in"],
+      "thai": "เข้าสู่ระบบ Parsec สำเร็จแล้ว",
+      "outcome": "success",
+      "status": "SUCCESS"
+    },
+    {
+      "keywords": ["login", "successful"],
+      "thai": "เข้าสู่ระบบ Parsec สำเร็จแล้ว",
+      "outcome": "success",
+      "status": "SUCCESS"
+    },
+    {
+      "keywords": ["verify", "email"],
+      "thai": "กรุณายืนยันตัวตนผ่านอีเมลของคุณก่อนเข้าสู่ระบบ",
+      "outcome": "requires_action",
+      "status": "EMAIL_VERIFICATION_REQUIRED"
+    },
+    {
+      "keywords": ["confirm", "email"],
+      "thai": "กรุณายืนยันอีเมลของคุณก่อนเข้าสู่ระบบ",
+      "outcome": "requires_action",
+      "status": "EMAIL_VERIFICATION_REQUIRED"
+    },
+    {
+      "keywords": ["incorrect", "password"],
+      "thai": "อีเมลหรือรหัสผ่านไม่ถูกต้อง",
+      "outcome": "failed",
+      "status": "INVALID_CREDENTIALS"
+    },
+    {
+      "keywords": ["incorrect", "email"],
+      "thai": "อีเมลหรือรหัสผ่านไม่ถูกต้อง",
+      "outcome": "failed",
+      "status": "INVALID_CREDENTIALS"
+    },
+    {
+      "keywords": ["invalid", "credential"],
+      "thai": "อีเมลหรือรหัสผ่านไม่ถูกต้อง",
+      "outcome": "failed",
+      "status": "INVALID_CREDENTIALS"
+    },
+    {
+      "keywords": ["wrong", "password"],
+      "thai": "อีเมลหรือรหัสผ่านไม่ถูกต้อง",
+      "outcome": "failed",
+      "status": "INVALID_CREDENTIALS"
+    },
+    {
+      "keywords": ["unauthorized"],
+      "thai": "บัญชีนี้ไม่ได้รับอนุญาตให้เข้าสู่ระบบ",
+      "outcome": "failed",
+      "status": "INVALID_CREDENTIALS"
+    },
+    {
+      "keywords": ["too many", "attempt"],
+      "thai": "พยายามเข้าสู่ระบบบ่อยเกินไป กรุณาลองใหม่ภายหลัง",
+      "outcome": "failed",
+      "status": "RATE_LIMITED"
+    },
+    {
+      "keywords": ["rate", "limit"],
+      "thai": "ระบบจำกัดการเข้าสู่ระบบชั่วคราว กรุณาลองใหม่ภายหลัง",
+      "outcome": "failed",
+      "status": "RATE_LIMITED"
+    },
+    {
+      "keywords": ["account", "locked"],
+      "thai": "บัญชี Parsec ถูกล็อก กรุณาตรวจสอบอีเมลหรือติดต่อฝ่ายสนับสนุน Parsec",
+      "outcome": "requires_action",
+      "status": "ACCOUNT_LOCKED"
+    },
+    {
+      "keywords": ["disabled"],
+      "thai": "บัญชี Parsec ถูกปิดใช้งาน กรุณาตรวจสอบอีเมลหรือติดต่อฝ่ายสนับสนุน Parsec",
+      "outcome": "requires_action",
+      "status": "ACCOUNT_LOCKED"
+    },
+    {
+      "keywords": ["suspended"],
+      "thai": "บัญชี Parsec ถูกระงับ กรุณาติดต่อฝ่ายสนับสนุน Parsec",
+      "outcome": "requires_action",
+      "status": "ACCOUNT_LOCKED"
+    },
+    {
+      "keywords": ["banned"],
+      "thai": "บัญชี Parsec ถูกระงับการใช้งาน กรุณาติดต่อฝ่ายสนับสนุน Parsec",
+      "outcome": "requires_action",
+      "status": "ACCOUNT_LOCKED"
+    },
+    {
+      "keywords": ["service", "unavailable"],
+      "thai": "บริการ Parsec ไม่พร้อมใช้งานชั่วคราว กรุณาลองใหม่ภายหลัง",
+      "outcome": "failed",
+      "status": "SERVICE_UNAVAILABLE"
+    },
+    {
+      "keywords": ["maintenance"],
+      "thai": "บริการ Parsec กำลังปิดปรับปรุง กรุณาลองใหม่ภายหลัง",
+      "outcome": "failed",
+      "status": "SERVICE_UNAVAILABLE"
+    },
+    {
+      "keywords": ["temporarily", "unavailable"],
+      "thai": "บริการ Parsec ไม่พร้อมใช้งานชั่วคราว กรุณาลองใหม่ภายหลัง",
+      "outcome": "failed",
+      "status": "SERVICE_UNAVAILABLE"
+    },
+    {
+      "keywords": ["already", "logged"],
+      "thai": "บัญชี Parsec นี้เข้าสู่ระบบอยู่แล้วใน session อื่น",
+      "outcome": "requires_action",
+      "status": "SESSION_CONFLICT"
+    },
+    {
+      "keywords": ["session", "active"],
+      "thai": "บัญชี Parsec นี้มี session ที่ใช้งานอยู่แล้ว",
+      "outcome": "requires_action",
+      "status": "SESSION_CONFLICT"
+    },
+    {
+      "keywords": ["another", "session"],
+      "thai": "บัญชี Parsec นี้กำลังใช้งานใน session อื่น",
+      "outcome": "requires_action",
+      "status": "SESSION_CONFLICT"
+    },
+    {
+      "keywords": ["network", "error"],
+      "thai": "เกิดข้อผิดพลาดด้านการเชื่อมต่อเครือข่าย",
+      "outcome": "failed",
+      "status": "NETWORK_ERROR"
+    },
+    {
+      "keywords": ["connection", "error"],
+      "thai": "เกิดข้อผิดพลาดด้านการเชื่อมต่อ Parsec",
+      "outcome": "failed",
+      "status": "NETWORK_ERROR"
+    },
+    {
+      "keywords": ["connection", "failed"],
+      "thai": "การเชื่อมต่อ Parsec ล้มเหลว กรุณาตรวจสอบอินเทอร์เน็ตแล้วลองใหม่",
+      "outcome": "failed",
+      "status": "NETWORK_ERROR"
+    },
+    {
+      "keywords": ["offline"],
+      "thai": "เครื่องไม่สามารถเชื่อมต่อบริการ Parsec ได้",
+      "outcome": "failed",
+      "status": "NETWORK_ERROR"
+    },
+    {
+      "keywords": ["no internet"],
+      "thai": "ไม่มีการเชื่อมต่ออินเทอร์เน็ต",
+      "outcome": "failed",
+      "status": "NETWORK_ERROR"
+    },
+    {
+      "keywords": ["captcha"],
+      "thai": "ต้องยืนยันตัวตนแบบ CAPTCHA — ต้องดำเนินการที่หน้าจอเครื่องโดยตรง",
+      "outcome": "requires_action",
+      "status": "CAPTCHA_REQUIRED"
+    },
+    {
+      "keywords": ["two-factor"],
+      "thai": "บัญชีนี้เปิดใช้การยืนยันตัวตนสองขั้นตอน (2FA) — ต้องดำเนินการที่หน้าจอเครื่องโดยตรง",
+      "outcome": "requires_action",
+      "status": "TWO_FACTOR_REQUIRED"
+    },
+    {
+      "keywords": ["2fa"],
+      "thai": "บัญชีนี้เปิดใช้การยืนยันตัวตนสองขั้นตอน (2FA) — ต้องดำเนินการที่หน้าจอเครื่องโดยตรง",
+      "outcome": "requires_action",
+      "status": "TWO_FACTOR_REQUIRED"
+    },
+    {
+      "keywords": ["email", "sent", "login", "attempt"],
+      "thai": "Parsec ส่งอีเมลเพื่อยืนยันความพยายามเข้าสู่ระบบแล้ว กรุณาเปิดอีเมลและกดยืนยัน",
+      "outcome": "requires_action",
+      "status": "EMAIL_VERIFICATION_REQUIRED"
+    },
+    {
+      "keywords": ["email", "not", "found"],
+      "thai": "ไม่พบบัญชี Parsec ที่ใช้อีเมลนี้",
+      "outcome": "failed",
+      "status": "INVALID_CREDENTIALS"
+    },
+    {
+      "keywords": ["account", "not", "found"],
+      "thai": "ไม่พบบัญชี Parsec นี้",
+      "outcome": "failed",
+      "status": "INVALID_CREDENTIALS"
+    },
+    {
+      "keywords": ["valid", "email", "address"],
+      "thai": "รูปแบบที่อยู่อีเมลไม่ถูกต้อง กรุณาตรวจสอบแล้วลองใหม่",
+      "outcome": "failed",
+      "status": "INVALID_EMAIL"
+    },
+    {
+      "keywords": ["reset", "password"],
+      "thai": "บัญชีนี้ต้องตั้งรหัสผ่านใหม่ กรุณาดำเนินการผ่านอีเมลหรือเว็บไซต์ Parsec",
+      "outcome": "requires_action",
+      "status": "PASSWORD_RESET_REQUIRED"
+    },
+    {
+      "keywords": ["authorization", "device"],
+      "thai": "ต้องยืนยันอุปกรณ์นี้ก่อนเข้าสู่ระบบ Parsec กรุณาตรวจสอบอีเมลของบัญชี",
+      "outcome": "requires_action",
+      "status": "DEVICE_AUTHORIZATION_REQUIRED"
+    },
+    {
+      "keywords": ["update", "required"],
+      "thai": "Parsec เวอร์ชันนี้ต้องอัปเดตก่อนจึงจะเข้าสู่ระบบได้",
+      "outcome": "requires_action",
+      "status": "UPDATE_REQUIRED"
+    },
+    {
+      "keywords": ["request", "timed", "out"],
+      "thai": "คำขอเข้าสู่ระบบ Parsec หมดเวลา กรุณาตรวจสอบอินเทอร์เน็ตแล้วลองใหม่",
+      "outcome": "failed",
+      "status": "NETWORK_ERROR"
+    },
+    {
+      "keywords": ["could", "not", "connect"],
+      "thai": "ไม่สามารถเชื่อมต่อบริการ Parsec ได้ กรุณาตรวจสอบอินเทอร์เน็ตแล้วลองใหม่",
+      "outcome": "failed",
+      "status": "NETWORK_ERROR"
+    }
+  ],
+  "codes": [
+    {
+      "code": "400",
+      "thai": "คำขอเข้าสู่ระบบ Parsec ไม่ถูกต้อง กรุณาตรวจสอบข้อมูลแล้วลองใหม่",
+      "outcome": "failed",
+      "status": "BAD_REQUEST"
+    },
+    {
+      "code": "401",
+      "thai": "อีเมลหรือรหัสผ่าน Parsec ไม่ถูกต้อง",
+      "outcome": "failed",
+      "status": "INVALID_CREDENTIALS"
+    },
+    {
+      "code": "404",
+      "thai": "ไม่พบบัญชีหรือบริการ Parsec ที่ร้องขอ",
+      "outcome": "failed",
+      "status": "NOT_FOUND"
+    },
+    {
+      "code": "408",
+      "thai": "คำขอเข้าสู่ระบบ Parsec หมดเวลา กรุณาลองใหม่",
+      "outcome": "failed",
+      "status": "NETWORK_ERROR"
+    },
+    {
+      "code": "409",
+      "thai": "บัญชี Parsec มีเซสชันที่ขัดแย้งกัน กรุณาออกจากระบบในอุปกรณ์อื่นแล้วลองใหม่",
+      "outcome": "requires_action",
+      "status": "SESSION_CONFLICT"
+    },
+    {
+      "code": "429",
+      "thai": "พยายามเข้าสู่ระบบ Parsec บ่อยเกินไป กรุณารอสักครู่แล้วลองใหม่",
+      "outcome": "failed",
+      "status": "RATE_LIMITED"
+    },
+    {
+      "code": "500",
+      "thai": "ระบบ Parsec เกิดข้อผิดพลาดภายใน กรุณาลองใหม่ภายหลัง",
+      "outcome": "failed",
+      "status": "SERVICE_UNAVAILABLE"
+    },
+    {
+      "code": "502",
+      "thai": "เกตเวย์ของบริการ Parsec ตอบกลับผิดพลาด กรุณาลองใหม่ภายหลัง",
+      "outcome": "failed",
+      "status": "SERVICE_UNAVAILABLE"
+    },
+    {
+      "code": "503",
+      "thai": "บริการ Parsec ไม่พร้อมใช้งานชั่วคราว กรุณาลองใหม่ภายหลัง",
+      "outcome": "failed",
+      "status": "SERVICE_UNAVAILABLE"
+    },
+    {
+      "code": "504",
+      "thai": "บริการ Parsec ตอบกลับเกินเวลา กรุณาลองใหม่ภายหลัง",
+      "outcome": "failed",
+      "status": "NETWORK_ERROR"
+    }
+  ],
+  "fallbacks": [
+    { "pattern": "(?i)an email was just sent to your address", "replacement": "ระบบเพิ่งส่งอีเมลไปยังที่อยู่อีเมลของคุณ" },
+    { "pattern": "(?i)to verify your (?:log\\s*in|login) attempt", "replacement": "เพื่อยืนยันความพยายามเข้าสู่ระบบของคุณ" },
+    { "pattern": "(?i)from this ip address", "replacement": "จากที่อยู่ IP นี้" },
+    { "pattern": "(?i)check your email", "replacement": "กรุณาตรวจสอบอีเมลของคุณ" },
+    { "pattern": "(?i)confirmation email", "replacement": "อีเมลยืนยัน" },
+    { "pattern": "(?i)authentication code", "replacement": "รหัสยืนยันตัวตน" },
+    { "pattern": "(?i)we could not find (?:an )?account", "replacement": "เราไม่พบบัญชี" },
+    { "pattern": "(?i)no account (?:was )?found", "replacement": "ไม่พบบัญชี" },
+    { "pattern": "(?i)enter a valid email address", "replacement": "กรุณากรอกที่อยู่อีเมลที่ถูกต้อง" },
+    { "pattern": "(?i)device authorization", "replacement": "การยืนยันอุปกรณ์" },
+    { "pattern": "(?i)authorize this device", "replacement": "ยืนยันอุปกรณ์นี้" },
+    { "pattern": "(?i)reset your password", "replacement": "ตั้งรหัสผ่านของคุณใหม่" },
+    { "pattern": "(?i)password reset", "replacement": "การตั้งรหัสผ่านใหม่" },
+    { "pattern": "(?i)request timed out", "replacement": "คำขอหมดเวลา" },
+    { "pattern": "(?i)could not connect", "replacement": "ไม่สามารถเชื่อมต่อได้" },
+    { "pattern": "(?i)update (?:is )?required", "replacement": "จำเป็นต้องอัปเดต" },
+    { "pattern": "(?i)two[- ]factor authentication", "replacement": "การยืนยันตัวตนสองขั้นตอน" },
+    { "pattern": "(?i)invalid credentials", "replacement": "ข้อมูลเข้าสู่ระบบไม่ถูกต้อง" },
+    { "pattern": "(?i)wrong password", "replacement": "รหัสผ่านไม่ถูกต้อง" },
+    { "pattern": "(?i)too many (?:log\\s*in|login) attempts", "replacement": "พยายามเข้าสู่ระบบบ่อยเกินไป" },
+    { "pattern": "(?i)too many attempts", "replacement": "พยายามเข้าสู่ระบบบ่อยเกินไป" },
+    { "pattern": "(?i)please try again later", "replacement": "กรุณาลองใหม่ภายหลัง" },
+    { "pattern": "(?i)try again later", "replacement": "กรุณาลองใหม่ภายหลัง" },
+    { "pattern": "(?i)service unavailable", "replacement": "บริการไม่พร้อมใช้งาน" },
+    { "pattern": "(?i)server unavailable", "replacement": "เซิร์ฟเวอร์ไม่พร้อมใช้งาน" },
+    { "pattern": "(?i)temporarily unavailable", "replacement": "ไม่พร้อมใช้งานชั่วคราว" },
+    { "pattern": "(?i)already logged in", "replacement": "เข้าสู่ระบบอยู่แล้ว" },
+    { "pattern": "(?i)another session", "replacement": "เซสชันอื่น" },
+    { "pattern": "(?i)not a robot", "replacement": "ไม่ใช่หุ่นยนต์" },
+    { "pattern": "(?i)ip address", "replacement": "ที่อยู่ IP" },
+    { "pattern": "(?i)log\\s*in|login", "replacement": "เข้าสู่ระบบ" },
+    { "pattern": "(?i)error", "replacement": "ข้อผิดพลาด" },
+    { "pattern": "(?i)warning", "replacement": "คำเตือน" },
+    { "pattern": "(?i)notice|alert", "replacement": "แจ้งเตือน" },
+    { "pattern": "(?i)email", "replacement": "อีเมล" },
+    { "pattern": "(?i)password", "replacement": "รหัสผ่าน" },
+    { "pattern": "(?i)account", "replacement": "บัญชี" },
+    { "pattern": "(?i)verify|confirm", "replacement": "ยืนยัน" },
+    { "pattern": "(?i)incorrect|invalid", "replacement": "ไม่ถูกต้อง" },
+    { "pattern": "(?i)required", "replacement": "จำเป็นต้องดำเนินการ" },
+    { "pattern": "(?i)please", "replacement": "กรุณา" },
+    { "pattern": "(?i)failed", "replacement": "ล้มเหลว" },
+    { "pattern": "(?i)unable", "replacement": "ไม่สามารถ" },
+    { "pattern": "(?i)denied|unauthorized", "replacement": "ไม่ได้รับอนุญาต" },
+    { "pattern": "(?i)network", "replacement": "เครือข่าย" },
+    { "pattern": "(?i)connection", "replacement": "การเชื่อมต่อ" },
+    { "pattern": "(?i)offline", "replacement": "ออฟไลน์" },
+    { "pattern": "(?i)locked", "replacement": "ถูกล็อก" },
+    { "pattern": "(?i)disabled", "replacement": "ถูกปิดใช้งาน" },
+    { "pattern": "(?i)suspended|banned", "replacement": "ถูกระงับการใช้งาน" },
+    { "pattern": "(?i)session", "replacement": "เซสชัน" },
+    { "pattern": "(?i)attempts?", "replacement": "ความพยายาม" },
+    { "pattern": "(?i)sent", "replacement": "ส่งแล้ว" },
+    { "pattern": "(?i)\\bor\\b", "replacement": "หรือ" },
+    { "pattern": "(?i)\\byour\\b", "replacement": "ของคุณ" },
+    { "pattern": "(?i)\\bthis\\b", "replacement": "นี้" },
+    { "pattern": "(?i)\\bfrom\\b", "replacement": "จาก" }
+  ]
+}

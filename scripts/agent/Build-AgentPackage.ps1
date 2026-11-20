@@ -31,7 +31,7 @@ $manifestPath='AgentPackage.manifest.json'
 $agentVersion=if($releaseBuild){$ReleaseVersion}else{$agentVersion}
 $manifest=[pscustomobject]@{packageFormatVersion=1;agentInformationalVersion=$agentVersion;sourceCommit=$revision;sourceDirty=($statusLines.Count -gt 0);releaseBuild=$releaseBuild;agentUpdateChallengeProtocol=2}
 $verifierProject=Join-Path $repo 'services/AgentPackageVerifier/AgentPackageVerifier.csproj'
-$scriptNames=@('Install-AgentPackage.ps1','Install-Service.ps1','Install-TightVncServer.ps1','Prepare-SunshineStreamGate.ps1','PrivateInstallFiles.ps1','ServiceInstallTransaction.ps1')
+$scriptNames=@('Install-AgentPackage.ps1','Install-Service.ps1','Install-TightVncServer.ps1','Remove-StreamGuard.ps1','PrivateInstallFiles.ps1','ServiceInstallTransaction.ps1')
 if($releaseBuild){$scriptNames+=@('Update-AgentPackage.ps1','Update-Agent.ps1')}
 $entries=@('Agent')+$scriptNames+$manifestPath
 if($Plan){

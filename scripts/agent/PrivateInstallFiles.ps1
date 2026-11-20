@@ -268,10 +268,60 @@ function Get-AgentEnrollmentRecoveryInstruction {
  }
 }
 function Get-AgentInstallMode {
- param([Parameter(Mandatory)][bool]$ServiceExists,[Parameter(Mandatory)][bool]$InstallDirectoryExists,[Parameter(Mandatory)][bool]$DataDirectoryExists,[bool]$GuardServiceExists=$false,[bool]$EmptyIdentityDirectoryResidue=$false)
- if(-not $ServiceExists -and -not $InstallDirectoryExists -and (-not $DataDirectoryExists -or $EmptyIdentityDirectoryResidue) -and -not $GuardServiceExists){return 'install'}
- if($ServiceExists -and $InstallDirectoryExists -and $DataDirectoryExists -and $GuardServiceExists){return 'repair-enrollment'}
+ param([Parameter(Mandatory)][bool]$ServiceExists,[Parameter(Mandatory)][bool]$InstallDirectoryExists,[Parameter(Mandatory)][bool]$DataDirectoryExists,[bool]$EmptyIdentityDirectoryResidue=$false)
+ if(-not $ServiceExists -and -not $InstallDirectoryExists -and (-not $DataDirectoryExists -or $EmptyIdentityDirectoryResidue)){return 'install'}
+ if($ServiceExists -and $InstallDirectoryExists -and $DataDirectoryExists){return 'repair-enrollment'}
  throw 'Agent installation is incomplete or inconsistent; refusing to overwrite service, binaries or identity data.'
+}
+function Test-LegacyStreamGuardRemnant {
+ # Detects every shape a pre-removal Stream Guard installation can leave behind:
+ # the Guard service, its managed firewall rule, or a dangling Guard dependency
+ # on the Agent or SunshineService. Read-only; safe from Plan and repair paths.
+ $guardServiceName='KamenRaider Stream Guard'
+ $streamRuleName='KamenRaider Stream Guard - Sunshine'
+ if(Get-Service -Name $guardServiceName -ErrorAction SilentlyContinue){return $true}
+ if($env:OS -eq 'Windows_NT' -and (Get-Command Get-NetFirewallRule -ErrorAction SilentlyContinue)){
+  $rule=@(Get-NetFirewallRule -PolicyStore ActiveStore -Name $streamRuleName -ErrorAction SilentlyContinue)
+  if($rule.Count -gt 0){return $true}
+ }
+ Initialize-ServiceManagerNativeType
+ foreach($serviceName in @('KamenRaider Agent','SunshineService')){
+  if(-not (Get-Service -Name $serviceName -ErrorAction SilentlyContinue)){continue}
+  try{$configuration=[KamenRaider.Install.NativeServiceManagerV2]::QueryConfiguration($serviceName)}catch{continue}
+  if(@($configuration.Dependencies | Where-Object {$_.Equals($guardServiceName,[StringComparison]::OrdinalIgnoreCase)}).Count -gt 0){return $true}
+ }
+ return $false
+}
+function Test-AgentLegacyServiceMigrationNeeded {
+ # True when the machine still carries a legacy Stream Guard remnant or when the
+ # existing Agent service must move from the virtual account to LocalSystem.
+ if(Test-LegacyStreamGuardRemnant){return $true}
+ if(-not (Get-Service -Name 'KamenRaider Agent' -ErrorAction SilentlyContinue)){return $false}
+ Initialize-ServiceManagerNativeType
+ try{$configuration=[KamenRaider.Install.NativeServiceManagerV2]::QueryConfiguration('KamenRaider Agent')}catch{return $false}
+ $account=[string]$configuration.Account
+ return ($account -and -not [string]::Equals($account,'LocalSystem',[StringComparison]::OrdinalIgnoreCase))
+}
+function Ensure-SunshineServiceAutomaticAndRunning {
+ param([string]$ServiceName='SunshineService',[int]$TimeoutSeconds=30)
+ if($env:OS -ne 'Windows_NT'){throw 'Windows is required to configure the Sunshine service.'}
+ $service=Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+ if(-not $service){throw "Windows service '$ServiceName' is not installed; install Sunshine before the Agent."}
+ Set-Service -Name $ServiceName -StartupType Automatic -ErrorAction Stop
+ $service=Get-Service -Name $ServiceName -ErrorAction Stop
+ if($service.Status -ne [ServiceProcess.ServiceControllerStatus]::Running){Start-Service -Name $ServiceName -ErrorAction Stop}
+ $timer=[Diagnostics.Stopwatch]::StartNew()
+ do{
+  $service=Get-Service -Name $ServiceName -ErrorAction Stop
+  if($service.Status -eq [ServiceProcess.ServiceControllerStatus]::Running){break}
+  if($service.Status -eq [ServiceProcess.ServiceControllerStatus]::Stopped){Start-Service -Name $ServiceName -ErrorAction Stop}
+  if($timer.Elapsed.TotalSeconds -ge $TimeoutSeconds){break}
+  Start-Sleep -Milliseconds 250
+ }while($timer.Elapsed.TotalSeconds -lt $TimeoutSeconds)
+ if($service.Status -ne [ServiceProcess.ServiceControllerStatus]::Running){throw "Service '$ServiceName' did not reach Running within $TimeoutSeconds seconds."}
+ $startupType=if($service.PSObject.Properties.Name -contains 'StartType'){[string]$service.StartType}else{[string](Get-CimInstance -ClassName Win32_Service -Filter ("Name='{0}'" -f $ServiceName) -ErrorAction Stop).StartMode}
+ if($startupType -notin @('Automatic','Auto')){throw "Service '$ServiceName' did not retain an automatic startup mode."}
+ return [pscustomobject]@{ServiceName=$ServiceName;Startup='Automatic';State='Running'}
 }
 function Get-AgentBootstrapTreeInventory {
  param([Parameter(Mandatory)][string]$Path)
@@ -893,10 +943,13 @@ function Invoke-AgentEnrollmentRepair {
  )
  $serviceInfo=@(Get-CimInstance -ClassName Win32_Service -Filter ("Name='{0}'" -f $ServiceName) -ErrorAction Stop)
  if($serviceInfo.Count -ne 1){throw 'Existing Agent service record is missing or ambiguous.'}
- $expectedAccount="NT SERVICE\$ServiceName"
+ # Current installs use LocalSystem; machines still awaiting the account migration run
+ # under the deterministic virtual service account. Repair keeps either reviewed shape.
+ $virtualAccount="NT SERVICE\$ServiceName"
+ $actualStartName=[string]$serviceInfo[0].StartName
  $expectedBinaryPath=Get-ServiceBinaryPath -Executable (Join-Path $InstallDirectory 'Agent.exe') -ContentRoot $InstallDirectory
  if(-not [string]::Equals([string]$serviceInfo[0].PathName,$expectedBinaryPath,[StringComparison]::OrdinalIgnoreCase) -or
-    -not [string]::Equals([string]$serviceInfo[0].StartName,$expectedAccount,[StringComparison]::OrdinalIgnoreCase) -or
+    (-not [string]::Equals($actualStartName,'LocalSystem',[StringComparison]::OrdinalIgnoreCase) -and -not [string]::Equals($actualStartName,$virtualAccount,[StringComparison]::OrdinalIgnoreCase)) -or
     -not [string]::Equals([string]$serviceInfo[0].StartMode,'Auto',[StringComparison]::OrdinalIgnoreCase)){
   throw 'Existing service identity, binary path or automatic startup does not match the Agent installation.'
  }

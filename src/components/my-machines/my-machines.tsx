@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Footer } from "@/components/ui/layout/Footer";
 import { Navbar } from "@/components/ui/layout/Navbar";
 import { authClient } from "@/lib/auth-client";
+import { ParsecConnect } from "@/components/my-machines/parsec-connect";
 import { formatBalance } from "@/lib/money";
 import {
   formatRentalDateTime,
@@ -475,6 +476,7 @@ function LeaseCard({
               ระบบหักค่าเช่าตามชั่วโมงที่ต่อทันที และจะคืนเงินตามเวลาที่ไม่ได้ใช้ให้อัตโนมัติเมื่อสิ้นสุดการเช่า
             </p>
           </form>
+          <ParsecConnect leaseId={lease.id} initial={lease.parsec ?? null} />
         </>
       ) : lease.state === "pending" ? (
         <p>ระบบกำลังยืนยันการเช่ากับเครื่อง กรุณารอสักครู่แล้วรีเฟรชอีกครั้ง</p>

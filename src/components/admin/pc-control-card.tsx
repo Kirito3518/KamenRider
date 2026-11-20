@@ -1,6 +1,6 @@
 "use client";
 
-import { Clock, KeyRound, Minus, Monitor, Plus, Power, PowerOff, UserRound, XCircle } from "lucide-react";
+import { Clock, KeyRound, Minus, Monitor, Plus, Power, PowerOff, RefreshCw, Unlink, UserRound, XCircle } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -31,6 +31,8 @@ export function PcControlCard({
   onReduceTime,
   onPowerOff,
   onCancel,
+  onRestartSunshine,
+  onUnpairSunshine,
 }: {
   machine: PcControlMachine;
   now: number;
@@ -45,6 +47,8 @@ export function PcControlCard({
   onReduceTime: () => void;
   onPowerOff: () => void;
   onCancel: () => void;
+  onRestartSunshine: () => void;
+  onUnpairSunshine: () => void;
 }) {
   const lease = machine.lease;
   const online = agentOnline(machine, now);
@@ -119,6 +123,14 @@ export function PcControlCard({
           <Button variant="destructive" size="sm" onClick={onPowerOff} disabled={busy || !online}>
             <PowerOff data-icon="inline-start" />
             ปิดเครื่อง
+          </Button>
+          <Button variant="outline" size="sm" onClick={onRestartSunshine} disabled={busy || !online || updateLocked}>
+            <RefreshCw data-icon="inline-start" />
+            รีสตาร์ท Sunshine
+          </Button>
+          <Button variant="outline" size="sm" onClick={onUnpairSunshine} disabled={busy || !online || updateLocked}>
+            <Unlink data-icon="inline-start" />
+            ยกเลิกการจับคู่ Sunshine
           </Button>
           <Button variant="outline" size="sm" onClick={onPair} disabled={busy || !leaseActionable}>
             <KeyRound data-icon="inline-start" />

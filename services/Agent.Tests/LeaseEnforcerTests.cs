@@ -1,126 +1,979 @@
 using System.Text.Json;
 using KamenRaider.Agent.Leases;
 using KamenRaider.Agent.Power;
+using KamenRaider.Agent.Sunshine;
 using KamenRaider.Contracts;
+
 namespace Agent.Tests;
-public class LeaseEnforcerTests {
- sealed class Clock:TimeProvider,IBootClock { public string BootId {get;set;}="boot"; public long UptimeMilliseconds {get;set;}=1000; public DateTimeOffset Now=DateTimeOffset.Parse("2026-10-29T00:00:00Z"); public override DateTimeOffset GetUtcNow()=>Now; public void Advance(int seconds){UptimeMilliseconds+=seconds*1000;Now=Now.AddSeconds(seconds);} }
- sealed class Gate:IStreamGate { public bool Blocked=true;public bool FailAllow;public int Calls;public StreamLeaseGrant? LastGrant;public TaskCompletionSource? Pause;public TaskCompletionSource? Entered;public TaskCompletionSource? PauseAllow;public TaskCompletionSource? AllowEntered;public Task BlockAsync(CancellationToken ct){Calls++;Blocked=true;Entered?.TrySetResult();return Pause?.Task??Task.CompletedTask;} public async Task AllowAsync(StreamLeaseGrant grant,CancellationToken ct){LastGrant=grant;if(AllowEntered is not null)AllowEntered.TrySetResult();if(PauseAllow is not null)await PauseAllow.Task;if(FailAllow)throw new IOException("Gate unavailable");Blocked=false;} }
- sealed class Power:IShutdown {public int Calls;public bool Fail;public TaskCompletionSource? Pause;public Task RequestImmediateShutdownAsync(CancellationToken ct){Calls++;if(Pause is not null)return Pause.Task;return Fail?Task.FromException(new IOException()):Task.CompletedTask;}}
- sealed class StalledOncePower:IShutdown {public int Calls;public TaskCompletionSource FirstRequest=new(TaskCreationOptions.RunContinuationsAsynchronously);public Task RequestImmediateShutdownAsync(CancellationToken ct)=>++Calls==1?FirstRequest.Task:Task.CompletedTask;}
- sealed class BrokenStore(string path):LeaseStore(path) {public override Task SaveAsync(LeaseSnapshot snapshot,CancellationToken ct)=>throw new IOException();}
- sealed class BrokenClearStore(string path):LeaseStore(path) {public override Task ClearAsync(CancellationToken ct)=>throw new IOException();}
- sealed class AfterSaveThrowStore(string path):LeaseStore(path) {public override async Task SaveAsync(LeaseSnapshot snapshot,CancellationToken ct){await base.SaveAsync(snapshot,ct);throw new IOException();}}
- sealed class Fixture:IDisposable {public string Dir=Path.Combine(Path.GetTempPath(),Guid.NewGuid().ToString());public Clock Clock=new();public Gate Gate=new();public Power Power=new();public TestMaintenanceFence Fence=new();public LeaseStore Store;public LeaseEnforcer Enforcer;public Fixture(){Store=new(Dir);Enforcer=New();}public LeaseEnforcer New()=>new(Store,Clock,Clock,Gate,Power,Fence);public void Dispose(){if(Directory.Exists(Dir))Directory.Delete(Dir,true);} public CommandEnvelope Command(long revision=1,int expiry=60,string id="cmd")=>new(id,"ApplyLease","rental",revision,Clock.BootId,Clock.Now.AddSeconds(30),JsonSerializer.SerializeToElement(new{startsAtUtc=DateTimeOffset.Parse("2026-10-29T00:00:00Z"),expiresAtUtc=DateTimeOffset.Parse("2026-10-29T00:00:00Z").AddSeconds(expiry)}));}
- [Fact] public async Task SaveFailureNeverAcknowledges(){using var f=new Fixture();var e=new LeaseEnforcer(new BrokenStore(f.Dir),f.Clock,f.Clock,f.Gate,f.Power,f.Fence);Assert.Equal("failed",(await e.ApplyAsync(f.Command(),default)).Status);Assert.Null(e.Current);Assert.False(e.CanStream);}
- [Fact] public async Task ConfirmedActiveLeaseOpensStreamGate(){using var f=new Fixture();await f.Enforcer.ApplyAsync(f.Command(),default);Assert.True(f.Gate.Blocked);await f.Enforcer.ConfirmAsync(new("rental",1,"boot",f.Clock.Now.AddSeconds(60)),default);Assert.False(f.Gate.Blocked);Assert.True(f.Enforcer.CanStream);}
- [Fact] public async Task ConfirmedLeasePassesExactLeaseAndMonotonicDeadlineToStreamGate(){using var f=new Fixture();await f.Enforcer.ApplyAsync(f.Command(),default);var expiry=DateTimeOffset.Parse("2026-10-29T00:01:00Z");await f.Enforcer.ConfirmAsync(new("rental",1,"boot",expiry),default);Assert.Equal(new StreamLeaseGrant("rental",1,"boot",expiry,61000),f.Gate.LastGrant);}
- [Fact] public async Task PairingScopeExistsOnlyForTheExactConfirmedLease(){using var f=new Fixture();Assert.Null(f.Enforcer.CurrentPairingScope);await f.Enforcer.ApplyAsync(f.Command(),default);Assert.Null(f.Enforcer.CurrentPairingScope);var expiry=DateTimeOffset.Parse("2026-10-29T00:01:00Z");await f.Enforcer.ConfirmAsync(new("rental",1,"boot",expiry),default);Assert.Equal(new KamenRaider.Agent.Sunshine.PairingScope("rental",1,"boot",expiry,61000),f.Enforcer.CurrentPairingScope);f.Clock.Advance(60);await f.Enforcer.EnforceAsync(default);Assert.Null(f.Enforcer.CurrentPairingScope);}
- [Fact] public async Task FailedGateOpenLeavesLeaseUnconfirmedAndRetriesClosed(){using var f=new Fixture();await f.Enforcer.ApplyAsync(f.Command(),default);f.Gate.FailAllow=true;await Assert.ThrowsAsync<IOException>(()=>f.Enforcer.ConfirmAsync(new("rental",1,"boot",f.Clock.Now.AddSeconds(60)),default));Assert.Equal("StreamGateFailed",f.Enforcer.Fault);Assert.False(f.Enforcer.CanStream);Assert.True(f.Gate.Blocked);f.Gate.FailAllow=false;await f.Enforcer.ConfirmAsync(new("rental",1,"boot",f.Clock.Now.AddSeconds(60)),default);Assert.Null(f.Enforcer.Fault);Assert.True(f.Enforcer.CanStream);Assert.False(f.Gate.Blocked);}
- [Fact] public async Task BlockedSyncDoesNotApplyCommandsOrConfirmLease(){using var f=new Fixture();var dispatcher=new KamenRaider.Agent.Sync.LeaseCommandDispatcher(f.Enforcer);var serverTime=f.Clock.Now;await dispatcher.AcceptAsync(new(serverTime,new(1,5000,6000),[f.Command()],null),f.Clock.UptimeMilliseconds,default);Assert.Equal(1,f.Enforcer.Current!.Revision);var extension=f.Command(2,120,"extend") with{ValidUntilUtc=serverTime.AddSeconds(180)};var response=new SyncResponse(serverTime.AddSeconds(10),new(1,5000,6000),[extension],new("rental",1,"boot",serverTime.AddSeconds(60)));await dispatcher.AcceptBlockedAsync(response,f.Clock.UptimeMilliseconds,default);Assert.Equal(1,f.Enforcer.Current!.Revision);Assert.False(f.Enforcer.CanStream);Assert.Equal(51000,f.Enforcer.Current!.DeadlineUptimeMilliseconds);Assert.Equal(new CommandResult("cmd","applied",1),Assert.Single(dispatcher.PendingResults));}
- [Fact] public async Task RejectedFirstLeaseDoesNotShutDownAfterItsProposedExpiry(){using var f=new Fixture();var e=new LeaseEnforcer(new BrokenStore(f.Dir),f.Clock,f.Clock,f.Gate,f.Power,f.Fence);Assert.Equal("failed",(await e.ApplyAsync(f.Command(),default)).Status);f.Clock.Advance(60);await e.EnforceAsync(default);Assert.Equal(0,f.Power.Calls);}
- [Fact] public async Task UnacknowledgedDurableFirstLeaseStillShutsDown(){using var f=new Fixture();var e=new LeaseEnforcer(new AfterSaveThrowStore(f.Dir),f.Clock,f.Clock,f.Gate,f.Power,f.Fence);Assert.Equal("failed",(await e.ApplyAsync(f.Command(),default)).Status);f.Clock.Advance(60);await e.EnforceAsync(default);Assert.Equal(1,f.Power.Calls);}
- [Fact] public async Task OfflineDeadlineShutsDownOnceDespiteWallClockRollback(){using var f=new Fixture();await f.Enforcer.ApplyAsync(f.Command(),default);f.Clock.Advance(60);f.Clock.Now=f.Clock.Now.AddDays(-1);await f.Enforcer.EnforceAsync(default);await f.Enforcer.EnforceAsync(default);Assert.Equal(1,f.Power.Calls);Assert.False(f.Enforcer.CanStream);}
- [Fact] public async Task RestartAndDuplicateCannotExtendMonotonicDeadline(){using var f=new Fixture();var cmd=f.Command() with {ValidUntilUtc=f.Clock.Now.AddSeconds(120)};await f.Enforcer.ApplyAsync(cmd,default);f.Clock.Advance(30);f.Clock.Now=f.Clock.Now.AddMinutes(-1);var e=f.New();await e.InitializeAsync(default);Assert.Equal("applied",(await e.ApplyAsync(cmd,default)).Status);f.Clock.Advance(30);await e.EnforceAsync(default);Assert.Equal(1,f.Power.Calls);}
- [Fact] public async Task ExtensionRejectsStaleCommandsAndRequiresMatchingConfirmation(){using var f=new Fixture();await f.Enforcer.ApplyAsync(f.Command(),default);Assert.False(f.Enforcer.CanStream);await f.Enforcer.ConfirmAsync(new("rental",1,"boot",f.Clock.Now.AddSeconds(60)),default);Assert.True(f.Enforcer.CanStream);await f.Enforcer.ApplyAsync(f.Command(2,120,"extend"),default);Assert.False(f.Enforcer.CanStream);Assert.Equal("failed",(await f.Enforcer.ApplyAsync(f.Command(1,60,"old"),default)).Status);await f.Enforcer.ConfirmAsync(new("rental",2,"boot",f.Clock.Now.AddSeconds(120)),default);Assert.True(f.Enforcer.CanStream);f.Clock.Advance(60);await f.Enforcer.EnforceAsync(default);Assert.Equal(0,f.Power.Calls);f.Clock.Advance(60);await f.Enforcer.EnforceAsync(default);Assert.Equal(1,f.Power.Calls);}
- [Fact] public async Task UnconfirmedExtensionShutsDownAtOriginalDeadlineInSameProcess(){using var f=new Fixture();await f.Enforcer.ApplyAsync(f.Command(),default);await f.Enforcer.ConfirmAsync(new("rental",1,"boot",f.Clock.Now.AddSeconds(60)),default);Assert.Equal("applied",(await f.Enforcer.ApplyAsync(f.Command(2,120,"extend"),default)).Status);f.Clock.Advance(60);await f.Enforcer.EnforceAsync(default);Assert.Equal(1,f.Power.Calls);Assert.False(f.Enforcer.CanStream);}
- [Fact] public async Task NewBootFailsClosedAndCannotRevivePersistedLease(){using var f=new Fixture();await f.Enforcer.ApplyAsync(f.Command(),default);f.Clock.BootId="next";var e=f.New();await e.InitializeAsync(default);Assert.False(e.CanStream);Assert.Equal("failed",(await e.ApplyAsync(f.Command(2,120,"next"),default)).Status);}
- [Fact] public async Task ShutdownFailureStaysBlockedAndRetries(){using var f=new Fixture();await f.Enforcer.ApplyAsync(f.Command(),default);f.Clock.Advance(60);f.Power.Fail=true;await f.Enforcer.EnforceAsync(default);Assert.Equal("ShutdownFailed",f.Enforcer.Fault);Assert.False(f.Enforcer.CanStream);f.Power.Fail=false;await f.Enforcer.EnforceAsync(default);Assert.Equal(2,f.Power.Calls);}
- [Fact] public async Task ExpiryClosesGateWhileShutdownAdapterIsStalled(){using var f=new Fixture();await f.Enforcer.ApplyAsync(f.Command(),default);f.Gate.Entered=new(TaskCreationOptions.RunContinuationsAsynchronously);f.Power.Pause=new(TaskCreationOptions.RunContinuationsAsynchronously);f.Clock.Advance(60);var enforce=f.Enforcer.EnforceAsync(default);try{await f.Gate.Entered.Task.WaitAsync(TimeSpan.FromSeconds(1));Assert.False(enforce.IsCompleted);Assert.Equal(1,f.Power.Calls);}finally{f.Power.Pause.TrySetResult();await enforce;}}
- [Fact] public async Task TimedOutShutdownRequestCanBeRetried(){using var f=new Fixture();var power=new StalledOncePower();var e=new LeaseEnforcer(f.Store,f.Clock,f.Clock,f.Gate,new BoundedShutdown(power,TimeSpan.FromMilliseconds(25)),f.Fence);await e.ApplyAsync(f.Command(),default);f.Clock.Advance(60);await e.EnforceAsync(default).WaitAsync(TimeSpan.FromSeconds(1));Assert.Equal("ShutdownFailed",e.Fault);await e.EnforceAsync(default);Assert.Equal(2,power.Calls);Assert.Equal("ShutdownRequested",e.Fault);power.FirstRequest.TrySetResult();}
- [Theory] [InlineData("wrongboot",10)] [InlineData("boot",0)] public async Task InvalidBootOrTtlRejected(string boot,int ttl){using var f=new Fixture();var c=f.Command() with{BootId=boot,ValidUntilUtc=f.Clock.Now.AddSeconds(ttl)};Assert.Equal("failed",(await f.Enforcer.ApplyAsync(c,default)).Status);Assert.Null(f.Enforcer.Current);}
- [Fact] public async Task SyncDispatchQueuesExactResultAndRecoversLostAckByRetry(){using var f=new Fixture();var dispatch=new KamenRaider.Agent.Sync.LeaseCommandDispatcher(f.Enforcer);var cmd=f.Command();await dispatch.AcceptAsync(new(f.Clock.Now,new(1,5000,6000),[cmd]),default);Assert.Equal(new CommandResult("cmd","applied",1),Assert.Single(dispatch.PendingResults));Assert.False(f.Enforcer.CanStream);await dispatch.AcceptAsync(new(f.Clock.Now,new(1,5000,6000),[cmd]),default);Assert.Single(dispatch.PendingResults);await dispatch.AcceptAsync(new(f.Clock.Now,new(1,5000,6000),[],new("rental",1,"boot",f.Clock.Now.AddSeconds(60))),default);Assert.Empty(dispatch.PendingResults);Assert.True(f.Enforcer.CanStream);}
- [Fact] public async Task CorruptPersistenceFailsClosed(){using var f=new Fixture();Directory.CreateDirectory(f.Dir);await File.WriteAllTextAsync(Path.Combine(f.Dir,"lease.json"),"{");await f.Enforcer.InitializeAsync(default);Assert.Equal("LeaseStorageFailed",f.Enforcer.Fault);Assert.False(f.Enforcer.CanStream);Assert.Equal("failed",(await f.Enforcer.ApplyAsync(f.Command(),default)).Status);}
 
- [Fact] public async Task SyncUsesControllerTimeWhenLocalWallClockIsBehind(){using var f=new Fixture();var now=f.Clock.Now;var cmd=f.Command();f.Clock.Now=f.Clock.Now.AddDays(-1);var dispatch=new KamenRaider.Agent.Sync.LeaseCommandDispatcher(f.Enforcer);await dispatch.AcceptAsync(new(now,new(1,5000,6000),[cmd]),default);f.Clock.Advance(60);await f.Enforcer.EnforceAsync(default);Assert.Equal(1,f.Power.Calls);}
- sealed class PausedStore(string path):LeaseStore(path){public TaskCompletionSource Entered=new(TaskCreationOptions.RunContinuationsAsynchronously);public TaskCompletionSource Release=new(TaskCreationOptions.RunContinuationsAsynchronously);public bool Pause;public override async Task SaveAsync(LeaseSnapshot snapshot,CancellationToken ct){if(Pause){Entered.TrySetResult();await Release.Task;}await base.SaveAsync(snapshot,ct);}public override async Task<bool> SaveIfAsync(LeaseSnapshot snapshot,Func<Action,bool> commit,CancellationToken ct){if(Pause){Entered.TrySetResult();await Release.Task;}return await base.SaveIfAsync(snapshot,commit,ct);}}
- [Fact] public async Task GateStallCannotDelayOldExpiryOrReviveExtension(){using var f=new Fixture();await f.Enforcer.ApplyAsync(f.Command(),default);f.Clock.Advance(50);f.Gate.Pause=new(TaskCreationOptions.RunContinuationsAsynchronously);var apply=f.Enforcer.ApplyAsync(f.Command(2,120,"extend"),default);f.Clock.Advance(10);var enforce=f.Enforcer.EnforceAsync(default);try{await enforce.WaitAsync(TimeSpan.FromSeconds(1));Assert.Equal(1,f.Power.Calls);}finally{f.Gate.Pause.TrySetResult();await apply;}Assert.Equal("failed",(await apply).Status);Assert.Equal(1,f.Enforcer.Current!.Revision);Assert.False(f.Enforcer.CanStream);}
- [Fact] public async Task PersistenceStallCannotDelayExpiryAndLateWriteCannotReviveOnRestart(){using var f=new Fixture();var store=new PausedStore(f.Dir);var e=new LeaseEnforcer(store,f.Clock,f.Clock,f.Gate,f.Power,f.Fence);await e.ApplyAsync(f.Command(),default);f.Clock.Advance(50);store.Pause=true;var apply=e.ApplyAsync(f.Command(2,120,"extend"),default);await store.Entered.Task;f.Clock.Advance(10);try{await e.EnforceAsync(default).WaitAsync(TimeSpan.FromSeconds(1));Assert.Equal(1,f.Power.Calls);}finally{store.Release.TrySetResult();await apply;}Assert.Equal("failed",(await apply).Status);Assert.Equal(1,e.Current!.Revision);var restarted=f.New();await restarted.InitializeAsync(default);Assert.False(restarted.CanStream);Assert.Equal("failed",(await restarted.ApplyAsync(f.Command(3,180,"revive"),default)).Status);}
- [Fact] public async Task SyncElapsedIncludesTransitAndConfigurationWrite(){using var f=new Fixture();var server=f.Clock.Now;var cmd=f.Command() with{ValidUntilUtc=server.AddMinutes(2)};var requestStart=f.Clock.UptimeMilliseconds;f.Clock.Now=f.Clock.Now.AddDays(-1);f.Clock.Advance(20);var dispatch=new KamenRaider.Agent.Sync.LeaseCommandDispatcher(f.Enforcer);await dispatch.AcceptAsync(new(server,new(1,5000,6000),[cmd]),requestStart,default);f.Clock.Advance(40);await f.Enforcer.EnforceAsync(default);Assert.Equal(1,f.Power.Calls);}
- [Fact] public async Task ConfirmedExtensionRetainsNewDeadlineAcrossRestart(){using var f=new Fixture();await f.Enforcer.ApplyAsync(f.Command(),default);await f.Enforcer.ApplyAsync(f.Command(2,120,"extend"),default);await f.Enforcer.ConfirmAsync(new("rental",2,"boot",f.Clock.Now.AddSeconds(120)),default);f.Clock.Advance(70);var restarted=f.New();await restarted.InitializeAsync(default);await restarted.ObserveControllerTimeAsync(f.Clock.Now,default);await restarted.ConfirmAsync(new("rental",2,"boot",DateTimeOffset.Parse("2026-10-29T00:02:00Z")),default);Assert.True(restarted.CanStream);await restarted.EnforceAsync(default);Assert.Equal(0,f.Power.Calls);f.Clock.Advance(50);await restarted.EnforceAsync(default);Assert.Equal(1,f.Power.Calls);}
- [Fact] public async Task FirstLeasePersistenceStallStillArmsExpiry(){using var f=new Fixture();var store=new PausedStore(f.Dir){Pause=true};var e=new LeaseEnforcer(store,f.Clock,f.Clock,f.Gate,f.Power,f.Fence);var apply=e.ApplyAsync(f.Command() with{ValidUntilUtc=f.Clock.Now.AddMinutes(2)},default);await store.Entered.Task;f.Clock.Advance(60);try{await e.EnforceAsync(default).WaitAsync(TimeSpan.FromSeconds(1));Assert.Equal(1,f.Power.Calls);}finally{store.Release.TrySetResult();await apply;}Assert.Equal("failed",(await apply).Status);Assert.False(e.CanStream);}
- [Fact] public async Task FirstLeaseWrittenAfterExpiryStillShutsDown(){using var f=new Fixture();var store=new PausedStore(f.Dir){Pause=true};var e=new LeaseEnforcer(store,f.Clock,f.Clock,f.Gate,f.Power,f.Fence);var apply=e.ApplyAsync(f.Command() with{ValidUntilUtc=f.Clock.Now.AddMinutes(2)},default);await store.Entered.Task;f.Clock.Advance(60);store.Release.SetResult();Assert.Equal("failed",(await apply).Status);await e.EnforceAsync(default);Assert.Equal(1,f.Power.Calls);}
- [Fact] public async Task StartupGateStallCannotPreventPersistedExpiry(){using var f=new Fixture();await f.Enforcer.ApplyAsync(f.Command(),default);f.Clock.Advance(60);f.Gate.Pause=new(TaskCreationOptions.RunContinuationsAsynchronously);var restarted=f.New();var enforcement=restarted.EnforceAsync(default);try{await enforcement.WaitAsync(TimeSpan.FromSeconds(1));Assert.Equal(1,f.Power.Calls);}finally{f.Gate.Pause.TrySetResult();await enforcement;}}
- [Fact] public async Task FirstLeaseGateStallStillArmsExpiry(){using var f=new Fixture();f.Gate.Pause=new(TaskCreationOptions.RunContinuationsAsynchronously);var apply=f.Enforcer.ApplyAsync(f.Command() with{ValidUntilUtc=f.Clock.Now.AddMinutes(2)},default);f.Clock.Advance(60);try{await f.Enforcer.EnforceAsync(default).WaitAsync(TimeSpan.FromSeconds(1));Assert.Equal(1,f.Power.Calls);}finally{f.Gate.Pause.TrySetResult();await apply;}Assert.Equal("failed",(await apply).Status);}
- [Fact] public async Task RestartConfirmationBeforeGuardRestoresProposedExtensionDeadline(){using var f=new Fixture();await f.Enforcer.ApplyAsync(f.Command(),default);await f.Enforcer.ApplyAsync(f.Command(2,120,"extend"),default);f.Clock.Advance(20);var restarted=f.New();await restarted.InitializeAsync(default);await restarted.ObserveControllerTimeAsync(f.Clock.Now,default);await restarted.ConfirmAsync(new("rental",2,"boot",DateTimeOffset.Parse("2026-10-29T00:02:00Z")),default);Assert.True(restarted.CanStream);f.Clock.Advance(40);await restarted.EnforceAsync(default);Assert.Equal(0,f.Power.Calls);f.Clock.Advance(60);await restarted.EnforceAsync(default);Assert.Equal(1,f.Power.Calls);}
- [Fact] public async Task RepeatedExpiryPollsCoalesceStalledGateBlock(){using var f=new Fixture();await f.Enforcer.ApplyAsync(f.Command(),default);var before=f.Gate.Calls;f.Gate.Pause=new(TaskCreationOptions.RunContinuationsAsynchronously);f.Clock.Advance(60);try{for(var poll=0;poll<100;poll++)await f.Enforcer.EnforceAsync(default);Assert.Equal(before+1,f.Gate.Calls);Assert.Equal(1,f.Power.Calls);}finally{f.Gate.Pause.TrySetResult();}}
- [Fact] public async Task RestartConfirmationAtGuardExpiryCannotRestoreExtension(){using var f=new Fixture();await f.Enforcer.ApplyAsync(f.Command(),default);await f.Enforcer.ApplyAsync(f.Command(2,120,"extend"),default);f.Clock.Advance(60);var restarted=f.New();await restarted.InitializeAsync(default);await restarted.ConfirmAsync(new("rental",2,"boot",DateTimeOffset.Parse("2026-10-29T00:02:00Z")),default);Assert.False(restarted.CanStream);await restarted.EnforceAsync(default);Assert.Equal(1,f.Power.Calls);}
- [Fact] public async Task PairDispatchRequiresCurrentControllerConfirmationAndPublishesBoundOffer(){using var f=new Fixture();await f.Enforcer.ApplyAsync(f.Command(),default);var confirmation=new ActiveLeaseConfirmation("rental",1,"boot",f.Clock.Now.AddSeconds(60));await f.Enforcer.ConfirmAsync(confirmation,default);var api=new PairApi();var session=new KamenRaider.Agent.Sunshine.PairingSession(api,new PairFence(),()=>f.Enforcer.CurrentPairingScope,f.Clock);var dispatcher=new KamenRaider.Agent.Sync.LeaseCommandDispatcher(f.Enforcer,session);var offer=await dispatcher.GetPairingOfferAsync(default);Assert.NotNull(offer);Assert.Equal("rental",offer.RentalId);Assert.Equal("boot",offer.BootId);
-  var command=new CommandEnvelope("pair","PairPin","rental",1,"boot",f.Clock.Now.AddSeconds(20),JsonSerializer.SerializeToElement(new{pairingId="id",pin="1234"}));await dispatcher.AcceptAsync(new(f.Clock.Now,new(1,1,2),[command],null),default);Assert.Equal("failed",Assert.Single(dispatcher.PendingResults).Status);Assert.Equal(0,api.Calls);
-  await f.Enforcer.ConfirmAsync(confirmation,default);await dispatcher.GetPairingOfferAsync(default);await dispatcher.AcceptAsync(new(f.Clock.Now,new(1,1,2),[command],confirmation),default);Assert.Equal("applied",Assert.Single(dispatcher.PendingResults).Status);Assert.Equal(1,api.Calls);
- }
- sealed class PairFence:KamenRaider.Agent.Sunshine.IPairingFence {public Task<bool> VerifyOpenForLeaseAsync(KamenRaider.Agent.Sunshine.PairingScope scope,CancellationToken ct)=>Task.FromResult(true);public async Task<bool> RunFencedCleanupAsync(Func<CancellationToken,Task> clear,CancellationToken ct){await clear(ct);return true;}}
- sealed class PairApi:KamenRaider.Agent.Sunshine.ISunshinePairingApi {public int Calls;public Task<string[]> PendingIdsAsync(CancellationToken ct)=>Task.FromResult(new[]{"id"});public Task<bool> SubmitAsync(string id,string pin,CancellationToken ct){Calls++;return Task.FromResult(true);}public Task ClearAsync(CancellationToken ct)=>Task.CompletedTask;}
- [Fact] public async Task ControllerTimeRejectsPairCommandEvenWhenLocalClockIsBehind(){using var f=new Fixture();var initial=f.Clock.Now;await f.Enforcer.ApplyAsync(f.Command(),default);var confirmation=new ActiveLeaseConfirmation("rental",1,"boot",initial.AddSeconds(60));await f.Enforcer.ConfirmAsync(confirmation,default);var api=new PairApi();var session=new KamenRaider.Agent.Sunshine.PairingSession(api,new PairFence(),()=>f.Enforcer.CurrentPairingScope,f.Clock);var dispatcher=new KamenRaider.Agent.Sync.LeaseCommandDispatcher(f.Enforcer,session);await dispatcher.GetPairingOfferAsync(default);f.Clock.Advance(10);f.Clock.Now=f.Clock.Now.AddDays(-1);var command=new CommandEnvelope("pair","PairPin","rental",1,"boot",initial.AddSeconds(5),JsonSerializer.SerializeToElement(new{pairingId="id",pin="1234"}));await dispatcher.AcceptAsync(new(initial.AddSeconds(10),new(1,1,2),[command],confirmation),default);Assert.Equal("failed",Assert.Single(dispatcher.PendingResults).Status);Assert.Equal(0,api.Calls);}
- [Fact] public async Task CrossBootImportPreservesExpiryAndAccountsForTransit(){using var f=new Fixture();await f.Enforcer.ApplyAsync(f.Command(),default);var expiry=f.Clock.Now.AddSeconds(60);f.Clock.BootId="next";f.Clock.UptimeMilliseconds=100;var restarted=f.New();var started=f.Clock.UptimeMilliseconds;f.Clock.UptimeMilliseconds+=20000;Assert.True(await restarted.ImportReconciledLeaseAsync(new("rental",1,"next",expiry),f.Clock.Now,started,default));Assert.Equal(expiry,restarted.Current!.ExpiresAtUtc);Assert.Equal(60100,restarted.Current.DeadlineUptimeMilliseconds);var again=f.New();await again.InitializeAsync(default);await again.ConfirmAsync(new("rental",1,"next",expiry),default);f.Clock.UptimeMilliseconds=60100;await again.EnforceAsync(default);Assert.Equal(1,f.Power.Calls);}
+/// <summary>
+/// The lease enforcer is the local expiry authority. Since the 0jay-style change the only stream
+/// control is Sunshine's own pairing, so ending/expiring a lease clears paired clients (best
+/// effort) while local enforcement still acks/shuts down even when that cleanup fails.
+/// </summary>
+public class LeaseEnforcerTests
+{
+    sealed class Clock : TimeProvider, IBootClock
+    {
+        public string BootId { get; set; } = "boot";
+        public long UptimeMilliseconds { get; set; } = 1000;
+        public DateTimeOffset Now = DateTimeOffset.Parse("2026-10-29T00:00:00Z");
+        public override DateTimeOffset GetUtcNow() => Now;
+        public void Advance(int seconds) { UptimeMilliseconds += seconds * 1000; Now = Now.AddSeconds(seconds); }
+    }
 
- [Fact] public async Task ReconciliationImporterAcceptsAConfirmedLeaseAfterSameBootServiceRestart(){using var f=new Fixture();var confirmation=new ActiveLeaseConfirmation("rental",1,"boot",f.Clock.Now.AddSeconds(60));await f.Enforcer.ApplyAsync(f.Command(),default);await f.Enforcer.ConfirmAsync(confirmation,default);var restarted=f.New();var importer=new KamenRaider.Agent.Startup.LeaseEnforcerReconciledLeaseImporter(restarted);Assert.True(await importer.ImportAsync(confirmation,f.Clock.Now,f.Clock.UptimeMilliseconds,default));Assert.Equal(confirmation.ExpiresAtUtc,restarted.Current!.ExpiresAtUtc);Assert.False(restarted.CanStream);await restarted.ConfirmAsync(confirmation,default);Assert.True(restarted.CanStream);}
+    sealed class Cleanup : IStreamCleanup
+    {
+        public int Calls;
+        public bool Fail;
+        public TaskCompletionSource? Pause;
+        public TaskCompletionSource? Entered;
+        public TaskCompletionSource Finished { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
- [Fact] public async Task ReconciliationImporterRecoversConfirmedLeaseWhenLocalSnapshotIsAbsent(){using var f=new Fixture();var confirmation=new ActiveLeaseConfirmation("rental",1,"next",f.Clock.Now.AddSeconds(60));await f.Enforcer.ApplyAsync(f.Command(),default);await f.Enforcer.ConfirmAsync(new("rental",1,"boot",f.Clock.Now.AddSeconds(60)),default);File.Delete(Path.Combine(f.Dir,"lease.json"));f.Clock.BootId="next";f.Clock.UptimeMilliseconds=100;var restarted=f.New();var importer=new KamenRaider.Agent.Startup.LeaseEnforcerReconciledLeaseImporter(restarted);Assert.True(await importer.ImportAsync(confirmation,f.Clock.Now,f.Clock.UptimeMilliseconds,default));Assert.Equal(confirmation.ExpiresAtUtc,restarted.Current!.ExpiresAtUtc);Assert.Equal(60100,restarted.Current.DeadlineUptimeMilliseconds);Assert.False(restarted.CanStream);}
+        public async Task<bool> ClearAsync(CancellationToken ct)
+        {
+            Calls++;
+            Entered?.TrySetResult();
+            try
+            {
+                if (Pause is not null) await Pause.Task;
+                if (Fail) throw new IOException("Sunshine cleanup unavailable");
+                return true;
+            }
+            finally
+            {
+                Finished.TrySetResult();
+            }
+        }
+    }
 
- [Fact] public async Task ReconciledPrepareAvailableClearsOldBootLeaseDurablyAndAcceptsNextLease(){using var f=new Fixture();var previous=new ActiveLeaseConfirmation("rental",1,"boot",f.Clock.Now.AddSeconds(60));await f.Enforcer.ApplyAsync(f.Command(),default);await f.Enforcer.ConfirmAsync(previous,default);f.Clock.BootId="next";var recovered=f.New();await recovered.InitializeAsync(default);Assert.Equal("ReconciliationRequired",recovered.Fault);Assert.True(await recovered.ClearReconciledLeaseAsync("next",default));Assert.Null(recovered.Current);Assert.Null(recovered.Fault);Assert.Null(await f.Store.LoadAsync(default));var restarted=f.New();await restarted.InitializeAsync(default);Assert.Null(restarted.Current);Assert.Null(restarted.Fault);Assert.Equal("applied",(await restarted.ApplyAsync(f.Command(1,60,"new-rental"),default)).Status);}
+    sealed class Power : IShutdown
+    {
+        public int Calls;
+        public bool Fail;
+        public TaskCompletionSource? Pause;
+        public Task RequestImmediateShutdownAsync(CancellationToken ct)
+        {
+            Calls++;
+            if (Pause is not null) return Pause.Task;
+            return Fail ? Task.FromException(new IOException()) : Task.CompletedTask;
+        }
+    }
 
- [Fact] public async Task PrepareAvailableCannotClearSameBootLeaseBeforeReboot(){using var f=new Fixture();var confirmation=new ActiveLeaseConfirmation("rental",1,"boot",f.Clock.Now.AddSeconds(60));await f.Enforcer.ApplyAsync(f.Command(),default);await f.Enforcer.ConfirmAsync(confirmation,default);Assert.True(f.Enforcer.CanStream);Assert.False(await f.Enforcer.ClearReconciledLeaseAsync("boot",default));Assert.NotNull(await f.Store.LoadAsync(default));Assert.False(f.Enforcer.CanStream);Assert.Equal("ReconciliationRequired",f.Enforcer.Fault);Assert.True(f.Gate.Blocked);}
+    sealed class StalledOncePower : IShutdown
+    {
+        public int Calls;
+        public TaskCompletionSource FirstRequest = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public Task RequestImmediateShutdownAsync(CancellationToken ct) => ++Calls == 1 ? FirstRequest.Task : Task.CompletedTask;
+    }
 
- [Fact] public async Task ReconciledPrepareAvailableRefusesAnotherBootAndKeepsLease(){using var f=new Fixture();await f.Enforcer.ApplyAsync(f.Command(),default);f.Clock.BootId="next";var recovered=f.New();Assert.False(await recovered.ClearReconciledLeaseAsync("other-boot",default));Assert.NotNull(await f.Store.LoadAsync(default));}
+    sealed class BrokenStore(string path) : LeaseStore(path)
+    {
+        public override Task SaveAsync(LeaseSnapshot snapshot, CancellationToken ct) => throw new IOException();
+    }
 
- [Fact] public async Task ReconciledPrepareAvailableKeepsLeaseWhenFenceCannotClose(){using var f=new Fixture();await f.Enforcer.ApplyAsync(f.Command(),default);f.Clock.BootId="next";var recovered=new LeaseEnforcer(f.Store,f.Clock,f.Clock,new ThrowingGate(),f.Power,f.Fence);await Assert.ThrowsAsync<OperationCanceledException>(()=>recovered.ClearReconciledLeaseAsync("next",default));Assert.NotNull(await f.Store.LoadAsync(default));Assert.Equal("ReconciliationPending",recovered.Fault);}
+    sealed class BrokenClearStore(string path) : LeaseStore(path)
+    {
+        public override Task ClearAsync(CancellationToken ct) => throw new IOException();
+    }
 
- [Fact] public async Task ReconciledPrepareAvailableKeepsLeaseWhenTombstoneCannotBeSaved(){using var f=new Fixture();await f.Enforcer.ApplyAsync(f.Command(),default);f.Clock.BootId="next";var store=new BrokenClearStore(f.Dir);var recovered=new LeaseEnforcer(store,f.Clock,f.Clock,f.Gate,f.Power,f.Fence);Assert.False(await recovered.ClearReconciledLeaseAsync("next",default));Assert.NotNull(await f.Store.LoadAsync(default));Assert.Equal("LeaseStorageFailed",recovered.Fault);}
+    sealed class AfterSaveThrowStore(string path) : LeaseStore(path)
+    {
+        public override async Task SaveAsync(LeaseSnapshot snapshot, CancellationToken ct)
+        {
+            await base.SaveAsync(snapshot, ct);
+            throw new IOException();
+        }
+    }
 
+    sealed class PausedStore(string path) : LeaseStore(path)
+    {
+        public TaskCompletionSource Entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource Release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public bool Pause;
 
-[Fact] public async Task CrossBootImportRejectsUnconfirmedExtension(){using var f=new Fixture();await f.Enforcer.ApplyAsync(f.Command(),default);await f.Enforcer.ApplyAsync(f.Command(2,120,"extend"),default);f.Clock.BootId="next";f.Clock.UptimeMilliseconds=100;var e=f.New();Assert.False(await e.ImportReconciledLeaseAsync(new("rental",2,"next",f.Clock.Now.AddSeconds(120)),f.Clock.Now,100,default));Assert.False(e.CanStream);}
- sealed class ThrowingGate:IStreamGate {public Task BlockAsync(CancellationToken ct)=>throw new OperationCanceledException();public Task AllowAsync(StreamLeaseGrant grant,CancellationToken ct)=>throw new OperationCanceledException();}
- [Fact] public async Task FailedImportFenceCannotBeConfirmed(){using var f=new Fixture();await f.Enforcer.ApplyAsync(f.Command(),default);var expiry=f.Clock.Now.AddSeconds(60);f.Clock.BootId="next";f.Clock.UptimeMilliseconds=100;var e=new LeaseEnforcer(f.Store,f.Clock,f.Clock,new ThrowingGate(),f.Power,f.Fence);await Assert.ThrowsAsync<OperationCanceledException>(()=>e.ImportReconciledLeaseAsync(new("rental",1,"next",expiry),f.Clock.Now,100,default));try{await e.ConfirmAsync(new("rental",1,"next",expiry),default);}catch(OperationCanceledException){}Assert.False(e.CanStream);}
- [Fact] public async Task CrossBootImportUsesPreviousControllerTimeFloor(){using var f=new Fixture();await f.Enforcer.ApplyAsync(f.Command(),default);var expiry=f.Clock.Now.AddSeconds(60);f.Clock.BootId="next";f.Clock.UptimeMilliseconds=100;var e=f.New();await e.ObserveControllerTimeAsync(f.Clock.Now.AddSeconds(30),default);f.Clock.Now=f.Clock.Now.AddDays(-1);Assert.True(await e.ImportReconciledLeaseAsync(new("rental",1,"next",expiry),expiry.AddSeconds(-60),100,default));Assert.Equal(30100,e.Current!.DeadlineUptimeMilliseconds);}
+        public override async Task SaveAsync(LeaseSnapshot snapshot, CancellationToken ct)
+        {
+            if (Pause) { Entered.TrySetResult(); await Release.Task; }
+            await base.SaveAsync(snapshot, ct);
+        }
 
- [Fact] public async Task ControllerAdvanceDuringImportCannotConfirmExpiredLease(){using var f=new Fixture();await f.Enforcer.ApplyAsync(f.Command(),default);var expiry=f.Clock.Now.AddSeconds(60);f.Clock.BootId="next";f.Clock.UptimeMilliseconds=100;var store=new PausedStore(f.Dir){Pause=true};var e=new LeaseEnforcer(store,f.Clock,f.Clock,f.Gate,f.Power,f.Fence);var import=e.ImportReconciledLeaseAsync(new("rental",1,"next",expiry),f.Clock.Now,100,default);await store.Entered.Task;var observe=e.ObserveControllerTimeAsync(expiry,default);store.Release.SetResult();Assert.False(await import);await observe;await e.ConfirmAsync(new("rental",1,"next",expiry),default);Assert.False(e.CanStream);await e.EnforceAsync(default);Assert.Equal(1,f.Power.Calls);}
- [Fact] public async Task ControllerAdvanceAfterImportShortensDeadlineAcrossRestart(){using var f=new Fixture();await f.Enforcer.ApplyAsync(f.Command(),default);var expiry=f.Clock.Now.AddSeconds(60);f.Clock.BootId="next";f.Clock.UptimeMilliseconds=100;var e=f.New();Assert.True(await e.ImportReconciledLeaseAsync(new("rental",1,"next",expiry),f.Clock.Now,100,default));await e.ObserveControllerTimeAsync(expiry.AddSeconds(-10),default);Assert.Equal(10100,e.Current!.DeadlineUptimeMilliseconds);var restart=f.New();await restart.InitializeAsync(default);Assert.Equal(10100,restart.Current!.DeadlineUptimeMilliseconds);f.Clock.UptimeMilliseconds=10100;await restart.ConfirmAsync(new("rental",1,"next",expiry),default);Assert.False(restart.CanStream);await restart.EnforceAsync(default);Assert.Equal(1,f.Power.Calls);}
- [Fact] public async Task ControllerDeadlineIsDurableBeforeGateCanStall(){using var f=new Fixture();await f.Enforcer.ApplyAsync(f.Command(),default);f.Gate.Pause=new(TaskCreationOptions.RunContinuationsAsynchronously);f.Gate.Entered=new(TaskCreationOptions.RunContinuationsAsynchronously);var observe=f.Enforcer.ObserveControllerTimeAsync(f.Clock.Now.AddSeconds(50),default);await f.Gate.Entered.Task;try{var restarted=new LeaseEnforcer(f.Store,f.Clock,f.Clock,new Gate(),f.Power,f.Fence);await restarted.InitializeAsync(default);Assert.Equal(11000,restarted.Current!.DeadlineUptimeMilliseconds);}finally{f.Gate.Pause.TrySetResult();await observe;}}
- [Fact] public async Task ConfirmationSaveCrossingRecoveryDeadlineCannotEraseGuard(){using var f=new Fixture();var store=new PausedStore(f.Dir);var e=new LeaseEnforcer(store,f.Clock,f.Clock,f.Gate,f.Power,f.Fence);await e.ApplyAsync(f.Command(),default);await e.ConfirmAsync(new("rental",1,"boot",f.Clock.Now.AddSeconds(60)),default);await e.ApplyAsync(f.Command(2,120,"extend"),default);store.Pause=true;var confirmation=e.ConfirmAsync(new("rental",2,"boot",f.Clock.Now.AddSeconds(120)),default);await store.Entered.Task;f.Clock.Advance(60);store.Release.TrySetResult();await confirmation;var restarted=new LeaseEnforcer(store,f.Clock,f.Clock,new Gate(),f.Power,f.Fence);await restarted.EnforceAsync(default);Assert.Equal(1,f.Power.Calls);}
- [Fact] public async Task OlderControllerObservationCannotExtendImportedDeadline(){using var f=new Fixture();await f.Enforcer.ApplyAsync(f.Command(),default);var expiry=f.Clock.Now.AddSeconds(60);f.Clock.BootId="next";f.Clock.UptimeMilliseconds=100;var e=f.New();Assert.True(await e.ImportReconciledLeaseAsync(new("rental",1,"next",expiry),f.Clock.Now,100,default));await e.ObserveControllerTimeAsync(expiry.AddSeconds(-10),default);await e.ObserveControllerTimeAsync(expiry.AddDays(-1),default);Assert.Equal(10100,e.Current!.DeadlineUptimeMilliseconds);}
+        public override async Task<bool> SaveIfAsync(LeaseSnapshot snapshot, Func<Action, bool> commit, CancellationToken ct)
+        {
+            if (Pause) { Entered.TrySetResult(); await Release.Task; }
+            return await base.SaveIfAsync(snapshot, commit, ct);
+        }
+    }
 
- [Fact] public async Task RestartCannotConfirmOldSnapshotWithoutFreshControllerTime(){using var f=new Fixture();await f.Enforcer.ApplyAsync(f.Command(),default);var expiry=f.Clock.Now.AddSeconds(60);var e=f.New();await e.InitializeAsync(default);await e.ConfirmAsync(new("rental",1,"boot",expiry),default);Assert.False(e.CanStream);await e.ObserveControllerTimeAsync(expiry,default);await e.ConfirmAsync(new("rental",1,"boot",expiry),default);Assert.False(e.CanStream);await e.EnforceAsync(default);Assert.Equal(1,f.Power.Calls);}
- [Fact] public async Task NonExpiredAdvanceDuringImportCanRecoverAfterDurableShortening(){using var f=new Fixture();await f.Enforcer.ApplyAsync(f.Command(),default);var expiry=f.Clock.Now.AddSeconds(60);f.Clock.BootId="next";f.Clock.UptimeMilliseconds=100;var store=new PausedStore(f.Dir){Pause=true};var e=new LeaseEnforcer(store,f.Clock,f.Clock,f.Gate,f.Power,f.Fence);var import=e.ImportReconciledLeaseAsync(new("rental",1,"next",expiry),f.Clock.Now,100,default);await store.Entered.Task;var observation=e.ObserveControllerTimeAsync(expiry.AddSeconds(-10),default);store.Release.SetResult();await import;await observation;await e.ConfirmAsync(new("rental",1,"next",expiry),default);Assert.True(e.CanStream);Assert.Equal(10100,e.Current!.DeadlineUptimeMilliseconds);}
+    sealed class Fixture : IDisposable
+    {
+        public string Dir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
+        public Clock Clock = new();
+        public Cleanup Cleanup = new();
+        public Power Power = new();
+        public TestMaintenanceFence Fence = new();
+        public LeaseStore Store;
+        public LeaseEnforcer Enforcer;
 
- [Fact] public async Task MaintenanceHoldRaisedDuringConfirmationClosesGateBeforeConfirmationReturns(){
-  using var f=new Fixture();await f.Enforcer.ApplyAsync(f.Command(),default);
-  f.Gate.PauseAllow=new(TaskCreationOptions.RunContinuationsAsynchronously);
-  f.Gate.AllowEntered=new(TaskCreationOptions.RunContinuationsAsynchronously);
-  var confirmation=f.Enforcer.ConfirmAsync(new("rental",1,"boot",f.Clock.Now.AddSeconds(60)),default);
-  await f.Gate.AllowEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
-  f.Fence.SetHeld();
-  Assert.False(f.Enforcer.CanStream);
-  f.Gate.PauseAllow.TrySetResult();
-  await confirmation;
-  Assert.False(f.Enforcer.CanStream);
-  Assert.Null(f.Enforcer.CurrentPairingScope);
-  Assert.True(f.Gate.Blocked);
- }
+        public Fixture()
+        {
+            Store = new(Dir);
+            Enforcer = New();
+        }
 
- [Fact] public async Task HeldMaintenanceFenceRejectsFirstLeaseApplication(){
-  using var f=new Fixture();f.Fence.SetHeld();
-  Assert.Equal("failed",(await f.Enforcer.ApplyAsync(f.Command(),default)).Status);
-  Assert.Null(f.Enforcer.Current);
-  Assert.True(f.Gate.Blocked);
-  Assert.False(f.Enforcer.CanStream);
- }
+        public LeaseEnforcer New() => new(Store, Clock, Clock, Cleanup, Power, Fence);
 
- [Fact] public async Task UnknownMaintenanceFenceRejectsMachinePreparation(){
-  using var f=new Fixture();f.Fence.SetUnknown();
-  var command=new CommandEnvelope("prepare","PrepareMachine","rental",1,f.Clock.BootId,f.Clock.Now.AddMinutes(1),JsonSerializer.SerializeToElement(new{}));
-  Assert.False(await f.Enforcer.CanPrepareMachineAsync(command,default));
-  Assert.True(f.Gate.Blocked);
- }
+        public void Dispose()
+        {
+            if (Directory.Exists(Dir)) Directory.Delete(Dir, true);
+        }
 
- [Fact] public async Task MaintenanceSnapshotRetainsPendingInitialWhenSaveOutcomeIsAmbiguous(){
-  using var f=new Fixture();
-  var e=new LeaseEnforcer(new AfterSaveThrowStore(f.Dir),f.Clock,f.Clock,f.Gate,f.Power,f.Fence);
-  Assert.Equal("failed",(await e.ApplyAsync(f.Command(),default)).Status);
-  var snapshot=await e.GetMaintenanceSnapshotAsync(default);
-  Assert.False(snapshot.IsKnown);
-  Assert.Null(snapshot.Current);
-  Assert.NotNull(snapshot.PendingInitial);
-  Assert.Equal("LeaseStorageFailed",snapshot.Fault);
- }
+        public CommandEnvelope Command(long revision = 1, int expiry = 60, string id = "cmd") => new(
+            id, "ApplyLease", "rental", revision, Clock.BootId, Clock.Now.AddSeconds(30),
+            JsonSerializer.SerializeToElement(new
+            {
+                startsAtUtc = DateTimeOffset.Parse("2026-10-29T00:00:00Z"),
+                expiresAtUtc = DateTimeOffset.Parse("2026-10-29T00:00:00Z").AddSeconds(expiry)
+            }));
+    }
+
+    // ---------------------------------------------------------------- persistence and confirmation
+
+    [Fact]
+    public async Task SaveFailureNeverAcknowledges()
+    {
+        using var f = new Fixture();
+        var e = new LeaseEnforcer(new BrokenStore(f.Dir), f.Clock, f.Clock, f.Cleanup, f.Power, f.Fence);
+        Assert.Equal("failed", (await e.ApplyAsync(f.Command(), default)).Status);
+        Assert.Null(e.Current);
+        Assert.False(e.CanStream);
+        Assert.Equal(0, f.Cleanup.Calls);
+    }
+
+    [Fact]
+    public async Task ConfirmedActiveLeaseCanStreamWithoutClearingPairedClients()
+    {
+        using var f = new Fixture();
+        await f.Enforcer.ApplyAsync(f.Command(), default);
+        Assert.False(f.Enforcer.CanStream);
+        Assert.Equal(0, f.Cleanup.Calls);
+
+        await f.Enforcer.ConfirmAsync(new("rental", 1, "boot", f.Clock.Now.AddSeconds(60)), default);
+
+        Assert.True(f.Enforcer.CanStream);
+        Assert.Equal(0, f.Cleanup.Calls);
+    }
+
+    [Fact]
+    public async Task PairingScopeExistsOnlyForTheExactConfirmedLease()
+    {
+        using var f = new Fixture();
+        Assert.Null(f.Enforcer.CurrentPairingScope);
+        await f.Enforcer.ApplyAsync(f.Command(), default);
+        Assert.Null(f.Enforcer.CurrentPairingScope);
+        var expiry = DateTimeOffset.Parse("2026-10-29T00:01:00Z");
+        await f.Enforcer.ConfirmAsync(new("rental", 1, "boot", expiry), default);
+        Assert.Equal(new PairingScope("rental", 1, "boot", expiry, 61000), f.Enforcer.CurrentPairingScope);
+        f.Clock.Advance(60);
+        await f.Enforcer.EnforceAsync(default);
+        Assert.Null(f.Enforcer.CurrentPairingScope);
+    }
+
+    [Fact]
+    public async Task BlockedSyncDoesNotApplyCommandsOrConfirmLease()
+    {
+        using var f = new Fixture();
+        var dispatcher = new KamenRaider.Agent.Sync.LeaseCommandDispatcher(f.Enforcer);
+        var serverTime = f.Clock.Now;
+        await dispatcher.AcceptAsync(new(serverTime, new(1, 5000, 6000), [f.Command()], null), f.Clock.UptimeMilliseconds, default);
+        Assert.Equal(1, f.Enforcer.Current!.Revision);
+        var extension = f.Command(2, 120, "extend") with { ValidUntilUtc = serverTime.AddSeconds(180) };
+        var response = new SyncResponse(serverTime.AddSeconds(10), new(1, 5000, 6000), [extension], new("rental", 1, "boot", serverTime.AddSeconds(60)));
+        await dispatcher.AcceptBlockedAsync(response, f.Clock.UptimeMilliseconds, default);
+        Assert.Equal(1, f.Enforcer.Current!.Revision);
+        Assert.False(f.Enforcer.CanStream);
+        Assert.Equal(51000, f.Enforcer.Current!.DeadlineUptimeMilliseconds);
+        Assert.Equal(new CommandResult("cmd", "applied", 1), Assert.Single(dispatcher.PendingResults));
+    }
+
+    [Fact]
+    public async Task RejectedFirstLeaseDoesNotShutDownAfterItsProposedExpiry()
+    {
+        using var f = new Fixture();
+        var e = new LeaseEnforcer(new BrokenStore(f.Dir), f.Clock, f.Clock, f.Cleanup, f.Power, f.Fence);
+        Assert.Equal("failed", (await e.ApplyAsync(f.Command(), default)).Status);
+        f.Clock.Advance(60);
+        await e.EnforceAsync(default);
+        Assert.Equal(0, f.Power.Calls);
+    }
+
+    [Fact]
+    public async Task UnacknowledgedDurableFirstLeaseStillShutsDown()
+    {
+        using var f = new Fixture();
+        var e = new LeaseEnforcer(new AfterSaveThrowStore(f.Dir), f.Clock, f.Clock, f.Cleanup, f.Power, f.Fence);
+        Assert.Equal("failed", (await e.ApplyAsync(f.Command(), default)).Status);
+        f.Clock.Advance(60);
+        await e.EnforceAsync(default);
+        Assert.Equal(1, f.Power.Calls);
+        Assert.Equal(1, f.Cleanup.Calls);
+    }
+
+    // ---------------------------------------------------------------- expiry and shutdown
+
+    [Fact]
+    public async Task OfflineDeadlineShutsDownOnceDespiteWallClockRollback()
+    {
+        using var f = new Fixture();
+        await f.Enforcer.ApplyAsync(f.Command(), default);
+        f.Clock.Advance(60);
+        f.Clock.Now = f.Clock.Now.AddDays(-1);
+        await f.Enforcer.EnforceAsync(default);
+        await f.Enforcer.EnforceAsync(default);
+        Assert.Equal(1, f.Power.Calls);
+        Assert.False(f.Enforcer.CanStream);
+    }
+
+    [Fact]
+    public async Task RestartAndDuplicateCannotExtendMonotonicDeadline()
+    {
+        using var f = new Fixture();
+        var cmd = f.Command() with { ValidUntilUtc = f.Clock.Now.AddSeconds(120) };
+        await f.Enforcer.ApplyAsync(cmd, default);
+        f.Clock.Advance(30);
+        f.Clock.Now = f.Clock.Now.AddMinutes(-1);
+        var e = f.New();
+        await e.InitializeAsync(default);
+        Assert.Equal("applied", (await e.ApplyAsync(cmd, default)).Status);
+        f.Clock.Advance(30);
+        await e.EnforceAsync(default);
+        Assert.Equal(1, f.Power.Calls);
+    }
+
+    [Fact]
+    public async Task ExtensionRejectsStaleCommandsAndRequiresMatchingConfirmation()
+    {
+        using var f = new Fixture();
+        await f.Enforcer.ApplyAsync(f.Command(), default);
+        Assert.False(f.Enforcer.CanStream);
+        await f.Enforcer.ConfirmAsync(new("rental", 1, "boot", f.Clock.Now.AddSeconds(60)), default);
+        Assert.True(f.Enforcer.CanStream);
+        await f.Enforcer.ApplyAsync(f.Command(2, 120, "extend"), default);
+        Assert.False(f.Enforcer.CanStream);
+        Assert.Equal("failed", (await f.Enforcer.ApplyAsync(f.Command(1, 60, "old"), default)).Status);
+        await f.Enforcer.ConfirmAsync(new("rental", 2, "boot", f.Clock.Now.AddSeconds(120)), default);
+        Assert.True(f.Enforcer.CanStream);
+        f.Clock.Advance(60);
+        await f.Enforcer.EnforceAsync(default);
+        Assert.Equal(0, f.Power.Calls);
+        f.Clock.Advance(60);
+        await f.Enforcer.EnforceAsync(default);
+        Assert.Equal(1, f.Power.Calls);
+    }
+
+    [Fact]
+    public async Task UnconfirmedExtensionShutsDownAtOriginalDeadlineInSameProcess()
+    {
+        using var f = new Fixture();
+        await f.Enforcer.ApplyAsync(f.Command(), default);
+        await f.Enforcer.ConfirmAsync(new("rental", 1, "boot", f.Clock.Now.AddSeconds(60)), default);
+        Assert.Equal("applied", (await f.Enforcer.ApplyAsync(f.Command(2, 120, "extend"), default)).Status);
+        f.Clock.Advance(60);
+        await f.Enforcer.EnforceAsync(default);
+        Assert.Equal(1, f.Power.Calls);
+        Assert.False(f.Enforcer.CanStream);
+    }
+
+    [Fact]
+    public async Task NewBootFailsClosedAndCannotRevivePersistedLease()
+    {
+        using var f = new Fixture();
+        await f.Enforcer.ApplyAsync(f.Command(), default);
+        f.Clock.BootId = "next";
+        var e = f.New();
+        await e.InitializeAsync(default);
+        Assert.False(e.CanStream);
+        Assert.Equal("failed", (await e.ApplyAsync(f.Command(2, 120, "next"), default)).Status);
+    }
+
+    [Fact]
+    public async Task ShutdownFailureStaysBlockedAndRetries()
+    {
+        using var f = new Fixture();
+        await f.Enforcer.ApplyAsync(f.Command(), default);
+        f.Clock.Advance(60);
+        f.Power.Fail = true;
+        await f.Enforcer.EnforceAsync(default);
+        Assert.Equal("ShutdownFailed", f.Enforcer.Fault);
+        Assert.False(f.Enforcer.CanStream);
+        f.Power.Fail = false;
+        await f.Enforcer.EnforceAsync(default);
+        Assert.Equal(2, f.Power.Calls);
+    }
+
+    [Fact]
+    public async Task ExpiryStartsStreamCleanupWhileShutdownAdapterIsStalled()
+    {
+        using var f = new Fixture();
+        await f.Enforcer.ApplyAsync(f.Command(), default);
+        f.Cleanup.Entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        f.Cleanup.Pause = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        f.Power.Pause = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        f.Clock.Advance(60);
+
+        var enforce = f.Enforcer.EnforceAsync(default);
+        try
+        {
+            await f.Cleanup.Entered.Task.WaitAsync(TimeSpan.FromSeconds(1));
+            Assert.False(enforce.IsCompleted);
+            Assert.Equal(1, f.Power.Calls);
+        }
+        finally
+        {
+            f.Power.Pause.TrySetResult();
+            f.Cleanup.Pause.TrySetResult();
+            await enforce.WaitAsync(TimeSpan.FromSeconds(2));
+        }
+    }
+
+    [Fact]
+    public async Task ExpiryShutsDownEvenWhenStreamCleanupFails()
+    {
+        using var f = new Fixture();
+        await f.Enforcer.ApplyAsync(f.Command(), default);
+        f.Cleanup.Fail = true;
+        f.Clock.Advance(60);
+
+        await f.Enforcer.EnforceAsync(default);
+        await f.Cleanup.Finished.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        Assert.Equal(1, f.Power.Calls);
+        Assert.Equal(1, f.Cleanup.Calls);
+        Assert.Equal("ShutdownRequested", f.Enforcer.Fault);
+    }
+
+    [Fact]
+    public async Task TimedOutShutdownRequestCanBeRetried()
+    {
+        using var f = new Fixture();
+        var power = new StalledOncePower();
+        var e = new LeaseEnforcer(f.Store, f.Clock, f.Clock, f.Cleanup, new BoundedShutdown(power, TimeSpan.FromMilliseconds(25)), f.Fence);
+        await e.ApplyAsync(f.Command(), default);
+        f.Clock.Advance(60);
+        await e.EnforceAsync(default).WaitAsync(TimeSpan.FromSeconds(1));
+        Assert.Equal("ShutdownFailed", e.Fault);
+        await e.EnforceAsync(default);
+        Assert.Equal(2, power.Calls);
+        Assert.Equal("ShutdownRequested", e.Fault);
+        power.FirstRequest.TrySetResult();
+    }
+
+    [Theory]
+    [InlineData("wrongboot", 10)]
+    [InlineData("boot", 0)]
+    public async Task InvalidBootOrTtlRejected(string boot, int ttl)
+    {
+        using var f = new Fixture();
+        var c = f.Command() with { BootId = boot, ValidUntilUtc = f.Clock.Now.AddSeconds(ttl) };
+        Assert.Equal("failed", (await f.Enforcer.ApplyAsync(c, default)).Status);
+        Assert.Null(f.Enforcer.Current);
+    }
+
+    // ---------------------------------------------------------------- sync dispatch and clocks
+
+    [Fact]
+    public async Task SyncDispatchQueuesExactResultAndRecoversLostAckByRetry()
+    {
+        using var f = new Fixture();
+        var dispatch = new KamenRaider.Agent.Sync.LeaseCommandDispatcher(f.Enforcer);
+        var cmd = f.Command();
+        await dispatch.AcceptAsync(new(f.Clock.Now, new(1, 5000, 6000), [cmd]), default);
+        Assert.Equal(new CommandResult("cmd", "applied", 1), Assert.Single(dispatch.PendingResults));
+        Assert.False(f.Enforcer.CanStream);
+        await dispatch.AcceptAsync(new(f.Clock.Now, new(1, 5000, 6000), [cmd]), default);
+        Assert.Single(dispatch.PendingResults);
+        await dispatch.AcceptAsync(new(f.Clock.Now, new(1, 5000, 6000), [], new("rental", 1, "boot", f.Clock.Now.AddSeconds(60))), default);
+        Assert.Empty(dispatch.PendingResults);
+        Assert.True(f.Enforcer.CanStream);
+    }
+
+    [Fact]
+    public async Task CorruptPersistenceFailsClosed()
+    {
+        using var f = new Fixture();
+        Directory.CreateDirectory(f.Dir);
+        await File.WriteAllTextAsync(Path.Combine(f.Dir, "lease.json"), "{");
+        await f.Enforcer.InitializeAsync(default);
+        Assert.Equal("LeaseStorageFailed", f.Enforcer.Fault);
+        Assert.False(f.Enforcer.CanStream);
+        Assert.Equal("failed", (await f.Enforcer.ApplyAsync(f.Command(), default)).Status);
+    }
+
+    [Fact]
+    public async Task SyncUsesControllerTimeWhenLocalWallClockIsBehind()
+    {
+        using var f = new Fixture();
+        var now = f.Clock.Now;
+        var cmd = f.Command();
+        f.Clock.Now = f.Clock.Now.AddDays(-1);
+        var dispatch = new KamenRaider.Agent.Sync.LeaseCommandDispatcher(f.Enforcer);
+        await dispatch.AcceptAsync(new(now, new(1, 5000, 6000), [cmd]), default);
+        f.Clock.Advance(60);
+        await f.Enforcer.EnforceAsync(default);
+        Assert.Equal(1, f.Power.Calls);
+    }
+
+    [Fact]
+    public async Task PersistenceStallCannotDelayExpiryAndLateWriteCannotReviveOnRestart()
+    {
+        using var f = new Fixture();
+        var store = new PausedStore(f.Dir);
+        var e = new LeaseEnforcer(store, f.Clock, f.Clock, f.Cleanup, f.Power, f.Fence);
+        await e.ApplyAsync(f.Command(), default);
+        f.Clock.Advance(50);
+        store.Pause = true;
+        var apply = e.ApplyAsync(f.Command(2, 120, "extend"), default);
+        await store.Entered.Task;
+        f.Clock.Advance(10);
+        try
+        {
+            await e.EnforceAsync(default).WaitAsync(TimeSpan.FromSeconds(1));
+            Assert.Equal(1, f.Power.Calls);
+        }
+        finally
+        {
+            store.Release.TrySetResult();
+            await apply;
+        }
+        Assert.Equal("failed", (await apply).Status);
+        Assert.Equal(1, e.Current!.Revision);
+        var restarted = f.New();
+        await restarted.InitializeAsync(default);
+        Assert.False(restarted.CanStream);
+        Assert.Equal("failed", (await restarted.ApplyAsync(f.Command(3, 180, "revive"), default)).Status);
+    }
+
+    [Fact]
+    public async Task SyncElapsedIncludesTransitAndConfigurationWrite()
+    {
+        using var f = new Fixture();
+        var server = f.Clock.Now;
+        var cmd = f.Command() with { ValidUntilUtc = server.AddMinutes(2) };
+        var requestStart = f.Clock.UptimeMilliseconds;
+        f.Clock.Now = f.Clock.Now.AddDays(-1);
+        f.Clock.Advance(20);
+        var dispatch = new KamenRaider.Agent.Sync.LeaseCommandDispatcher(f.Enforcer);
+        await dispatch.AcceptAsync(new(server, new(1, 5000, 6000), [cmd]), requestStart, default);
+        f.Clock.Advance(40);
+        await f.Enforcer.EnforceAsync(default);
+        Assert.Equal(1, f.Power.Calls);
+    }
+
+    [Fact]
+    public async Task ConfirmedExtensionRetainsNewDeadlineAcrossRestart()
+    {
+        using var f = new Fixture();
+        await f.Enforcer.ApplyAsync(f.Command(), default);
+        await f.Enforcer.ApplyAsync(f.Command(2, 120, "extend"), default);
+        await f.Enforcer.ConfirmAsync(new("rental", 2, "boot", f.Clock.Now.AddSeconds(120)), default);
+        f.Clock.Advance(70);
+        var restarted = f.New();
+        await restarted.InitializeAsync(default);
+        await restarted.ObserveControllerTimeAsync(f.Clock.Now, default);
+        await restarted.ConfirmAsync(new("rental", 2, "boot", DateTimeOffset.Parse("2026-10-29T00:02:00Z")), default);
+        Assert.True(restarted.CanStream);
+        await restarted.EnforceAsync(default);
+        Assert.Equal(0, f.Power.Calls);
+        f.Clock.Advance(50);
+        await restarted.EnforceAsync(default);
+        Assert.Equal(1, f.Power.Calls);
+    }
+
+    [Fact]
+    public async Task FirstLeasePersistenceStallStillArmsExpiry()
+    {
+        using var f = new Fixture();
+        var store = new PausedStore(f.Dir) { Pause = true };
+        var e = new LeaseEnforcer(store, f.Clock, f.Clock, f.Cleanup, f.Power, f.Fence);
+        var apply = e.ApplyAsync(f.Command() with { ValidUntilUtc = f.Clock.Now.AddMinutes(2) }, default);
+        await store.Entered.Task;
+        f.Clock.Advance(60);
+        try
+        {
+            await e.EnforceAsync(default).WaitAsync(TimeSpan.FromSeconds(1));
+            Assert.Equal(1, f.Power.Calls);
+        }
+        finally
+        {
+            store.Release.TrySetResult();
+            await apply;
+        }
+        Assert.Equal("failed", (await apply).Status);
+        Assert.False(e.CanStream);
+    }
+
+    [Fact]
+    public async Task FirstLeaseWrittenAfterExpiryStillShutsDown()
+    {
+        using var f = new Fixture();
+        var store = new PausedStore(f.Dir) { Pause = true };
+        var e = new LeaseEnforcer(store, f.Clock, f.Clock, f.Cleanup, f.Power, f.Fence);
+        var apply = e.ApplyAsync(f.Command() with { ValidUntilUtc = f.Clock.Now.AddMinutes(2) }, default);
+        await store.Entered.Task;
+        f.Clock.Advance(60);
+        store.Release.SetResult();
+        Assert.Equal("failed", (await apply).Status);
+        await e.EnforceAsync(default);
+        Assert.Equal(1, f.Power.Calls);
+    }
+
+    [Fact]
+    public async Task StartupCleanupStallCannotPreventPersistedExpiry()
+    {
+        using var f = new Fixture();
+        await f.Enforcer.ApplyAsync(f.Command(), default);
+        f.Clock.Advance(60);
+        f.Cleanup.Entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        f.Cleanup.Pause = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        var restarted = f.New();
+        var enforcement = restarted.EnforceAsync(default);
+        try
+        {
+            await enforcement.WaitAsync(TimeSpan.FromSeconds(1));
+            Assert.Equal(1, f.Power.Calls);
+        }
+        finally
+        {
+            f.Cleanup.Pause.TrySetResult();
+            await enforcement;
+        }
+    }
+
+    [Fact]
+    public async Task RestartConfirmationRestoresProposedExtensionDeadline()
+    {
+        using var f = new Fixture();
+        await f.Enforcer.ApplyAsync(f.Command(), default);
+        await f.Enforcer.ApplyAsync(f.Command(2, 120, "extend"), default);
+        f.Clock.Advance(20);
+        var restarted = f.New();
+        await restarted.InitializeAsync(default);
+        await restarted.ObserveControllerTimeAsync(f.Clock.Now, default);
+        await restarted.ConfirmAsync(new("rental", 2, "boot", DateTimeOffset.Parse("2026-10-29T00:02:00Z")), default);
+        Assert.True(restarted.CanStream);
+        f.Clock.Advance(40);
+        await restarted.EnforceAsync(default);
+        Assert.Equal(0, f.Power.Calls);
+        f.Clock.Advance(60);
+        await restarted.EnforceAsync(default);
+        Assert.Equal(1, f.Power.Calls);
+    }
+
+    [Fact]
+    public async Task RepeatedExpiryPollsCoalesceStalledCleanup()
+    {
+        using var f = new Fixture();
+        await f.Enforcer.ApplyAsync(f.Command(), default);
+        f.Cleanup.Pause = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        f.Clock.Advance(60);
+        try
+        {
+            for (var poll = 0; poll < 100; poll++) await f.Enforcer.EnforceAsync(default);
+            Assert.Equal(1, f.Cleanup.Calls);
+            Assert.Equal(1, f.Power.Calls);
+        }
+        finally
+        {
+            f.Cleanup.Pause.TrySetResult();
+            await f.Cleanup.Finished.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        }
+    }
+
+    [Fact]
+    public async Task RestartConfirmationAtExpiryCannotRestoreExtension()
+    {
+        using var f = new Fixture();
+        await f.Enforcer.ApplyAsync(f.Command(), default);
+        await f.Enforcer.ApplyAsync(f.Command(2, 120, "extend"), default);
+        f.Clock.Advance(60);
+        var restarted = f.New();
+        await restarted.InitializeAsync(default);
+        await restarted.ObserveControllerTimeAsync(f.Clock.Now, default);
+        await restarted.ConfirmAsync(new("rental", 2, "boot", DateTimeOffset.Parse("2026-10-29T00:02:00Z")), default);
+        Assert.False(restarted.CanStream);
+        await restarted.EnforceAsync(default);
+        Assert.Equal(1, f.Power.Calls);
+    }
+
+    // ---------------------------------------------------------------- pairing dispatch
+
+    [Fact]
+    public async Task PairDispatchRequiresCurrentControllerConfirmationAndPublishesBoundOffer()
+    {
+        using var f = new Fixture();
+        await f.Enforcer.ApplyAsync(f.Command(), default);
+        var confirmation = new ActiveLeaseConfirmation("rental", 1, "boot", f.Clock.Now.AddSeconds(60));
+        await f.Enforcer.ConfirmAsync(confirmation, default);
+        var api = new PairApi();
+        var session = new PairingSession(api, () => f.Enforcer.CanStream, () => f.Enforcer.CurrentPairingScope, f.Clock);
+        var dispatcher = new KamenRaider.Agent.Sync.LeaseCommandDispatcher(f.Enforcer, session);
+        var offer = await dispatcher.GetPairingOfferAsync(default);
+        Assert.NotNull(offer);
+        Assert.Equal("rental", offer.RentalId);
+        Assert.Equal("boot", offer.BootId);
+
+        var command = new CommandEnvelope("pair", "PairPin", "rental", 1, "boot", f.Clock.Now.AddSeconds(20),
+            JsonSerializer.SerializeToElement(new { pairingId = "id", pin = "1234" }));
+        await dispatcher.AcceptAsync(new(f.Clock.Now, new(1, 1, 2), [command], null), default);
+        Assert.Equal("failed", Assert.Single(dispatcher.PendingResults).Status);
+        Assert.Equal(0, api.Calls);
+
+        await f.Enforcer.ConfirmAsync(confirmation, default);
+        await dispatcher.GetPairingOfferAsync(default);
+        await dispatcher.AcceptAsync(new(f.Clock.Now, new(1, 1, 2), [command], confirmation), default);
+        Assert.Equal("applied", Assert.Single(dispatcher.PendingResults).Status);
+        Assert.Equal(1, api.Calls);
+    }
+
+    [Fact]
+    public async Task ControllerTimeRejectsPairCommandEvenWhenLocalClockIsBehind()
+    {
+        using var f = new Fixture();
+        var initial = f.Clock.Now;
+        await f.Enforcer.ApplyAsync(f.Command(), default);
+        var confirmation = new ActiveLeaseConfirmation("rental", 1, "boot", initial.AddSeconds(60));
+        await f.Enforcer.ConfirmAsync(confirmation, default);
+        var api = new PairApi();
+        var session = new PairingSession(api, () => f.Enforcer.CanStream, () => f.Enforcer.CurrentPairingScope, f.Clock);
+        var dispatcher = new KamenRaider.Agent.Sync.LeaseCommandDispatcher(f.Enforcer, session);
+        await dispatcher.GetPairingOfferAsync(default);
+        f.Clock.Advance(10);
+        f.Clock.Now = f.Clock.Now.AddDays(-1);
+        var command = new CommandEnvelope("pair", "PairPin", "rental", 1, "boot", initial.AddSeconds(5),
+            JsonSerializer.SerializeToElement(new { pairingId = "id", pin = "1234" }));
+        await dispatcher.AcceptAsync(new(initial.AddSeconds(10), new(1, 1, 2), [command], confirmation), default);
+        Assert.Equal("failed", Assert.Single(dispatcher.PendingResults).Status);
+        Assert.Equal(0, api.Calls);
+    }
+
+    sealed class PairApi : ISunshinePairingApi
+    {
+        public int Calls;
+        public Task<string[]> PendingIdsAsync(CancellationToken ct) => Task.FromResult(new[] { "id" });
+        public Task<bool> SubmitAsync(string id, string pin, CancellationToken ct) { Calls++; return Task.FromResult(true); }
+        public Task ClearAsync(CancellationToken ct) => Task.CompletedTask;
+    }
+
+    // ---------------------------------------------------------------- boot reconciliation / imports
+
+    [Fact]
+    public async Task CrossBootImportPreservesExpiryAndAccountsForTransit()
+    {
+        using var f = new Fixture();
+        await f.Enforcer.ApplyAsync(f.Command(), default);
+        var expiry = f.Clock.Now.AddSeconds(60);
+        f.Clock.BootId = "next";
+        f.Clock.UptimeMilliseconds = 100;
+        var restarted = f.New();
+        var started = f.Clock.UptimeMilliseconds;
+        f.Clock.UptimeMilliseconds += 20000;
+        Assert.True(await restarted.ImportReconciledLeaseAsync(new("rental", 1, "next", expiry), f.Clock.Now, started, default));
+        Assert.Equal(expiry, restarted.Current!.ExpiresAtUtc);
+        Assert.Equal(60100, restarted.Current.DeadlineUptimeMilliseconds);
+        var again = f.New();
+        await again.InitializeAsync(default);
+        await again.ConfirmAsync(new("rental", 1, "next", expiry), default);
+        f.Clock.UptimeMilliseconds = 60100;
+        await again.EnforceAsync(default);
+        Assert.Equal(1, f.Power.Calls);
+    }
+
+    [Fact]
+    public async Task ReconciliationImporterAcceptsAConfirmedLeaseAfterSameBootServiceRestart()
+    {
+        using var f = new Fixture();
+        var confirmation = new ActiveLeaseConfirmation("rental", 1, "boot", f.Clock.Now.AddSeconds(60));
+        await f.Enforcer.ApplyAsync(f.Command(), default);
+        await f.Enforcer.ConfirmAsync(confirmation, default);
+        var restarted = f.New();
+        var importer = new KamenRaider.Agent.Startup.LeaseEnforcerReconciledLeaseImporter(restarted);
+        Assert.True(await importer.ImportAsync(confirmation, f.Clock.Now, f.Clock.UptimeMilliseconds, default));
+        Assert.Equal(confirmation.ExpiresAtUtc, restarted.Current!.ExpiresAtUtc);
+        Assert.False(restarted.CanStream);
+        await restarted.ConfirmAsync(confirmation, default);
+        Assert.True(restarted.CanStream);
+    }
+
+    [Fact]
+    public async Task ReconciliationImporterRecoversConfirmedLeaseWhenLocalSnapshotIsAbsent()
+    {
+        using var f = new Fixture();
+        var confirmation = new ActiveLeaseConfirmation("rental", 1, "next", f.Clock.Now.AddSeconds(60));
+        await f.Enforcer.ApplyAsync(f.Command(), default);
+        await f.Enforcer.ConfirmAsync(new("rental", 1, "boot", f.Clock.Now.AddSeconds(60)), default);
+        File.Delete(Path.Combine(f.Dir, "lease.json"));
+        f.Clock.BootId = "next";
+        f.Clock.UptimeMilliseconds = 100;
+        var restarted = f.New();
+        var importer = new KamenRaider.Agent.Startup.LeaseEnforcerReconciledLeaseImporter(restarted);
+        Assert.True(await importer.ImportAsync(confirmation, f.Clock.Now, f.Clock.UptimeMilliseconds, default));
+        Assert.Equal(confirmation.ExpiresAtUtc, restarted.Current!.ExpiresAtUtc);
+        Assert.Equal(60100, restarted.Current.DeadlineUptimeMilliseconds);
+        Assert.False(restarted.CanStream);
+    }
+
+    [Fact]
+    public async Task ReconciledPrepareAvailableClearsOldBootLeaseDurablyAndAcceptsNextLease()
+    {
+        using var f = new Fixture();
+        var previous = new ActiveLeaseConfirmation("rental", 1, "boot", f.Clock.Now.AddSeconds(60));
+        await f.Enforcer.ApplyAsync(f.Command(), default);
+        await f.Enforcer.ConfirmAsync(previous, default);
+        f.Clock.BootId = "next";
+        var recovered = f.New();
+        await recovered.InitializeAsync(default);
+        Assert.Equal("ReconciliationRequired", recovered.Fault);
+        Assert.True(await recovered.ClearReconciledLeaseAsync("next", default));
+        Assert.Null(recovered.Current);
+        Assert.Null(recovered.Fault);
+        Assert.Null(await f.Store.LoadAsync(default));
+        var restarted = f.New();
+        await restarted.InitializeAsync(default);
+        Assert.Null(restarted.Current);
+        Assert.Null(restarted.Fault);
+        Assert.Equal("applied", (await restarted.ApplyAsync(f.Command(1, 60, "new-rental"), default)).Status);
+    }
+
+    [Fact]
+    public async Task PrepareAvailableCannotClearSameBootLeaseBeforeReboot()
+    {
+        using var f = new Fixture();
+        var confirmation = new ActiveLeaseConfirmation("rental", 1, "boot", f.Clock.Now.AddSeconds(60));
+        await f.Enforcer.ApplyAsync(f.Command(), default);
+        await f.Enforcer.ConfirmAsync(confirmation, default);
+        Assert.True(f.Enforcer.CanStream);
+        Assert.False(await f.Enforcer.ClearReconciledLeaseAsync("boot", default));
+        Assert.NotNull(await f.Store.LoadAsync(default));
+        Assert.False(f.Enforcer.CanStream);
+        Assert.Equal("ReconciliationRequired", f.Enforcer.Fault);
+    }
+
+    [Fact]
+    public async Task ReconciledPrepareAvailableRefusesAnotherBootAndKeepsLease()
+    {
+        using var f = new Fixture();
+        await f.Enforcer.ApplyAsync(f.Command(), default);
+        f.Clock.BootId = "next";
+        var recovered = f.New();
+        Assert.False(await recovered.ClearReconciledLeaseAsync("other-boot", default));
+        Assert.NotNull(await f.Store.LoadAsync(default));
+    }
+
+    [Fact]
+    public async Task ReconciledPrepareAvailableKeepsLeaseWhenTombstoneCannotBeSaved()
+    {
+        using var f = new Fixture();
+        await f.Enforcer.ApplyAsync(f.Command(), default);
+        f.Clock.BootId = "next";
+        var store = new BrokenClearStore(f.Dir);
+        var recovered = new LeaseEnforcer(store, f.Clock, f.Clock, f.Cleanup, f.Power, f.Fence);
+        Assert.False(await recovered.ClearReconciledLeaseAsync("next", default));
+        Assert.NotNull(await f.Store.LoadAsync(default));
+        Assert.Equal("LeaseStorageFailed", recovered.Fault);
+    }
+
+    [Fact]
+    public async Task CrossBootImportRejectsUnconfirmedExtension()
+    {
+        using var f = new Fixture();
+        await f.Enforcer.ApplyAsync(f.Command(), default);
+        await f.Enforcer.ApplyAsync(f.Command(2, 120, "extend"), default);
+        f.Clock.BootId = "next";
+        f.Clock.UptimeMilliseconds = 100;
+        var e = f.New();
+        Assert.False(await e.ImportReconciledLeaseAsync(new("rental", 2, "next", f.Clock.Now.AddSeconds(120)), f.Clock.Now, 100, default));
+        Assert.False(e.CanStream);
+    }
+
+    [Fact]
+    public async Task CrossBootImportUsesPreviousControllerTimeFloor()
+    {
+        using var f = new Fixture();
+        await f.Enforcer.ApplyAsync(f.Command(), default);
+        var expiry = f.Clock.Now.AddSeconds(60);
+        f.Clock.BootId = "next";
+        f.Clock.UptimeMilliseconds = 100;
+        var e = f.New();
+        await e.ObserveControllerTimeAsync(f.Clock.Now.AddSeconds(30), default);
+        f.Clock.Now = f.Clock.Now.AddDays(-1);
+        Assert.True(await e.ImportReconciledLeaseAsync(new("rental", 1, "next", expiry), expiry.AddSeconds(-60), 100, default));
+        Assert.Equal(30100, e.Current!.DeadlineUptimeMilliseconds);
+    }
+
+    [Fact]
+    public async Task ControllerAdvanceDuringImportCannotConfirmExpiredLease()
+    {
+        using var f = new Fixture();
+        await f.Enforcer.ApplyAsync(f.Command(), default);
+        var expiry = f.Clock.Now.AddSeconds(60);
+        f.Clock.BootId = "next";
+        f.Clock.UptimeMilliseconds = 100;
+        var store = new PausedStore(f.Dir) { Pause = true };
+        var e = new LeaseEnforcer(store, f.Clock, f.Clock, f.Cleanup, f.Power, f.Fence);
+        var import = e.ImportReconciledLeaseAsync(new("rental", 1, "next", expiry), f.Clock.Now, 100, default);
+        await store.Entered.Task;
+        var observe = e.ObserveControllerTimeAsync(expiry, default);
+        store.Release.SetResult();
+        Assert.False(await import);
+        await observe;
+        await e.ConfirmAsync(new("rental", 1, "next", expiry), default);
+        Assert.False(e.CanStream);
+        await e.EnforceAsync(default);
+        Assert.Equal(1, f.Power.Calls);
+    }
+
+    [Fact]
+    public async Task ControllerAdvanceAfterImportShortensDeadlineAcrossRestart()
+    {
+        using var f = new Fixture();
+        await f.Enforcer.ApplyAsync(f.Command(), default);
+        var expiry = f.Clock.Now.AddSeconds(60);
+        f.Clock.BootId = "next";
+        f.Clock.UptimeMilliseconds = 100;
+        var e = f.New();
+        Assert.True(await e.ImportReconciledLeaseAsync(new("rental", 1, "next", expiry), f.Clock.Now, 100, default));
+        await e.ObserveControllerTimeAsync(expiry.AddSeconds(-10), default);
+        Assert.Equal(10100, e.Current!.DeadlineUptimeMilliseconds);
+        var restart = f.New();
+        await restart.InitializeAsync(default);
+        Assert.Equal(10100, restart.Current!.DeadlineUptimeMilliseconds);
+        f.Clock.UptimeMilliseconds = 10100;
+        await restart.ConfirmAsync(new("rental", 1, "next", expiry), default);
+        Assert.False(restart.CanStream);
+        await restart.EnforceAsync(default);
+        Assert.Equal(1, f.Power.Calls);
+    }
+
+    [Fact]
+    public async Task ConfirmationSaveCrossingRecoveryDeadlineCannotEraseDeadline()
+    {
+        using var f = new Fixture();
+        var store = new PausedStore(f.Dir);
+        var e = new LeaseEnforcer(store, f.Clock, f.Clock, f.Cleanup, f.Power, f.Fence);
+        await e.ApplyAsync(f.Command(), default);
+        await e.ConfirmAsync(new("rental", 1, "boot", f.Clock.Now.AddSeconds(60)), default);
+        await e.ApplyAsync(f.Command(2, 120, "extend"), default);
+        store.Pause = true;
+        var confirmation = e.ConfirmAsync(new("rental", 2, "boot", f.Clock.Now.AddSeconds(120)), default);
+        await store.Entered.Task;
+        f.Clock.Advance(60);
+        store.Release.TrySetResult();
+        await confirmation;
+        var restarted = new LeaseEnforcer(store, f.Clock, f.Clock, f.Cleanup, f.Power, f.Fence);
+        await restarted.EnforceAsync(default);
+        Assert.Equal(1, f.Power.Calls);
+    }
+
+    [Fact]
+    public async Task OlderControllerObservationCannotExtendImportedDeadline()
+    {
+        using var f = new Fixture();
+        await f.Enforcer.ApplyAsync(f.Command(), default);
+        var expiry = f.Clock.Now.AddSeconds(60);
+        f.Clock.BootId = "next";
+        f.Clock.UptimeMilliseconds = 100;
+        var e = f.New();
+        Assert.True(await e.ImportReconciledLeaseAsync(new("rental", 1, "next", expiry), f.Clock.Now, 100, default));
+        await e.ObserveControllerTimeAsync(expiry.AddSeconds(-10), default);
+        await e.ObserveControllerTimeAsync(expiry.AddDays(-1), default);
+        Assert.Equal(10100, e.Current!.DeadlineUptimeMilliseconds);
+    }
+
+    [Fact]
+    public async Task RestartCannotConfirmOldSnapshotWithoutFreshControllerTime()
+    {
+        using var f = new Fixture();
+        await f.Enforcer.ApplyAsync(f.Command(), default);
+        var expiry = f.Clock.Now.AddSeconds(60);
+        var e = f.New();
+        await e.InitializeAsync(default);
+        await e.ConfirmAsync(new("rental", 1, "boot", expiry), default);
+        Assert.False(e.CanStream);
+        await e.ObserveControllerTimeAsync(expiry, default);
+        await e.ConfirmAsync(new("rental", 1, "boot", expiry), default);
+        Assert.False(e.CanStream);
+        await e.EnforceAsync(default);
+        Assert.Equal(1, f.Power.Calls);
+    }
+
+    [Fact]
+    public async Task NonExpiredAdvanceDuringImportCanRecoverAfterDurableShortening()
+    {
+        using var f = new Fixture();
+        await f.Enforcer.ApplyAsync(f.Command(), default);
+        var expiry = f.Clock.Now.AddSeconds(60);
+        f.Clock.BootId = "next";
+        f.Clock.UptimeMilliseconds = 100;
+        var store = new PausedStore(f.Dir) { Pause = true };
+        var e = new LeaseEnforcer(store, f.Clock, f.Clock, f.Cleanup, f.Power, f.Fence);
+        var import = e.ImportReconciledLeaseAsync(new("rental", 1, "next", expiry), f.Clock.Now, 100, default);
+        await store.Entered.Task;
+        var observation = e.ObserveControllerTimeAsync(expiry.AddSeconds(-10), default);
+        store.Release.SetResult();
+        await import;
+        await observation;
+        await e.ConfirmAsync(new("rental", 1, "next", expiry), default);
+        Assert.True(e.CanStream);
+        Assert.Equal(10100, e.Current!.DeadlineUptimeMilliseconds);
+    }
+
+    // ---------------------------------------------------------------- maintenance fence
+
+    [Fact]
+    public async Task MaintenanceHoldClosesStreamAndPairingScope()
+    {
+        using var f = new Fixture();
+        await f.Enforcer.ApplyAsync(f.Command(), default);
+        await f.Enforcer.ConfirmAsync(new("rental", 1, "boot", f.Clock.Now.AddSeconds(60)), default);
+        Assert.True(f.Enforcer.CanStream);
+        Assert.NotNull(f.Enforcer.CurrentPairingScope);
+
+        f.Fence.SetHeld();
+
+        Assert.False(f.Enforcer.CanStream);
+        Assert.Null(f.Enforcer.CurrentPairingScope);
+        Assert.Equal(0, f.Cleanup.Calls);
+    }
+
+    [Fact]
+    public async Task HeldMaintenanceFenceRejectsFirstLeaseApplication()
+    {
+        using var f = new Fixture();
+        f.Fence.SetHeld();
+        Assert.Equal("failed", (await f.Enforcer.ApplyAsync(f.Command(), default)).Status);
+        Assert.Null(f.Enforcer.Current);
+        Assert.False(f.Enforcer.CanStream);
+    }
+
+    [Fact]
+    public async Task UnknownMaintenanceFenceRejectsMachinePreparation()
+    {
+        using var f = new Fixture();
+        f.Fence.SetUnknown();
+        var command = new CommandEnvelope("prepare", "PrepareMachine", "rental", 1, f.Clock.BootId, f.Clock.Now.AddMinutes(1), JsonSerializer.SerializeToElement(new { }));
+        Assert.False(await f.Enforcer.CanPrepareMachineAsync(command, default));
+    }
+
+    [Fact]
+    public async Task MaintenanceSnapshotRetainsPendingInitialWhenSaveOutcomeIsAmbiguous()
+    {
+        using var f = new Fixture();
+        var e = new LeaseEnforcer(new AfterSaveThrowStore(f.Dir), f.Clock, f.Clock, f.Cleanup, f.Power, f.Fence);
+        Assert.Equal("failed", (await e.ApplyAsync(f.Command(), default)).Status);
+        var snapshot = await e.GetMaintenanceSnapshotAsync(default);
+        Assert.False(snapshot.IsKnown);
+        Assert.Null(snapshot.Current);
+        Assert.NotNull(snapshot.PendingInitial);
+        Assert.Equal("LeaseStorageFailed", snapshot.Fault);
+    }
 }

@@ -93,9 +93,8 @@ public sealed class WindowsMaintenanceFence(
 
         var executable = Path.GetFullPath(sunshinePath);
 
-        // The firewall rule is deliberately separate from Stream Guard's managed rule.
-        // Old installed Guard processes do not know its name and cannot undo it through
-        // their ordinary block/allow transitions.
+        // The firewall rule is deliberately independent of every other agent-owned rule so
+        // that an unexpected transition elsewhere cannot undo the maintenance block.
         firewall.EnsureBlocked(executable);
         if (!firewall.IsBlocked(executable))
             throw new IOException("The independent Windows Firewall maintenance block was not verified.");

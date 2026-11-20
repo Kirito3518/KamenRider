@@ -72,6 +72,7 @@ export function GET(r: Request) {
         machine.machineId,
         {
           displayName: machine.displayName,
+          parsecEnabled: machine.parsecEnabled === true,
           agent: {
             reachability:
               machine.readiness === "unreachable"
@@ -129,6 +130,12 @@ export function GET(r: Request) {
                   ),
                 )
               : unavailableConnection,
+          parsec:
+            lease.state === "active" && machine?.parsecEnabled
+              ? await call<import("@/lib/parsec-contracts").ParsecLeaseState>(
+                  `/internal/leases/${segment(lease.id)}/parsec`,
+                )
+              : null,
           payment: payment ? paymentInfo(payment) : null,
         } satisfies Lease;
       }),

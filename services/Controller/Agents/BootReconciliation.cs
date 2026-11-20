@@ -62,12 +62,16 @@ public sealed partial class ControllerDatabase
                 ("$now", now.ToUnixTimeMilliseconds())))
                 valid = (long)check.ExecuteScalar()! == 1;
             if (!valid || proof.BootId != request.BootId || machine.ApprovalStatus != "approved"
-                || request.AppliedConfigRevision != config.Revision || !request.BaselineValidated
-                || !request.RestorationVerified || !request.FencedCleanupVerified || !request.HealthVerified)
+                || request.AppliedConfigRevision != config.Revision || !request.FencedCleanupVerified
+                || !request.StreamReady)
             {
                 tx.Commit();
                 return new(now, config, null, "Hold");
             }
+
+            // 0jay-style readiness: a boot is acceptable once pairing was cleared (fenced cleanup)
+            // and Sunshine is live (stream ready). Baseline, restoration and desktop/health evidence
+            // remain advisory diagnostics only; they no longer gate the transition.
 
             // Consume with the state transition: replay cannot affect this or a replacement allocation.
             ExecuteLease(tx, "DELETE FROM boot_reconciliation_challenges WHERE machine_id=$id", ("$id", verified.MachineId));

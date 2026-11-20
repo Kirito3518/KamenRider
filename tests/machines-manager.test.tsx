@@ -28,6 +28,7 @@ const PC_CONTROL_PATTERN =
 type InstallCommandResponse = {
   available: boolean;
   command?: string;
+  oneLiner?: string;
   expiresAtUtc?: string;
   reason?: string;
 };
@@ -88,8 +89,8 @@ describe("MachinesManager dashboard", () => {
       value: { writeText: clipboardWriteText },
     });
     installResponses = [
-      { available: true, command: FIRST_COMMAND, expiresAtUtc: FIRST_EXPIRY },
-      { available: true, command: SECOND_COMMAND, expiresAtUtc: SECOND_EXPIRY },
+      { available: true, command: FIRST_COMMAND, oneLiner: `${FIRST_COMMAND}-one`, expiresAtUtc: FIRST_EXPIRY },
+      { available: true, command: SECOND_COMMAND, oneLiner: `${SECOND_COMMAND}-one`, expiresAtUtc: SECOND_EXPIRY },
     ];
     fetchSpy = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
@@ -336,7 +337,7 @@ describe("MachinesManager dashboard", () => {
 
     await act(async () => {
       resolveInitialRequest?.(
-        jsonResponse({ available: true, command: FIRST_COMMAND, expiresAtUtc: FIRST_EXPIRY }),
+        jsonResponse({ available: true, command: FIRST_COMMAND, oneLiner: `${FIRST_COMMAND}-one`, expiresAtUtc: FIRST_EXPIRY }),
       );
     });
 
@@ -369,7 +370,7 @@ describe("MachinesManager dashboard", () => {
 
     await act(async () => {
       resolveReplacement?.(
-        jsonResponse({ available: true, command: SECOND_COMMAND, expiresAtUtc: SECOND_EXPIRY }),
+        jsonResponse({ available: true, command: SECOND_COMMAND, oneLiner: `${SECOND_COMMAND}-one`, expiresAtUtc: SECOND_EXPIRY }),
       );
     });
 
@@ -644,6 +645,7 @@ describe("MachinesManager dashboard", () => {
         moonlightPort: 47989,
         sunshinePort: 47990,
         vncLocalIp: "192.168.1.60",
+        parsecEnabled: false,
         expectedRevision: 1,
       }),
     );

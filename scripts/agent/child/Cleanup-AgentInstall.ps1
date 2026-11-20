@@ -5,7 +5,7 @@
 
 .DESCRIPTION
   Run on a CHILD PC (the rental machine). The script:
-    * stops and deletes the KamenRaider Agent / Stream Guard services,
+    * stops and deletes the KamenRaider Agent service and any legacy KamenRaider Stream Guard service,
     * removes the protected install directories (C:\Program Files\KamenRaider and
       C:\ProgramData\KamenRaider) including installer staging/evidence leftovers,
     * removes the KamenRaider firewall rules created by the installer,

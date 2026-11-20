@@ -29,11 +29,27 @@ public class BootTests {
   Assert.Empty(f.Sync("new").Commands);Assert.Null(f.Db.GetLease(lease.Id)!.PendingRevision);
   Assert.Throws<ArgumentException>(()=>f.Sync("boot"));f.Reopen();Assert.Equal(lease.ExpiresAtUtc,BootChallengeTests.Prove(f,BootChallengeTests.Issue(f)).Lease!.ExpiresAtUtc);
  }
- [Theory][InlineData(false,true,true,true,3)][InlineData(true,false,true,true,3)][InlineData(true,true,false,true,3)][InlineData(true,true,true,false,3)][InlineData(true,true,true,true,2)]
- public async Task MissingProofOrStaleConfigurationHoldsAllocation(bool baseline,bool restoration,bool cleanup,bool health,long revision) {
-  using var f=new LeaseFixture();var lease=await f.Active();f.Time.Now=f.Time.Now.AddMinutes(2);
-  Assert.Equal("Hold",f.Db.Reconcile("pc",new("new",revision,baseline,restoration,cleanup,health)).Action);
-  await Assert.ThrowsAsync<InvalidOperationException>(()=>f.Create("another"));Assert.Equal("ending",f.Db.GetLease(lease.Id)!.State);
+ [Theory][InlineData(false,3)][InlineData(true,2)]
+ public async Task MissingFencedCleanupOrStaleConfigurationHoldsAllocation(bool cleanup,long revision) {
+  using var f=new LeaseFixture();var lease=await f.Active();
+  var challenge=BootChallengeTests.Issue(f);
+  Assert.Equal("Hold",f.Db.Reconcile("pc",new(challenge.BootId,revision,true,true,cleanup,true,challenge,StreamReady:true)).Action);
+  await Assert.ThrowsAsync<InvalidOperationException>(()=>f.Create("another"));Assert.Equal("active",f.Db.GetLease(lease.Id)!.State);
+ }
+ [Fact] public async Task StreamReadyAndFencedCleanupAcceptBootWithoutAdvisoryEvidence() {
+  using var f=new LeaseFixture();var lease=await f.Active();
+  var challenge=BootChallengeTests.Issue(f);
+  // Baseline, restoration and desktop-health evidence remain advisory; 0jay-style readiness
+  // is pairing cleanup plus a live Sunshine stream.
+  var result=f.Db.Reconcile("pc",new(challenge.BootId,3,false,false,true,false,challenge,StreamReady:true));
+  Assert.Equal("ResumeLease",result.Action);
+  Assert.Equal(lease.Id,result.Lease!.RentalId);
+ }
+ [Fact] public async Task MissingStreamReadyHoldsAllocationEvenWithFencedCleanup() {
+  using var f=new LeaseFixture();var lease=await f.Active();
+  var challenge=BootChallengeTests.Issue(f);
+  Assert.Equal("Hold",BootChallengeTests.Prove(f,challenge,streamReady:false).Action);
+  Assert.Equal("active",f.Db.GetLease(lease.Id)!.State);
  }
  [Fact] public async Task ExpiredLeaseIsNeverResumedAndCleanupReleasesAllocationWithoutShutdownCommand() {
   using var f=new LeaseFixture();var lease=await f.Active();f.Time.Now=f.Time.Now.AddSeconds(60);

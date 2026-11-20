@@ -508,6 +508,8 @@ public static class ControllerDatabaseMaintenance
             if (userVersion >= 22) ValidateUpdateConfirmationSchema(connection);
             if (userVersion >= 23) ValidatePcControlSchema(connection);
             if (userVersion >= 24) ValidateMachineProfileSchema(connection);
+            if (userVersion >= 26) ValidateSunshineMaintenanceSchema(connection);
+            if (userVersion >= 27) ValidateParsecSchema(connection);
             // These uniqueness constraints enforce allocation and command-revision invariants.
             ValidateIndex(connection, "leases", "leases_machine_allocation", ["machine_id"], "allocation_held=1", required: true);
             var hasCommandRevisionIndex = HasIndex(connection, "command_outbox", "lease_command_revision");
@@ -778,6 +780,117 @@ public static class ControllerDatabaseMaintenance
             indexCheck.Parameters.AddWithValue("$name", name);
             if (Convert.ToInt64(indexCheck.ExecuteScalar(), CultureInfo.InvariantCulture) != 1)
                 throw new InvalidDataException($"Controller database is missing PC-control command index '{name}'.");
+        }
+    }
+
+    internal static void ValidateSunshineMaintenanceSchema(SqliteConnection connection, SqliteTransaction? transaction = null)
+    {
+        long userVersion;
+        using (var version = connection.CreateCommand())
+        {
+            version.Transaction = transaction;
+            version.CommandText = "PRAGMA user_version";
+            userVersion = Convert.ToInt64(version.ExecuteScalar(), CultureInfo.InvariantCulture);
+        }
+        if (userVersion < 26)
+            throw new InvalidDataException("Controller database is missing the version 26 Sunshine maintenance schema.");
+
+        foreach (var (table, tokens) in new[]
+        {
+            ("command_outbox", new[] { "RestartSunshine", "UnpairSunshine" }),
+            ("machine_admin_actions", new[] { "restartSunshine", "unpairSunshine" })
+        })
+        {
+            using var definition = connection.CreateCommand();
+            definition.Transaction = transaction;
+            definition.CommandText = "SELECT sql FROM sqlite_schema WHERE type='table' AND name=$name";
+            definition.Parameters.AddWithValue("$name", table);
+            var sql = definition.ExecuteScalar()?.ToString();
+            if (sql is null)
+                throw new InvalidDataException($"Controller database is missing the {table} table.");
+            if (tokens.Any(token => !sql.Contains(token, StringComparison.Ordinal)))
+                throw new InvalidDataException($"Controller database table '{table}' does not admit the Sunshine maintenance command types.");
+        }
+
+        using (var index = connection.CreateCommand())
+        {
+            index.Transaction = transaction;
+            index.CommandText = "SELECT COUNT(*) FROM sqlite_schema WHERE type='index' AND name='machine_sunshine_pending'";
+            if (Convert.ToInt64(index.ExecuteScalar(), CultureInfo.InvariantCulture) != 1)
+                throw new InvalidDataException("Controller database is missing the pending Sunshine maintenance command index.");
+        }
+
+        using (var malformed = connection.CreateCommand())
+        {
+            malformed.Transaction = transaction;
+            malformed.CommandText = "SELECT COUNT(*) FROM command_outbox WHERE type IN ('RestartSunshine','UnpairSunshine') AND (rental_id IS NOT NULL OR lease_revision<>0)";
+            if (Convert.ToInt64(malformed.ExecuteScalar(), CultureInfo.InvariantCulture) != 0)
+                throw new InvalidDataException("Controller database has a malformed machine-scoped Sunshine maintenance command.");
+        }
+    }
+
+    internal static void ValidateParsecSchema(SqliteConnection connection, SqliteTransaction? transaction = null)
+    {
+        long userVersion;
+        using (var version = connection.CreateCommand())
+        {
+            version.Transaction = transaction;
+            version.CommandText = "PRAGMA user_version";
+            userVersion = Convert.ToInt64(version.ExecuteScalar(), CultureInfo.InvariantCulture);
+        }
+        if (userVersion < 27)
+            throw new InvalidDataException("Controller database is missing the version 27 Parsec schema.");
+
+        ValidateColumns(connection, "parsec_attempts", [
+            new("attempt_id", "TEXT"), new("machine_id", "TEXT", true), new("rental_id", "TEXT", true),
+            new("user_id", "TEXT", true), new("idempotency_key", "TEXT", true), new("state", "TEXT", true),
+            new("error_code", "TEXT"), new("message", "TEXT"), new("boot_key_id", "TEXT"),
+            new("created_at_unix_ms", "INTEGER", true), new("updated_at_unix_ms", "INTEGER", true),
+            new("expires_at_unix_ms", "INTEGER", true)
+        ], ["attempt_id"]);
+        ValidateColumns(connection, "machine_parsec_state", [
+            new("machine_id", "TEXT"), new("available", "INTEGER", true), new("boot_key_id", "TEXT"),
+            new("public_key", "TEXT"), new("updated_at_unix_ms", "INTEGER", true)
+        ], ["machine_id"]);
+
+        using (var column = connection.CreateCommand())
+        {
+            column.Transaction = transaction;
+            column.CommandText = "SELECT COUNT(*) FROM pragma_table_info('machines') WHERE name='parsec_enabled'";
+            if (Convert.ToInt64(column.ExecuteScalar(), CultureInfo.InvariantCulture) != 1)
+                throw new InvalidDataException("Controller database is missing the version 27 machines.parsec_enabled column.");
+        }
+
+        using (var definition = connection.CreateCommand())
+        {
+            definition.Transaction = transaction;
+            definition.CommandText = "SELECT sql FROM sqlite_schema WHERE type='table' AND name='command_outbox'";
+            var sql = definition.ExecuteScalar()?.ToString();
+            if (sql is null || !sql.Contains("ParsecConnect", StringComparison.Ordinal))
+                throw new InvalidDataException("Controller database command_outbox does not admit ParsecConnect.");
+        }
+
+        using (var index = connection.CreateCommand())
+        {
+            index.Transaction = transaction;
+            index.CommandText = "SELECT COUNT(*) FROM sqlite_schema WHERE type='index' AND name='lease_parsec_pending'";
+            if (Convert.ToInt64(index.ExecuteScalar(), CultureInfo.InvariantCulture) != 1)
+                throw new InvalidDataException("Controller database is missing the pending Parsec attempt index.");
+        }
+
+        using (var malformed = connection.CreateCommand())
+        {
+            malformed.Transaction = transaction;
+            malformed.CommandText = """
+                SELECT (SELECT COUNT(*) FROM command_outbox WHERE type='ParsecConnect' AND (rental_id IS NULL OR lease_revision<=0))
+                     + (SELECT COUNT(*) FROM parsec_attempts WHERE state NOT IN ('queued','starting','waiting_email','ready','failed')
+                            OR expires_at_unix_ms<created_at_unix_ms OR length(COALESCE(message,''))>200)
+                     + (SELECT COUNT(*) FROM machine_parsec_state WHERE available NOT IN (0,1)
+                            OR (available=1 AND (boot_key_id IS NULL OR public_key IS NULL)))
+                     + (SELECT COUNT(*) FROM machines WHERE parsec_enabled NOT IN (0,1))
+                """;
+            if (Convert.ToInt64(malformed.ExecuteScalar(), CultureInfo.InvariantCulture) != 0)
+                throw new InvalidDataException("Controller database has invalid Parsec state or attempt rows.");
         }
     }
 
@@ -1113,7 +1226,7 @@ public static class ControllerDatabaseMaintenance
 
     internal static void ValidateCanonicalSchema(SqliteConnection connection, long expectedVersion, SqliteTransaction? transaction = null)
     {
-        if (expectedVersion is < 0 or > 25)
+        if (expectedVersion is < 0 or > 27)
             throw new InvalidDataException("Controller database version is outside the supported migration range.");
 
         var checkpoints = expectedSchemas.GetOrAdd(expectedVersion, BuildCanonicalSchemas);
@@ -1196,7 +1309,7 @@ public static class ControllerDatabaseMaintenance
 
     private static IReadOnlyList<IReadOnlyDictionary<string, SchemaObject>> BuildCanonicalSchemas(long version)
     {
-        if (version is not (0 or 2 or 3 or >= 4 and <= 25))
+        if (version is not (0 or 2 or 3 or >= 4 and <= 27))
             return [];
 
         var connectionString = new SqliteConnectionStringBuilder { DataSource = ":memory:", ForeignKeys = true, Pooling = false }.ToString();

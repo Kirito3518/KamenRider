@@ -74,7 +74,7 @@ public class SyncWorkerHardwareTests
         public string Directory { get; } = Path.Combine(Path.GetTempPath(), "kr-sync-hardware-" + Guid.NewGuid().ToString("N"));
         public Clock BootClock { get; } = new();
         public AppliedConfiguration Configuration { get; }
-        public Gate StreamGate { get; } = new();
+        public Cleanup StreamCleanup { get; } = new();
         public LeaseEnforcer Enforcer { get; }
 
         public Fixture()
@@ -87,7 +87,7 @@ public class SyncWorkerHardwareTests
                 new LeaseStore(Path.Combine(Directory, "leases")),
                 BootClock,
                 BootClock,
-                StreamGate,
+                StreamCleanup,
                 new NoopShutdown(),
                 new TestMaintenanceFence());
         }
@@ -106,10 +106,9 @@ public class SyncWorkerHardwareTests
         public override DateTimeOffset GetUtcNow() => Now;
     }
 
-    private sealed class Gate : IStreamGate
+    private sealed class Cleanup : KamenRaider.Agent.Sunshine.IStreamCleanup
     {
-        public Task BlockAsync(CancellationToken ct) => Task.CompletedTask;
-        public Task AllowAsync(StreamLeaseGrant grant, CancellationToken ct) => Task.CompletedTask;
+        public Task<bool> ClearAsync(CancellationToken ct) => Task.FromResult(true);
     }
 
     private sealed class NoopShutdown : IShutdown

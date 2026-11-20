@@ -19,11 +19,11 @@ export const READINESS_CHECK_LABELS: Record<
   baseline: "การตรวจพื้นฐาน",
   bootChallenge: "การทดสอบยืนยันการบูต",
   restoration: "การตรวจการคืนค่าสภาพเครื่อง",
-  streamFence: "การตรวจป้องกันการสตรีมก่อนพร้อม",
+  streamFence: "ความพร้อมสตรีม (Sunshine)",
   desktopHealth: "การตรวจสุขภาพเดสก์ท็อป",
   configurationRevision: "การตรวจ revision การตั้งค่า",
   leaseReconciliation: "การตรวจสถานะ lease",
-  runtimeHealth: "การตรวจความพร้อมขณะทำงาน",
+  runtimeHealth: "ความพร้อมขณะทำงาน (Sunshine)",
 };
 
 export const READINESS_STATUS_LABELS: Record<

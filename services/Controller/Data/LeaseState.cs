@@ -38,6 +38,10 @@ public sealed partial class ControllerDatabase {
         // a preparation that never activated ends at the deadline check instant.
         ExecuteLease(tx,"UPDATE leases SET state=CASE WHEN state='preparing' THEN 'failed' ELSE 'ending' END,ended_at=COALESCE(ended_at,CASE WHEN state='preparing' THEN $now ELSE COALESCE(expires_at,$now) END),pending_revision=NULL,pending_expires_at=NULL WHERE (state='preparing' AND preparation_deadline <= $now) OR (state IN ('preparing','active') AND expires_at <= $now)",("$now",now));
         ExecuteLease(tx,"UPDATE command_outbox SET status='expired' WHERE status='pending' AND (valid_until <= $now OR rental_id IN (SELECT id FROM leases WHERE state IN ('failed','ending')))",("$now",now));
+        // A Parsec login may not outlive its lease. Expired/ending/completed rentals close any
+        // queued attempt and drop the sealed payload that is still waiting in the outbox.
+        ExecuteLease(tx,"UPDATE parsec_attempts SET state='failed',error_code=$code,message=NULL,updated_at_unix_ms=$now WHERE state IN ('queued','starting','waiting_email') AND rental_id IN (SELECT id FROM leases WHERE state IN ('failed','ending','completed'))",("$code",ParsecErrorCodes.LeaseEnded),("$now",now));
+        ExecuteLease(tx,"UPDATE command_outbox SET status='invalidated',payload='{}' WHERE type='ParsecConnect' AND status='pending' AND rental_id IN (SELECT id FROM leases WHERE state IN ('failed','ending','completed'))");
     }
     public LeaseDto CreateLease(string userId,string machineId,int durationSeconds,string idempotencyKey) {
         Identifier(userId); Identifier(machineId); Identifier(idempotencyKey); Duration(durationSeconds);

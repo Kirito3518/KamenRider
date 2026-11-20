@@ -98,7 +98,6 @@ public sealed class FoundationSunshineClientTests
         Assert.Equal(new[]
         {
             "POST /api/clients/unpair-all",
-            "POST /api/apps/close",
             "GET /api/clients/list"
         }, transport.Paths);
     }

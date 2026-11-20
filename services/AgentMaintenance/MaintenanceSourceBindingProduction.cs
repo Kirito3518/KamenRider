@@ -88,8 +88,8 @@ public sealed class WindowsMaintenanceSourceBindingAuthorization : IMaintenanceS
 
 /// <summary>
 /// Production independent Windows Firewall maintenance fence. It writes a dedicated Local
-/// inbound block for the trusted Sunshine executable (distinct from Stream Guard's managed
-/// rule) and verifies the effective ActiveStore policy before reporting success. A host that
+/// inbound block for the trusted Sunshine executable and verifies the effective ActiveStore
+/// policy before reporting success. A host that
 /// cannot prove the effective block fails closed; the helper never continues on a partial rule.
 /// </summary>
 [SupportedOSPlatform("windows")]

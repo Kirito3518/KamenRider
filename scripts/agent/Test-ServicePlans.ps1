@@ -16,18 +16,19 @@ if ($binaryPath -ne '"C:\Program Files\KamenRaider\Agent\Agent.exe" --contentRoo
 $root = [IO.Path]::GetFullPath((Join-Path ([IO.Path]::GetTempPath()) ('kr-install-test-' + [Guid]::NewGuid().ToString('N'))))
 $agent = & $install -Role Agent -PublishDirectory $root -DataDirectory (Join-Path $root 'data') `
     -ConfigurationFile (Join-Path $root 'config.json') -TrustedRootThumbprint ('A' * 40) -Plan
-if ($agent.Startup -ne 'auto' -or $agent.Account -ne 'NT SERVICE\KamenRaider Agent') { throw 'Agent plan must use automatic startup and the virtual service account.' }
+if ($agent.Startup -ne 'auto' -or $agent.Account -ne 'LocalSystem') { throw 'Agent plan must use automatic startup and the LocalSystem account.' }
 if ($agent.StartAfterInstall) { throw 'Service Plan must not start a service unless StartAfterInstall is explicitly selected.' }
-if ($agent.Dependencies.Count -ne 1 -or $agent.Dependencies[0] -ne 'KamenRaider Stream Guard') { throw 'Agent service must depend on Stream Guard even when the dependency is not explicitly passed.' }
+if ($agent.Dependencies.Count -ne 0) { throw 'Agent service must not declare a service dependency.' }
 $startPlan = & $install -Role Agent -PublishDirectory $root -DataDirectory (Join-Path $root 'data') `
     -ConfigurationFile (Join-Path $root 'config.json') -TrustedRootThumbprint ('A' * 40) -StartAfterInstall -Plan
 if (-not $startPlan.StartAfterInstall) { throw 'Plan must report the requested post-install start.' }
-$guardDependentPlan = & $install -Role Agent -PublishDirectory $root -DataDirectory (Join-Path $root 'data') `
-    -ConfigurationFile (Join-Path $root 'config.json') -TrustedRootThumbprint ('A' * 40) `
-    -Dependencies @('KamenRaider Stream Guard') -StartAfterInstall -Plan
-if ($guardDependentPlan.Dependencies.Count -ne 1 -or $guardDependentPlan.Dependencies[0] -ne 'KamenRaider Stream Guard') {
-    throw 'Agent service plan must preserve its Stream Guard service dependency.'
-}
+$dependencyRejected = $false
+try {
+    & $install -Role Agent -PublishDirectory $root -DataDirectory (Join-Path $root 'data') `
+        -ConfigurationFile (Join-Path $root 'config.json') -TrustedRootThumbprint ('A' * 40) `
+        -Dependencies @('KamenRaider Stream Guard') -Plan | Out-Null
+} catch { $dependencyRejected = $_.Exception.Message -like '*no service dependencies*' }
+if (-not $dependencyRejected) { throw 'Agent service plan must reject a service dependency.' }
 $ticketPlan = & $install -Role Agent -PublishDirectory $root -DataDirectory (Join-Path $root 'data') `
     -ConfigurationFile (Join-Path $root 'config.json') -TrustedRootThumbprint ('A' * 40) -EnrollmentTicket ('A' * 43) -Plan
 if (-not $ticketPlan.EnrollmentTicketStored -or $ticketPlan.PSObject.Properties.Name -contains 'EnrollmentTicket') { throw 'Service plan must store the ticket without exposing its value.' }

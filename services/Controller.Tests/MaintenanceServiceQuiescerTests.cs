@@ -82,23 +82,16 @@ public sealed class MaintenanceServiceQuiescerTests
             Services.Services[MaintenanceServiceQuiescer.AgentServiceName] = Service(
                 MaintenanceServiceQuiescer.AgentServiceName,
                 '"' + Layout.AgentExecutablePath + '"' + " --contentRoot \"C:\\Program Files\\KamenRaider\\Agent\"",
-                "NT SERVICE\\KamenRaider Agent",
-                [MaintenanceServiceQuiescer.GuardServiceName],
-                101);
-            Services.Services[MaintenanceServiceQuiescer.GuardServiceName] = Service(
-                MaintenanceServiceQuiescer.GuardServiceName,
-                '"' + Layout.AgentExecutablePath + '"' + " --contentRoot \"C:\\Program Files\\KamenRaider\\Agent\" --stream-guard",
                 "LocalSystem",
                 [],
-                102);
+                101);
             Services.Services[MaintenanceServiceQuiescer.SunshineServiceName] = Service(
                 MaintenanceServiceQuiescer.SunshineServiceName,
                 $"\"{Layout.SunshineServiceExecutablePath}\" --service",
                 "LocalSystem",
-                ["VendorService", MaintenanceServiceQuiescer.GuardServiceName],
+                ["VendorService"],
                 103);
             Processes.PathsByPid[101] = Layout.AgentExecutablePath;
-            Processes.PathsByPid[102] = Layout.AgentExecutablePath;
             Processes.PathsByPid[103] = Layout.SunshineServiceExecutablePath;
             Quiescer = new(Services, Processes, Prerequisites, TimeSpan.FromMilliseconds(100), TimeSpan.FromMilliseconds(1));
         }
@@ -125,7 +118,7 @@ public sealed class MaintenanceServiceQuiescerTests
     }
 
     [Fact]
-    public async Task QuiescesDependentsBeforeGuardAndJournalsOnlyAfterNoMatchingProcessRemains()
+    public async Task QuiescesAgentBeforeSunshineAndJournalsOnlyAfterNoMatchingProcessRemains()
     {
         var f = new Fixture();
 
@@ -134,11 +127,22 @@ public sealed class MaintenanceServiceQuiescerTests
         Assert.Equal(new[]
         {
             "stop:KamenRaider Agent",
-            "stop:SunshineService",
-            "stop:KamenRaider Stream Guard"
+            "stop:SunshineService"
         }, f.Events.Where(value => value.StartsWith("stop:", StringComparison.Ordinal)));
         Assert.True(f.Events.IndexOf("processes") < f.Events.IndexOf("journal:servicesQuiesced"));
         Assert.Equal(MaintenanceWindowsServiceState.Stopped, f.Services.Services[MaintenanceServiceQuiescer.AgentServiceName].State);
+    }
+
+    [Fact]
+    public async Task AgentMustNotCarryAServiceDependency()
+    {
+        var f = new Fixture();
+        f.Services.Services[MaintenanceServiceQuiescer.AgentServiceName] =
+            f.Services.Services[MaintenanceServiceQuiescer.AgentServiceName] with { Dependencies = ["UnexpectedDependency"] };
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => f.Quiescer.QuiesceAsync(f.Layout, CancellationToken.None));
+
+        Assert.DoesNotContain(f.Events, value => value.StartsWith("stop:", StringComparison.Ordinal));
     }
 
     [Fact]

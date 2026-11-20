@@ -1,5 +1,7 @@
 # Sunshine compatibility and deployment qualification
 
+> **สถาปัตยกรรมเปลี่ยนเมื่อ 2026-11-20**: Stream Guard/firewall fence ถูกถอด; Sunshine รันตลอดและใช้ pairing เป็นประตู — ดู [sunshine-local-control.md](sunshine-local-control.md) และ [0jay-migration-2026-11-20.md](0jay-migration-2026-11-20.md)
+
 Status on 2026-11-07: **operational streaming protection is unverified; do not deploy this as an access-control gate.** The installed fork's pairing source contract has been checked and the adapter matches its PIN and client-list APIs. The LocalSystem Guard, startup fence, lease coordinator and Windows firewall/SCM adapters have software tests, and the installer package transaction now passes the Plan/mock and package checks recorded below. Windows boot ordering, TLS credentials, desktop capture and effective firewall policy have not been qualified. No live Sunshine requests, firewall changes, service changes or shutdowns were performed.
 
 ## Read-only inventory on this computer

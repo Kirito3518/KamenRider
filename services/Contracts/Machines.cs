@@ -8,6 +8,8 @@ public record AdminVncTicketResponse(string Ticket, DateTimeOffset ExpiresAtUtc)
 public record CreateAdminVncTicketRequest(string MachineId, string AllowedOrigin);
 public record MachineUpdate(string DisplayName, long HourlyPriceMinorUnits, int MoonlightPort, int SunshinePort) {
     public string? VncLocalIp { get; init; }
+    /// <summary>Admin opt-in for renter-supplied Parsec account login; omitted means unchanged.</summary>
+    public bool? ParsecEnabled { get; init; }
 }
 public record MachineDto(string MachineId, string ApprovalStatus, string DisplayName, long HourlyPriceMinorUnits, string LocalIp, string MacAddress, int MoonlightPort, int SunshinePort, long ConfigRevision, DateTimeOffset? LastSeenAt, string? BootId, string Readiness, string? AgentVersion, string? ApprovedBy, DateTimeOffset? ApprovedAt) {
     public long? AppliedConfigRevision {get;init;}
@@ -27,6 +29,10 @@ public record MachineDto(string MachineId, string ApprovalStatus, string Display
     public long RamBytes { get; init; }
     /// <summary>Sunshine management credential revision the Agent reports as applied.</summary>
     public long AppliedSunshineCredentialRevision { get; init; }
+    /// <summary>Admin opt-in for renter-supplied Parsec account login.</summary>
+    public bool ParsecEnabled { get; init; }
+    /// <summary>Whether the Agent currently advertises a usable Parsec installation.</summary>
+    public bool ParsecAvailable { get; init; }
 }
 
 public record MachineIdentityConfirmation(string Fingerprint);

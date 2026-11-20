@@ -49,6 +49,17 @@ function Open-AgentInstallReturnPage {
     }
 }
 
+function Invoke-LegacyStreamGuardMigration {
+    param(
+        [Parameter(Mandatory)][string]$InstallerPath,
+        [Parameter(Mandatory)][string]$PackageRoot,
+        [Parameter(Mandatory)][string]$BackupDirectory
+    )
+    if (-not (Test-Path -LiteralPath $InstallerPath -PathType Leaf)) { throw 'Remove-StreamGuard.ps1 is missing from the Agent package.' }
+    $installerBlock = [ScriptBlock]::Create([IO.File]::ReadAllText($InstallerPath))
+    return & $installerBlock -InstallScriptRoot $PackageRoot -BackupDirectory $BackupDirectory -Confirm:$false
+}
+
 $effectivePackageRoot = if ([string]::IsNullOrWhiteSpace($PackageRoot)) { $PSScriptRoot } else { $PackageRoot }
 if ([string]::IsNullOrWhiteSpace($effectivePackageRoot) -or -not [IO.Path]::IsPathRooted($effectivePackageRoot)) { throw 'PackageRoot must identify the absolute Agent package directory.' }
 $effectivePackageRoot = [IO.Path]::GetFullPath($effectivePackageRoot)
@@ -81,17 +92,16 @@ if (-not [string]::IsNullOrWhiteSpace($NetworkAdapterId)) {
 $sourceDirectory = Join-Path $effectivePackageRoot 'Agent'
 $serviceInstaller = Join-Path $effectivePackageRoot 'Install-Service.ps1'
 $tightVncInstaller = Join-Path $effectivePackageRoot 'Install-TightVncServer.ps1'
-$streamGateInstaller = Join-Path $effectivePackageRoot 'Prepare-SunshineStreamGate.ps1'
+$removeStreamGuardInstaller = Join-Path $effectivePackageRoot 'Remove-StreamGuard.ps1'
 if (-not (Test-Path -LiteralPath (Join-Path $sourceDirectory 'Agent.exe') -PathType Leaf)) { throw 'Agent.exe is missing from the package.' }
 if (-not (Test-Path -LiteralPath $serviceInstaller -PathType Leaf)) { throw 'Install-Service.ps1 is missing from the package.' }
 if (-not (Test-Path -LiteralPath $tightVncInstaller -PathType Leaf)) { throw 'Install-TightVncServer.ps1 is missing from the package.' }
-if (-not (Test-Path -LiteralPath $streamGateInstaller -PathType Leaf)) { throw 'Prepare-SunshineStreamGate.ps1 is missing from the package.' }
+if (-not (Test-Path -LiteralPath $removeStreamGuardInstaller -PathType Leaf)) { throw 'Remove-StreamGuard.ps1 is missing from the package.' }
+if (-not (Test-Path -LiteralPath (Join-Path $effectivePackageRoot 'PrivateInstallFiles.ps1') -PathType Leaf)) { throw 'PrivateInstallFiles.ps1 is missing from the package.' }
 
 $installDirectory = Join-Path (Join-Path $env:ProgramFiles 'KamenRaider') 'Agent'
 $dataDirectory = Join-Path (Join-Path $env:ProgramData 'KamenRaider') 'Agent'
-$streamGateInstallerBlock = [ScriptBlock]::Create([IO.File]::ReadAllText($streamGateInstaller))
-$streamGatePlan = & $streamGateInstallerBlock -GuardExecutablePath (Join-Path $installDirectory 'Agent.exe') `
-    -ContentRoot $installDirectory -InstallScriptRoot $effectivePackageRoot -Plan
+$streamGuardBackupDirectory = Join-Path (Join-Path $env:ProgramData 'KamenRaider') 'StreamGuardMigration'
 if ($Plan) {
     [pscustomobject]@{
         ControllerUrl = $controllerUrlNormalized
@@ -118,8 +128,29 @@ if ($Plan) {
             NetworkAdapterId = $normalizedAdapterId
         }
         ServiceStartup = 'auto'
-        StreamGateSetup = $streamGatePlan
         StartAfterInstall = $true
+        AgentService = [pscustomobject]@{
+            Name = 'KamenRaider Agent'
+            Account = 'LocalSystem'
+            Startup = 'auto'
+            Dependencies = @()
+            StartAfterInstall = $true
+        }
+        SunshineService = [pscustomobject]@{
+            Name = 'SunshineService'
+            Startup = 'Automatic'
+            EnsureExists = $true
+            EnsureRunning = $true
+            Action = 'Set automatic startup and start SunshineService before the Agent service starts.'
+        }
+        LegacyStreamGuardRemoval = [pscustomobject]@{
+            Script = 'Remove-StreamGuard.ps1'
+            Trigger = 'legacy Stream Guard service, managed firewall rule, dangling Guard dependency, or a virtual-account Agent service'
+            BackupDirectory = $streamGuardBackupDirectory
+            BackupContents = 'Guard/Agent/Sunshine service configuration and the managed firewall rule shape'
+            Idempotent = $true
+            RequiredOutcome = 'Guard removed; Agent service is LocalSystem with no dependencies; SunshineService is Automatic and Running.'
+        }
         EnrollmentTicketStored = $true
         EnrollmentWaitSeconds = 90
         InstallReturnUrl = $returnUrlNormalized
@@ -136,7 +167,6 @@ if (-not ([Security.Principal.WindowsPrincipal]::new([Security.Principal.Windows
 
 $serviceName = 'KamenRaider Agent'
 $guardServiceName = 'KamenRaider Stream Guard'
-$serviceAccount = "NT SERVICE\$serviceName"
 $serviceSid = Get-ServiceSid -ServiceName $serviceName
 $existingService = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
 $existingGuardService = Get-Service -Name $guardServiceName -ErrorAction SilentlyContinue
@@ -151,7 +181,6 @@ $installMode = Get-AgentInstallMode `
     -ServiceExists ([bool]$existingService) `
     -InstallDirectoryExists $installDirectoryExists `
     -DataDirectoryExists $dataDirectoryExists `
-    -GuardServiceExists ([bool]$existingGuardService) `
     -EmptyIdentityDirectoryResidue $emptyIdentityDirectoryResidue
 
 $maintenanceDirectory = Join-Path $env:ProgramData 'KamenRaider.AgentMaintenance'
@@ -191,9 +220,13 @@ if (-not (Test-Path -LiteralPath "Cert:\LocalMachine\Root\$TrustedRootThumbprint
 
 if ($installMode -eq 'repair-enrollment') {
     if (-not $PSCmdlet.ShouldProcess($installDirectory, 'Verify the existing Agent and renew its enrollment ticket')) { return }
+    if (Test-AgentLegacyServiceMigrationNeeded) {
+        Write-Output 'Legacy Stream Guard state or a virtual-account Agent service was detected; running the idempotent Stream Guard removal migration before enrollment repair.'
+        Invoke-LegacyStreamGuardMigration -InstallerPath $removeStreamGuardInstaller -PackageRoot $effectivePackageRoot `
+            -BackupDirectory $streamGuardBackupDirectory | Out-Null
+    }
+    Ensure-SunshineServiceAutomaticAndRunning | Out-Null
     try {
-        & $streamGateInstallerBlock -Action Validate -GuardExecutablePath (Join-Path $installDirectory 'Agent.exe') `
-            -ContentRoot $installDirectory -InstallScriptRoot $effectivePackageRoot | Out-Null
         Invoke-AgentEnrollmentRepair -ServiceName $serviceName -InstallDirectory $installDirectory `
             -DataDirectory $dataDirectory -ControllerUrl $controllerUrlNormalized `
             -EnrollmentTicket $EnrollmentTicket -ServiceSid $serviceSid
@@ -243,8 +276,8 @@ $configStage = $null
 $publishStage = $null
 $publishMoved = $false
 $serviceCreatedByThisRun = $false
-$streamGateTransaction = $null
-$streamGateCommitted = $false
+$legacyMigrationAttempted = $false
+$legacyMigrationCompleted = $false
 $freshFencePublished = $false
 $freshFenceHoldFailed = $false
 $vncSetupAttempted = $false
@@ -311,17 +344,21 @@ try {
         Write-Warning 'An interrupted identity-directory residue was preserved. No fresh clear maintenance fence was created; streaming remains held until a verified recovery operation completes.'
     }
 
-    $streamGateTransaction = & $streamGateInstallerBlock -Action Apply `
-        -GuardExecutablePath (Join-Path $installDirectory 'Agent.exe') -ContentRoot $installDirectory `
-        -InstallScriptRoot $effectivePackageRoot -Confirm:$false
+    if (Test-AgentLegacyServiceMigrationNeeded) {
+        $legacyMigrationAttempted = $true
+        Write-Output 'Legacy Stream Guard state or a virtual-account Agent service was detected; running the idempotent Stream Guard removal migration.'
+        Invoke-LegacyStreamGuardMigration -InstallerPath $removeStreamGuardInstaller -PackageRoot $effectivePackageRoot `
+            -BackupDirectory $streamGuardBackupDirectory | Out-Null
+        $legacyMigrationCompleted = $true
+    }
+    Ensure-SunshineServiceAutomaticAndRunning | Out-Null
 
     $serviceInstallerBlock = [ScriptBlock]::Create([IO.File]::ReadAllText($serviceInstaller))
     & $serviceInstallerBlock -Role Agent -PublishDirectory $installDirectory -DataDirectory $dataDirectory `
         -InstallScriptRoot $effectivePackageRoot `
         -ConfigurationFile $configSource -TrustedRootThumbprint $TrustedRootThumbprint `
-        -EnrollmentTicket $EnrollmentTicket -Dependencies @($guardServiceName) -StartAfterInstall -Confirm:$false
+        -EnrollmentTicket $EnrollmentTicket -StartAfterInstall -Confirm:$false
     $serviceCreatedByThisRun = $true
-    $streamGateCommitted = $true
 
     $receiptPath = Join-Path $dataDirectory 'enrollment-receipt.json'
     $timer = [Diagnostics.Stopwatch]::StartNew()
@@ -359,7 +396,6 @@ try {
     Write-Output "Agent service installed and started with automatic startup. Data directory: $dataDirectory"
 } catch {
     $original = $_
-    $streamGateRollbackError = $null
     if ($freshFencePublished -and -not $serviceCreatedByThisRun) {
         try { Set-FreshAgentMaintenanceFenceHeld -DirectoryPath $maintenanceDirectory -ServiceSid $serviceSid }
         catch {
@@ -367,12 +403,8 @@ try {
             Write-Warning 'Fresh Agent initialization failed; the maintenance fence could not be changed to held. The protected installation and evidence were retained; use the administrator recovery path.'
         }
     }
-    if ($streamGateTransaction -and -not $streamGateCommitted) {
-        try {
-            & $streamGateInstallerBlock -Action Rollback -GuardExecutablePath (Join-Path $installDirectory 'Agent.exe') `
-                -ContentRoot $installDirectory -InstallScriptRoot $effectivePackageRoot `
-                -Transaction $streamGateTransaction | Out-Null
-        } catch { $streamGateRollbackError = $_.Exception }
+    if ($legacyMigrationAttempted -and -not $legacyMigrationCompleted) {
+        Write-Warning "The legacy Stream Guard migration did not complete. Its service and firewall configuration backup is retained under '$streamGuardBackupDirectory'; rerun the admin install command after resolving the reported error (the migration is idempotent)."
     }
     if ($serviceCreatedByThisRun) {
         $failedService = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
@@ -388,14 +420,11 @@ try {
         Remove-Item -LiteralPath $resolvedConfigStage -Recurse -Force
     }
     $serviceExists = [bool](Get-Service -Name $serviceName -ErrorAction SilentlyContinue)
-    $guardExists = [bool](Get-Service -Name $guardServiceName -ErrorAction SilentlyContinue)
-    if (-not $serviceExists -and -not $guardExists -and -not $streamGateRollbackError -and -not $freshFenceHoldFailed -and $publishMoved -and (Test-Path -LiteralPath $installDirectory)) {
+    $legacyMigrationFailed = $legacyMigrationAttempted -and -not $legacyMigrationCompleted
+    if (-not $serviceExists -and -not $legacyMigrationFailed -and -not $freshFenceHoldFailed -and $publishMoved -and (Test-Path -LiteralPath $installDirectory)) {
         $safeInstall = [IO.Path]::GetFullPath($installDirectory)
         $expectedInstall = [IO.Path]::GetFullPath((Join-Path $env:ProgramFiles 'KamenRaider\Agent'))
         if ($safeInstall -eq $expectedInstall) { Remove-Item -LiteralPath $safeInstall -Recurse -Force }
-    }
-    if ($streamGateRollbackError) {
-        throw [AggregateException]::new('Agent installation failed and Stream Guard rollback did not fully restore prior service/firewall state.', @($original.Exception, $streamGateRollbackError))
     }
     throw $original
 } finally {

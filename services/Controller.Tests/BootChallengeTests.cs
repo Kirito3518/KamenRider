@@ -2,10 +2,10 @@ using KamenRaider.Contracts;
 namespace Controller.Tests;
 public class BootChallengeTests {
  [Fact] public async Task ProofFlagsWithoutControllerChallengeCannotResumeLease() {
-  using var f=new LeaseFixture();await f.Active();Assert.Equal("Hold",f.Db.Reconcile("pc",new("new",3,true,true,true,true)).Action);
+  using var f=new LeaseFixture();await f.Active();Assert.Equal("Hold",f.Db.Reconcile("pc",new("new",3,true,true,true,true,StreamReady:true)).Action);
  }
  internal static ReconciliationChallenge Issue(LeaseFixture f,string boot="new")=>Assert.IsType<ReconciliationChallenge>(f.Db.Reconcile("pc",new(boot,3,true)).Challenge);
- internal static ReconcileResponse Prove(LeaseFixture f,ReconciliationChallenge challenge,string? boot=null)=>f.Db.Reconcile("pc",new(boot??challenge.BootId,3,true,true,true,true,challenge));
+ internal static ReconcileResponse Prove(LeaseFixture f,ReconciliationChallenge challenge,string? boot=null,bool streamReady=true)=>f.Db.Reconcile("pc",new(boot??challenge.BootId,3,true,true,true,true,challenge,streamReady));
  [Fact] public async Task DelayedProofForUnallocatedMachineCannotFailNewAllocation() {
   using var f=new LeaseFixture();var challenge=Issue(f);var lease=await f.Create();
   Assert.Equal("Hold",Prove(f,challenge).Action);Assert.Equal("preparing",f.Db.GetLease(lease.Id)!.State);

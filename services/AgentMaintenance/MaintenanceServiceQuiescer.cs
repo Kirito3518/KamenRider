@@ -63,9 +63,8 @@ public sealed class MaintenanceServiceQuiescer(
     TimeSpan? pollInterval = null)
 {
     public const string AgentServiceName = "KamenRaider Agent";
-    public const string GuardServiceName = "KamenRaider Stream Guard";
     public const string SunshineServiceName = "SunshineService";
-    private const string AgentServiceAccount = "NT SERVICE\\KamenRaider Agent";
+    private const string AgentServiceAccount = "LocalSystem";
     private const string LocalSystemAccount = "LocalSystem";
     private readonly TimeSpan timeout = operationTimeout ?? TimeSpan.FromSeconds(30);
     private readonly TimeSpan interval = pollInterval ?? TimeSpan.FromMilliseconds(200);
@@ -225,11 +224,11 @@ public sealed class MaintenanceServiceQuiescer(
 
     private static IEnumerable<ServiceDefinition> Definitions(NormalizedLayout layout)
     {
-        yield return new(AgentServiceName, layout.AgentExecutablePath, AgentServiceAccount, string.Empty, true, null, [GuardServiceName], null);
-        yield return new(GuardServiceName, layout.AgentExecutablePath, LocalSystemAccount, "--stream-guard", true, null, [], null);
-        // Sunshine keeps vendor dependencies; the managed stream gate adds exactly one Guard dependency.
+        // The Agent is a single LocalSystem service with no service dependencies.
+        yield return new(AgentServiceName, layout.AgentExecutablePath, AgentServiceAccount, string.Empty, true, null, [], null);
+        // Sunshine keeps its vendor dependencies and is stopped independently of the Agent.
         yield return new(SunshineServiceName, layout.SunshineServiceExecutablePath, LocalSystemAccount, string.Empty, false,
-            [string.Empty, "--service"], null, GuardServiceName);
+            [string.Empty, "--service"], null, null);
     }
 
     private static IEnumerable<ServiceDefinition> StopOrder(NormalizedLayout layout)
@@ -237,7 +236,6 @@ public sealed class MaintenanceServiceQuiescer(
         var definitions = Definitions(layout).ToDictionary(definition => definition.Name, StringComparer.OrdinalIgnoreCase);
         yield return definitions[AgentServiceName];
         yield return definitions[SunshineServiceName];
-        yield return definitions[GuardServiceName];
     }
 
     internal static (string Executable, string Arguments) ParseImageCommandLine(string commandLine)

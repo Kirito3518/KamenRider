@@ -35,7 +35,6 @@ public sealed class WindowsMaintenanceApplyServiceLifecycleTests
         private readonly Dictionary<string, int> startPids = new(StringComparer.OrdinalIgnoreCase)
         {
             [MaintenanceServiceQuiescer.AgentServiceName] = 201,
-            [MaintenanceServiceQuiescer.GuardServiceName] = 202,
             [MaintenanceServiceQuiescer.SunshineServiceName] = 203
         };
 
@@ -112,21 +111,15 @@ public sealed class WindowsMaintenanceApplyServiceLifecycleTests
             Services.Services[MaintenanceServiceQuiescer.AgentServiceName] = Service(
                 MaintenanceServiceQuiescer.AgentServiceName,
                 '"' + Layout.AgentExecutablePath + '"' + " --contentRoot \"C:\\Program Files\\KamenRaider\\Agent\"",
-                "NT SERVICE\\KamenRaider Agent",
-                [MaintenanceServiceQuiescer.GuardServiceName], 101);
-            Services.Services[MaintenanceServiceQuiescer.GuardServiceName] = Service(
-                MaintenanceServiceQuiescer.GuardServiceName,
-                '"' + Layout.AgentExecutablePath + '"' + " --contentRoot \"C:\\Program Files\\KamenRaider\\Agent\" --stream-guard",
-                "LocalSystem", [], 102);
+                "LocalSystem",
+                [], 101);
             Services.Services[MaintenanceServiceQuiescer.SunshineServiceName] = Service(
                 MaintenanceServiceQuiescer.SunshineServiceName,
                 $"\"{Layout.SunshineServiceExecutablePath}\" --service",
-                "LocalSystem", ["VendorService", MaintenanceServiceQuiescer.GuardServiceName], 103);
+                "LocalSystem", ["VendorService"], 103);
             Processes.PathsByPid[101] = Layout.AgentExecutablePath;
-            Processes.PathsByPid[102] = Layout.AgentExecutablePath;
             Processes.PathsByPid[103] = Layout.SunshineServiceExecutablePath;
             Processes.PathsByPid[201] = Layout.AgentExecutablePath;
-            Processes.PathsByPid[202] = Layout.AgentExecutablePath;
             Processes.PathsByPid[203] = Layout.SunshineServiceExecutablePath;
             Lifecycle = new(Services, Processes, Authorization, Layout,
                 _ => Version,
@@ -145,17 +138,13 @@ public sealed class WindowsMaintenanceApplyServiceLifecycleTests
                 MaintenanceWindowsServiceTypes.Win32OwnProcess);
     }
 
-    [Theory]
-    [InlineData("KamenRaider Agent", "extra")]
-    [InlineData("KamenRaider Stream Guard", "extra")]
-    public async Task AgentAndGuardDependenciesMustMatchTheirInstalledTopology(string serviceName, string extraDependency)
+    [Fact]
+    public async Task AgentDependenciesMustMatchTheInstalledTopology()
     {
         var f = new Fixture();
-        f.Services.Services[serviceName] = f.Services.Services[serviceName] with
+        f.Services.Services[MaintenanceServiceQuiescer.AgentServiceName] = f.Services.Services[MaintenanceServiceQuiescer.AgentServiceName] with
         {
-            Dependencies = serviceName == MaintenanceServiceQuiescer.AgentServiceName
-                ? [MaintenanceServiceQuiescer.GuardServiceName, extraDependency]
-                : [extraDependency]
+            Dependencies = ["extraDependency"]
         };
 
         await Assert.ThrowsAsync<InvalidOperationException>(() => f.StopAllAsync());
@@ -164,13 +153,13 @@ public sealed class WindowsMaintenanceApplyServiceLifecycleTests
     }
 
     [Fact]
-    public async Task SunshineDependencyIsValidatedSeparatelyFromAgentAndGuard()
+    public async Task SunshineDependenciesAreValidatedSeparatelyFromTheAgent()
     {
         var f = new Fixture();
         f.Services.Services[MaintenanceServiceQuiescer.SunshineServiceName] =
             f.Services.Services[MaintenanceServiceQuiescer.SunshineServiceName] with
             {
-                Dependencies = ["VendorService", "AdditionalVendorService", MaintenanceServiceQuiescer.GuardServiceName]
+                Dependencies = ["VendorService", "AdditionalVendorService"]
             };
 
         await f.StopAllAsync();
@@ -178,22 +167,21 @@ public sealed class WindowsMaintenanceApplyServiceLifecycleTests
         Assert.Equal(new[]
         {
             "stop:KamenRaider Agent",
-            "stop:SunshineService",
-            "stop:KamenRaider Stream Guard"
+            "stop:SunshineService"
         }, f.Events.Where(value => value.StartsWith("stop:", StringComparison.Ordinal)));
         Assert.Contains("processes", f.Events);
     }
 
     [Fact]
-    public async Task SunshineMustKeepTheGuardDependencyInstalledByTheStreamGate()
+    public async Task SunshineWithoutDependenciesIsAccepted()
     {
         var f = new Fixture();
         f.Services.Services[MaintenanceServiceQuiescer.SunshineServiceName] =
-            f.Services.Services[MaintenanceServiceQuiescer.SunshineServiceName] with { Dependencies = ["VendorService"] };
+            f.Services.Services[MaintenanceServiceQuiescer.SunshineServiceName] with { Dependencies = [] };
 
-        await Assert.ThrowsAsync<InvalidOperationException>(() => f.StopAllAsync());
+        await f.StopAllAsync();
 
-        Assert.DoesNotContain(f.Events, value => value.StartsWith("stop:", StringComparison.Ordinal));
+        Assert.Contains("stop:SunshineService", f.Events);
     }
 
     [Fact]
@@ -239,22 +227,7 @@ public sealed class WindowsMaintenanceApplyServiceLifecycleTests
     }
 
     [Fact]
-    public async Task GuardContentRootMustMatchTheQuotedInstalledDirectory()
-    {
-        var f = new Fixture();
-        f.Services.Services[MaintenanceServiceQuiescer.GuardServiceName] =
-            f.Services.Services[MaintenanceServiceQuiescer.GuardServiceName] with
-            {
-                ImagePath = '"' + f.Layout.AgentExecutablePath + '"' + " --contentRoot \"C:\\Program Files\\Other Agent\" --stream-guard"
-            };
-
-        await Assert.ThrowsAsync<InvalidOperationException>(() => f.StopAllAsync());
-
-        Assert.DoesNotContain(f.Events, value => value.StartsWith("stop:", StringComparison.Ordinal));
-    }
-
-    [Fact]
-    public async Task QuiescenceStopsDependentsBeforeGuardAndChecksResidualProcesses()
+    public async Task QuiescenceStopsAgentBeforeSunshineAndChecksResidualProcesses()
     {
         var f = new Fixture();
 
@@ -263,8 +236,7 @@ public sealed class WindowsMaintenanceApplyServiceLifecycleTests
         Assert.Equal(new[]
         {
             "stop:KamenRaider Agent",
-            "stop:SunshineService",
-            "stop:KamenRaider Stream Guard"
+            "stop:SunshineService"
         }, f.Events.Where(value => value.StartsWith("stop:", StringComparison.Ordinal)));
         Assert.True(f.Events.IndexOf("processes") < f.Events.IndexOf("authorize:held-and-quiesced"));
         Assert.All(f.Services.Services.Values, value => Assert.Equal(MaintenanceWindowsServiceState.Stopped, value.State));
@@ -316,7 +288,7 @@ public sealed class WindowsMaintenanceApplyServiceLifecycleTests
     }
 
     [Fact]
-    public async Task StartupUsesGuardThenSeparateSunshineThenAgentAndVerifiesImages()
+    public async Task StartupStartsSunshineThenAgentAndVerifiesImages()
     {
         var f = new Fixture();
         await f.StopAllAsync();
@@ -327,18 +299,16 @@ public sealed class WindowsMaintenanceApplyServiceLifecycleTests
 
         Assert.Equal(new[]
         {
-            "start:KamenRaider Stream Guard",
             "start:SunshineService",
             "start:KamenRaider Agent"
         }, f.Events.Where(value => value.StartsWith("start:", StringComparison.Ordinal)));
-        Assert.Contains("image:202", f.Events);
         Assert.Contains("image:203", f.Events);
         Assert.Contains("image:201", f.Events);
         Assert.All(f.Services.Services.Values, value => Assert.Equal(MaintenanceWindowsServiceState.Running, value.State));
     }
 
     [Fact]
-    public async Task StartFailureDoesNotStartDependentsOrLaterServices()
+    public async Task StartFailureDoesNotStartLaterServices()
     {
         var f = new Fixture();
         await f.StopAllAsync();
@@ -348,7 +318,7 @@ public sealed class WindowsMaintenanceApplyServiceLifecycleTests
         await Assert.ThrowsAsync<InvalidOperationException>(() => f.Lifecycle.StartAndVerifyAsync(
             Fixture.OperationId, @"C:\Program Files\KamenRaider\Agent", Fixture.Version, CancellationToken.None));
 
-        Assert.Equal(new[] { "start:KamenRaider Stream Guard", "start:SunshineService" },
+        Assert.Equal(new[] { "start:SunshineService" },
             f.Events.Where(value => value.StartsWith("start:", StringComparison.Ordinal)));
         Assert.DoesNotContain("start:KamenRaider Agent", f.Events);
     }
@@ -359,30 +329,29 @@ public sealed class WindowsMaintenanceApplyServiceLifecycleTests
         var f = new Fixture(TimeSpan.FromMilliseconds(8));
         await f.StopAllAsync();
         f.Events.Clear();
-        f.Services.NeverStart.Add(MaintenanceServiceQuiescer.GuardServiceName);
+        f.Services.NeverStart.Add(MaintenanceServiceQuiescer.SunshineServiceName);
 
         await Assert.ThrowsAsync<TimeoutException>(() => f.Lifecycle.StartAndVerifyAsync(
             Fixture.OperationId, @"C:\Program Files\KamenRaider\Agent", Fixture.Version, CancellationToken.None));
 
-        Assert.Equal(new[] { "start:KamenRaider Stream Guard" },
+        Assert.Equal(new[] { "start:SunshineService" },
             f.Events.Where(value => value.StartsWith("start:", StringComparison.Ordinal)));
-        Assert.DoesNotContain("start:SunshineService", f.Events);
+        Assert.DoesNotContain("start:KamenRaider Agent", f.Events);
     }
 
     [Fact]
-    public async Task LosingHoldDuringGuardStartupPreventsSunshineAndAgentStart()
+    public async Task LosingHoldDuringSunshineStartupPreventsAgentStart()
     {
         var f = new Fixture();
         await f.StopAllAsync();
         f.Events.Clear();
-        f.Services.LoseHoldAfterStartFor = MaintenanceServiceQuiescer.GuardServiceName;
+        f.Services.LoseHoldAfterStartFor = MaintenanceServiceQuiescer.SunshineServiceName;
 
         await Assert.ThrowsAsync<InvalidOperationException>(() => f.Lifecycle.StartAndVerifyAsync(
             Fixture.OperationId, @"C:\Program Files\KamenRaider\Agent", Fixture.Version, CancellationToken.None));
 
-        Assert.Equal(new[] { "start:KamenRaider Stream Guard" },
+        Assert.Equal(new[] { "start:SunshineService" },
             f.Events.Where(value => value.StartsWith("start:", StringComparison.Ordinal)));
-        Assert.DoesNotContain("start:SunshineService", f.Events);
         Assert.DoesNotContain("start:KamenRaider Agent", f.Events);
     }
 

@@ -302,3 +302,44 @@ public sealed class WindowsMaintenanceFenceReader : IMaintenanceFenceReader
         public uint FileIndexLow;
     }
 }
+
+internal static class ServiceSidResolver
+{
+    private static readonly System.Text.RegularExpressions.Regex ServiceSidPattern = new(
+        @"SERVICE SID:\s*(S-1-5-80(?:-\d+){5})",
+        System.Text.RegularExpressions.RegexOptions.Compiled |
+        System.Text.RegularExpressions.RegexOptions.CultureInvariant |
+        System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+    public static SecurityIdentifier Resolve(string serviceName)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(serviceName);
+        if (!OperatingSystem.IsWindows())
+            throw new PlatformNotSupportedException("Windows service SIDs are available only on Windows.");
+
+        var scPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "sc.exe");
+        var startInfo = new System.Diagnostics.ProcessStartInfo
+        {
+            FileName = scPath,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true
+        };
+        startInfo.ArgumentList.Add("showsid");
+        startInfo.ArgumentList.Add(serviceName);
+        using var process = System.Diagnostics.Process.Start(startInfo) ?? throw new InvalidOperationException("Unable to start Service Control Manager SID lookup.");
+
+        if (!process.WaitForExit(5000))
+        {
+            process.Kill(entireProcessTree: true);
+            throw new TimeoutException("Service Control Manager SID lookup timed out.");
+        }
+
+        var output = process.StandardOutput.ReadToEnd() + Environment.NewLine + process.StandardError.ReadToEnd();
+        var match = ServiceSidPattern.Match(output);
+        if (process.ExitCode != 0 || !match.Success)
+            throw new InvalidOperationException($"Unable to resolve the service SID for '{serviceName}'.");
+        return new SecurityIdentifier(match.Groups[1].Value);
+    }
+}

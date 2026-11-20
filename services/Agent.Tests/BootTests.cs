@@ -1,154 +1,517 @@
-using KamenRaider.Agent.Startup;
-using KamenRaider.Agent.Leases;
 using KamenRaider.Agent.Configuration;
+using KamenRaider.Agent.Leases;
+using KamenRaider.Agent.Startup;
+using KamenRaider.Agent.Sunshine;
 using KamenRaider.Contracts;
+
 namespace Agent.Tests;
-public class BootTests {
- [Theory][InlineData(false,true,true)][InlineData(true,false,true)][InlineData(true,true,false)]
- public async Task MissingRestorationFenceOrHealthCannotReportReady(bool restored,bool cleaned,bool healthy) {
-  using var f=new Fixture();f.Environment.Restored=restored;f.Environment.Cleaned=cleaned;f.Environment.Healthy=healthy;
-  Assert.Equal(Readiness.NotReady,await f.Run());Assert.False(f.Client.Last!.RestorationVerified);
- }
- [Fact] public async Task OfflineBootClosesGateAndCannotReportReady() {
-  using var f=new Fixture();f.Client.Offline=true;Assert.Equal(Readiness.NotReady,await f.Run());Assert.True(f.Gate.Blocked);
- }
- [Fact] public async Task CurrentConfigurationMustBeAppliedBeforeProofSubmission() {
-  using var f=new Fixture();Assert.Equal(Readiness.Ready,await f.Run());Assert.Equal(7,f.Client.Last!.AppliedConfigRevision);Assert.Equal("os-boot",f.Client.Last.BootId);Assert.True(f.Client.Last.FencedCleanupVerified);
- }
- [Fact] public async Task SameBootServiceRestartStillRequiresIndependentRestorationProof() {
-  using var f=new Fixture();Assert.Equal(Readiness.Ready,await f.Run());f.Environment.Restored=false;Assert.Equal(Readiness.NotReady,await f.Run());
- }
- [Fact] public async Task ReadyIsRevokedWhenRuntimeHealthFalls() {
-  using var f=new Fixture();Assert.Equal(Readiness.Ready,await f.Run());var before=f.Gate.Calls;f.Environment.RuntimeHealthy=false;Assert.Equal(Readiness.NotReady,await f.Reconciler.RevalidateRuntimeAsync(default));Assert.True(f.Gate.Calls>before);f.Environment.RuntimeHealthy=true;Assert.Equal(Readiness.Ready,await f.Reconciler.RevalidateRuntimeAsync(default));
- }
- [Fact] public async Task GateFailureInvalidatesRuntimeEvidenceUntilReconciliationSucceeds() {
-  using var f=new Fixture();Assert.Equal(Readiness.Ready,await f.Run());f.Environment.RuntimeHealthy=false;f.Gate.Fail=true;Assert.Equal(Readiness.Fault,await f.Reconciler.RevalidateRuntimeAsync(default));Assert.False(f.Reconciler.HasRuntimeEvidence);f.Environment.RuntimeHealthy=true;f.Gate.Fail=false;Assert.Equal(Readiness.NotReady,await f.Reconciler.RevalidateRuntimeAsync(default));Assert.False(f.Reconciler.HasRuntimeEvidence);
- }
- [Fact] public async Task BootChangeInvalidatesRuntimeEvidenceAndClosesGate() {
-  using var f=new Fixture();Assert.Equal(Readiness.Ready,await f.Run());var before=f.Gate.Calls;f.Clock.BootId="next-boot";Assert.Equal(Readiness.NotReady,await f.Reconciler.RevalidateRuntimeAsync(default));Assert.False(f.Reconciler.HasRuntimeEvidence);Assert.True(f.Gate.Calls>before);
- }
- [Fact] public async Task ConfigurationChangeRequiresFreshBootProof() {
-  using var f=new Fixture();Assert.Equal(Readiness.Ready,await f.Run());var before=f.Gate.Calls;await f.Configuration.ApplyAsync(new(8,6001,6002),default);Assert.Equal(Readiness.NotReady,await f.Reconciler.RevalidateRuntimeAsync(default));Assert.False(f.Reconciler.HasRuntimeEvidence);Assert.True(f.Gate.Calls>before);
- }
- [Fact] public async Task ResumeCannotBecomeReadyUntilLeaseIsDurablyRestored() {
-  using var f=new Fixture();f.Client.Resume=true;Assert.Equal(Readiness.NotReady,await f.Run());f.Importer.Result=true;Assert.Equal(Readiness.Ready,await f.Run());
-  Assert.Equal(2,f.Importer.Calls);Assert.Equal(f.Client.LastResponse!.Lease,f.Importer.Lease);Assert.Equal(f.Client.LastResponse.ServerTimeUtc,f.Importer.ControllerTime);Assert.Equal(f.Clock.UptimeMilliseconds,f.Importer.RequestStartedUptime);
- }
- [Fact] public async Task LeaseExpiryDuringImportCannotReportReady() {
-  using var f=new Fixture();f.Client.Resume=true;f.Importer.Result=true;f.Importer.OnImport=()=>f.Clock.Uptime=120010;
-  Assert.Equal(Readiness.NotReady,await f.Run());
- }
- [Fact] public async Task AvailableMachineDoesNotImportAnActiveLease() {
-  using var f=new Fixture();Assert.Equal(Readiness.Ready,await f.Run());Assert.Equal(0,f.Importer.Calls);Assert.Equal(1,f.Importer.ClearCalls);Assert.Equal(f.Clock.BootId,f.Importer.ClearedBootId);
- }
- [Fact] public async Task AvailableMachineCannotBecomeReadyUntilOldLeaseSnapshotIsCleared() {
-  using var f=new Fixture();f.Importer.ClearResult=false;Assert.Equal(Readiness.NotReady,await f.Run());Assert.Equal(1,f.Importer.ClearCalls);Assert.Equal(0,f.Importer.Calls);
- }
- [Theory][InlineData(true,false)][InlineData(false,true)] public async Task ResumeLeaseMustMatchAllocationAndRevisionBoundToChallenge(bool mismatchAllocation,bool mismatchRevision) {
-  using var f=new Fixture();f.Client.Resume=true;f.Client.MismatchAllocation=mismatchAllocation;f.Client.MismatchRevision=mismatchRevision;f.Importer.Result=true;
-  Assert.Equal(Readiness.NotReady,await f.Run());Assert.Equal(0,f.Importer.Calls);
- }
- [Theory][InlineData(false,true,true)][InlineData(true,false,true)][InlineData(true,true,false)] public async Task ActiveLeaseIsNotImportedBeforeAllBootEvidencePasses(bool restored,bool cleaned,bool healthy) {
-  using var f=new Fixture();f.Client.Resume=true;f.Environment.Restored=restored;f.Environment.Cleaned=cleaned;f.Environment.Healthy=healthy;f.Importer.Result=true;
-  Assert.Equal(Readiness.NotReady,await f.Run());Assert.Equal(0,f.Importer.Calls);
- }
-  [Fact] public async Task FencedPairingCleanupCompletesBeforeAResumedLeaseIsImported() {
-   using var f=new Fixture();f.Client.Resume=true;f.Importer.Result=true;
-   Assert.Equal(Readiness.Ready,await f.Run());
-   Assert.True(f.Events.IndexOf("pairing-and-client-cleanup")<f.Events.IndexOf("lease-import"));
-  }
- [Fact] public async Task MissingControllerChallengeCannotSubmitProofOrBecomeReady() {
-  using var f=new Fixture();f.Client.NoChallenge=true;Assert.Equal(Readiness.NotReady,await f.Run());Assert.False(f.Client.Last!.HealthVerified);
-  Assert.Equal("blocked", Diagnostic(f.Reconciler, "bootChallenge"));
-  Assert.Equal("unknown", Diagnostic(f.Reconciler, "restoration"));
- }
- [Theory][InlineData(true,false)][InlineData(false,true)] public async Task InvalidControllerChallengeIsReportedAsBlocked(bool expired,bool wrongBoot) {
-  using var f=new Fixture();f.Client.ExpiredChallenge=expired;f.Client.MismatchedBoot=wrongBoot;
-  Assert.Equal(Readiness.NotReady,await f.Run());
-  Assert.Equal("blocked", Diagnostic(f.Reconciler, "bootChallenge"));
-  Assert.Equal("unknown", Diagnostic(f.Reconciler, "restoration"));
- }
- [Fact] public async Task UnavailableBaselineIsReportedWithoutOpeningTheGate() {
-  using var f=new Fixture(baselineValidated:false);
-  Assert.Equal(Readiness.NotReady,await f.Run());
-  Assert.True(f.Gate.Blocked);
-  Assert.Equal("unavailable", Diagnostic(f.Reconciler, "baseline"));
-  Assert.Equal("passed", Diagnostic(f.Reconciler, "bootChallenge"));
-  Assert.Equal("unknown", Diagnostic(f.Reconciler, "restoration"));
- }
- [Theory][InlineData(false,true,true,"restoration")][InlineData(true,false,true,"streamFence")][InlineData(true,true,false,"desktopHealth")]
- public async Task FailedEvidenceReportsOnlyTheFirstBlockingCheck(bool restored,bool cleaned,bool healthy,string checkId) {
-  using var f=new Fixture();f.Environment.Restored=restored;f.Environment.Cleaned=cleaned;f.Environment.Healthy=healthy;
-  Assert.Equal(Readiness.NotReady,await f.Run());
-  Assert.Equal("blocked", Diagnostic(f.Reconciler, checkId));
-  var order = DiagnosticIds;
-  var index = Array.IndexOf(order, checkId);
-  Assert.All(order.Skip(index + 1).Where(id=>id!="configurationRevision"), id => Assert.Equal("unknown", Diagnostic(f.Reconciler, id)));
- }
- [Fact] public async Task PositiveBootProofReportsChecksAsPassedOnlyAfterEachCheckRuns() {
-  using var f=new Fixture();
-  Assert.Equal(Readiness.Ready,await f.Run());
-  Assert.Equal("unknown", Diagnostic(f.Reconciler, "runtimeHealth"));
-  Assert.Equal(Readiness.Ready,await f.Reconciler.RevalidateRuntimeAsync(default));
-  Assert.Equal(DiagnosticIds.Select(id => (id, "passed")), DiagnosticReport(f.Reconciler));
- }
- [Fact] public async Task RuntimeHealthFailureUpdatesRuntimeDiagnosticAndKeepsGateClosed() {
-  using var f=new Fixture();Assert.Equal(Readiness.Ready,await f.Run());
-  f.Environment.RuntimeHealthy=false;
-  Assert.Equal(Readiness.NotReady,await f.Reconciler.RevalidateRuntimeAsync(default));
-  Assert.Equal("blocked", Diagnostic(f.Reconciler, "runtimeHealth"));
-  Assert.True(f.Gate.Blocked);
-  f.Environment.RuntimeHealthy=true;
-  Assert.Equal(Readiness.Ready,await f.Reconciler.RevalidateRuntimeAsync(default));
-  Assert.Equal("passed", Diagnostic(f.Reconciler, "runtimeHealth"));
- }
- [Fact] public async Task RuntimeHealthExceptionDoesNotLeaveAPreviousPassedDiagnostic() {
-  using var f=new Fixture();Assert.Equal(Readiness.Ready,await f.Run());
-  Assert.Equal(Readiness.Ready,await f.Reconciler.RevalidateRuntimeAsync(default));
-  f.Environment.RuntimeThrows=true;
-  Assert.Equal(Readiness.Fault,await f.Reconciler.RevalidateRuntimeAsync(default));
-  Assert.Equal("unknown",Diagnostic(f.Reconciler,"runtimeHealth"));
- }
- [Fact] public async Task ProofIsBoundToExactControllerChallenge() {
-  using var f=new Fixture();Assert.Equal(Readiness.Ready,await f.Run());Assert.Equal("generation-1",f.Client.Last!.Challenge?.Token);Assert.Equal("allocation-1",f.Client.Last.Challenge?.AllocationId);Assert.Equal(4,f.Client.Last.Challenge?.LeaseRevision);
- }
- sealed class Fixture:IDisposable {
-  readonly string path=Path.Combine(Path.GetTempPath(),Guid.NewGuid().ToString());public Clock Clock=new();public Gate Gate=new();public Client Client=new();public Environment Environment=new();public Importer Importer=new();public List<string> Events=[];public AppliedConfiguration Configuration;public BootReconciler Reconciler;
-  public Fixture(bool baselineValidated=true){Directory.CreateDirectory(path);Configuration=new(path);Environment.Events=Events;Importer.Events=Events;Reconciler=new BootReconciler(Clock,Gate,Configuration,Client,Environment,Importer,new BaselineEvidence(baselineValidated?BootEvidenceStatus.Passed:BootEvidenceStatus.Unavailable));}
-  public Task<Readiness> Run()=>Reconciler.ReconcileAsync(default);
-  public void Dispose()=>Directory.Delete(path,true);
- }
- sealed class Clock:IBootClock {public string BootId{get;set;}="os-boot";public long Uptime=10;public long UptimeMilliseconds=>Uptime;}
- sealed class Gate:IStreamGate {public bool Blocked;public bool Fail;public int Calls;public Task BlockAsync(CancellationToken ct){Calls++;if(Fail)return Task.FromException(new IOException("Stream gate unavailable"));Blocked=true;return Task.CompletedTask;}public Task AllowAsync(StreamLeaseGrant grant,CancellationToken ct){if(Fail)return Task.FromException(new IOException("Stream gate unavailable"));Blocked=false;return Task.CompletedTask;}}
- sealed class Client:IBootReconciliationClient {
-  public bool Offline,Resume,NoChallenge,ExpiredChallenge,MismatchedBoot,MismatchAllocation,MismatchRevision;public ReconcileRequest? Last;public ReconcileResponse? LastResponse;
-  public Task<ReconcileResponse> ReconcileAsync(ReconcileRequest request,CancellationToken ct){Last=request;if(Offline)throw new HttpRequestException();var lease=Resume?new ActiveLeaseConfirmation("rental",1,"os-boot",DateTimeOffset.UtcNow.AddMinutes(1)):null;var allocation=Resume?(MismatchAllocation?"another-rental":"rental"):"allocation-1";var revision=Resume?(MismatchRevision?2:1):4;var challengeBoot=MismatchedBoot?"other-boot":"os-boot";var challengeExpiry=ExpiredChallenge?DateTimeOffset.UtcNow.AddSeconds(-1):DateTimeOffset.UtcNow.AddSeconds(30);LastResponse=new ReconcileResponse(DateTimeOffset.UtcNow,new(7,5000,6000),lease,request.HealthVerified?(Resume?"ResumeLease":"PrepareAvailable"):"Hold",NoChallenge?null:new("generation-1",challengeBoot,allocation,revision,challengeExpiry));return Task.FromResult(LastResponse);}
- }
- sealed class Environment:IBootEnvironment {
-  public bool Restored=true,Cleaned=true,Healthy=true,RuntimeHealthy=true,RuntimeThrows;public List<string>? Events;
-  public Task<BootEvidenceStatus> VerifyRestorationAsync(ReconciliationChallenge challenge,CancellationToken ct){Events?.Add("restoration-proof");return Task.FromResult(Restored?BootEvidenceStatus.Passed:BootEvidenceStatus.Blocked);}
-  public Task<BootEvidenceStatus> FenceAndClearAsync(ReconciliationChallenge challenge,CancellationToken ct){Events?.Add("pairing-and-client-cleanup");return Task.FromResult(Cleaned?BootEvidenceStatus.Passed:BootEvidenceStatus.Blocked);}
-  public Task<BootEvidenceStatus> VerifyHealthAsync(ReconciliationChallenge challenge,CancellationToken ct){Events?.Add("desktop-health");return Task.FromResult(Healthy?BootEvidenceStatus.Passed:BootEvidenceStatus.Blocked);}
-  public Task<BootEvidenceStatus> VerifyRuntimeHealthAsync(string bootId,long configurationRevision,CancellationToken ct){if(RuntimeThrows)throw new IOException("runtime evidence failed");return Task.FromResult(RuntimeHealthy?BootEvidenceStatus.Passed:BootEvidenceStatus.Blocked);}
- }
- sealed class Importer:IReconciledLeaseImporter {
-   public bool Result,ClearResult=true;public int Calls,ClearCalls;public string? ClearedBootId;public ActiveLeaseConfirmation? Lease;public DateTimeOffset ControllerTime;public long RequestStartedUptime;public Action? OnImport;public List<string>? Events;
-   public Task<bool> ClearAsync(string bootId,CancellationToken ct){Events?.Add("old-lease-clear");ClearCalls++;ClearedBootId=bootId;return Task.FromResult(ClearResult);}
-   public Task<bool> ImportAsync(ActiveLeaseConfirmation lease,DateTimeOffset controllerTime,long requestStartedUptime,CancellationToken ct){Events?.Add("lease-import");Calls++;Lease=lease;ControllerTime=controllerTime;RequestStartedUptime=requestStartedUptime;OnImport?.Invoke();return Task.FromResult(Result);}
- }
 
- sealed class BaselineEvidence(BootEvidenceStatus status):IBootBaselineEvidence { public BootEvidenceStatus Status=>status; }
+/// <summary>
+/// 0jay-style boot readiness: configuration, boot challenge and lease reconciliation still gate
+/// readiness, the Sunshine local endpoints must be live, and the boot cleanup (unpair-all) must
+/// pass. Restoration and desktop-health evidence are reported as advisory diagnostics only.
+/// </summary>
+public class BootTests
+{
+    [Theory]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    public async Task RestorationAndDesktopHealthAreAdvisoryDiagnosticsOnly(bool restored, bool healthy)
+    {
+        using var f = new Fixture();
+        f.Environment.Restored = restored;
+        f.Environment.Healthy = healthy;
 
- private static readonly string[] DiagnosticIds=["baseline","bootChallenge","restoration","streamFence","desktopHealth","configurationRevision","leaseReconciliation","runtimeHealth"];
- private static string Diagnostic(BootReconciler reconciler,string checkId)=>DiagnosticReport(reconciler).Single(x=>x.CheckId==checkId).Status;
- private static (string CheckId,string Status)[] DiagnosticReport(BootReconciler reconciler) {
-  var property=typeof(BootReconciler).GetProperty("ReadinessDiagnostics");Assert.NotNull(property);
-  var values=Assert.IsAssignableFrom<System.Collections.IEnumerable>(property!.GetValue(reconciler));
-  return values.Cast<object>().Select(value=>{
-   var type=value.GetType();
-   var checkId=type.GetProperty("CheckId")?.GetValue(value)?.ToString();
-   var status=type.GetProperty("Status")?.GetValue(value)?.ToString();
-   return (Assert.IsType<string>(checkId),Assert.IsType<string>(status));
-  }).ToArray();
- }
+        Assert.Equal(Readiness.Ready, await f.Run());
+
+        Assert.Equal("passed", f.Diagnostics(ReadinessDiagnosticIds.BootChallenge));
+        Assert.Equal("passed", f.Diagnostics(ReadinessDiagnosticIds.StreamFence));
+        Assert.Equal(restored ? "passed" : "blocked", f.Diagnostics(ReadinessDiagnosticIds.Restoration));
+        Assert.Equal(healthy ? "passed" : "blocked", f.Diagnostics(ReadinessDiagnosticIds.DesktopHealth));
+
+        var proof = f.Client.Requests[^1];
+        Assert.Equal(restored, proof.RestorationVerified);
+        Assert.Equal(healthy, proof.HealthVerified);
+        Assert.True(proof.FencedCleanupVerified);
+        Assert.True(proof.StreamReady);
+    }
+
+    [Fact]
+    public async Task MissingStreamCleanupCannotReportReady()
+    {
+        using var f = new Fixture();
+        f.Environment.Cleaned = false;
+
+        Assert.Equal(Readiness.NotReady, await f.Run());
+
+        Assert.Single(f.Client.Requests);
+        Assert.Equal("blocked", f.Diagnostics(ReadinessDiagnosticIds.StreamFence));
+        Assert.Equal(BootEvidenceStatus.Blocked, f.Environment.LastCleanStatus);
+    }
+
+    [Fact]
+    public async Task OfflineBootCannotReportReady()
+    {
+        using var f = new Fixture();
+        f.Client.Offline = true;
+
+        Assert.Equal(Readiness.NotReady, await f.Run());
+
+        Assert.Empty(f.Client.Requests);
+        Assert.Equal(0, f.Liveness.ProbeCalls);
+    }
+
+    [Fact]
+    public async Task ReadyRequiresSunshineLiveness()
+    {
+        using var f = new Fixture();
+        f.Liveness.Ready = false;
+
+        Assert.Equal(Readiness.NotReady, await f.Run());
+        Assert.Single(f.Client.Requests);
+        Assert.Equal("blocked", f.Diagnostics(ReadinessDiagnosticIds.StreamFence));
+        Assert.Equal("blocked", f.Diagnostics(ReadinessDiagnosticIds.RuntimeHealth));
+
+        f.Liveness.Ready = true;
+        Assert.Equal(Readiness.Ready, await f.Run());
+        Assert.Equal(3, f.Client.Requests.Count);
+        Assert.Equal("passed", f.Diagnostics(ReadinessDiagnosticIds.StreamFence));
+        Assert.Equal("passed", f.Diagnostics(ReadinessDiagnosticIds.RuntimeHealth));
+        Assert.True(f.Client.Requests[^1].StreamReady);
+    }
+
+    [Fact]
+    public async Task LivenessProbeExceptionIsAReadinessFault()
+    {
+        using var f = new Fixture();
+        f.Liveness.Throw = true;
+
+        Assert.Equal(Readiness.Fault, await f.Run());
+
+        Assert.Single(f.Client.Requests);
+        Assert.Equal("blocked", f.Diagnostics(ReadinessDiagnosticIds.StreamFence));
+        Assert.Equal("blocked", f.Diagnostics(ReadinessDiagnosticIds.RuntimeHealth));
+    }
+
+    [Fact]
+    public async Task CurrentConfigurationMustBeAppliedBeforeProofSubmission()
+    {
+        using var f = new Fixture();
+
+        Assert.Equal(Readiness.Ready, await f.Run());
+
+        Assert.Equal(2, f.Client.Requests.Count);
+        var proof = f.Client.Requests[^1];
+        Assert.Equal(7, proof.AppliedConfigRevision);
+        Assert.Equal("os-boot", proof.BootId);
+        Assert.True(proof.FencedCleanupVerified);
+        Assert.Equal("passed", f.Diagnostics(ReadinessDiagnosticIds.ConfigurationRevision));
+    }
+
+    [Fact]
+    public async Task BootChallengeIsRequiredForReadiness()
+    {
+        using var f = new Fixture();
+        f.Client.NoChallenge = true;
+
+        Assert.Equal(Readiness.NotReady, await f.Run());
+        Assert.Single(f.Client.Requests);
+        Assert.Equal("blocked", f.Diagnostics(ReadinessDiagnosticIds.BootChallenge));
+        Assert.Equal("unknown", f.Diagnostics(ReadinessDiagnosticIds.Restoration));
+    }
+
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public async Task InvalidBootChallengeIsReportedAsBlocked(bool expired, bool wrongBoot)
+    {
+        using var f = new Fixture();
+        f.Client.ExpiredChallenge = expired;
+        f.Client.MismatchedBoot = wrongBoot;
+
+        Assert.Equal(Readiness.NotReady, await f.Run());
+
+        Assert.Single(f.Client.Requests);
+        Assert.Equal("blocked", f.Diagnostics(ReadinessDiagnosticIds.BootChallenge));
+    }
+
+    [Fact]
+    public async Task UnavailableBaselineIsAnAdvisoryDiagnostic()
+    {
+        using var f = new Fixture(baselineValidated: false);
+
+        Assert.Equal(Readiness.Ready, await f.Run());
+
+        Assert.Equal("unavailable", f.Diagnostics(ReadinessDiagnosticIds.Baseline));
+        Assert.Equal("passed", f.Diagnostics(ReadinessDiagnosticIds.BootChallenge));
+        Assert.False(f.Client.Requests[0].BaselineValidated);
+    }
+
+    [Fact]
+    public async Task CleanupRunsBeforeLivenessAndResumeDurabilityProof()
+    {
+        using var f = new Fixture();
+        f.Client.Resume = true;
+        f.Importer.Result = true;
+        f.Environment.Events = f.Events;
+        f.Liveness.Events = f.Events;
+        f.Importer.Events = f.Events;
+
+        Assert.Equal(Readiness.Ready, await f.Run());
+
+        var cleanupIndex = f.Events.IndexOf("cleanup");
+        var livenessIndex = f.Events.IndexOf("liveness");
+        var importIndex = f.Events.IndexOf("lease-import");
+        Assert.True(cleanupIndex >= 0);
+        Assert.True(livenessIndex > cleanupIndex);
+        Assert.True(importIndex > livenessIndex);
+        Assert.True(f.Events.IndexOf("old-lease-clear") < importIndex);
+    }
+
+    [Fact]
+    public async Task SameBootServiceRestartRevalidatesLiveness()
+    {
+        using var f = new Fixture();
+        Assert.Equal(Readiness.Ready, await f.Run());
+
+        f.Liveness.Ready = false;
+        Assert.Equal(Readiness.NotReady, await f.Reconciler.RevalidateRuntimeAsync(default));
+        Assert.Equal("blocked", f.Diagnostics(ReadinessDiagnosticIds.RuntimeHealth));
+
+        f.Liveness.Ready = true;
+        Assert.Equal(Readiness.Ready, await f.Reconciler.RevalidateRuntimeAsync(default));
+        Assert.Equal("passed", f.Diagnostics(ReadinessDiagnosticIds.RuntimeHealth));
+        Assert.Equal(3, f.Liveness.ProbeCalls);
+    }
+
+    [Fact]
+    public async Task RuntimeLivenessExceptionReportsFaultAndBlockedDiagnostics()
+    {
+        using var f = new Fixture();
+        Assert.Equal(Readiness.Ready, await f.Run());
+
+        f.Liveness.Throw = true;
+        Assert.Equal(Readiness.Fault, await f.Reconciler.RevalidateRuntimeAsync(default));
+
+        Assert.Equal("blocked", f.Diagnostics(ReadinessDiagnosticIds.StreamFence));
+        Assert.Equal("blocked", f.Diagnostics(ReadinessDiagnosticIds.RuntimeHealth));
+    }
+
+    [Fact]
+    public async Task RevalidationBeforeReconciliationIsNotReady()
+    {
+        using var f = new Fixture();
+
+        Assert.Equal(Readiness.NotReady, await f.Reconciler.RevalidateRuntimeAsync(default));
+
+        Assert.False(f.Reconciler.HasRuntimeEvidence);
+        Assert.Equal("unknown", f.Diagnostics(ReadinessDiagnosticIds.RuntimeHealth));
+    }
+
+    [Fact]
+    public async Task BootChangeInvalidatesRuntimeEvidence()
+    {
+        using var f = new Fixture();
+        Assert.Equal(Readiness.Ready, await f.Run());
+
+        f.Clock.BootId = "next-boot";
+
+        Assert.Equal(Readiness.NotReady, await f.Reconciler.RevalidateRuntimeAsync(default));
+        Assert.False(f.Reconciler.HasRuntimeEvidence);
+        Assert.Equal("blocked", f.Diagnostics(ReadinessDiagnosticIds.BootChallenge));
+    }
+
+    [Fact]
+    public async Task ConfigurationChangeRequiresFreshBootProof()
+    {
+        using var f = new Fixture();
+        Assert.Equal(Readiness.Ready, await f.Run());
+
+        await f.Configuration.ApplyAsync(new(8, 6001, 6002), default);
+
+        Assert.Equal(Readiness.NotReady, await f.Reconciler.RevalidateRuntimeAsync(default));
+        Assert.False(f.Reconciler.HasRuntimeEvidence);
+        Assert.Equal("blocked", f.Diagnostics(ReadinessDiagnosticIds.ConfigurationRevision));
+    }
+
+    [Fact]
+    public async Task PositiveBootProofReportsEveryAdvisoryCheck()
+    {
+        using var f = new Fixture();
+
+        Assert.Equal(Readiness.Ready, await f.Run());
+
+        Assert.All(ReadinessDiagnosticIds.Canonical, id => Assert.Equal("passed", f.Diagnostics(id)));
+    }
+
+    [Fact]
+    public async Task ProofIsBoundToExactControllerChallenge()
+    {
+        using var f = new Fixture();
+
+        Assert.Equal(Readiness.Ready, await f.Run());
+
+        Assert.Equal("generation-1", f.Client.Requests[^1].Challenge?.Token);
+        Assert.Equal("allocation-1", f.Client.Requests[^1].Challenge?.AllocationId);
+        Assert.Equal(4, f.Client.Requests[^1].Challenge?.LeaseRevision);
+        Assert.Equal("generation-1", f.Environment.LastChallenge?.Token);
+    }
+
+    [Fact]
+    public async Task ResumeCannotBecomeReadyUntilLeaseIsDurablyRestored()
+    {
+        using var f = new Fixture();
+        f.Client.Resume = true;
+        f.Importer.Result = false;
+
+        Assert.Equal(Readiness.NotReady, await f.Run());
+        f.Importer.Result = true;
+        Assert.Equal(Readiness.Ready, await f.Run());
+
+        Assert.Equal(2, f.Importer.Calls);
+        Assert.Equal(f.Client.LastResponse!.Lease, f.Importer.Lease);
+        Assert.Equal(f.Client.LastResponse.ServerTimeUtc, f.Importer.ControllerTime);
+    }
+
+    [Fact]
+    public async Task LeaseExpiryDuringImportCannotReportReady()
+    {
+        using var f = new Fixture();
+        f.Client.Resume = true;
+        f.Importer.Result = true;
+        f.Importer.OnImport = () => f.Clock.Uptime = 120010;
+
+        Assert.Equal(Readiness.NotReady, await f.Run());
+    }
+
+    [Fact]
+    public async Task AvailableMachineDoesNotImportAnActiveLease()
+    {
+        using var f = new Fixture();
+
+        Assert.Equal(Readiness.Ready, await f.Run());
+
+        Assert.Equal(0, f.Importer.Calls);
+        Assert.Equal(1, f.Importer.ClearCalls);
+        Assert.Equal(f.Clock.BootId, f.Importer.ClearedBootId);
+    }
+
+    [Fact]
+    public async Task AvailableMachineCannotBecomeReadyUntilOldLeaseSnapshotIsCleared()
+    {
+        using var f = new Fixture();
+        f.Importer.ClearResult = false;
+
+        Assert.Equal(Readiness.NotReady, await f.Run());
+
+        Assert.Equal(1, f.Importer.ClearCalls);
+        Assert.Equal(0, f.Importer.Calls);
+        Assert.Equal("blocked", f.Diagnostics(ReadinessDiagnosticIds.LeaseReconciliation));
+    }
+
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public async Task ResumeLeaseMustMatchAllocationAndRevisionBoundToChallenge(bool mismatchAllocation, bool mismatchRevision)
+    {
+        using var f = new Fixture();
+        f.Client.Resume = true;
+        f.Client.MismatchAllocation = mismatchAllocation;
+        f.Client.MismatchRevision = mismatchRevision;
+        f.Importer.Result = true;
+
+        Assert.Equal(Readiness.NotReady, await f.Run());
+
+        Assert.Equal(0, f.Importer.Calls);
+        Assert.Equal("blocked", f.Diagnostics(ReadinessDiagnosticIds.LeaseReconciliation));
+    }
+
+    [Fact]
+    public async Task ActiveLeaseIsNotImportedBeforeStreamCleanupPasses()
+    {
+        using var f = new Fixture();
+        f.Client.Resume = true;
+        f.Environment.Cleaned = false;
+        f.Importer.Result = true;
+
+        Assert.Equal(Readiness.NotReady, await f.Run());
+
+        Assert.Equal(0, f.Importer.Calls);
+        Assert.Single(f.Client.Requests);
+    }
+
+    [Fact]
+    public async Task BlockedCleanupStillReportsLaterAdvisoryChecks()
+    {
+        using var f = new Fixture();
+        f.Environment.Cleaned = false;
+
+        Assert.Equal(Readiness.NotReady, await f.Run());
+
+        Assert.Equal("blocked", f.Diagnostics(ReadinessDiagnosticIds.StreamFence));
+        Assert.Equal("passed", f.Diagnostics(ReadinessDiagnosticIds.DesktopHealth));
+    }
+
+    private sealed class Fixture : IDisposable
+    {
+        private readonly string directory = Path.Combine(Path.GetTempPath(), "kr-boot-tests-" + Guid.NewGuid().ToString("N"));
+
+        public Fixture(bool baselineValidated = true)
+        {
+            Directory.CreateDirectory(directory);
+            Configuration = new AppliedConfiguration(Path.Combine(directory, "config"));
+            Directory.CreateDirectory(Path.Combine(directory, "config"));
+            Baseline = new BaselineEvidence(baselineValidated ? BootEvidenceStatus.Passed : BootEvidenceStatus.Unavailable);
+            Client = new Client(Clock);
+            Reconciler = new BootReconciler(Clock, Configuration, Client, Environment, Importer, Baseline, Liveness);
+        }
+
+        public Clock Clock { get; } = new();
+        public Client Client { get; }
+        public Environment Environment { get; } = new();
+        public Importer Importer { get; } = new();
+        public Liveness Liveness { get; } = new();
+        public List<string> Events { get; } = [];
+        public BaselineEvidence Baseline { get; }
+        public AppliedConfiguration Configuration { get; }
+        public BootReconciler Reconciler { get; }
+
+        public Task<Readiness> Run() => Reconciler.ReconcileAsync(default);
+
+        public string Diagnostics(string checkId) =>
+            Reconciler.ReadinessDiagnostics.Single(diagnostic => diagnostic.CheckId == checkId).Status;
+
+        public void Dispose()
+        {
+            if (Directory.Exists(directory)) Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    private sealed class Clock : TimeProvider, IBootClock
+    {
+        public string BootId { get; set; } = "os-boot";
+        public long Uptime { get; set; } = 10;
+        public long UptimeMilliseconds => Uptime;
+        public override DateTimeOffset GetUtcNow() => DateTimeOffset.Parse("2026-10-29T00:00:00Z");
+    }
+
+    private sealed class Client(Clock clock) : IBootReconciliationClient
+    {
+
+        public bool Offline { get; set; }
+        public bool Resume { get; set; }
+        public bool NoChallenge { get; set; }
+        public bool ExpiredChallenge { get; set; }
+        public bool MismatchedBoot { get; set; }
+        public bool MismatchAllocation { get; set; }
+        public bool MismatchRevision { get; set; }
+        public List<ReconcileRequest> Requests { get; } = [];
+        public ReconcileResponse? LastResponse { get; private set; }
+
+        public Task<ReconcileResponse> ReconcileAsync(ReconcileRequest request, CancellationToken ct)
+        {
+            if (Offline) throw new HttpRequestException("controller offline");
+            Requests.Add(request);
+            var serverTime = clock.GetUtcNow();
+            var lease = Resume
+                ? new ActiveLeaseConfirmation("rental", 1, clock.BootId, serverTime.AddMinutes(1))
+                : null;
+            var allocation = Resume ? (MismatchAllocation ? "another-rental" : "rental") : "allocation-1";
+            var revision = Resume ? (MismatchRevision ? 2 : 1) : 4;
+            var challengeBoot = MismatchedBoot ? "other-boot" : clock.BootId;
+            var challengeExpiry = ExpiredChallenge ? serverTime.AddSeconds(-1) : serverTime.AddSeconds(30);
+            var challenge = NoChallenge
+                ? null
+                : new ReconciliationChallenge("generation-1", challengeBoot, allocation, revision, challengeExpiry);
+            var action = request.Challenge is null ? "Hold" : (Resume ? "ResumeLease" : "PrepareAvailable");
+            LastResponse = new ReconcileResponse(serverTime, new(7, 5000, 6000), lease, action, challenge);
+            return Task.FromResult(LastResponse);
+        }
+    }
+
+    private sealed class Environment : IBootEnvironment
+    {
+        public bool Restored { get; set; } = true;
+        public bool Cleaned { get; set; } = true;
+        public bool Healthy { get; set; } = true;
+        public List<string>? Events { get; set; }
+        public BootEvidenceStatus LastCleanStatus { get; private set; } = BootEvidenceStatus.Unknown;
+        public ReconciliationChallenge? LastChallenge { get; private set; }
+
+        public Task<BootEvidenceStatus> VerifyRestorationAsync(ReconciliationChallenge challenge, CancellationToken ct)
+        {
+            Events?.Add("restoration");
+            return Task.FromResult(Restored ? BootEvidenceStatus.Passed : BootEvidenceStatus.Blocked);
+        }
+
+        public Task<BootEvidenceStatus> ClearStreamAccessAsync(ReconciliationChallenge challenge, CancellationToken ct)
+        {
+            Events?.Add("cleanup");
+            LastChallenge = challenge;
+            LastCleanStatus = Cleaned ? BootEvidenceStatus.Passed : BootEvidenceStatus.Blocked;
+            return Task.FromResult(LastCleanStatus);
+        }
+
+        public Task<BootEvidenceStatus> VerifyHealthAsync(ReconciliationChallenge challenge, CancellationToken ct)
+        {
+            Events?.Add("desktop-health");
+            return Task.FromResult(Healthy ? BootEvidenceStatus.Passed : BootEvidenceStatus.Blocked);
+        }
+    }
+
+    private sealed class Importer : IReconciledLeaseImporter
+    {
+        public bool Result { get; set; }
+        public bool ClearResult { get; set; } = true;
+        public int Calls { get; private set; }
+        public int ClearCalls { get; private set; }
+        public string? ClearedBootId { get; private set; }
+        public ActiveLeaseConfirmation? Lease { get; private set; }
+        public DateTimeOffset ControllerTime { get; private set; }
+        public Action? OnImport { get; set; }
+        public List<string>? Events { get; set; }
+
+        public Task<bool> ClearAsync(string bootId, CancellationToken ct)
+        {
+            Events?.Add("old-lease-clear");
+            ClearCalls++;
+            ClearedBootId = bootId;
+            return Task.FromResult(ClearResult);
+        }
+
+        public Task<bool> ImportAsync(ActiveLeaseConfirmation lease, DateTimeOffset controllerTime, long requestStartedUptime, CancellationToken ct)
+        {
+            Events?.Add("lease-import");
+            Calls++;
+            Lease = lease;
+            ControllerTime = controllerTime;
+            OnImport?.Invoke();
+            return Task.FromResult(Result);
+        }
+    }
+
+    private sealed class Liveness : ISunshineLiveness
+    {
+        public bool Ready { get; set; } = true;
+        public bool Throw { get; set; }
+        public int ProbeCalls { get; private set; }
+        public List<string>? Events { get; set; }
+
+        public SunshineLivenessSnapshot Current { get; private set; } = SunshineLivenessSnapshot.Unknown;
+
+        public Task<SunshineLivenessSnapshot> ProbeOnceAsync(CancellationToken ct)
+        {
+            ProbeCalls++;
+            Events?.Add("liveness");
+            if (Throw) throw new IOException("liveness transport failed");
+            Current = new(Ready, Ready ? SunshineLivenessProbe.ReasonReady : SunshineLivenessProbe.ReasonStreamSilent,
+                DateTimeOffset.UtcNow, 47989, 47984);
+            return Task.FromResult(Current);
+        }
+    }
+
+    private sealed class BaselineEvidence(BootEvidenceStatus status) : IBootBaselineEvidence
+    {
+        public BootEvidenceStatus Status => status;
+    }
 }

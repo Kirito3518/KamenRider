@@ -86,7 +86,7 @@ function Assert-AgentUpdatePackageRoot {
     $root = Get-Item -LiteralPath $PackageRoot -Force -ErrorAction Stop
     if (-not $root.PSIsContainer -or ($root.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'PackageRoot must be a real directory.' }
     $manifest = Test-AgentUpdatePackageManifest -PackageRoot $root.FullName -TargetVersion $TargetVersion
-    $allowedRootFiles = @('Install-AgentPackage.ps1','Install-Service.ps1','Install-TightVncServer.ps1','Prepare-SunshineStreamGate.ps1','PrivateInstallFiles.ps1','ServiceInstallTransaction.ps1','Update-AgentPackage.ps1','Update-Agent.ps1','AgentPackage.manifest.json')
+    $allowedRootFiles = @('Install-AgentPackage.ps1','Install-Service.ps1','Install-TightVncServer.ps1','Remove-StreamGuard.ps1','PrivateInstallFiles.ps1','ServiceInstallTransaction.ps1','Update-AgentPackage.ps1','Update-Agent.ps1','AgentPackage.manifest.json')
     $files = @(Get-ChildItem -LiteralPath $root.FullName -Force -Recurse -ErrorAction Stop)
     if ($files.Count -gt 5000) { throw 'Expanded Agent package exceeds 5,000 entries.' }
     $totalBytes = [long]0
@@ -100,7 +100,7 @@ function Assert-AgentUpdatePackageRoot {
         }
     }
     if ($totalBytes -gt 524288000) { throw 'Expanded Agent package exceeds 500 MiB.' }
-    foreach ($required in @('Agent\Agent.exe','Agent\Agent.deps.json','PrivateInstallFiles.ps1','Prepare-SunshineStreamGate.ps1','Update-AgentPackage.ps1','AgentPackage.manifest.json')) {
+    foreach ($required in @('Agent\Agent.exe','Agent\Agent.deps.json','PrivateInstallFiles.ps1','Remove-StreamGuard.ps1','Update-AgentPackage.ps1','AgentPackage.manifest.json')) {
         if (-not (Test-Path -LiteralPath (Join-Path $root.FullName $required) -PathType Leaf)) { throw "Agent package is missing $required." }
     }
     if (Test-Path -LiteralPath (Join-Path $root.FullName 'Agent\appsettings.json')) { throw 'Agent package must not replace local appsettings.json.' }
@@ -174,18 +174,29 @@ function Restore-AgentUpdateBackup {
 }
 
 function Get-AgentUpdateLiveServiceApi {
-    param([Parameter(Mandatory)][string]$AgentServiceName, [Parameter(Mandatory)][string]$GuardServiceName)
+    param([Parameter(Mandatory)][string]$AgentServiceName)
     return [pscustomobject]@{
         StopAgent = { $service = Get-Service -Name $AgentServiceName -ErrorAction Stop; if ($service.Status -ne 'Stopped') { Stop-Service -Name $AgentServiceName -ErrorAction Stop; $service.WaitForStatus('Stopped',[TimeSpan]::FromSeconds(30)) } }.GetNewClosure()
-        StopGuard = { $service = Get-Service -Name $GuardServiceName -ErrorAction Stop; if ($service.Status -ne 'Stopped') { Stop-Service -Name $GuardServiceName -ErrorAction Stop; $service.WaitForStatus('Stopped',[TimeSpan]::FromSeconds(30)) } }.GetNewClosure()
-        StartGuard = { $service = Get-Service -Name $GuardServiceName -ErrorAction Stop; if ($service.Status -ne 'Running') { Start-Service -Name $GuardServiceName -ErrorAction Stop; $service.WaitForStatus('Running',[TimeSpan]::FromSeconds(30)) } }.GetNewClosure()
         StartAgent = { $service = Get-Service -Name $AgentServiceName -ErrorAction Stop; if ($service.Status -ne 'Running') { Start-Service -Name $AgentServiceName -ErrorAction Stop; $service.WaitForStatus('Running',[TimeSpan]::FromSeconds(30)) } }.GetNewClosure()
     }
 }
 
+function Invoke-AgentUpdateStreamGuardMigration {
+    # Runs the packaged idempotent migration so an upgraded machine ends in the same
+    # state as a fresh install: Guard removed, Agent service on LocalSystem with no
+    # dependencies, and SunshineService back on automatic startup and running.
+    param([Parameter(Mandatory)][string]$PackageRoot)
+    $migrationPath = Join-Path $PackageRoot 'Remove-StreamGuard.ps1'
+    if (-not (Test-Path -LiteralPath $migrationPath -PathType Leaf)) { throw 'Remove-StreamGuard.ps1 is missing from the Agent update package.' }
+    . ([ScriptBlock]::Create([IO.File]::ReadAllText((Join-Path $PackageRoot 'PrivateInstallFiles.ps1'))))
+    Initialize-ServiceManagerNativeType
+    if (-not (Test-AgentLegacyServiceMigrationNeeded)) { return $null }
+    $migrationBlock = [ScriptBlock]::Create([IO.File]::ReadAllText($migrationPath))
+    return & $migrationBlock -InstallScriptRoot $PackageRoot -Confirm:$false
+}
+
 function Invoke-AgentUpdateServiceStart {
     param([Parameter(Mandatory)]$ServiceApi)
-    & $ServiceApi.StartGuard
     & $ServiceApi.StartAgent
 }
 
@@ -198,8 +209,10 @@ function Invoke-AgentUpdateTransaction {
         [Parameter(Mandatory)][string]$OperationId,
         [Parameter(Mandatory)][string]$TargetVersion,
         [Parameter(Mandatory)]$ServiceApi,
-        [Security.Principal.SecurityIdentifier]$ServiceSid
+        [Security.Principal.SecurityIdentifier]$ServiceSid,
+        [scriptblock]$StreamGuardMigration
     )
+    if (-not $StreamGuardMigration) { $StreamGuardMigration = { param($PackagePath) Invoke-AgentUpdateStreamGuardMigration -PackageRoot $PackagePath }.GetNewClosure() }
     $plan = Get-AgentUpdateTransactionPlan -InstallDirectory $InstallDirectory -OperationId $OperationId
     $install = $plan.InstallDirectory
     $data = [IO.Path]::GetFullPath($DataDirectory)
@@ -241,7 +254,6 @@ function Invoke-AgentUpdateTransaction {
             (Test-AgentUpdateTreesEquivalent -First $install -Second $plan.BackupDirectory)
         if (-not $resumeUpdate) {
             & $ServiceApi.StopAgent
-            & $ServiceApi.StopGuard
             Restore-AgentUpdateBackup -Plan $plan -ServiceSid $ServiceSid
             if (Test-Path -LiteralPath $plan.StageDirectory) { Remove-Item -LiteralPath $plan.StageDirectory -Recurse -Force }
             if (Test-Path -LiteralPath $plan.PriorDirectory) { Remove-Item -LiteralPath $plan.PriorDirectory -Recurse -Force }
@@ -281,7 +293,6 @@ function Invoke-AgentUpdateTransaction {
         if (Test-Path -LiteralPath $prior) { throw 'An interrupted prior directory exists; refusing to overwrite it.' }
         $servicesTouched = $true
         & $ServiceApi.StopAgent
-        & $ServiceApi.StopGuard
         $servicesStopped = $true
         [IO.Directory]::Move($install, $prior)
         $swapStarted = $true
@@ -291,6 +302,7 @@ function Invoke-AgentUpdateTransaction {
             if ([IO.Path]::GetDirectoryName($resolvedPrior) -ne $plan.ParentDirectory) { throw 'Unsafe update prior path.' }
             Remove-Item -LiteralPath $resolvedPrior -Recurse -Force
         }
+        & $StreamGuardMigration $package | Out-Null
         Invoke-AgentUpdateServiceStart -ServiceApi $ServiceApi
         return [pscustomobject]@{ Outcome = 'applied'; InstallDirectory = $install; BackupDirectory = $plan.BackupDirectory; Message = 'Agent update swapped and services started; protected backup retained pending heartbeat.' }
     } catch {
@@ -300,7 +312,6 @@ function Invoke-AgentUpdateTransaction {
             try {
                 if ($swapStarted) {
                     & $ServiceApi.StopAgent
-                    & $ServiceApi.StopGuard
                     Restore-AgentUpdateBackup -Plan $plan -ServiceSid $ServiceSid
                     if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
                     if (Test-Path -LiteralPath $prior) { Remove-Item -LiteralPath $prior -Recurse -Force }
@@ -333,6 +344,6 @@ if ($DefineFunctionsOnly) { return }
 if ($Action -ne 'Apply') { throw 'Unsupported Agent update action.' }
 if (-not $InstallDirectory -or -not $DataDirectory -or -not $PackageRoot -or -not $OperationId -or -not $TargetVersion) { throw 'InstallDirectory, DataDirectory, PackageRoot, OperationId, and TargetVersion are required.' }
 if (-not $ServiceSid) { $parsedServiceSid = $null } else { $parsedServiceSid = [Security.Principal.SecurityIdentifier]::new($ServiceSid) }
-$serviceApi = Get-AgentUpdateLiveServiceApi -AgentServiceName 'KamenRaider Agent' -GuardServiceName 'KamenRaider Stream Guard'
+$serviceApi = Get-AgentUpdateLiveServiceApi -AgentServiceName 'KamenRaider Agent'
 $result = Invoke-AgentUpdateTransaction -InstallDirectory $InstallDirectory -DataDirectory $DataDirectory -PackageRoot $PackageRoot -OperationId $OperationId -TargetVersion $TargetVersion -ServiceSid $parsedServiceSid -ServiceApi $serviceApi
 $result

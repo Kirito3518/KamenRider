@@ -9,6 +9,8 @@ const LEASE_TIME_URL = "/api/admin/pc-control/pc-1/lease-time";
 const LEASE_CANCEL_URL = "/api/admin/pc-control/pc-1/lease-cancel";
 const PAIRING_URL = "/api/admin/pc-control/pc-1/pairing";
 const WAKE_URL = "/api/admin/machines/pc-1/wake";
+const SUNSHINE_RESTART_URL = "/api/admin/pc-control/pc-1/sunshine";
+const SUNSHINE_STATUS_URL = "/api/admin/pc-control/pc-1/sunshine/sunshine-1";
 
 function jsonResponse(body: unknown, ok = true) {
   return { ok, status: ok ? 200 : 409, json: async () => body } as Response;
@@ -80,6 +82,20 @@ describe("PcControl", () => {
         });
       if (url === WAKE_URL || url === POWER_OFF_URL || url === LEASE_TIME_URL || url === LEASE_CANCEL_URL || url === PAIRING_URL)
         return jsonResponse({ status: "queued" });
+      if (url === SUNSHINE_RESTART_URL)
+        return jsonResponse({
+          commandId: "sunshine-1",
+          action: "restart",
+          status: "requested",
+          expiresAtUtc: new Date(Date.now() + 60_000).toISOString(),
+        });
+      if (url === SUNSHINE_STATUS_URL)
+        return jsonResponse({
+          commandId: "sunshine-1",
+          action: "restart",
+          status: "applied",
+          expiresAtUtc: new Date(Date.now() + 60_000).toISOString(),
+        });
       throw new Error(`Unexpected fetch URL: ${url}`);
     });
     vi.stubGlobal("fetch", fetchSpy);
@@ -166,5 +182,29 @@ describe("PcControl", () => {
     await screen.findByText("PC-01");
     fireEvent.click(screen.getByRole("button", { name: "เปิดเครื่อง" }));
     await waitFor(() => expect(calls.some((call) => call.url === WAKE_URL)).toBe(true));
+  });
+
+  it("queues Sunshine maintenance commands through the confirm dialogs and surfaces the result", async () => {
+    render(<PcControl />);
+    await screen.findByText("PC-01");
+
+    fireEvent.click(screen.getByRole("button", { name: "รีสตาร์ท Sunshine" }));
+    expect(screen.getByText("ยืนยันรีสตาร์ท Sunshine")).toBeDefined();
+    fireEvent.click(screen.getByRole("button", { name: "รีสตาร์ท Sunshine" }));
+
+    await waitFor(() => expect(calls.some((call) => call.url === SUNSHINE_RESTART_URL)).toBe(true));
+    const restart = calls.find((call) => call.url === SUNSHINE_RESTART_URL)!;
+    expect(restart.init?.method).toBe("POST");
+    // The machine has an active rental, so the command must be forced.
+    expect(JSON.parse(String(restart.init?.body))).toMatchObject({ action: "restart", force: true });
+    expect(await screen.findByText("รีสตาร์ท Sunshine PC-01 สำเร็จแล้ว")).toBeDefined();
+
+    fireEvent.click(screen.getByRole("button", { name: "ยกเลิกการจับคู่ Sunshine" }));
+    expect(screen.getByText("ยืนยันยกเลิกการจับคู่ Sunshine")).toBeDefined();
+    fireEvent.click(screen.getByRole("button", { name: "ยกเลิกการจับคู่" }));
+
+    await waitFor(() => expect(calls.some((call) => call.url === SUNSHINE_RESTART_URL && JSON.parse(String(call.init?.body)).action === "unpair")).toBe(true));
+    const unpair = calls.find((call) => call.url === SUNSHINE_RESTART_URL && JSON.parse(String(call.init?.body)).action === "unpair")!;
+    expect(JSON.parse(String(unpair.init?.body))).toMatchObject({ action: "unpair", force: true });
   });
 });

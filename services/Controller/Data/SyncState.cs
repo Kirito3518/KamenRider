@@ -25,6 +25,12 @@ public sealed partial class ControllerDatabase
         request = request with { Hardware = NormalizeReportedHardware(request.Hardware) };
         if (request.AppliedSunshineCredentialRevision is < 0)
             throw new ArgumentException("Invalid heartbeat");
+        if (request.Parsec is { } parsec &&
+            (parsec.Available
+                ? !ValidBase64Url(parsec.BootKeyId, 64) || !ValidBase64Url(parsec.PublicKey, 1024)
+                : (!string.IsNullOrEmpty(parsec.BootKeyId) && !ValidBase64Url(parsec.BootKeyId, 64)) ||
+                  (!string.IsNullOrEmpty(parsec.PublicKey) && !ValidBase64Url(parsec.PublicKey, 1024))))
+            throw new ArgumentException("Invalid heartbeat");
         var diagnostics = ValidateReadinessDiagnostics(request.ReadinessDiagnostics);
 
         lock (gate)
@@ -107,6 +113,10 @@ public sealed partial class ControllerDatabase
         if (request.AppliedSunshineCredentialRevision is { } appliedSunshineRevision)
             ExecuteLease(tx, "UPDATE machines SET sunshine_credential_revision=$revision WHERE machine_id=$id",
                 ("$revision", appliedSunshineRevision), ("$id", id));
+        // Agent Parsec capability is ephemeral (one boot key) and is replaced/invalidated by every
+        // heartbeat so a restart or an uninstalled parsecd.exe cannot keep a stale key usable.
+        StoreParsecCapability(tx, id, request.Parsec, now.ToUnixTimeMilliseconds());
+        ExpireParsecAttempts(tx, now.ToUnixTimeMilliseconds());
         if (diagnostics is null)
             ExecuteLease(tx, "DELETE FROM machine_readiness_diagnostics WHERE machine_id=$id", ("$id", id));
         else
@@ -116,9 +126,14 @@ public sealed partial class ControllerDatabase
         var responseChallenge = isProven ? issueToken(tx, id, CurrentKeyFingerprint(tx, id)) : null;
         var sunshineCredentialRevision = ReadSunshineCredentialRevision(tx);
         if (request.Readiness != "ready")
+        {
+            // Machine-scoped repair commands must keep working while the machine is notReady:
+            // a broken Sunshine installation is exactly when restart/unpair is needed.
+            ApplyMachineScopedResults(tx, id, request, now.ToUnixTimeMilliseconds());
             return new(now, new(machine.ConfigRevision, machine.MoonlightPort, machine.SunshinePort),
-                PendingShutdownCommands(tx, id, request.BootId), null)
+                PendingMachineScopedCommands(tx, id, request.BootId), null)
             { AgentUpdateChallenge = responseChallenge, SunshineCredentialRevision = sunshineCredentialRevision };
+        }
 
         string? unbound;
         using (var cmd = LeaseCommand(tx, "SELECT id FROM leases WHERE machine_id=$id AND state='preparing' AND boot_id IS NULL", ("$id", id)))

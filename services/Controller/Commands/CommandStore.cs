@@ -21,12 +21,27 @@ public sealed partial class ControllerDatabase {
                 return commands.Select(c=>c.Type=="PairPin"&&pairingPins.TryGetValue(c.CommandId,out var secret)?c with{Payload=JsonSerializer.SerializeToElement(new{pairingId=c.Payload.GetProperty("pairingId").GetString(),pin=secret.Pin})}:c).ToArray();
     }
 
-    private CommandEnvelope[] PendingShutdownCommands(SqliteTransaction tx,string machineId,string boot) {
+    private CommandEnvelope[] PendingMachineScopedCommands(SqliteTransaction tx,string machineId,string boot) {
         if (IsRestoreQuarantined(tx)) return [];
-        using var cmd=LeaseCommand(tx,"SELECT command_id,type,rental_id,lease_revision,boot_id,valid_until,payload FROM command_outbox WHERE machine_id=$id AND boot_id=$boot AND type='ShutdownMachine' AND status='pending' ORDER BY rowid",("$id",machineId),("$boot",boot));
+        using var cmd=LeaseCommand(tx,"SELECT command_id,type,rental_id,lease_revision,boot_id,valid_until,payload FROM command_outbox WHERE machine_id=$id AND boot_id=$boot AND type IN ('ShutdownMachine','RestartSunshine','UnpairSunshine') AND status='pending' ORDER BY rowid",("$id",machineId),("$boot",boot));
         using var r=cmd.ExecuteReader();var commands=new List<CommandEnvelope>();
         while(r.Read()) commands.Add(new(r.GetString(0),r.GetString(1),r.IsDBNull(2)?"":r.GetString(2),r.GetInt64(3),r.GetString(4),DateTimeOffset.FromUnixTimeMilliseconds(r.GetInt64(5)),JsonSerializer.Deserialize<JsonElement>(r.GetString(6))));
         return commands.ToArray();
+    }
+    private static bool IsMachineScopedCommand(string type) => type is "ShutdownMachine" or "RestartSunshine" or "UnpairSunshine";
+    private void ApplyMachineScopedCommandResult(SqliteTransaction tx,string commandId,string status) {
+        if(status=="applied") ExecuteLease(tx,"UPDATE command_outbox SET status='applied',error_code=NULL WHERE command_id=$id",("$id",commandId));
+        else if(status=="failed") ExecuteLease(tx,"UPDATE command_outbox SET status='failed',error_code='AgentFailure' WHERE command_id=$id",("$id",commandId));
+    }
+    // Machine-scoped repair commands (shutdown, Sunshine restart/unpair) are valid while the
+    // machine reports notReady: a broken Sunshine is exactly when these must still be delivered.
+    private void ApplyMachineScopedResults(SqliteTransaction tx,string machineId,SyncRequest request,long now) {
+        if (IsRestoreQuarantined(tx)) return;
+        foreach(var result in request.CommandResults) {
+            var command=PendingMachineScopedCommands(tx,machineId,request.BootId).SingleOrDefault(c=>c.CommandId==result.CommandId);
+            if(command is null||command.ValidUntilUtc.ToUnixTimeMilliseconds()<=now||result.AppliedRevision!=command.LeaseRevision) continue;
+            ApplyMachineScopedCommandResult(tx,command.CommandId,result.Status);
+        }
     }
     private void RejectRetiredBoot(SqliteTransaction tx,string machineId,string boot) {
         using(var check=LeaseCommand(tx,"SELECT retired FROM machine_boots WHERE machine_id=$id AND boot_id=$boot",("$id",machineId),("$boot",boot)))
@@ -45,9 +60,15 @@ public sealed partial class ControllerDatabase {
             // A result can affect only its persisted pending command, current boot and exact revision.
             var command=PendingCommands(tx,machineId,request.BootId).SingleOrDefault(c=>c.CommandId==result.CommandId);
             if(command is null||command.ValidUntilUtc.ToUnixTimeMilliseconds()<=now||result.AppliedRevision!=command.LeaseRevision) continue;
-            if(command.Type=="ShutdownMachine"){
-                if(result.Status=="applied") ExecuteLease(tx,"UPDATE command_outbox SET status='applied',error_code=NULL WHERE command_id=$id",("$id",command.CommandId));
-                else if(result.Status=="failed") ExecuteLease(tx,"UPDATE command_outbox SET status='failed',error_code='AgentFailure' WHERE command_id=$id",("$id",command.CommandId));
+            if(IsMachineScopedCommand(command.Type)){
+                ApplyMachineScopedCommandResult(tx,command.CommandId,result.Status);
+                continue;
+            }
+            if(command.Type=="ParsecConnect"){
+                // The Agent accepts the attempt asynchronously; per-attempt progress arrives on the
+                // signed /agent/parsec-status callback, not in this command result.
+                if(result.Status is "applied" or "failed")
+                    ApplyParsecConnectResult(tx,command.CommandId,result.Status,now);
                 continue;
             }
             if(command.Type=="EndLease"){
@@ -60,6 +81,7 @@ public sealed partial class ControllerDatabase {
                 if(ending is not null&&ending.Dto.Revision==command.LeaseRevision){
                     ExecuteLease(tx,"UPDATE leases SET state='completed',allocation_held=0,ended_at=COALESCE(ended_at,$now),pending_revision=NULL,pending_expires_at=NULL WHERE id=$id AND revision=$revision",("$id",ending.Dto.Id),("$revision",command.LeaseRevision),("$now",now));
                 }
+                FailParsecAttemptsForLease(tx,command.RentalId,now);
                 ExecuteLease(tx,"UPDATE command_outbox SET status='applied' WHERE command_id=$id",("$id",command.CommandId));
                 continue;
             }

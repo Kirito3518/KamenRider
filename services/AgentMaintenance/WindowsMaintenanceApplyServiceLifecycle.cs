@@ -7,7 +7,7 @@ namespace KamenRaider.AgentMaintenance;
 [SupportedOSPlatform("windows")]
 public sealed class WindowsMaintenanceApplyServiceLifecycle : IMaintenanceApplyServiceLifecycle
 {
-    private const string AgentAccount = "NT SERVICE\\KamenRaider Agent";
+    private const string AgentAccount = "LocalSystem";
     private const string LocalSystemAccount = "LocalSystem";
     private static readonly Regex VersionPattern = new("\\A(?:[0-9]+\\.[0-9]+\\.[0-9]+|1\\.0\\.0\\+g[0-9a-f]{12,40})\\z", RegexOptions.CultureInvariant);
 
@@ -247,9 +247,6 @@ public sealed class WindowsMaintenanceApplyServiceLifecycle : IMaintenanceApplyS
         if (snapshot.Dependencies.Any(string.IsNullOrWhiteSpace) ||
             snapshot.Dependencies.Distinct(StringComparer.OrdinalIgnoreCase).Count() != snapshot.Dependencies.Count)
             throw new InvalidOperationException($"Service '{definition.Name}' has an invalid dependency list.");
-        if (definition.RequiredDependency is not null &&
-            snapshot.Dependencies.Count(dependency => string.Equals(dependency, definition.RequiredDependency, StringComparison.OrdinalIgnoreCase)) != 1)
-            throw new InvalidOperationException($"Service '{definition.Name}' is missing its unique required dependency.");
 
         if (snapshot.State == MaintenanceWindowsServiceState.Stopped)
         {
@@ -273,13 +270,12 @@ public sealed class WindowsMaintenanceApplyServiceLifecycle : IMaintenanceApplyS
 
     private IEnumerable<ServiceDefinition> Definitions()
     {
+        // The Agent is a single LocalSystem service with no service dependencies.
         yield return new(MaintenanceServiceQuiescer.AgentServiceName, layout.AgentExecutablePath, AgentAccount, string.Empty, true,
-            null, [MaintenanceServiceQuiescer.GuardServiceName], null);
-        yield return new(MaintenanceServiceQuiescer.GuardServiceName, layout.AgentExecutablePath, LocalSystemAccount,
-            "--stream-guard", true, null, [], null);
+            null, []);
         // Preserve vendor dependencies; only the two forms observed in supported Sunshine installs are accepted.
         yield return new(MaintenanceServiceQuiescer.SunshineServiceName, layout.SunshineServiceExecutablePath,
-            LocalSystemAccount, string.Empty, false, [string.Empty, "--service"], null, MaintenanceServiceQuiescer.GuardServiceName);
+            LocalSystemAccount, string.Empty, false, [string.Empty, "--service"], null);
     }
 
     private IEnumerable<ServiceDefinition> StopOrder()
@@ -287,12 +283,11 @@ public sealed class WindowsMaintenanceApplyServiceLifecycle : IMaintenanceApplyS
         var definitions = Definitions().ToDictionary(definition => definition.Name, StringComparer.OrdinalIgnoreCase);
         yield return definitions[MaintenanceServiceQuiescer.AgentServiceName];
         yield return definitions[MaintenanceServiceQuiescer.SunshineServiceName];
-        yield return definitions[MaintenanceServiceQuiescer.GuardServiceName];
     }
 
     private static IEnumerable<ServiceDefinition> StartOrder(IReadOnlyDictionary<string, ServiceDefinition> definitions)
     {
-        yield return definitions[MaintenanceServiceQuiescer.GuardServiceName];
+        // The Agent is started after Sunshine because it attaches to the running stream host.
         yield return definitions[MaintenanceServiceQuiescer.SunshineServiceName];
         yield return definitions[MaintenanceServiceQuiescer.AgentServiceName];
     }
@@ -321,6 +316,5 @@ public sealed class WindowsMaintenanceApplyServiceLifecycle : IMaintenanceApplyS
         string Arguments,
         bool HasContentRootArgument,
         IReadOnlyList<string>? AllowedArguments,
-        IReadOnlyList<string>? ExpectedDependencies,
-        string? RequiredDependency);
+        IReadOnlyList<string>? ExpectedDependencies);
 }

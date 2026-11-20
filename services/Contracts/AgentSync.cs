@@ -8,6 +8,8 @@ public record SyncRequest(string BootId,string LocalIp,string MacAddress,long Ap
     public ReadinessDiagnostic[]? ReadinessDiagnostics { get; init; }
     public HardwareInfo? Hardware { get; init; }
     public long? AppliedSunshineCredentialRevision { get; init; }
+    /// <summary>Agent boot-only Parsec capability (public key + whether parsecd.exe exists).</summary>
+    public ParsecCapability? Parsec { get; init; }
 }
 public record ReadinessDiagnostic(string CheckId,string Status);
 public static class ReadinessDiagnosticIds {

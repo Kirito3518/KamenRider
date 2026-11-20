@@ -1,53 +1,16 @@
-# เปิด Sunshine GUI ชั่วคราวบนเครื่องลูก (โหมด maintenance / LAB)
+# เปิด/ใช้งาน Sunshine GUI บนเครื่องลูก (โมเดลใหม่ — ไม่มี Stream Guard)
 
-Stream Guard จะปิด SunshineService (Manual/Stopped) และ firewall block ไว้จนกว่าจะมี stream authority
-ถ้าต้องใช้ **Sunshine GUI** เพื่อตั้งค่า/ดูสถานะ ให้เปิดโหมด maintenance ชั่วคราว
+> เอกสารนี้แทน `sunshine-gui-maintenance.md` เดิม ตั้งแต่ 2026-11-20 Stream Guard ถูกถอดออกแล้ว
 
-> **LAB ONLY:** สคริปต์จะหยุด Agent และปิด firewall block ของ Guard ชั่วคราว
-> ใช้เสร็จต้อง `-Restore` ทุกครั้ง
+Sunshine รันตลอดเวลาและ Agent ไม่หยุด/บล็อก Sunshine อีกต่อไป — เปิด Sunshine GUI/WebUI ได้ตามปกติ:
 
-## ใช้ GUI บนเครื่องลูกเอง (localhost)
+- บนเครื่องลูกเอง: `https://localhost:47990` (หรือพอร์ต Sunshine web UI ที่ตั้งไว้)
+- จากเครื่องอื่นใน LAN: ต้องอนุญาต firewall เองเป็นการชั่วคราว และ **ห้ามเปิดพอร์ตนี้ออกอินเทอร์เน็ต**
 
-รันบนเครื่องลูก (Administrator; script ขอ UAC เอง):
+สิ่งที่ต้องระวัง: loopback ของ Sunshine ไม่ต้องใช้รหัส therefore **อย่าให้บัญชีลูกค้าเข้าถึงพอร์ต web UI ได้** — ตั้ง `origin_web_ui_allowed = pc` และ outbound firewall block พอร์ต Sunshine web UI เฉพาะบัญชีลูกค้าใน image (ดู [sunshine-local-control.md](sunshine-local-control.md))
 
-```powershell
-irm "https://kamanriderplay.com/agent/Enable-SunshineGui.ps1" | iex
-```
+งานแอดมินที่เคยใช้ maintenance mode:
 
-สคริปต์จะ:
-- หยุด `KamenRaider Agent`
-- disable firewall rule ของ Stream Guard
-- เปิด `SunshineService`
-- เปิดเบราว์เซอร์ `https://localhost:47990` ให้
-
-## ใช้ GUI จากเครื่องของคุณเอง (LAN เดียวกัน)
-
-รันบนเครื่องลูก (Administrator) ระบุ IP เครื่องคุณ:
-
-```powershell
-& ([scriptblock]::Create((irm "https://kamanriderplay.com/agent/Enable-SunshineGui.ps1"))) -AllowClientIp 192.168.1.34
-```
-
-หรือเปิดให้ทั้ง subnet:
-
-```powershell
-& ([scriptblock]::Create((irm "https://kamanriderplay.com/agent/Enable-SunshineGui.ps1"))) -AllowLan
-```
-
-แล้วเปิดจากเครื่องคุณ: `https://192.168.1.25:47990`
-(ดู URL ที่สคริปต์พิมพ์ให้อีกครั้ง)
-
-## ปิดโหมด maintenance (คืน Guard/Agent)
-
-```powershell
-& ([scriptblock]::Create((irm "https://kamanriderplay.com/agent/Enable-SunshineGui.ps1"))) -Restore
-```
-
-สคริปต์จะลบ firewall rule ชั่วคราว, เปิด firewall block ของ Guard กลับ และ start Agent
-
-## หมายเหตุ
-
-- ระหว่าง maintenance: Agent หยุด → Controller จะเห็นเครื่องออฟไลน์ (ปกติ)
-- Sunshine GUI ใช้ username/password ที่ตั้งไว้; ถ้าจำไม่ได้ใช้ `docs/sunshine-password-reset.md`
-- อย่าเปิด 47990 ออกอินเทอร์เน็ต; ใช้เฉพาะ LAN/localhost และปิด maintenance เมื่อเสร็จ
-- สคริปต์อยู่ที่ `scripts/agent/child/Enable-SunshineGui.ps1` และให้บริการที่ `/agent/Enable-SunshineGui.ps1`
+- รีสตาร์ต Sunshine → ใช้ปุ่ม **Restart Sunshine** ใน PC Control (คำสั่ง `RestartSunshine`)
+- ล้างอุปกรณ์ที่จับคู่ไว้ → ใช้ปุ่ม **Unpair Sunshine** (คำสั่ง `UnpairSunshine`)
+- เปิด GUI เพื่อตั้งค่า → ทำได้ทันทีเมื่อเครื่องไม่ได้อยู่ระหว่างให้เช่า

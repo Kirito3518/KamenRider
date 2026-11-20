@@ -40,6 +40,20 @@ try {
  $dataReadOnlyAcl=[Security.AccessControl.DirectorySecurity]::new();$dataReadOnlyAcl.SetOwner($currentSid)
  $dataReadOnlyAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($serviceSid,[Security.AccessControl.FileSystemRights]::ReadAndExecute,[Security.AccessControl.AccessControlType]::Allow))
  if(Test-TrustedInstallAcl $dataReadOnlyAcl (Get-TrustedInstallSids @($serviceSid)) -RequireModifySid $serviceSid){throw 'A private data directory without Agent service modify rights must be rejected.'}
+ # The Agent service runs as LocalSystem, but the maintenance-fence reader keeps
+ # verifying the three-principal ACL shape keyed by the deterministic virtual SID.
+ $localSystemSid='S-1-5-18'
+ if(@(Get-TrustedInstallSids | Where-Object {$_.Value -eq $localSystemSid}).Count -ne 1){throw 'The LocalSystem SID must be a trusted install principal for Agent private data.'}
+ if(@(Get-TrustedMachineInstallSids | Where-Object {$_.Value -eq $localSystemSid}).Count -ne 1){throw 'The LocalSystem SID must be trusted for machine-protected Agent binaries.'}
+ $systemDataAcl=New-PrivateInstallSecurity -ServiceSid $serviceSid -Directory
+ $systemRules=@($systemDataAcl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier]) | Where-Object {$_.IdentityReference.Value -eq $localSystemSid})
+ if($systemRules.Count -ne 1 -or $systemRules[0].FileSystemRights -ne [Security.AccessControl.FileSystemRights]::FullControl){throw 'Private Agent data ACLs must grant the LocalSystem SID full control.'}
+ $fenceSecurity=New-AgentMaintenanceFenceSecurity -ServiceSid $serviceSid -Directory
+ $fenceRules=@($fenceSecurity.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier]))
+ $fenceIdentities=@($fenceRules | ForEach-Object {$_.IdentityReference.Value})
+ if($fenceRules.Count -ne 3 -or $localSystemSid -notin $fenceIdentities -or 'S-1-5-32-544' -notin $fenceIdentities -or $serviceSid.Value -notin $fenceIdentities){throw 'Maintenance fence ACL must keep SYSTEM + Administrators + the virtual Agent service SID after the LocalSystem migration.'}
+ $fenceServiceRule=@($fenceRules | Where-Object {$_.IdentityReference.Value -eq $serviceSid.Value})[0]
+ if($fenceServiceRule.FileSystemRights -ne ([Security.AccessControl.FileSystemRights]::ReadAndExecute -bor [Security.AccessControl.FileSystemRights]::Synchronize)){throw 'The maintenance fence must keep granting the virtual service SID only read/execute and synchronize.'}
  foreach($generic in @([int]268435456,[int]1073741824)){
   if(-not (Test-DisallowedInstallAceRights $generic)){throw ('Untrusted generic ACL mask was not rejected: {0}' -f $generic)}
  }

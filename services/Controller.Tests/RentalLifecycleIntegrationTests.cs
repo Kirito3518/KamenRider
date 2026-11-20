@@ -99,23 +99,25 @@ public sealed class RentalLifecycleIntegrationTests
                 owner.DefaultRequestHeaders.Add("X-Service-Credential", ServiceCredential);
                 owner.DefaultRequestHeaders.Add("X-Authenticated-Actor-Id", "renter-1");
 
-                var gate = new IntegrationGate(clock);
                 var sunshine = new IntegrationSunshine();
                 sunshine.Clients.Add("stale-client");
-                var bootEnvironment = new IntegrationBootEnvironment(clock, gate, sunshine);
+                var streamCleanup = new IntegrationStreamCleanup(sunshine);
+                var bootEnvironment = new IntegrationBootEnvironment(clock, streamCleanup, sunshine);
+                var liveness = new IntegrationLiveness();
                 var configuration = new AppliedConfiguration(agentData);
                 var shutdown = new IntegrationShutdown();
-                var enforcer = new LeaseEnforcer(new LeaseStore(agentData), clock, clock, gate, shutdown, new ClearMaintenanceFenceReader());
+                var enforcer = new LeaseEnforcer(new LeaseStore(agentData), clock, clock, streamCleanup, shutdown, new ClearMaintenanceFenceReader());
                 var importer = new LeaseEnforcerReconciledLeaseImporter(enforcer);
                 var controllerUri = new Uri("https://localhost/");
                 var reconciliation = new ReconciliationClient(agentHttp, identity, controllerUri, clock);
 
-                var boot = new BootReconciler(clock, gate, configuration, reconciliation, bootEnvironment, importer, new IntegrationBaselineEvidence(BootEvidenceStatus.Passed));
+                var boot = new BootReconciler(clock, configuration, reconciliation, bootEnvironment, importer,
+                    new IntegrationBaselineEvidence(BootEvidenceStatus.Passed), liveness);
                 Assert.Equal(Readiness.Ready, await boot.ReconcileAsync(default));
                 Assert.Empty(sunshine.Clients);
                 Assert.True(bootEnvironment.FencedCleanupCount > 0);
 
-                var pairing = new PairingSession(sunshine, gate, () => enforcer.CurrentPairingScope, clock);
+                var pairing = new PairingSession(sunshine, () => enforcer.CanStream, () => enforcer.CurrentPairingScope, clock);
                 var preparation = new IntegrationPreparation();
                 var dispatcher = new LeaseCommandDispatcher(enforcer, pairing, preparation);
                 var syncCycle = new AgentSyncCycle(new SyncClient(agentHttp, identity), controllerUri, clock, configuration, dispatcher);
@@ -142,7 +144,6 @@ public sealed class RentalLifecycleIntegrationTests
                 var activeLease = Assert.Single((await owner.GetFromJsonAsync<LeaseDto[]>("/internal/users/renter-1/leases"))!);
                 Assert.Equal("active", activeLease.State);
                 Assert.True(enforcer.CanStream);
-                Assert.False(gate.IsBlocked);
 
                 await syncCycle.RunAsync(clock.BootId, LocalIp, MacAddress, Readiness.Ready, default);
                 var pairingOffer = await owner.GetFromJsonAsync<PairingOffer>($"/internal/leases/{activeLease.Id}/pair/pending");
@@ -175,7 +176,9 @@ public sealed class RentalLifecycleIntegrationTests
                 Assert.Equal(2, (await extend.Content.ReadFromJsonAsync<LeaseDto>())?.PendingRevision);
 
                 await syncCycle.RunAsync(clock.BootId, LocalIp, MacAddress, Readiness.Ready, default);
-                Assert.True(gate.IsBlocked);
+                // Extending a lease re-applies it on the Agent but no longer fences or clears the
+                // paired client: only pairing cleanup can cut the stream in the 0jay-style model.
+                Assert.Single(sunshine.Clients);
                 await syncCycle.RunAsync(clock.BootId, LocalIp, MacAddress, Readiness.Ready, default);
                 activeLease = Assert.Single((await owner.GetFromJsonAsync<LeaseDto[]>("/internal/users/renter-1/leases"))!);
                 Assert.Equal("active", activeLease.State);
@@ -185,7 +188,9 @@ public sealed class RentalLifecycleIntegrationTests
                 clock.AdvanceSeconds(121);
                 await enforcer.EnforceAsync(default);
                 Assert.Equal(1, shutdown.Calls);
-                Assert.True(gate.IsBlocked);
+                // Local expiry cuts the stream by unpairing clients even when the Controller is gone.
+                await WaitUntilAsync(() => streamCleanup.Clears > 0);
+                Assert.Empty(sunshine.Clients);
 
                 await syncCycle.RunAsync(clock.BootId, LocalIp, MacAddress, Readiness.NotReady, default);
                 var endingLease = Assert.Single((await owner.GetFromJsonAsync<LeaseDto[]>("/internal/users/renter-1/leases"))!);
@@ -195,7 +200,8 @@ public sealed class RentalLifecycleIntegrationTests
                 Assert.Equal(endingLease.ExpiresAtUtc, endingLease.EndedAtUtc);
 
                 clock.Reboot("boot-2");
-                var afterReboot = new BootReconciler(clock, gate, configuration, reconciliation, bootEnvironment, importer, new IntegrationBaselineEvidence(BootEvidenceStatus.Passed));
+                var afterReboot = new BootReconciler(clock, configuration, reconciliation, bootEnvironment, importer,
+                    new IntegrationBaselineEvidence(BootEvidenceStatus.Passed), liveness);
                 Assert.Equal(Readiness.Ready, await afterReboot.ReconcileAsync(default));
                 Assert.Empty(sunshine.Clients);
 
@@ -273,42 +279,44 @@ public sealed class RentalLifecycleIntegrationTests
         }
     }
 
-    private sealed class IntegrationGate(IntegrationClock clock) : IStreamGate, IPairingFence
+    private static async Task WaitUntilAsync(Func<bool> condition)
     {
-        public bool IsBlocked { get; private set; } = true;
-        public StreamLeaseGrant? Grant { get; private set; }
+        for (var attempt = 0; attempt < 250; attempt++)
+        {
+            if (condition()) return;
+            await Task.Delay(20);
+        }
+        Assert.True(condition(), "The asynchronous stream cleanup did not complete.");
+    }
 
-        public Task BlockAsync(CancellationToken cancellationToken)
+    /// <summary>
+    /// Stream cleanup is Sunshine's own unpair-all in the 0jay model; there is no local gate or
+    /// firewall rule to toggle.
+    /// </summary>
+    private sealed class IntegrationStreamCleanup(IntegrationSunshine sunshine) : IStreamCleanup
+    {
+        public int Clears { get; private set; }
+
+        public async Task<bool> ClearAsync(CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            IsBlocked = true;
-            Grant = null;
-            return Task.CompletedTask;
+            Clears++;
+            await sunshine.ClearAsync(cancellationToken);
+            return sunshine.Clients.Count == 0;
         }
+    }
 
-        public Task AllowAsync(StreamLeaseGrant grant, CancellationToken cancellationToken)
+    private sealed class IntegrationLiveness : ISunshineLiveness
+    {
+        private readonly SunshineLivenessSnapshot snapshot =
+            new(true, "sunshine-ready", DateTimeOffset.MinValue, 47989, 47990);
+
+        public SunshineLivenessSnapshot Current => snapshot;
+
+        public Task<SunshineLivenessSnapshot> ProbeOnceAsync(CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (grant.BootId != clock.BootId || grant.DeadlineUptimeMilliseconds <= clock.UptimeMilliseconds || grant.ExpiresAtUtc <= clock.GetUtcNow())
-                return Task.FromException(new InvalidOperationException("Expired or cross-boot stream grant."));
-            Grant = grant;
-            IsBlocked = false;
-            return Task.CompletedTask;
-        }
-
-        public Task<bool> VerifyOpenForLeaseAsync(PairingScope scope, CancellationToken cancellationToken)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            var grant = Grant;
-            return Task.FromResult(!IsBlocked && grant is not null && grant.RentalId == scope.RentalId &&
-                grant.Revision == scope.Revision && grant.BootId == scope.BootId && grant.ExpiresAtUtc == scope.ExpiresAtUtc);
-        }
-
-        public async Task<bool> RunFencedCleanupAsync(Func<CancellationToken, Task> clear, CancellationToken cancellationToken)
-        {
-            await BlockAsync(cancellationToken);
-            await clear(cancellationToken);
-            return IsBlocked && Grant is null;
+            return Task.FromResult(snapshot);
         }
     }
 
@@ -341,7 +349,8 @@ public sealed class RentalLifecycleIntegrationTests
         }
     }
 
-    private sealed class IntegrationBootEnvironment(IntegrationClock clock, IntegrationGate gate, IntegrationSunshine sunshine) : IBootEnvironment
+    private sealed class IntegrationBootEnvironment(IntegrationClock clock, IntegrationStreamCleanup streamCleanup,
+        IntegrationSunshine sunshine) : IBootEnvironment
     {
         public int FencedCleanupCount { get; private set; }
 
@@ -351,11 +360,11 @@ public sealed class RentalLifecycleIntegrationTests
             return Task.FromResult(challenge.BootId == clock.BootId ? BootEvidenceStatus.Passed : BootEvidenceStatus.Blocked);
         }
 
-        public async Task<BootEvidenceStatus> FenceAndClearAsync(ReconciliationChallenge challenge, CancellationToken cancellationToken)
+        public async Task<BootEvidenceStatus> ClearStreamAccessAsync(ReconciliationChallenge challenge, CancellationToken cancellationToken)
         {
             if (challenge.BootId != clock.BootId)
                 return BootEvidenceStatus.Blocked;
-            var cleared = await gate.RunFencedCleanupAsync(sunshine.ClearAsync, cancellationToken);
+            var cleared = await streamCleanup.ClearAsync(cancellationToken);
             if (cleared)
                 FencedCleanupCount++;
             return cleared && sunshine.Clients.Count == 0 ? BootEvidenceStatus.Passed : BootEvidenceStatus.Blocked;
@@ -365,12 +374,6 @@ public sealed class RentalLifecycleIntegrationTests
         {
             cancellationToken.ThrowIfCancellationRequested();
             return Task.FromResult(challenge.BootId == clock.BootId ? BootEvidenceStatus.Passed : BootEvidenceStatus.Blocked);
-        }
-
-        public Task<BootEvidenceStatus> VerifyRuntimeHealthAsync(string bootId, long configurationRevision, CancellationToken cancellationToken)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            return Task.FromResult(bootId == clock.BootId && configurationRevision > 0 ? BootEvidenceStatus.Passed : BootEvidenceStatus.Blocked);
         }
     }
 

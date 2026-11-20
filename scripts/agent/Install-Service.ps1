@@ -18,11 +18,14 @@ foreach ($path in @($PublishDirectory, $DataDirectory, $ConfigurationFile)) {
 }
 
 $serviceName = "KamenRaider $Role"
-$account = "NT SERVICE\$serviceName"
+$account = if ($Role -eq 'Agent') { 'LocalSystem' } else { "NT SERVICE\$serviceName" }
 $executable = Join-Path $PublishDirectory "$Role.exe"
-$guardDependency = 'KamenRaider Stream Guard'
-if ($Role -eq 'Agent' -and $Dependencies.Count -eq 0) { $Dependencies = @($guardDependency) }
 $startup = 'auto'
+if (@($Dependencies | Where-Object { [string]::IsNullOrWhiteSpace($_) -or $_.Contains([char]0) }).Count -gt 0) { throw 'Service dependencies must be non-empty service names without null characters.' }
+if (@($Dependencies | Select-Object -Unique).Count -ne @($Dependencies).Count) { throw 'Service dependencies must not contain duplicates.' }
+if ($Role -eq 'Agent' -and @($Dependencies).Count -ne 0) {
+    throw 'The Agent service must be a single LocalSystem service with no service dependencies.'
+}
 if ($Plan) {
     [pscustomobject]@{
         ServiceName = $serviceName
@@ -41,11 +44,6 @@ if ($Plan) {
 
 if ($Role -eq 'Controller') { throw 'Controller service installation is not enabled until separately reviewed.' }
 if ($Role -eq 'Agent' -and $EnrollmentTicket -notmatch '^[A-Za-z0-9_-]{43}$') { throw 'A valid enrollment ticket is required for Agent service installation.' }
-if ($Role -eq 'Agent' -and (@($Dependencies).Count -ne 1 -or -not [string]::Equals($Dependencies[0], $guardDependency, [StringComparison]::OrdinalIgnoreCase))) {
-    throw "Agent service installation requires the '$guardDependency' service dependency."
-}
-if (@($Dependencies | Where-Object { [string]::IsNullOrWhiteSpace($_) -or $_.Contains([char]0) }).Count -gt 0) { throw 'Service dependencies must be non-empty service names without null characters.' }
-if (@($Dependencies | Select-Object -Unique).Count -ne @($Dependencies).Count) { throw 'Service dependencies must not contain duplicates.' }
 
 if ($env:OS -ne 'Windows_NT') { throw 'Windows is required.' }
 if (-not ([Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -85,13 +83,9 @@ if ($Role -eq 'Agent') {
 $binaryPath = Get-ServiceBinaryPath -Executable $executable -ContentRoot $PublishDirectory
 $dataDirectoryState = [pscustomobject]@{ Created = $false }
 Invoke-ServiceInstallTransaction -Create {
-    foreach ($dependency in $Dependencies) {
-        if (-not (Get-Service -Name $dependency -ErrorAction SilentlyContinue)) { throw "Required service dependency '$dependency' is not installed." }
-    }
     New-DisabledWindowsService -ServiceName $serviceName -BinaryPath $binaryPath -Account $account -Dependencies $Dependencies
     return $true
 } -Configure {
-    Assert-ServiceSidMatchesVirtualAccount -ServiceName $serviceName -ExpectedSid $serviceSid
     $dataDirectoryState.Created = Initialize-PrivateDataDirectory $DataDirectory $serviceSid -AllowEmptyIdentityDirectory:($Role -eq 'Agent')
     if ($Role -eq 'Agent') { Publish-PrivateEnrollmentTicket -Directory $DataDirectory -Ticket $EnrollmentTicket -ServiceSid $serviceSid | Out-Null }
     Publish-PrivateConfiguration $ConfigurationFile $PublishDirectory $serviceSid

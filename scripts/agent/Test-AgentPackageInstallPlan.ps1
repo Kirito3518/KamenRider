@@ -10,7 +10,7 @@ try {
     $env:ProgramData = Join-Path $root 'ProgramData'
     $env:ProgramFiles = Join-Path $root 'ProgramFiles'
     ${env:ProgramFiles(x86)} = Join-Path $root 'ProgramFilesX86'
-    foreach ($name in @('Install-AgentPackage.ps1', 'Install-Service.ps1', 'Install-TightVncServer.ps1', 'Prepare-SunshineStreamGate.ps1', 'PrivateInstallFiles.ps1', 'ServiceInstallTransaction.ps1')) {
+    foreach ($name in @('Install-AgentPackage.ps1', 'Install-Service.ps1', 'Install-TightVncServer.ps1', 'Remove-StreamGuard.ps1', 'PrivateInstallFiles.ps1', 'ServiceInstallTransaction.ps1')) {
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination (Join-Path $package $name)
     }
     . (Join-Path $package 'PrivateInstallFiles.ps1')
@@ -32,9 +32,9 @@ try {
         throw 'Direct, repair, residue, or pre-existing-fence paths must not receive fresh trusted initialization.'
     }
     $initializePosition = $installerSource.IndexOf('Initialize-FreshAgentMaintenanceFence -DirectoryPath', [StringComparison]::Ordinal)
-    $guardApplyPosition = $installerSource.IndexOf('$streamGateTransaction = & $streamGateInstallerBlock -Action Apply', [StringComparison]::Ordinal)
-    if ($initializePosition -lt 0 -or $guardApplyPosition -lt $initializePosition) {
-        throw 'The fresh clear fence must be published before Guard setup or Agent service start.'
+    $migrationPosition = $installerSource.LastIndexOf('Invoke-LegacyStreamGuardMigration -InstallerPath', [StringComparison]::Ordinal)
+    if ($initializePosition -lt 0 -or $migrationPosition -lt $initializePosition) {
+        throw 'The fresh clear fence must be published before legacy Stream Guard migration, Sunshine startup or Agent service start.'
     }
     $holdFailurePosition = $installerSource.IndexOf('Set-FreshAgentMaintenanceFenceHeld -DirectoryPath', [StringComparison]::Ordinal)
     $deletePublishedTreePosition = $installerSource.IndexOf('Remove-Item -LiteralPath $safeInstall -Recurse -Force', [StringComparison]::Ordinal)
@@ -143,15 +143,22 @@ try {
     if ($repairHelperStart -lt 0 -or $ticketAclRepairPosition -lt $repairHelperStart -or $repairServiceStartPosition -lt $ticketAclRepairPosition) {
         throw 'Enrollment repair must normalize permissions on an existing ticket before restarting the Agent service.'
     }
-    if (-not $installerSource.Contains('Prepare-SunshineStreamGate.ps1') -or -not $installerSource.Contains('StreamGateSetup')) { throw 'The Agent install plan must include Stream Guard setup and its transaction.' }
-    if (-not $installerSource.Contains('-Action Validate') -or -not $installerSource.Contains('-Action Apply') -or
-        -not $installerSource.Contains('-Action Rollback') -or -not $installerSource.Contains('-Dependencies @($guardServiceName)')) {
-        throw 'Agent repair must validate the Guard; fresh setup must prepare it transactionally and make Agent depend on it.'
+    if ($installerSource.Contains('Prepare-SunshineStreamGate.ps1') -or $installerSource.Contains('StreamGateSetup') -or
+        $installerSource.Contains('-stream-guard') -or $installerSource.Contains('Dependencies @($guardServiceName)')) {
+        throw 'The Agent installer must no longer contain or require the Stream Guard.'
     }
-    $guardSetupPosition = $installerSource.IndexOf('$streamGateTransaction = & $streamGateInstallerBlock -Action Apply', [StringComparison]::Ordinal)
+    if (-not $installerSource.Contains('Remove-StreamGuard.ps1') -or -not $installerSource.Contains('Invoke-LegacyStreamGuardMigration') -or
+        -not $installerSource.Contains('Test-AgentLegacyServiceMigrationNeeded')) {
+        throw 'The Agent installer must invoke the idempotent Stream Guard removal migration when legacy state is present.'
+    }
+    if (-not $installerSource.Contains('Ensure-SunshineServiceAutomaticAndRunning')) {
+        throw 'The Agent installer must ensure SunshineService is automatic and running before it starts the Agent.'
+    }
+    $migrationInvokePosition = $installerSource.IndexOf('Invoke-LegacyStreamGuardMigration -InstallerPath', [StringComparison]::Ordinal)
     $agentStartPosition = $installerSource.IndexOf('& $serviceInstallerBlock -Role Agent', [StringComparison]::Ordinal)
-    if ($guardSetupPosition -lt 0 -or $agentStartPosition -lt $guardSetupPosition) { throw 'The closed policy and Guard must be installed before Agent enrollment can start.' }
-    if (-not $installerSource.Contains('-not $guardExists -and -not $streamGateRollbackError')) { throw 'Installer rollback must retain protected binaries while a Guard service or failed rollback still needs them.' }
+    if ($migrationInvokePosition -lt 0 -or $agentStartPosition -lt 0 -or $agentStartPosition -lt $migrationInvokePosition) {
+        throw 'The legacy Stream Guard migration must run before Agent enrollment can start.'
+    }
     if ($installerSource.IndexOf('Invoke-AgentEnrollmentRepair', [StringComparison]::Ordinal) -gt $installerSource.IndexOf('$dotnetInterfaces', [StringComparison]::Ordinal)) { throw 'Enrollment repair must be selected before new-install network adapter discovery.' }
     if (-not $installerSource.Contains('Get-AgentEnrollmentWaitState -ServiceStatus $service.Status.ToString()')) { throw 'Installer must inspect Windows service state throughout the enrollment receipt wait.' }
     $repairBranch = $installerSource.IndexOf("if (`$installMode -eq 'repair-enrollment')", [StringComparison]::Ordinal)
@@ -221,11 +228,19 @@ try {
         throw 'Agent appsettings plan omitted or changed a required configuration value.'
     }
     if ($plan.ServiceStartup -ne 'auto' -or -not $plan.StartAfterInstall) { throw 'Agent service must start automatically after installation.' }
-    if ($plan.StreamGateSetup.GuardService.Name -ne 'KamenRaider Stream Guard' -or $plan.StreamGateSetup.GuardService.Startup -ne 'Automatic' -or
-        $plan.StreamGateSetup.Sunshine.Startup -ne 'Manual' -or $plan.StreamGateSetup.Agent.Dependency -ne 'KamenRaider Stream Guard' -or
-        $plan.StreamGateSetup.Firewall.Action -ne 'Block' -or -not $plan.StreamGateSetup.Firewall.Enabled) {
-        throw 'Install plan must include the LocalSystem Guard, Sunshine startup/dependency, Agent dependency and enabled firewall block.'
+    if ($plan.AgentService.Name -ne 'KamenRaider Agent' -or $plan.AgentService.Account -ne 'LocalSystem' -or
+        $plan.AgentService.Dependencies.Count -ne 0 -or -not $plan.AgentService.StartAfterInstall) {
+        throw 'Install plan must install a single LocalSystem Agent service with no service dependencies.'
     }
+    if ($plan.SunshineService.Name -ne 'SunshineService' -or $plan.SunshineService.Startup -ne 'Automatic' -or
+        -not $plan.SunshineService.EnsureExists -or -not $plan.SunshineService.EnsureRunning) {
+        throw 'Install plan must keep SunshineService installed, on automatic startup and running.'
+    }
+    if ($plan.LegacyStreamGuardRemoval.Script -ne 'Remove-StreamGuard.ps1' -or -not $plan.LegacyStreamGuardRemoval.Idempotent -or
+        $plan.LegacyStreamGuardRemoval.RequiredOutcome -notmatch 'Guard removed.*LocalSystem.*SunshineService is Automatic and Running') {
+        throw 'Install plan must describe the idempotent legacy Stream Guard removal and its required end state.'
+    }
+    if ($plan.PSObject.Properties.Name -contains 'StreamGateSetup') { throw 'Install plan must not retain the removed Stream Guard setup.' }
     if ($plan.EnrollmentWaitSeconds -ne 90) { throw 'Enrollment wait must be bounded at 90 seconds.' }
     if (-not $plan.EnrollmentTicketStored -or $plan.PSObject.Properties.Name -contains 'EnrollmentTicket' -or $plan.Configuration.PSObject.Properties.Name -contains 'EnrollmentTicket') { throw 'Plan must show a ticket will be stored privately without returning the ticket in configuration or output.' }
     if ((Get-AgentEnrollmentWaitState -ServiceStatus 'Stopped') -ne 'unavailable') { throw 'Enrollment wait must fail if the service stops.' }
@@ -246,8 +261,8 @@ try {
     if ((Get-AgentEnrollmentRecoveryInstruction 'Stopped') -notmatch 'Start-Service.*Do not rerun the installer') { throw 'A stopped Agent service must show its supported recovery command.' }
     if ((Get-AgentEnrollmentRecoveryInstruction 'Paused') -notmatch 'Resume-Service.*Do not rerun the installer') { throw 'A paused Agent service must show its supported recovery command.' }
     if ((Get-AgentInstallMode -ServiceExists $false -InstallDirectoryExists $false -DataDirectoryExists $false) -ne 'install') { throw 'A clean machine must use a new installation.' }
-    if ((Get-AgentInstallMode -ServiceExists $true -InstallDirectoryExists $true -DataDirectoryExists $true -GuardServiceExists $true) -ne 'repair-enrollment') { throw 'An existing Agent and Guard installation must use the enrollment-ticket repair path.' }
-    $partialInstallRejected=$false;try{Get-AgentInstallMode -ServiceExists $true -InstallDirectoryExists $false -DataDirectoryExists $true -GuardServiceExists $false | Out-Null}catch{$partialInstallRejected=$true}
+    if ((Get-AgentInstallMode -ServiceExists $true -InstallDirectoryExists $true -DataDirectoryExists $true) -ne 'repair-enrollment') { throw 'An existing Agent installation must use the enrollment-ticket repair path.' }
+    $partialInstallRejected=$false;try{Get-AgentInstallMode -ServiceExists $true -InstallDirectoryExists $false -DataDirectoryExists $true | Out-Null}catch{$partialInstallRejected=$true}
     if(-not $partialInstallRejected){throw 'A partial installation must not be overwritten by the ticket-repair path.'}
     $residueDataDirectory = Join-Path $package 'interrupted-data'
     $residueServiceSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
@@ -256,7 +271,7 @@ try {
     New-Item -ItemType Directory -Path $residueIdentityDirectory | Out-Null
     if (-not (Test-EmptyAgentIdentityDirectoryResidue -DataDirectory $residueDataDirectory -ServiceSid $residueServiceSid)) { throw 'An empty, trusted identity directory from interrupted Agent startup must be recognized.' }
     Assert-AgentDataDirectoryReady -Path $residueDataDirectory -ServiceSid $residueServiceSid -AllowEmptyIdentityDirectory
-    if ((Get-AgentInstallMode -ServiceExists $false -InstallDirectoryExists $false -DataDirectoryExists $true -GuardServiceExists $false -EmptyIdentityDirectoryResidue $true) -ne 'install') { throw 'An exact empty identity-directory residue must permit a safe fresh install.' }
+    if ((Get-AgentInstallMode -ServiceExists $false -InstallDirectoryExists $false -DataDirectoryExists $true -EmptyIdentityDirectoryResidue $true) -ne 'install') { throw 'An exact empty identity-directory residue must permit a safe fresh install.' }
     $residueFile = Join-Path $residueIdentityDirectory 'unexpected.json'
     [IO.File]::WriteAllText($residueFile, '{}')
     if (Test-EmptyAgentIdentityDirectoryResidue -DataDirectory $residueDataDirectory -ServiceSid $residueServiceSid) { throw 'An identity directory containing a file must not be treated as an interrupted-startup residue.' }
@@ -307,7 +322,7 @@ try {
     $config = Join-Path $root 'appsettings.json'
     $servicePlan = & (Join-Path $package 'Install-Service.ps1') -Role Agent -PublishDirectory $publish `
         -DataDirectory $data -ConfigurationFile $config -TrustedRootThumbprint ('A' * 40) -StartAfterInstall -Plan
-    if ($servicePlan.Startup -ne 'auto' -or -not $servicePlan.StartAfterInstall) { throw 'Service Plan did not describe automatic start.' }
+    if ($servicePlan.Startup -ne 'auto' -or -not $servicePlan.StartAfterInstall -or $servicePlan.Account -ne 'LocalSystem' -or $servicePlan.Dependencies.Count -ne 0) { throw 'Service Plan did not describe the automatic, dependency-free LocalSystem Agent.' }
 
     if (Test-Path -LiteralPath $root) {
         $unexpected = @(Get-ChildItem -LiteralPath $root -Force -Recurse | Where-Object { $_.FullName -notlike ($root + '\package*') -and $_.FullName -notlike ($root + '\ProgramFiles*') })

@@ -121,6 +121,7 @@ public static class ControllerHost
         app.MapGet("/internal/health", () => new HealthResponse(Protocol.Version, "ok"));
         app.MapMachines();
     app.MapPcControl();
+    app.MapParsec();
         app.MapSync();
         app.MapLeases();
         app.MapPairing();

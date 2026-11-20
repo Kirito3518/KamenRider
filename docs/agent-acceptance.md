@@ -1,5 +1,7 @@
 # Agent acceptance record
 
+> **สถาปัตยกรรมเปลี่ยนเมื่อ 2026-11-20**: Stream Guard ถูกถอด, Sunshine รันตลอด, readiness มาจาก Sunshine liveness + pairing cleanup, Agent เป็น LocalSystem และเพิ่ม Parsec — หลักฐานด้านล่างเป็นของสถาปัตยกรรมเดิม ดู [0jay-migration-2026-11-20.md](0jay-migration-2026-11-20.md) และ [sunshine-local-control.md](sunshine-local-control.md) สำหรับสถานะปัจจุบัน
+
 Status: **NOT READY for rentals (2026-11-09)**. Agent release/update software acceptance has passing results below; Task 6 passed independent review; this final fix wave awaits scoped re-review. This feature is one part of the full rental system. The release updater and the latest source changes have not been installed or executed on the live host. Live service transitions, firewall enforcement, Sunshine, VNC, external networking, cold boot and hardware remain unqualified.
 
 The read-only inventory recorded on 2026-11-09 found Agent and Stream Guard Running/Automatic, Sunshine Stopped/Manual, TightVNC absent, and a non-administrator shell. This observation is not service or rental acceptance. Task 6 used isolated software fixtures; it did not repeat the live inventory or modify live services, firewall, MSI, configuration or machine records. Reboot Restore Rx was not accessed or operated.

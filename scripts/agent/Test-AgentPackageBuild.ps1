@@ -142,7 +142,8 @@ try {
  try {
   $entries=@($zip.Entries | ForEach-Object FullName)
   foreach($entry in $entries){if($entry.Contains('\') -or $entry.StartsWith('/') -or $entry.Split('/') -contains '..'){throw "Unsafe or non-portable ZIP path: $entry"}}
-  foreach($required in @('Agent/Agent.exe','Install-AgentPackage.ps1','Install-Service.ps1','Install-TightVncServer.ps1','Prepare-SunshineStreamGate.ps1','PrivateInstallFiles.ps1','ServiceInstallTransaction.ps1')){if($required -notin $entries){throw "Package is missing $required."}}
+  foreach($required in @('Agent/Agent.exe','Install-AgentPackage.ps1','Install-Service.ps1','Install-TightVncServer.ps1','Remove-StreamGuard.ps1','PrivateInstallFiles.ps1','ServiceInstallTransaction.ps1')){if($required -notin $entries){throw "Package is missing $required."}}
+  foreach($removedScript in @('Prepare-SunshineStreamGate.ps1')){if($removedScript -in $entries){throw "Package must not contain the removed $removedScript."}}
   foreach($updateScript in @('Update-AgentPackage.ps1','Update-Agent.ps1')){if($updateScript -in $entries){throw "Enrollment package must retain its existing output and omit $updateScript."}}
   $defaultManifestEntry=$zip.GetEntry('AgentPackage.manifest.json')
   if(-not $defaultManifestEntry){throw 'Enrollment package is missing its manifest.'}

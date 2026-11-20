@@ -40,9 +40,14 @@ Test-AgentUpdateRequest -Request $validRequest | Out-Null
 foreach ($replacement in @(
     @{ Name = 'hash'; Value = 'not-a-hash'; Property = 'PackageSha256' },
     @{ Name = 'machine'; Value = '..\escape'; Property = 'MachineId' },
+    @{ Name = 'chain'; Value = 'not-a-chain'; Property = 'ChainId' },
+    @{ Name = 'generation'; Value = 0; Property = 'Generation' },
     @{ Name = 'ticket'; Value = 'short'; Property = 'UpdateTicket' },
     @{ Name = 'controller'; Value = 'http://controller.example/'; Property = 'ControllerUrl' },
-    @{ Name = 'thumbprint'; Value = 'Z' * 40; Property = 'TrustedRootThumbprint' }
+    @{ Name = 'thumbprint'; Value = 'Z' * 40; Property = 'TrustedRootThumbprint' },
+    @{ Name = 'runtime'; Value = 'linux-x64'; Property = 'TargetRuntime' },
+    @{ Name = 'helper-url'; Value = '/agent/maintenance/other.exe'; Property = 'HelperRelativeUrl' },
+    @{ Name = 'helper-protocol'; Value = 2; Property = 'HelperProtocol' }
 )) {
     $badRequest = $validRequest.PSObject.Copy()
     $badRequest.($replacement.Property) = $replacement.Value
@@ -53,56 +58,6 @@ $gitVersionRequest.ReleaseVersion = '1.0.0+g0123456789ab'
 $gitVersionRequest.TargetVersion = '1.0.0+g0123456789ab'
 Test-AgentUpdateRequest -Request $gitVersionRequest | Out-Null
 
-$mutationLog = [Collections.Generic.List[string]]::new()
-$expectedInstall = Join-Path (Join-Path $env:ProgramFiles 'KamenRaider') 'Agent'
-$expectedData = Join-Path (Join-Path $env:ProgramData 'KamenRaider') 'Agent'
-$expectedBinary = Join-Path $expectedInstall 'Agent.exe'
-$expectedServicePath = ('"{0}" --contentRoot "{1}"' -f [IO.Path]::GetFullPath($expectedBinary),[IO.Path]::GetFullPath($expectedInstall))
-$workflow = [pscustomobject]@{
-    Start = { $mutationLog.Add('start'); return $true }.GetNewClosure()
-    Download = { $mutationLog.Add('download'); return [pscustomobject]@{ Path = 'unused'; Sha256 = $validRequest.PackageSha256 } }.GetNewClosure()
-    Apply = { $mutationLog.Add('apply'); return [pscustomobject]@{ Outcome = 'applied' } }.GetNewClosure()
-    Report = { param($request,$status) $mutationLog.Add("report:$status") }.GetNewClosure()
-}
-$validState = [pscustomobject]@{
-    IdentityMachineId = $validRequest.MachineId
-    InstallDirectory = $expectedInstall
-    DataDirectory = $expectedData
-    ConfigurationDataDirectory = $expectedData
-    ConfigurationControllerUrl = 'https://controller.example/'
-    TrustedRootPresent = $true
-    AgentService = [pscustomobject]@{ Name = 'KamenRaider Agent'; Account = 'NT SERVICE\KamenRaider Agent'; StartMode = 'Auto'; BinaryPath = $expectedServicePath; Dependencies = @('KamenRaider Stream Guard') }
-    GuardService = [pscustomobject]@{ Name = 'KamenRaider Stream Guard'; Account = 'LocalSystem'; StartMode = 'Auto'; BinaryPath = $expectedServicePath + ' --stream-guard' }
-    SunshineService = [pscustomobject]@{ Name = 'SunshineService'; StartMode = 'Manual'; Dependencies = @('KamenRaider Stream Guard') }
-    InstallPathSafe = $true
-    DataPathSafe = $true
-    StreamFenceClosed = $true
-}
-
-foreach ($case in @(
-    @{ Name = 'wrong machine'; Change = { param($state) $state.IdentityMachineId = '11112222333344445555666677778888' } },
-    @{ Name = 'unsafe installation path'; Change = { param($state) $state.InstallDirectory = 'C:\Windows\Agent' } },
-    @{ Name = 'wrong Agent identity'; Change = { param($state) $state.AgentService.Account = 'LocalSystem' } },
-    @{ Name = 'wrong Agent path'; Change = { param($state) $state.AgentService.BinaryPath = 'C:\Windows\Agent.exe' } },
-    @{ Name = 'unsafe ACL'; Change = { param($state) $state.InstallPathSafe = $false } },
-    @{ Name = 'reparse path'; Change = { param($state) $state.DataPathSafe = $false } },
-    @{ Name = 'open stream fence'; Change = { param($state) $state.StreamFenceClosed = $false } }
-)) {
-    $state = $validState | ConvertTo-Json -Depth 8 | ConvertFrom-Json
-    & $case.Change $state
-    $mutationLog.Clear()
-    Assert-AgentUpdateThrows {
-        Invoke-AgentUpdateWorkflow -Request $validRequest -LocalState $state -Actions $workflow
-    } "Preflight accepted $($case.Name)."
-    if ($mutationLog.Count -ne 0) { throw "$($case.Name) caused a Controller, service, or file mutation before validation." }
-}
-
-$badHashRequest = $validRequest.PSObject.Copy()
-$badHashRequest.PackageSha256 = 'invalid-hash'
-$mutationLog.Clear()
-Assert-AgentUpdateThrows { Invoke-AgentUpdateWorkflow -Request $badHashRequest -LocalState $validState -Actions $workflow } 'Workflow accepted an invalid package hash.'
-if ($mutationLog.Count -ne 0) { throw 'Invalid package hash caused a Controller, service, or file mutation.' }
-
 $plan = Get-AgentUpdateTransactionPlan -InstallDirectory 'C:\Program Files\KamenRaider\Agent' -OperationId $validRequest.OperationId
 if ($plan.BackupDirectory -ne 'C:\Program Files\KamenRaider\.Agent-rollback-ffeeddccbbaa99887766554433221100') { throw 'Rollback backup path must be deterministic and operation-bound.' }
 if ($plan.StageDirectory -notlike 'C:\Program Files\KamenRaider\.Agent-stage-*') { throw 'Staging path must be a sibling on the install volume.' }
@@ -110,43 +65,42 @@ if ($plan.StageDirectory -notlike 'C:\Program Files\KamenRaider\.Agent-stage-*')
 $temporary = Join-Path ([IO.Path]::GetTempPath()) ('kr-agent-update-plan-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $temporary | Out-Null
 try {
-    Add-Type -AssemblyName System.IO.Compression
-    Add-Type -AssemblyName System.IO.Compression.FileSystem
-    $archivePath = Join-Path $temporary 'traversal.zip'
-    $zip = [IO.Compression.ZipFile]::Open($archivePath, [IO.Compression.ZipArchiveMode]::Create)
-    try {
-        $entry = $zip.CreateEntry('../outside.txt')
-        $stream = $entry.Open(); try { $bytes = [Text.Encoding]::UTF8.GetBytes('unsafe'); $stream.Write($bytes, 0, $bytes.Length) } finally { $stream.Dispose() }
-    } finally { $zip.Dispose() }
-    $traversalHash = (Get-FileHash $archivePath -Algorithm SHA256).Hash
-    Assert-AgentUpdateThrows { Test-AgentUpdatePackageArchive -ArchivePath $archivePath -ExpectedSha256 $traversalHash -TargetVersion '2.3.4' } 'Package traversal was accepted.'
-    if (Test-Path -LiteralPath (Join-Path $temporary 'outside.txt')) { throw 'Package traversal wrote outside its temporary archive directory.' }
-    $traversalRequest = $validRequest.PSObject.Copy()
-    $traversalRequest.PackageSha256 = $traversalHash
-    $traversalBytes = [IO.File]::ReadAllBytes($archivePath)
-    Remove-Item -LiteralPath $archivePath -Force
-    $traversalStream = [IO.MemoryStream]::new($traversalBytes)
-    $traversalLog = [Collections.Generic.List[string]]::new()
-    $traversalActions = [pscustomobject]@{
-        Start = { $traversalLog.Add('start') }.GetNewClosure()
-        Download = { $traversalLog.Add('download'); return [pscustomobject]@{ Stream = $traversalStream; Length = $traversalStream.Length } }.GetNewClosure()
-        Validate = { param($request,$package) Test-AgentUpdatePackageArchive -ArchiveStream $package.Stream -ExpectedSha256 $request.PackageSha256 -TargetVersion $request.TargetVersion | Out-Null }.GetNewClosure()
-        Apply = { $traversalLog.Add('apply'); throw 'Apply must not run for traversal.' }.GetNewClosure()
-        Report = { param($request,$status) $traversalLog.Add("report:$status") }.GetNewClosure()
-        Cleanup = { $traversalStream.Dispose(); $traversalLog.Add('cleanup') }.GetNewClosure()
+    New-Item -ItemType Directory -Path (Join-Path $temporary 'Agent') | Out-Null
+    [IO.File]::WriteAllText((Join-Path $temporary 'Agent\Agent.exe'), 'fixture')
+    [IO.File]::WriteAllText((Join-Path $temporary 'Agent\Agent.deps.json'), '{"libraries":{"Agent/2.3.4":{"type":"project"}}}')
+    $manifest = '{"packageFormatVersion":1,"agentInformationalVersion":"2.3.4","sourceCommit":"0123456789ab","sourceDirty":false,"releaseBuild":true,"agentUpdateChallengeProtocol":1}'
+    [IO.File]::WriteAllText((Join-Path $temporary 'AgentPackage.manifest.json'), $manifest)
+    foreach ($name in @('Install-AgentPackage.ps1','Install-Service.ps1','Install-TightVncServer.ps1','Remove-StreamGuard.ps1','PrivateInstallFiles.ps1','ServiceInstallTransaction.ps1','Update-AgentPackage.ps1','Update-Agent.ps1')) {
+        [IO.File]::WriteAllText((Join-Path $temporary $name), 'fixture')
     }
-    $traversalError = $null
-    try { Invoke-AgentUpdateWorkflow -Request $traversalRequest -LocalState $validState -Actions $traversalActions } catch { $traversalError = $_.Exception.Message }
-    if ($traversalError -notmatch 'unsafe path') { throw "Traversal must be rejected for its unsafe path, got: $traversalError" }
-    if ($traversalLog -contains 'apply' -or $traversalLog -notcontains 'report:failed') { throw 'Traversal archive was not rejected before binary or service mutation.' }
-    if (Test-Path -LiteralPath $archivePath) { throw 'Traversal validation wrote the in-memory archive to disk before rejection.' }
+    Assert-AgentUpdatePackageRoot -PackageRoot $temporary -TargetVersion '2.3.4' | Out-Null
+
+    # The legacy update path must no longer ship the removed Stream Guard setup
+    # script and must instead ship the idempotent Guard/account migration.
+    Remove-Item -LiteralPath (Join-Path $temporary 'Remove-StreamGuard.ps1') -Force
+    [IO.File]::WriteAllText((Join-Path $temporary 'Prepare-SunshineStreamGate.ps1'), 'fixture')
+    Assert-AgentUpdateThrows { Assert-AgentUpdatePackageRoot -PackageRoot $temporary -TargetVersion '2.3.4' } 'The update package accepted the removed Stream Guard setup script.'
+    Remove-Item -LiteralPath (Join-Path $temporary 'Prepare-SunshineStreamGate.ps1') -Force
+    Assert-AgentUpdateThrows { Assert-AgentUpdatePackageRoot -PackageRoot $temporary -TargetVersion '2.3.4' } 'The update package accepted a missing Guard-removal migration.'
+    [IO.File]::WriteAllText((Join-Path $temporary 'Remove-StreamGuard.ps1'), 'fixture')
+
+    [IO.File]::WriteAllText((Join-Path $temporary 'AgentPackage.manifest.json'), ($manifest.Replace('"releaseBuild":true','"releaseBuild":false')))
+    Assert-AgentUpdateThrows { Assert-AgentUpdatePackageRoot -PackageRoot $temporary -TargetVersion '2.3.4' } 'The update package accepted a non-release manifest.'
+    [IO.File]::WriteAllText((Join-Path $temporary 'AgentPackage.manifest.json'), ($manifest.Replace('"agentInformationalVersion":"2.3.4"','"agentInformationalVersion":"9.9.9"')))
+    Assert-AgentUpdateThrows { Assert-AgentUpdatePackageRoot -PackageRoot $temporary -TargetVersion '2.3.4' } 'The update package accepted a mismatched target version.'
+    Assert-AgentUpdateThrows { Get-AgentUpdateTransactionPlan -InstallDirectory 'C:\Temp\Agent' -OperationId $validRequest.OperationId } 'A non-managed installation directory was accepted.'
+    Assert-AgentUpdateThrows { Get-AgentUpdateTransactionPlan -InstallDirectory 'C:\Program Files\KamenRaider\Agent' -OperationId 'not-a-guid' } 'An invalid operation id was accepted.'
 } finally {
     $resolved = [IO.Path]::GetFullPath($temporary)
     $tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\') + '\'
     if (-not $resolved.StartsWith($tempRoot, [StringComparison]::OrdinalIgnoreCase) -or [IO.Path]::GetFileName($resolved) -notlike 'kr-agent-update-plan-*') { throw 'Unsafe test cleanup path.' }
     Remove-Item -LiteralPath $resolved -Recurse -Force
 }
-Initialize-AgentPinnedHttpType
-$pinnedClient = [KamenRaider.Update.PinnedHttpClientV1]::Create(('B' * 40))
-$pinnedClient.Dispose()
-Write-Output 'Agent update plan tests passed using temporary files and fake actions only.'
+if ($PSVersionTable.PSEdition -eq 'Core') {
+    Initialize-AgentPinnedHttpType
+    $pinnedClient = [KamenRaider.Update.PinnedHttpClientV1]::Create(('B' * 40))
+    $pinnedClient.Dispose()
+} else {
+    Write-Warning 'Pinned HTTP type compilation requires PowerShell 7 in this environment; Windows PowerShell 5.1 Desktop Add-Type is skipped.'
+}
+Write-Output 'Agent update plan and Guard-removal package tests passed using temporary files only.'

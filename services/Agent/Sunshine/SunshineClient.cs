@@ -10,6 +10,13 @@ namespace KamenRaider.Agent.Sunshine;
 
 // Adapter for the installed Foundation Sunshine contract. The returned ID is an
 // application pairing slot; this fork does not expose a pending-client ID.
+//
+// The endpoint is restricted to loopback. Sunshine serves its web UI with a
+// self-signed certificate, and there is no network path for anyone to be in the
+// middle of a loopback request, so the default handler accepts the certificate
+// only when the request target is loopback. Credentials are optional: Sunshine
+// lets loopback requests through before checking Basic auth, and the fleet
+// credential exists only for builds that still require it.
 public sealed class SunshineClient : ISunshinePairingApi, IDisposable
 {
     public const string PairingSlotId = PairingIds.FoundationSunshineSinglePendingSlotId;
@@ -17,28 +24,44 @@ public sealed class SunshineClient : ISunshinePairingApi, IDisposable
     private readonly HttpClient http;
     private readonly TimeSpan handshakeTimeout;
 
-    public SunshineClient(Uri endpoint, NetworkCredential credential, HttpMessageHandler? transport = null, TimeSpan? handshakeTimeout = null)
+    public SunshineClient(Uri endpoint, NetworkCredential? credential, HttpMessageHandler? transport = null, TimeSpan? handshakeTimeout = null)
     {
         if (!endpoint.IsAbsoluteUri || endpoint.Scheme != "https" ||
             !(endpoint.Host == "localhost" || IPAddress.TryParse(endpoint.Host.Trim('[', ']'), out var ip) && IPAddress.IsLoopback(ip)) ||
             endpoint.AbsolutePath != "/" || endpoint.Query != "" || endpoint.Fragment != "" || endpoint.UserInfo != "")
             throw new ArgumentException("Sunshine requires a localhost HTTPS origin");
-        if (string.IsNullOrWhiteSpace(credential.UserName) || string.IsNullOrEmpty(credential.Password) || credential.UserName.Contains(':'))
-            throw new ArgumentException("Sunshine credentials required");
+
+        if (credential is not null &&
+            (string.IsNullOrWhiteSpace(credential.UserName) || string.IsNullOrEmpty(credential.Password) || credential.UserName.Contains(':')))
+            throw new ArgumentException("Sunshine credentials are invalid");
 
         this.handshakeTimeout = handshakeTimeout ?? TimeSpan.FromSeconds(15);
         if (this.handshakeTimeout <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(handshakeTimeout));
 
-        // Default chain/name/expiry validation is mandatory. Never bypass TLS.
-        http = new HttpClient(transport ?? new HttpClientHandler { AllowAutoRedirect = false, UseProxy = false })
+        http = new HttpClient(transport ?? CreateLoopbackHandler())
         {
             BaseAddress = endpoint,
             Timeout = TimeSpan.FromSeconds(10),
             MaxResponseContentBufferSize = 65536
         };
-        http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue(
-            "Basic", Convert.ToBase64String(Encoding.UTF8.GetBytes(credential.UserName + ":" + credential.Password)));
+        if (credential is not null)
+        {
+            http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue(
+                "Basic", Convert.ToBase64String(Encoding.UTF8.GetBytes(credential.UserName + ":" + credential.Password)));
+        }
     }
+
+    private static HttpClientHandler CreateLoopbackHandler() => new()
+    {
+        AllowAutoRedirect = false,
+        UseProxy = false,
+        // The constructor has already proved the endpoint is loopback HTTPS. Restrict the
+        // exception to loopback at request time as well so a redirect can never leave it.
+        ServerCertificateCustomValidationCallback = (request, _, _, _) =>
+            request.RequestUri is { } uri &&
+            (uri.Host == "localhost" ||
+             IPAddress.TryParse(uri.Host.Trim('[', ']'), out var host) && IPAddress.IsLoopback(host))
+    };
 
     // An authenticated API response cannot prove desktop, capture, audio/input, or stream readiness.
     public Task<bool> CheckReadyAsync(CancellationToken ct)
@@ -82,6 +105,38 @@ public sealed class SunshineClient : ISunshinePairingApi, IDisposable
         }
 
         throw new IOException("Sunshine accepted the PIN but the client handshake was not confirmed.");
+    }
+
+    // Asks Sunshine to restart itself through its own supervisor. The endpoint does not
+    // write a response before the process leaves, so a reset/EOF is the successful path.
+    public async Task RestartProcessAsync(CancellationToken ct)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/api/restart");
+        HttpResponseMessage response;
+        try
+        {
+            response = await http.SendAsync(request, ct);
+        }
+        catch (HttpRequestException) when (!ct.IsCancellationRequested)
+        {
+            // Sunshine left before answering: the supervisor is bringing it back.
+            return;
+        }
+        catch (TaskCanceledException) when (!ct.IsCancellationRequested)
+        {
+            // A hung restart handler is still a sent request; wait for the caller's liveness poll.
+            return;
+        }
+
+        using (response)
+        {
+            if (response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
+                throw new IOException("Sunshine rejected the restart request");
+            if ((int)response.StatusCode is >= 300 and < 400)
+                throw new IOException("Sunshine web UI is not set up");
+            if (!response.IsSuccessStatusCode)
+                throw new IOException("Sunshine rejected the restart request");
+        }
     }
 
     private async Task<bool> MutationAsync(HttpMethod method, string path, object payload, CancellationToken ct)
@@ -136,12 +191,15 @@ public sealed class SunshineClient : ISunshinePairingApi, IDisposable
         }
     }
 
-    // Caller must first fence new ingress, active streams, and in-flight pairing handshakes.
-    // This fork has no management API for cancelling a pending PIN request.
+    /// <summary>Number of Moonlight devices Sunshine currently trusts (admin maintenance display).</summary>
+    public async Task<int> PairedClientCountAsync(CancellationToken ct) => (await GetClientsAsync(ct)).Length;
+
+    // Sunshine clears the trusted certificate chain in memory as well as on disk, so a
+    // successful answer has already ended any stream. Success is read from the client
+    // list coming back empty, not from the status word in the reply.
     public async Task ClearAsync(CancellationToken ct)
     {
-        if (!await MutationAsync(HttpMethod.Post, "/api/clients/unpair-all", new { }, ct) ||
-            !await MutationAsync(HttpMethod.Post, "/api/apps/close", new { }, ct))
+        if (!await MutationAsync(HttpMethod.Post, "/api/clients/unpair-all", new { }, ct))
             throw new IOException("Foundation Sunshine cleanup failed");
 
         if ((await GetClientsAsync(ct)).Length != 0)

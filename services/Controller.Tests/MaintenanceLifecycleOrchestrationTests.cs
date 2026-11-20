@@ -104,13 +104,9 @@ public sealed partial class InstalledAgentSourceInspectorTests
             var agentDirectory = Path.GetDirectoryName(Path.GetFullPath(layout.AgentExecutablePath))!;
             Add(MaintenanceServiceQuiescer.AgentServiceName,
                 Quote(layout.AgentExecutablePath) + " --contentRoot " + Quote(agentDirectory),
-                "NT SERVICE\\KamenRaider Agent", [MaintenanceServiceQuiescer.GuardServiceName]);
-            Add(MaintenanceServiceQuiescer.GuardServiceName,
-                Quote(layout.AgentExecutablePath) + " --contentRoot " + Quote(agentDirectory) + " --stream-guard",
                 "LocalSystem", []);
             Add(MaintenanceServiceQuiescer.SunshineServiceName,
-                Quote(layout.SunshineServiceExecutablePath) + " --service", "LocalSystem",
-                [MaintenanceServiceQuiescer.GuardServiceName]);
+                Quote(layout.SunshineServiceExecutablePath) + " --service", "LocalSystem", []);
         }
 
         public bool AllStopped => snapshots.Values.All(item => item.State == MaintenanceWindowsServiceState.Stopped && item.ProcessId == 0);
@@ -353,7 +349,7 @@ public sealed partial class InstalledAgentSourceInspectorTests
             Assert.Equal("awaitingHeartbeat", body.Status);
             exclusion.Verify(operationId);
             Assert.True(firewall.Blocked, "The independent firewall fence remains held while reporting.");
-            Assert.True(services.AllRunning, "Agent, Guard, and Sunshine must be running before report.");
+            Assert.True(services.AllRunning, "Agent and Sunshine must both be running before report.");
             cancellationToken.ThrowIfCancellationRequested();
             events.Add("controller-report-acknowledged");
             return Task.FromResult(new AgentUpdateOperationDto(operationId, machineId, request.ChainId,
@@ -456,7 +452,6 @@ public sealed partial class InstalledAgentSourceInspectorTests
         var applyServices = new ApplyServices(applyEvents);
         applyServices.OnStart = _ =>
         {
-            serviceApi.Start(MaintenanceServiceQuiescer.GuardServiceName);
             serviceApi.Start(MaintenanceServiceQuiescer.SunshineServiceName);
             serviceApi.Start(MaintenanceServiceQuiescer.AgentServiceName);
         };

@@ -35,3 +35,17 @@ public sealed record AdminPairingStatusDto(string CommandId, string Status);
 public sealed record LeaseTimeAdjustRequestDto(int DeltaSeconds, long ExpectedRevision, string IdempotencyKey);
 
 public sealed record LeaseCancelRequestDto(long ExpectedRevision, string IdempotencyKey, string RequestId);
+
+/// <summary>
+/// Machine-scoped Sunshine maintenance action requested by an administrator.
+/// "restart" queues RestartSunshine; "unpair" queues UnpairSunshine (clears paired clients
+/// and restarts Sunshine). Force must be set when an active rental would be interrupted.
+/// </summary>
+[System.Text.Json.Serialization.JsonUnmappedMemberHandling(System.Text.Json.Serialization.JsonUnmappedMemberHandling.Disallow)]
+public sealed record AdminSunshineCommandRequestDto(string Action, bool Force, string? RequestId = null)
+{
+    public const string Restart = "restart";
+    public const string Unpair = "unpair";
+}
+
+public sealed record AdminSunshineCommandStatusDto(string CommandId, string Action, string Status, DateTimeOffset ExpiresAtUtc);

@@ -44,28 +44,50 @@ export function PcControlConfirmDialog({
 }: {
   open: boolean;
   busy: boolean;
-  kind: "powerOff" | "cancel";
+  kind: "powerOff" | "cancel" | "restartSunshine" | "unpairSunshine";
   machine: PcControlMachine | null;
   onClose: () => void;
   onConfirm: () => void;
 }) {
   const powerOff = kind === "powerOff";
+  const sunshine = kind === "restartSunshine" || kind === "unpairSunshine";
+  const restartSunshine = kind === "restartSunshine";
+  const name = machine?.displayName || machine?.machineId;
+  const interruptingRental = sunshine && machine?.lease !== null;
   return (
     <AlertDialog open={open} onOpenChange={(next) => { if (!next) onClose(); }}>
       <AlertDialogContent size="sm">
         <AlertDialogHeader>
-          <AlertDialogTitle>{powerOff ? "ยืนยันปิดเครื่อง" : "ยืนยันยกเลิกการเช่า"}</AlertDialogTitle>
+          <AlertDialogTitle>
+            {powerOff
+              ? "ยืนยันปิดเครื่อง"
+              : kind === "cancel"
+                ? "ยืนยันยกเลิกการเช่า"
+                : restartSunshine
+                  ? "ยืนยันรีสตาร์ท Sunshine"
+                  : "ยืนยันยกเลิกการจับคู่ Sunshine"}
+          </AlertDialogTitle>
           <AlertDialogDescription>
             {powerOff
-              ? `ปิดเครื่อง ${machine?.displayName || machine?.machineId} ทันทีและสิ้นสุดการเช่าปัจจุบัน โดยไม่คืนเงิน`
-              : `ยกเลิกการเช่าของ ${machine?.displayName || machine?.machineId} โดยไม่คืนเงิน เครื่องจะหยุดให้บริการหลัง Agent ยืนยัน`}
+              ? `ปิดเครื่อง ${name} ทันทีและสิ้นสุดการเช่าปัจจุบัน โดยไม่คืนเงิน`
+              : kind === "cancel"
+                ? `ยกเลิกการเช่าของ ${name} โดยไม่คืนเงิน เครื่องจะหยุดให้บริการหลัง Agent ยืนยัน`
+                : restartSunshine
+                  ? `รีสตาร์ท Sunshine ของ ${name} ระบบสตรีมจะหยุดชั่วครู่${interruptingRental ? " และผู้เช่าปัจจุบันจะถูกตัดการเชื่อมต่อ" : ""}`
+                  : `ล้างเครื่องเล่นที่จับคู่ไว้ทั้งหมดของ ${name} แล้วรีสตาร์ท Sunshine${interruptingRental ? " ผู้เช่าปัจจุบันจะถูกตัดการเชื่อมต่อ" : ""}`}
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
           <AlertDialogCancel disabled={busy}>ไม่ใช่ตอนนี้</AlertDialogCancel>
-          <AlertDialogAction variant="destructive" onClick={onConfirm} disabled={busy}>
+          <AlertDialogAction variant={powerOff || kind === "cancel" ? "destructive" : "default"} onClick={onConfirm} disabled={busy}>
             {busy ? <Spinner data-icon="inline-start" /> : null}
-            {powerOff ? "ปิดเครื่องทันที" : "ยกเลิกการเช่า"}
+            {powerOff
+              ? "ปิดเครื่องทันที"
+              : kind === "cancel"
+                ? "ยกเลิกการเช่า"
+                : restartSunshine
+                  ? "รีสตาร์ท Sunshine"
+                  : "ยกเลิกการจับคู่"}
           </AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>

@@ -1,4 +1,4 @@
-﻿using KamenRaider.Contracts;
+using KamenRaider.Contracts;
 using KamenRaider.Controller.Agents;
 using KamenRaider.Controller.Data;
 using KamenRaider.Controller.Machines;
@@ -26,8 +26,8 @@ public sealed class AgentRecoveryTests
         using var version = connection.CreateCommand();
         version.CommandText = "PRAGMA user_version";
 
-        Assert.Equal(25L, Convert.ToInt64(version.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture));
-        ControllerDatabaseMaintenance.ValidateCanonicalSchema(connection, 25);
+        Assert.Equal(27L, Convert.ToInt64(version.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture));
+        ControllerDatabaseMaintenance.ValidateCanonicalSchema(connection, 27);
         ControllerDatabaseMaintenance.ValidateRecoverySchema(connection);
         ControllerDatabaseMaintenance.ValidateRecoverySuccessorSchema(connection);
         ControllerDatabaseMaintenance.ValidateUpdateConfirmationSchema(connection);

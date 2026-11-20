@@ -49,6 +49,7 @@ export type MachineMetadataInput = {
   moonlightPort: number;
   sunshinePort: number;
   vncLocalIp: string | null;
+  parsecEnabled: boolean;
 };
 
 type NetworkCheck =
@@ -93,6 +94,7 @@ function GeneralTab({
 }) {
   const [displayName, setDisplayName] = useState(machine.displayName || machine.machineId);
   const [price, setPrice] = useState(String(machine.hourlyPriceMinorUnits / 100));
+  const [parsecEnabled, setParsecEnabled] = useState(machine.parsecEnabled === true);
   const [busy, setBusy] = useState(false);
   const [submitted, setSubmitted] = useState(false);
   const [error, setError] = useState("");
@@ -124,6 +126,7 @@ function GeneralTab({
         moonlightPort: machine.moonlightPort,
         sunshinePort: machine.sunshinePort,
         vncLocalIp: getSavedVncTargetForMetadataUpdate(machine),
+        parsecEnabled,
       });
     } catch (cause) {
       setError(errorMessage(cause, "บันทึกข้อมูลทั่วไปไม่สำเร็จ"));
@@ -188,6 +191,25 @@ function GeneralTab({
             </Field>
           </div>
         </FieldGroup>
+        <Field>
+          <label className="flex items-start gap-3 text-sm">
+            <input
+              type="checkbox"
+              className="mt-0.5 size-4"
+              checked={parsecEnabled}
+              disabled={busy}
+              onChange={(event) => setParsecEnabled(event.currentTarget.checked)}
+            />
+            <span className="flex flex-col gap-1">
+              <span className="font-medium">เปิดให้ลูกค้าเข้าสู่ระบบ Parsec ด้วยบัญชีของตัวเอง</span>
+              <span className="text-muted-foreground">
+                Agent จะแสดงปุ่ม “เชื่อมต่อด้วย Parsec” เฉพาะเมื่อตรวจพบ Parsec บนเครื่องนี้
+                {machine.parsecAvailable === true ? " (ตรวจพบแล้ว)" : " (ยังไม่ตรวจพบ)"}
+                — ลูกค้ากรอกรหัสในเบราว์เซอร์และถูกเข้ารหัสก่อนส่งถึงเครื่อง
+              </span>
+            </span>
+          </label>
+        </Field>
         <ReadOnlyRows
           rows={[
             { label: "Machine ID", value: machine.machineId, mono: true },
@@ -341,6 +363,7 @@ function NetworkTab({
         moonlightPort: moonlight,
         sunshinePort: sunshine,
         vncLocalIp: target,
+        parsecEnabled: machine.parsecEnabled === true,
       });
       setMessage("บันทึกการตั้งค่าเครือข่ายแล้ว");
     } catch (cause) {

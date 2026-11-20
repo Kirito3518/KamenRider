@@ -19,7 +19,7 @@ public static class PackageVerifier
     [
         "Agent/Agent.exe", "Agent/Agent.dll", "Agent/Agent.deps.json", "AgentPackage.manifest.json",
         "Install-AgentPackage.ps1", "Install-Service.ps1", "Install-TightVncServer.ps1",
-        "Prepare-SunshineStreamGate.ps1", "PrivateInstallFiles.ps1", "ServiceInstallTransaction.ps1",
+        "Remove-StreamGuard.ps1", "PrivateInstallFiles.ps1", "ServiceInstallTransaction.ps1",
         "Update-AgentPackage.ps1", "Update-Agent.ps1"
     ];
     private static readonly HashSet<string> RootFiles = new(Required.Where(s => !s.Contains('/')), StringComparer.OrdinalIgnoreCase);

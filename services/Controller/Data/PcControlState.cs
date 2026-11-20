@@ -16,6 +16,8 @@ public sealed partial class ControllerDatabase
     private const int PcControlMaximumRemainingSeconds = 7 * 24 * 60 * 60;
     private const int PcControlMaximumDeltaSeconds = 86_400;
     private const long PcControlCommandValidityMilliseconds = 60_000;
+    private const string RestartSunshineCommand = "RestartSunshine";
+    private const string UnpairSunshineCommand = "UnpairSunshine";
 
     public PcControlSnapshotDto GetPcControlSnapshot()
     {
@@ -217,6 +219,166 @@ public sealed partial class ControllerDatabase
             tx.Commit();
             return result;
         }
+    }
+
+    /// <summary>
+    /// Queues a machine-scoped Sunshine maintenance command (restart or unpair) for the current
+    /// Agent boot. The command is delivered through the normal sync command outbox and never
+    /// carries a rental id or lease revision. Administrators must set force to interrupt a rental.
+    /// </summary>
+    public AdminSunshineCommandStatusDto QueueSunshineMaintenanceCommand(string machineId,
+        AdminSunshineCommandRequestDto request, string actorId)
+    {
+        Identifier(machineId);
+        Identifier(actorId);
+        ArgumentNullException.ThrowIfNull(request);
+        var type = SunshineCommandType(request.Action);
+        var auditAction = type == RestartSunshineCommand ? "restartSunshine" : "unpairSunshine";
+        var requestId = string.IsNullOrWhiteSpace(request.RequestId) ? Guid.NewGuid().ToString("N") : request.RequestId;
+        Identifier(requestId);
+        lock (gate)
+        {
+            using var tx = connection.BeginTransaction();
+            EnsureNotRestoreQuarantined(tx);
+            var now = clock.GetUtcNow();
+            var nowMs = now.ToUnixTimeMilliseconds();
+            ExpireLeases(tx, nowMs);
+            if (FindMachineAdminActionDetail(tx, actorId, requestId) is { } prior)
+            {
+                // A replayed request returns the command it originally produced; it must never
+                // silently turn one action type into the other.
+                if (prior.ActionType != auditAction)
+                    throw new InvalidOperationException("Idempotency conflict");
+                var existing = ReadAdminSunshineCommandStatus(tx, machineId,
+                    prior.CommandId ?? throw new KeyNotFoundException("Sunshine maintenance command was not found."));
+                tx.Commit();
+                return existing;
+            }
+
+            string? bootId;
+            DateTimeOffset? lastSeen;
+            using (var machine = Command("SELECT h.last_seen,h.boot_id,COALESCE(c.held,0),EXISTS(SELECT 1 FROM agent_update_operations o WHERE o.machine_id=m.machine_id AND o.status NOT IN ('completed','rolledBack','expired','superseded')) FROM machines m LEFT JOIN machine_heartbeats h ON h.machine_id=m.machine_id LEFT JOIN agent_maintenance_chains c ON c.chain_id=(SELECT c1.chain_id FROM agent_maintenance_chains c1 WHERE c1.machine_id=m.machine_id ORDER BY c1.held DESC,c1.rowid DESC LIMIT 1) WHERE m.machine_id=$id",
+                ("$id", machineId)))
+            {
+                machine.Transaction = tx;
+                using var row = machine.ExecuteReader();
+                if (!row.Read()) throw new KeyNotFoundException("Machine was not found.");
+                lastSeen = row.IsDBNull(0) ? null : DateTimeOffset.Parse(row.GetString(0));
+                bootId = row.IsDBNull(1) ? null : row.GetString(1);
+                if (row.GetInt64(2) != 0)
+                    throw new InvalidOperationException("Machine maintenance is active; Sunshine maintenance remains held.");
+                if (row.GetInt64(3) != 0)
+                    throw new InvalidOperationException("An Agent update is active; Sunshine maintenance remains held.");
+            }
+            if (string.IsNullOrWhiteSpace(bootId) || lastSeen is null
+                || lastSeen.Value > now.AddSeconds(1)
+                || now - lastSeen.Value > TimeSpan.FromMilliseconds(PcControlHeartbeatFreshMilliseconds))
+                throw new InvalidOperationException("Machine is offline; Sunshine maintenance cannot be delivered.");
+
+            string? pendingCommandId = null;
+            string? pendingCommandType = null;
+            long pendingValidUntil = 0;
+            using (var pending = Command("SELECT command_id,type,valid_until FROM command_outbox WHERE machine_id=$machine AND type IN ('RestartSunshine','UnpairSunshine') AND status='pending' ORDER BY rowid LIMIT 1",
+                ("$machine", machineId)))
+            {
+                pending.Transaction = tx;
+                using var row = pending.ExecuteReader();
+                if (row.Read())
+                {
+                    pendingCommandId = row.GetString(0);
+                    pendingCommandType = row.GetString(1);
+                    pendingValidUntil = row.GetInt64(2);
+                }
+            }
+            if (pendingCommandId is not null)
+            {
+                if (pendingCommandType != type)
+                    throw new InvalidOperationException("Another Sunshine maintenance command is already pending.");
+                tx.Commit();
+                return new(pendingCommandId, RequestSunshineAction(pendingCommandType), "requested",
+                    DateTimeOffset.FromUnixTimeMilliseconds(pendingValidUntil));
+            }
+            if (!request.Force && HasAllocationHoldingLease(tx, machineId))
+                throw new InvalidOperationException("Machine has an active rental; force is required to interrupt it.");
+
+            var commandId = Guid.NewGuid().ToString("N");
+            var validUntil = now.AddMilliseconds(PcControlCommandValidityMilliseconds).ToUnixTimeMilliseconds();
+            ExecuteLease(tx, "INSERT INTO command_outbox(command_id,type,rental_id,machine_id,lease_revision,boot_id,valid_until,payload) VALUES($command,$type,NULL,$machine,0,$boot,$until,$payload)",
+                ("$command", commandId), ("$type", type), ("$machine", machineId), ("$boot", bootId), ("$until", validUntil),
+                // The Agent reads the force flag from the payload; it is the same acknowledgement the
+                // Controller required before queueing while a rental was active.
+                ("$payload", System.Text.Json.JsonSerializer.Serialize(new { force = request.Force })));
+            RecordMachineAdminAction(tx, machineId, actorId, requestId, auditAction, commandId,
+                Digest(machineId, requestId, auditAction, request.Force ? "force" : "safe"), nowMs);
+            tx.Commit();
+            return new(commandId, RequestSunshineAction(type), "requested", DateTimeOffset.FromUnixTimeMilliseconds(validUntil));
+        }
+    }
+
+    /// <summary>Reads the current status of an already queued Sunshine maintenance command.</summary>
+    public AdminSunshineCommandStatusDto GetSunshineMaintenanceStatus(string machineId, string commandId, string actorId)
+    {
+        Identifier(machineId);
+        Identifier(commandId);
+        Identifier(actorId);
+        lock (gate)
+        {
+            using var tx = connection.BeginTransaction();
+            EnsureNotRestoreQuarantined(tx);
+            ExpireLeases(tx, clock.GetUtcNow().ToUnixTimeMilliseconds());
+            var result = ReadAdminSunshineCommandStatus(tx, machineId, commandId);
+            tx.Commit();
+            return result;
+        }
+    }
+
+    private static string SunshineCommandType(string action) => action switch
+    {
+        AdminSunshineCommandRequestDto.Restart => RestartSunshineCommand,
+        AdminSunshineCommandRequestDto.Unpair => UnpairSunshineCommand,
+        _ => throw new ArgumentException("Invalid Sunshine maintenance action"),
+    };
+
+    private static string RequestSunshineAction(string type) =>
+        type == RestartSunshineCommand ? AdminSunshineCommandRequestDto.Restart : AdminSunshineCommandRequestDto.Unpair;
+
+    private bool HasAllocationHoldingLease(SqliteTransaction tx, string machineId)
+    {
+        using var command = Command("SELECT EXISTS(SELECT 1 FROM leases WHERE machine_id=$machine AND allocation_held=1)",
+            ("$machine", machineId));
+        command.Transaction = tx;
+        return Convert.ToInt64(command.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture) != 0;
+    }
+
+    private (string ActionType, string? CommandId)? FindMachineAdminActionDetail(SqliteTransaction tx,
+        string actorId, string requestId)
+    {
+        using var command = Command("SELECT action_type,command_id FROM machine_admin_actions WHERE actor_id=$actor AND request_id=$request",
+            ("$actor", actorId), ("$request", requestId));
+        command.Transaction = tx;
+        using var row = command.ExecuteReader();
+        return row.Read() ? (row.GetString(0), row.IsDBNull(1) ? null : row.GetString(1)) : null;
+    }
+
+    private AdminSunshineCommandStatusDto ReadAdminSunshineCommandStatus(SqliteTransaction tx, string machineId,
+        string commandId)
+    {
+        using var command = Command("SELECT type,status,valid_until FROM command_outbox WHERE machine_id=$machine AND command_id=$command AND type IN ('RestartSunshine','UnpairSunshine')",
+            ("$machine", machineId), ("$command", commandId));
+        command.Transaction = tx;
+        using var row = command.ExecuteReader();
+        if (!row.Read()) throw new KeyNotFoundException("Sunshine maintenance command was not found.");
+        var type = row.GetString(0);
+        var status = row.GetString(1) switch
+        {
+            "pending" => "requested",
+            "applied" => "applied",
+            "failed" => "failed",
+            "expired" or "invalidated" => "expired",
+            var other => other,
+        };
+        return new(commandId, RequestSunshineAction(type), status,
+            DateTimeOffset.FromUnixTimeMilliseconds(row.GetInt64(2)));
     }
 
     private LeaseRow FindAllocationLeaseForMachine(SqliteTransaction tx, string machineId, string state)

@@ -14,7 +14,7 @@ internal static class AgentPackageCorpus
     internal const string Version = "2.3.4";
     internal const string Manifest = """{"packageFormatVersion":1,"agentInformationalVersion":"2.3.4","sourceCommit":"0123456789ab","sourceDirty":false,"releaseBuild":true,"agentUpdateChallengeProtocol":2}""";
     internal const string Deps = """{"libraries":{"Agent/2.3.4":{"type":"project"}}}""";
-    internal static readonly string[] Scripts = ["Install-AgentPackage.ps1", "Install-Service.ps1", "Install-TightVncServer.ps1", "Prepare-SunshineStreamGate.ps1", "PrivateInstallFiles.ps1", "ServiceInstallTransaction.ps1", "Update-AgentPackage.ps1", "Update-Agent.ps1"];
+    internal static readonly string[] Scripts = ["Install-AgentPackage.ps1", "Install-Service.ps1", "Install-TightVncServer.ps1", "Remove-StreamGuard.ps1", "PrivateInstallFiles.ps1", "ServiceInstallTransaction.ps1", "Update-AgentPackage.ps1", "Update-Agent.ps1"];
     private static readonly Lazy<Dictionary<string, (byte[] Exe, byte[] Dll)>> Published = new(Publish);
     internal static byte[] Utf8(string value) => Encoding.UTF8.GetBytes(value);
 

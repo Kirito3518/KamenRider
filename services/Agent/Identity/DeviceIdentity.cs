@@ -44,13 +44,14 @@ public sealed class DeviceIdentity : IAgentRequestSigner, IDisposable
             var service = WindowsIdentity.GetCurrent().User!;
             var administrators = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
             var system = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
-            var existingDirectoryOwner = directoryInfo.GetAccessControl(AccessControlSections.Owner)
-                .GetOwner(typeof(SecurityIdentifier));
-            if (!service.Equals(existingDirectoryOwner))
+            if (directoryInfo.GetAccessControl(AccessControlSections.Owner)
+                    .GetOwner(typeof(SecurityIdentifier)) is not SecurityIdentifier existingDirectoryOwner ||
+                (!service.Equals(existingDirectoryOwner) && !IsAdoptableLegacyOwner(service, existingDirectoryOwner)))
                 throw new UnauthorizedAccessException("Identity directory owner does not match the current service account.");
 
             var directorySecurity = new DirectorySecurity();
             directorySecurity.SetAccessRuleProtection(true, false);
+            directorySecurity.SetOwner(service);
             foreach (var sid in new[] { service, administrators, system }.Distinct())
             {
                 directorySecurity.AddAccessRule(new FileSystemAccessRule(
@@ -95,13 +96,14 @@ public sealed class DeviceIdentity : IAgentRequestSigner, IDisposable
             if ((identityInfo.Attributes & FileAttributes.ReparsePoint) != 0)
                 throw new InvalidDataException("Identity file must not be a reparse point");
 
-            var existingFileOwner = identityInfo.GetAccessControl(AccessControlSections.Owner)
-                .GetOwner(typeof(SecurityIdentifier));
-            if (!service.Equals(existingFileOwner))
+            if (identityInfo.GetAccessControl(AccessControlSections.Owner)
+                    .GetOwner(typeof(SecurityIdentifier)) is not SecurityIdentifier existingFileOwner ||
+                (!service.Equals(existingFileOwner) && !IsAdoptableLegacyOwner(service, existingFileOwner)))
                 throw new UnauthorizedAccessException("Identity file owner does not match the current service account.");
 
             var fileSecurity = new FileSecurity();
             fileSecurity.SetAccessRuleProtection(true, false);
+            fileSecurity.SetOwner(service);
             foreach (var sid in new[] { service, administrators, system }.Distinct())
                 fileSecurity.AddAccessRule(new FileSystemAccessRule(sid, FileSystemRights.FullControl, AccessControlType.Allow));
             identityInfo.SetAccessControl(fileSecurity);
@@ -117,8 +119,14 @@ public sealed class DeviceIdentity : IAgentRequestSigner, IDisposable
         return new(saved.MachineId, Convert.FromBase64String(saved.PrivateKey));
     }
 
-    public string Sign(string method, string path, DateTimeOffset timestamp, string nonce, string body) =>
-        Convert.ToBase64String(key.SignData(
+    // A legacy install ran the Agent as the virtual service account S-1-5-80-...; only SYSTEM (the
+    // new service account) may adopt that identity, and it re-owns it immediately below.
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    private static bool IsAdoptableLegacyOwner(SecurityIdentifier current, SecurityIdentifier owner) =>
+        current.Equals(new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null)) &&
+        owner.Value.StartsWith("S-1-5-80-", StringComparison.Ordinal);
+
+    public string Sign(string method, string path, DateTimeOffset timestamp, string nonce, string body) =>        Convert.ToBase64String(key.SignData(
             Encoding.UTF8.GetBytes($"{MachineId}\n{method}\n{path}\n{timestamp.ToUnixTimeSeconds()}\n{nonce}\n{Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(body)))}"),
             HashAlgorithmName.SHA256));
 

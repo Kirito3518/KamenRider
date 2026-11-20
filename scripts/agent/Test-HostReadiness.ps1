@@ -2,7 +2,8 @@
 param([switch]$Json)
 
 $ErrorActionPreference = 'Stop'
-if (-not $IsWindows) { throw 'Windows is required.' }
+$isWindowsHost = if (Test-Path -LiteralPath Variable:\IsWindows) { [bool]$IsWindows } else { $env:OS -eq 'Windows_NT' }
+if (-not $isWindowsHost) { throw 'Windows is required.' }
 
 . (Join-Path $PSScriptRoot 'HostReadinessInventory.ps1')
 $principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())

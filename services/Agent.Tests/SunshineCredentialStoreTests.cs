@@ -1,8 +1,12 @@
 using System.Runtime.Versioning;
 using System.Security.Principal;
 using System.Text;
+using KamenRaider.Agent;
+using KamenRaider.Agent.Configuration;
 using KamenRaider.Agent.Sunshine;
+using KamenRaider.Contracts;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 
 namespace Agent.Tests;
 
@@ -115,25 +119,32 @@ public class SunshineCredentialStoreTests
 
     [Fact]
     [SupportedOSPlatform("windows")]
-    public async Task PairingRemainsUnavailableWhenNoLocalCredentialHasBeenProvisioned()
+    public async Task MissingCredentialStillAllowsLoopbackSunshineButNotPairingWithoutALease()
     {
         if (!OperatingSystem.IsWindows()) return;
         using var directory = new TempDirectory();
-        using var pairing = new LazySunshinePairingSession(
-            NewStore(directory.Path, new TestProtector()),
-            () => 47990,
-            new ClosedPairingFence(),
-            () => null,
+        var store = NewStore(directory.Path, new TestProtector());
+        using var service = new SunshineService(
+            () => new ConfigurationDto(1, 47989, 47990),
+            static () => 0,
+            store.Load,
+            static () => true,
+            static () => null,
+            new FakeLiveness(),
+            Options.Create(new AgentOptions { MoonlightPort = 47989, SunshinePort = 47990 }),
             TimeProvider.System,
-            NullLogger<LazySunshinePairingSession>.Instance);
-        var command = new KamenRaider.Contracts.CommandEnvelope(
+            NullLogger<SunshineService>.Instance);
+
+        // 0jay-style: loopback Sunshine needs no fleet credential, so the session is usable;
+        // without a current lease scope the command is rejected by the pairing session itself
+        // (not with "PairingUnavailable").
+        Assert.Empty(await service.ListAsync(default));
+        Assert.Null(await service.CreateOfferAsync(default));
+        var command = new CommandEnvelope(
             "pair-command", "PairPin", "rental", 1, "boot", DateTimeOffset.UtcNow.AddMinutes(1),
             System.Text.Json.JsonSerializer.SerializeToElement(new { pairingId = "slot", pin = "1234" }));
-
-        Assert.Null(await pairing.CreateOfferAsync(default));
-        Assert.Empty(await pairing.ListAsync(default));
-        Assert.Equal(new KamenRaider.Contracts.CommandResult("pair-command", "failed", 1, "PairingUnavailable"), await pairing.ExecuteAsync(command, default));
-        Assert.False(await pairing.ClearAsync(default));
+        Assert.Equal(new CommandResult("pair-command", "failed", 1, "PairingRejected"),
+            await service.ExecuteAsync(command, default));
     }
 
     [SupportedOSPlatform("windows")]
@@ -143,9 +154,11 @@ public class SunshineCredentialStoreTests
         return new(directory, currentUser, protector);
     }
 
-    private sealed class ClosedPairingFence : IPairingFence
+    private sealed class FakeLiveness : ISunshineLiveness
     {
-        public Task<bool> VerifyOpenForLeaseAsync(PairingScope scope, CancellationToken ct) => Task.FromResult(false);
-        public Task<bool> RunFencedCleanupAsync(Func<CancellationToken, Task> clear, CancellationToken ct) => Task.FromResult(false);
+        public SunshineLivenessSnapshot Current { get; } = new(
+            true, SunshineLivenessProbe.ReasonReady, DateTimeOffset.UtcNow, 47989, 47990);
+
+        public Task<SunshineLivenessSnapshot> ProbeOnceAsync(CancellationToken ct) => Task.FromResult(Current);
     }
 }

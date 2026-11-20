@@ -39,6 +39,8 @@ import { GET as getPairing, POST as postPairing } from "@/app/api/admin/pc-contr
 import { POST as postLeaseTime } from "@/app/api/admin/pc-control/[machineId]/lease-time/route";
 import { POST as postLeaseCancel } from "@/app/api/admin/pc-control/[machineId]/lease-cancel/route";
 import { GET as getPairingStatus } from "@/app/api/admin/pc-control/[machineId]/pairing/[commandId]/route";
+import { POST as postSunshine } from "@/app/api/admin/pc-control/[machineId]/sunshine/route";
+import { GET as getSunshineStatus } from "@/app/api/admin/pc-control/[machineId]/sunshine/[commandId]/route";
 
 function request(body?: unknown, headers: Record<string, string> = {}) {
   return new Request("http://localhost/api/admin/pc-control", {
@@ -170,5 +172,52 @@ describe("PC-control admin routes", () => {
     const call = h.controllerRequest.mock.calls[0];
     expect(call[0]).toContain("/lease-cancel");
     expect(JSON.parse(call[1].body)).toEqual({ expectedRevision: 2, idempotencyKey: "key", requestId: "cancel-1" });
+  });
+
+  it("validates and forwards machine-scoped Sunshine maintenance commands", async () => {
+    const badAction = await postSunshine(request({ action: "explode", force: false }), params());
+    expect(badAction.status).toBe(400);
+    const badForce = await postSunshine(request({ action: "restart", force: "yes" }), params());
+    expect(badForce.status).toBe(400);
+    const extraField = await postSunshine(request({ action: "restart", force: false, extra: true }), params());
+    expect(extraField.status).toBe(400);
+    expect(h.controllerRequest).not.toHaveBeenCalled();
+
+    h.controllerRequest.mockResolvedValueOnce({
+      commandId: "sunshine-1",
+      action: "restart",
+      status: "requested",
+      expiresAtUtc: "2026-11-17T00:11:00Z",
+    });
+    const response = await postSunshine(
+      request({ action: "restart", force: true, requestId: "sunshine-request-1" }),
+      params(),
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ commandId: "sunshine-1", status: "requested" });
+    const call = h.controllerRequest.mock.calls[0];
+    expect(call[0]).toBe("/internal/admin/pc-control/0123456789abcdef0123456789abcdef/sunshine");
+    expect(JSON.parse(call[1].body)).toEqual({ action: "restart", force: true, requestId: "sunshine-request-1" });
+  });
+
+  it("loads the Sunshine maintenance command status for the current machine", async () => {
+    h.controllerRequest.mockResolvedValueOnce({
+      commandId: "sunshine-1",
+      action: "unpair",
+      status: "applied",
+      expiresAtUtc: "2026-11-17T00:11:00Z",
+    });
+
+    const response = await getSunshineStatus(request(), {
+      params: Promise.resolve({
+        machineId: "0123456789abcdef0123456789abcdef",
+        commandId: "sunshine-1",
+      }),
+    });
+    expect(response.status).toBe(200);
+    expect(h.controllerRequest.mock.calls[0][0]).toBe(
+      "/internal/admin/pc-control/0123456789abcdef0123456789abcdef/sunshine/sunshine-1",
+    );
+    expect(await response.json()).toMatchObject({ status: "applied" });
   });
 });

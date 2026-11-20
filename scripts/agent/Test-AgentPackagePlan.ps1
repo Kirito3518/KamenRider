@@ -10,7 +10,7 @@ $archiveBefore=if(Test-Path -LiteralPath $default.ArchivePath){(Get-FileHash -Li
 $plan=& $build -OutputDirectory $root -Runtime 'win-arm64' -Plan
 if($plan.Runtime -ne 'win-arm64' -or $plan.OutputDirectory -ne $root){throw 'Explicit package plan did not preserve requested settings.'}
 if(-not [IO.Path]::IsPathRooted($plan.ProjectPath)){throw 'Agent project path must be absolute.'}
-$required=@('Agent','Install-AgentPackage.ps1','Install-Service.ps1','Install-TightVncServer.ps1','Prepare-SunshineStreamGate.ps1','PrivateInstallFiles.ps1','ServiceInstallTransaction.ps1','AgentPackage.manifest.json')
+$required=@('Agent','Install-AgentPackage.ps1','Install-Service.ps1','Install-TightVncServer.ps1','Remove-StreamGuard.ps1','PrivateInstallFiles.ps1','ServiceInstallTransaction.ps1','AgentPackage.manifest.json')
 if(@($plan.PackageEntries).Count -ne $required.Count){throw 'Package plan must list each required package entry.'}
 foreach($entry in $required){if($entry -notin $plan.PackageEntries){throw "Package plan is missing $entry."}}
 if(Test-Path -LiteralPath $root){throw 'Plan must not create the requested output directory.'}

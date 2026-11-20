@@ -78,6 +78,25 @@ public static class PcControlEndpoints
             return Execute(() => Results.Ok(database.CancelMachineLease(id, request.ExpectedRevision,
                 request.IdempotencyKey, request.RequestId, actorId)));
         });
+
+        // Machine-scoped Sunshine maintenance (replaces the retired Stream Guard maintenance
+        // script). Commands are delivered to the current Agent boot through the sync outbox.
+        app.MapPost("/internal/admin/pc-control/{machineId}/sunshine", (string machineId,
+            AdminSunshineCommandRequestDto? request, HttpContext context, ControllerDatabase database) =>
+        {
+            context.Response.Headers.CacheControl = "no-store";
+            if (!AdminActor(context, out var actorId)) return Results.StatusCode(StatusCodes.Status403Forbidden);
+            if (request is null) return Results.BadRequest();
+            return Execute(() => Results.Ok(database.QueueSunshineMaintenanceCommand(machineId, request, actorId)));
+        });
+
+        app.MapGet("/internal/admin/pc-control/{machineId}/sunshine/{commandId}", (string machineId, string commandId,
+            HttpContext context, ControllerDatabase database) =>
+        {
+            context.Response.Headers.CacheControl = "no-store";
+            if (!AdminActor(context, out var actorId)) return Results.StatusCode(StatusCodes.Status403Forbidden);
+            return Execute(() => Results.Ok(database.GetSunshineMaintenanceStatus(machineId, commandId, actorId)));
+        });
     }
 
     private static IResult Execute(Func<IResult> action)

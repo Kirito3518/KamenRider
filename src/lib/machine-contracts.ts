@@ -31,6 +31,10 @@ export type Machine = {
   ramBytes: number;
   /** Sunshine management credential revision the Agent reports as applied. */
   appliedSunshineCredentialRevision: number;
+  /** Admin opt-in for renter-supplied Parsec account login. */
+  parsecEnabled?: boolean;
+  /** Agent currently advertises a usable Parsec installation (parsecd.exe detected). */
+  parsecAvailable?: boolean;
   localIp: string;
   vncLocalIp: string | null;
   hourlyPriceMinorUnits: number;
@@ -69,6 +73,8 @@ export type Lease = {
   connection?: { address: string | null; stale: boolean };
   /** Agent-reported machine display name (hostname by default); safe to show the renter. */
   machineDisplayName?: string | null;
+  /** Parsec capability for this active lease; absent when the admin has not enabled it. */
+  parsec?: import("@/lib/parsec-contracts").ParsecLeaseState | null;
   id: string;
   machineId: string;
   state: string;

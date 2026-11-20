@@ -15,9 +15,16 @@ import {
   PcControlPairDialog,
   PcControlTimeDialog,
 } from "@/components/admin/pc-control-dialogs";
-import type { PcControlMachine, PcControlSnapshot } from "@/lib/pc-control";
+import {
+  sunshineCommandLabel,
+  sunshineCommandStatusLabels,
+  type PcControlMachine,
+  type PcControlSnapshot,
+  type SunshineCommandAction,
+  type SunshineCommandStatus,
+} from "@/lib/pc-control";
 
-type ConfirmTarget = { kind: "powerOff" | "cancel"; machine: PcControlMachine } | null;
+type ConfirmTarget = { kind: "powerOff" | "cancel" | "restartSunshine" | "unpairSunshine"; machine: PcControlMachine } | null;
 
 async function postJson(path: string, body: unknown) {
   const response = await fetch(path, {
@@ -105,6 +112,50 @@ export function PcControl() {
     }), deltaSeconds > 0 ? "ส่งคำขอเพิ่มเวลาแล้ว รอ Agent ยืนยัน" : "ส่งคำขอลดเวลาแล้ว รอ Agent ยืนยัน");
   }
 
+  async function queueSunshine(machine: PcControlMachine, action: SunshineCommandAction) {
+    const label = sunshineCommandLabel(action);
+    const force = machine.lease !== null;
+    await run(machine, async () => {
+      const created = (await postJson(
+        `/api/admin/pc-control/${encodeURIComponent(machine.machineId)}/sunshine`,
+        { action, force, requestId: crypto.randomUUID() },
+      )) as SunshineCommandStatus;
+      if (typeof created.commandId === "string" && created.commandId)
+        void trackSunshine(machine, action, created.commandId);
+      return created;
+    }, `ส่งคำสั่ง${label}แล้ว รอ Agent ยืนยัน`);
+  }
+
+  // The Controller keeps the command status until the Agent reports back; poll briefly so the
+  // admin sees applied/failed instead of only the queued acknowledgement.
+  async function trackSunshine(machine: PcControlMachine, action: SunshineCommandAction, commandId: string) {
+    const label = sunshineCommandLabel(action);
+    const name = machine.displayName || machine.machineId;
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      if (attempt > 0) await new Promise((resolve) => window.setTimeout(resolve, 2_000));
+      if (!mounted.current) return;
+      try {
+        const response = await fetch(
+          `/api/admin/pc-control/${encodeURIComponent(machine.machineId)}/sunshine/${encodeURIComponent(commandId)}`,
+          { cache: "no-store" },
+        );
+        if (!response.ok) return;
+        const status = (await response.json()) as SunshineCommandStatus;
+        if (!mounted.current) return;
+        if (status.status === "applied") {
+          setMessage(`${label} ${name} สำเร็จแล้ว`);
+          return;
+        }
+        if (status.status === "failed" || status.status === "expired") {
+          setError(`${label} ${name} ไม่สำเร็จ (${sunshineCommandStatusLabels[status.status] || status.status})`);
+          return;
+        }
+      } catch {
+        return;
+      }
+    }
+  }
+
   async function confirmAction() {
     if (!confirmTarget) return;
     const { kind, machine } = confirmTarget;
@@ -112,7 +163,7 @@ export function PcControl() {
       await run(machine, () => postJson(`/api/admin/pc-control/${encodeURIComponent(machine.machineId)}/power-off`, {
         requestId: crypto.randomUUID(),
       }), "ส่งคำสั่งปิดเครื่องและสิ้นสุดการเช่าแล้ว");
-    } else {
+    } else if (kind === "cancel") {
       const lease = machine.lease;
       if (!lease) return;
       await run(machine, () => postJson(`/api/admin/pc-control/${encodeURIComponent(machine.machineId)}/lease-cancel`, {
@@ -120,6 +171,8 @@ export function PcControl() {
         idempotencyKey: crypto.randomUUID(),
         requestId: crypto.randomUUID(),
       }), "ส่งคำขอยกเลิกการเช่าแล้ว รอ Agent ยืนยัน");
+    } else {
+      await queueSunshine(machine, kind === "restartSunshine" ? "restart" : "unpair");
     }
     setConfirmTarget(null);
   }
@@ -188,6 +241,8 @@ export function PcControl() {
               onReduceTime={() => void adjustTime(machine, -3600)}
               onPowerOff={() => setConfirmTarget({ kind: "powerOff", machine })}
               onCancel={() => setConfirmTarget({ kind: "cancel", machine })}
+              onRestartSunshine={() => setConfirmTarget({ kind: "restartSunshine", machine })}
+              onUnpairSunshine={() => setConfirmTarget({ kind: "unpairSunshine", machine })}
             />
           ))}
         </div>

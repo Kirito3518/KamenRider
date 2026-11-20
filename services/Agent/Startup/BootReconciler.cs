@@ -1,5 +1,6 @@
 using KamenRaider.Agent.Configuration;
 using KamenRaider.Agent.Leases;
+using KamenRaider.Agent.Sunshine;
 using KamenRaider.Contracts;
 
 namespace KamenRaider.Agent.Startup;
@@ -28,25 +29,25 @@ public interface IReconciledLeaseImporter
     Task<bool> ClearAsync(string bootId, CancellationToken ct);
 }
 
-// Implementations must independently verify restoration for this boot, a real stream fence,
-// empty pairing/client state, and desktop/capture/input/audio health. Never infer these from uptime.
+// Implementations must independently verify restoration and desktop health where such
+// evidence exists, and must actually clear Sunshine pairing/stream access on boot.
+// Restoration and desktop evidence are advisory diagnostics in the 0jay-style readiness
+// model; only the pairing cleanup is required for readiness.
 public interface IBootEnvironment
 {
     Task<BootEvidenceStatus> VerifyRestorationAsync(ReconciliationChallenge challenge, CancellationToken ct);
-    Task<BootEvidenceStatus> FenceAndClearAsync(ReconciliationChallenge challenge, CancellationToken ct);
+    Task<BootEvidenceStatus> ClearStreamAccessAsync(ReconciliationChallenge challenge, CancellationToken ct);
     Task<BootEvidenceStatus> VerifyHealthAsync(ReconciliationChallenge challenge, CancellationToken ct);
-    // Recheck volatile runtime health each sync cycle without reusing an expired one-time challenge.
-    Task<BootEvidenceStatus> VerifyRuntimeHealthAsync(string bootId, long configurationRevision, CancellationToken ct);
 }
 
 public sealed class BootReconciler(
     IBootClock clock,
-    IStreamGate gate,
     AppliedConfiguration configuration,
     IBootReconciliationClient client,
     IBootEnvironment environment,
     IReconciledLeaseImporter leaseImporter,
-    IBootBaselineEvidence baselineEvidence)
+    IBootBaselineEvidence baselineEvidence,
+    ISunshineLiveness liveness)
 {
     private static readonly ReadinessDiagnostic[] UnknownDiagnostics = ReadinessDiagnosticIds.Canonical
         .Select(id => new ReadinessDiagnostic(id, ReadinessDiagnosticStatuses.Unknown))
@@ -74,11 +75,7 @@ public sealed class BootReconciler(
             }
 
             if (baselineEvidence.Status != BootEvidenceStatus.Passed)
-            {
                 SetDiagnostic(ReadinessDiagnosticIds.Baseline, baselineEvidence.Status);
-                SetDiagnostic(ReadinessDiagnosticIds.RuntimeHealth, BootEvidenceStatus.Unknown);
-                return await InvalidateReadinessAsync(ct);
-            }
 
             if (boot != clock.BootId)
             {
@@ -94,34 +91,30 @@ public sealed class BootReconciler(
                 return await InvalidateReadinessAsync(ct);
             }
 
-            SetDiagnostic(ReadinessDiagnosticIds.RuntimeHealth, BootEvidenceStatus.Unknown);
-            var runtimeStatus = await environment.VerifyRuntimeHealthAsync(boot, readyConfigurationRevision, ct);
-            SetDiagnostic(ReadinessDiagnosticIds.RuntimeHealth, runtimeStatus);
-            if (runtimeStatus != BootEvidenceStatus.Passed)
-            {
-                await gate.BlockAsync(ct);
-                return Readiness.NotReady;
-            }
-
-            return Readiness.Ready;
-        }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested)
-        {
-            throw;
-        }
-        catch (Exception)
-        {
+            // Liveness is the gate: the two local Sunshine endpoints must answer. A short
+            // miss streak is absorbed by the monitor's hysteresis so one probe does not take
+            // a working machine off the shelf.
+            SunshineLivenessSnapshot snapshot;
             try
             {
-                await gate.BlockAsync(ct);
+                snapshot = await liveness.ProbeOnceAsync(ct);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
             }
             catch (Exception)
             {
-                readyBootId = null;
-                readyConfigurationRevision = -1;
+                SetDiagnostic(ReadinessDiagnosticIds.StreamFence, BootEvidenceStatus.Blocked);
+                SetDiagnostic(ReadinessDiagnosticIds.RuntimeHealth, BootEvidenceStatus.Blocked);
+                return Readiness.Fault;
             }
 
-            return Readiness.Fault;
+            SetDiagnostic(ReadinessDiagnosticIds.StreamFence,
+                snapshot.Ready ? BootEvidenceStatus.Passed : BootEvidenceStatus.Blocked);
+            SetDiagnostic(ReadinessDiagnosticIds.RuntimeHealth,
+                snapshot.Ready ? BootEvidenceStatus.Passed : BootEvidenceStatus.Blocked);
+            return snapshot.Ready ? Readiness.Ready : Readiness.NotReady;
         }
         finally
         {
@@ -129,12 +122,12 @@ public sealed class BootReconciler(
         }
     }
 
-    private async Task<Readiness> InvalidateReadinessAsync(CancellationToken ct)
+    private Task<Readiness> InvalidateReadinessAsync(CancellationToken ct)
     {
+        _ = ct;
         readyBootId = null;
         readyConfigurationRevision = -1;
-        await gate.BlockAsync(ct);
-        return Readiness.NotReady;
+        return Task.FromResult(Readiness.NotReady);
     }
 
     public async Task<Readiness> ReconcileAsync(CancellationToken ct)
@@ -145,7 +138,6 @@ public sealed class BootReconciler(
             readinessDiagnostics = UnknownDiagnostics.ToArray();
             readyBootId = null;
             readyConfigurationRevision = -1;
-            await gate.BlockAsync(ct);
 
             var baselineStatus = baselineEvidence.Status;
             SetDiagnostic(ReadinessDiagnosticIds.Baseline, baselineStatus);
@@ -169,29 +161,45 @@ public sealed class BootReconciler(
             }
 
             SetDiagnostic(ReadinessDiagnosticIds.BootChallenge, BootEvidenceStatus.Passed);
-            if (baselineStatus != BootEvidenceStatus.Passed)
-            {
-                return Readiness.NotReady;
-            }
 
+            // Restoration and desktop health are reported, but the 0jay-style model does not
+            // require those (not yet qualified) adapters to sell a machine. Pairing cleanup is
+            // required: it is what ends the previous renter's access.
             var restoration = await environment.VerifyRestorationAsync(challenge!, ct);
             SetDiagnostic(ReadinessDiagnosticIds.Restoration, restoration);
-            if (restoration != BootEvidenceStatus.Passed)
-            {
-                return Readiness.NotReady;
-            }
 
-            var fence = await environment.FenceAndClearAsync(challenge!, ct);
-            SetDiagnostic(ReadinessDiagnosticIds.StreamFence, fence);
-            if (fence != BootEvidenceStatus.Passed)
-            {
-                return Readiness.NotReady;
-            }
+            var cleaned = await environment.ClearStreamAccessAsync(challenge!, ct);
+            SetDiagnostic(ReadinessDiagnosticIds.StreamFence, cleaned);
 
             var health = await environment.VerifyHealthAsync(challenge!, ct);
             SetDiagnostic(ReadinessDiagnosticIds.DesktopHealth, health);
-            if (health != BootEvidenceStatus.Passed)
+
+            if (cleaned != BootEvidenceStatus.Passed)
+                return Readiness.NotReady;
+
+            SunshineLivenessSnapshot livenessSnapshot;
+            try
             {
+                livenessSnapshot = await liveness.ProbeOnceAsync(ct);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception)
+            {
+                SetDiagnostic(ReadinessDiagnosticIds.StreamFence, BootEvidenceStatus.Blocked);
+                SetDiagnostic(ReadinessDiagnosticIds.RuntimeHealth, BootEvidenceStatus.Blocked);
+                return Readiness.Fault;
+            }
+
+            SetDiagnostic(ReadinessDiagnosticIds.StreamFence,
+                livenessSnapshot.Ready ? BootEvidenceStatus.Passed : BootEvidenceStatus.Blocked);
+            SetDiagnostic(ReadinessDiagnosticIds.RuntimeHealth,
+                livenessSnapshot.Ready ? BootEvidenceStatus.Passed : BootEvidenceStatus.Blocked);
+            if (!livenessSnapshot.Ready)
+            {
+                // Sunshine may still be starting; the next sync cycle retries reconciliation.
                 return Readiness.NotReady;
             }
 
@@ -203,7 +211,9 @@ public sealed class BootReconciler(
 
             var started = clock.UptimeMilliseconds;
             var response = await client.ReconcileAsync(
-                new(boot, configuration.Current!.Revision, true, true, true, true, challenge),
+                new(boot, configuration.Current!.Revision, baselineStatus == BootEvidenceStatus.Passed,
+                    restoration == BootEvidenceStatus.Passed, cleaned == BootEvidenceStatus.Passed,
+                    health == BootEvidenceStatus.Passed, challenge, StreamReady: livenessSnapshot.Ready),
                 ct);
             await configuration.ApplyAsync(response.Configuration, ct);
             var configurationMatches = clock.BootId == boot && response.Configuration.Revision == initial.Configuration.Revision;

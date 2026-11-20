@@ -23,4 +23,14 @@
   <ItemGroup>
     <ProjectReference Include="..\Contracts\Contracts.csproj" />
   </ItemGroup>
+
+  <ItemGroup>
+    <!-- Parsec desktop automation: reviewed as PowerShell/JSON resources, embedded because the
+         fleet is diskless and a running service must not load scripts from a mutable folder.
+         The logical names are the constants in ParsecResources. -->
+    <EmbeddedResource Include="Parsec\Scripts\*">
+      <LogicalName>KamenRaider.Agent.Parsec.Scripts.%(Filename)%(Extension)</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+
 </Project>

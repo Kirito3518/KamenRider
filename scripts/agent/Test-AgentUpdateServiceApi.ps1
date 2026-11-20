@@ -3,75 +3,119 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'Update-AgentPackage.ps1') -DefineFunctionsOnly
 . (Join-Path $PSScriptRoot 'PrivateInstallFiles.ps1')
 
+$failures = [Collections.Generic.List[string]]::new()
+
+# The Agent service remains a virtual service for ACL purposes even though the
+# process runs as LocalSystem: the fence reader resolves the deterministic
+# virtual service SID and expects it in the three-principal maintenance ACL.
+$virtualSid = 'S-1-5-80-306869082-510711969-1671650537-2166470815-2388419276'
+try {
+    $agentServiceSid = Get-AgentUpdateAgentServiceSid
+    if ($agentServiceSid.Value -ne $virtualSid) { throw "Agent service SID lookup must return the deterministic virtual service SID, got $($agentServiceSid.Value)." }
+} catch { $failures.Add($_.Exception.Message) }
+
+try {
+    $expectedBootstrapRoot = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)) 'KamenRaider.AgentMaintenanceBootstrap'
+    if ((Get-AgentUpdateBootstrapRoot) -ne $expectedBootstrapRoot) { throw 'Agent maintenance bootstrap must use the machine-wide Windows data directory.' }
+} catch { $failures.Add($_.Exception.Message) }
+
+try {
+    $security = New-AgentUpdateFenceDirectorySecurity
+    $rules = @($security.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
+    if (-not $security.AreAccessRulesProtected -or $security.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne 'S-1-5-32-544') {
+        throw 'Maintenance fence descriptor must be protected and owned by Administrators.'
+    }
+    $expected = @{
+        'S-1-5-18' = [Security.AccessControl.FileSystemRights]::FullControl
+        'S-1-5-32-544' = [Security.AccessControl.FileSystemRights]::FullControl
+        $virtualSid = [Security.AccessControl.FileSystemRights]'ReadAndExecute,Synchronize'
+    }
+    if ($rules.Count -ne 3) { throw 'Maintenance fence descriptor must contain exactly three principals.' }
+    foreach ($rule in $rules) {
+        if ($rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow -or $rule.IsInherited -or
+            $rule.PropagationFlags -ne [Security.AccessControl.PropagationFlags]::None -or
+            $rule.InheritanceFlags -ne [Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit' -or
+            -not $expected.ContainsKey($rule.IdentityReference.Value) -or
+            $rule.FileSystemRights -ne $expected[$rule.IdentityReference.Value]) {
+            throw 'Maintenance fence descriptor differs from the Agent reader policy.'
+        }
+    }
+} catch { $failures.Add($_.Exception.Message) }
+
+# The legacy updater service API must manage only the Agent service now.
 $global:AgentUpdateServiceTestCalls = [Collections.Generic.List[string]]::new()
-function global:Get-CimInstance {
-    param($ClassName,$Filter,$ErrorAction)
-    return [pscustomobject]@{ Name = 'KamenRaider Agent'; StartName = 'NT SERVICE\KamenRaider Agent'; StartMode = 'Auto'; PathName = 'mock'; State = 'Running' }
-}
+$global:AgentUpdateServiceStatus = 'Running'
 function global:Get-Service {
-    param($Name,$ErrorAction)
-    $service = [pscustomobject]@{ Name = $Name; Status = 'Running'; ServicesDependedOn = @([pscustomobject]@{ ServiceName = 'KamenRaider Stream Guard' }) }
-    $service | Add-Member -MemberType ScriptMethod -Name WaitForStatus -Value { param($status,$timeout) }
+    param($Name, $ErrorAction)
+    if ($Name -ne 'KamenRaider Agent') { throw "Unexpected service target: $Name" }
+    $service = [pscustomobject]@{ Name = $Name; Status = $global:AgentUpdateServiceStatus }
+    $service | Add-Member -MemberType ScriptMethod -Name WaitForStatus -Value { param($status, $timeout) }
     return $service
 }
 function global:Stop-Service {
-    param($Name,[switch]$Force,$ErrorAction)
-    if ($Force) { throw 'Guard stop was forced and could stop Sunshine.' }
-    $global:AgentUpdateServiceTestCalls.Add($Name)
+    param($Name, [switch]$Force, $ErrorAction)
+    if ($Force) { throw 'Agent stop must not be forced; StopAgent owns normal stop semantics.' }
+    $global:AgentUpdateServiceTestCalls.Add('stop:' + $Name)
+    $global:AgentUpdateServiceStatus = 'Stopped'
 }
-function global:Get-Acl { param($LiteralPath,$ErrorAction) return $global:AgentUpdateTestAcl }
+function global:Start-Service {
+    param($Name, $ErrorAction)
+    $global:AgentUpdateServiceTestCalls.Add('start:' + $Name)
+    $global:AgentUpdateServiceStatus = 'Running'
+}
 try {
-    $failures = [Collections.Generic.List[string]]::new()
     try {
-        $expectedLockParent = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)) 'KamenRaider'
-        if ((Get-AgentUpdateLockParent) -ne $expectedLockParent) { throw 'Agent lock location must use the machine-wide Windows data directory.' }
-    } catch { $failures.Add($_.Exception.Message) }
-    try {
-        $record = Get-AgentUpdateServiceRecord -Name 'KamenRaider Agent'
-        if ('KamenRaider Stream Guard' -notin @($record.Dependencies)) { throw 'Service preflight did not read the configured Guard dependency.' }
-    } catch { $failures.Add($_.Exception.Message) }
-    try {
-        $api = Get-AgentUpdateLiveServiceApi -AgentServiceName 'KamenRaider Agent' -GuardServiceName 'KamenRaider Stream Guard'
-        & $api.StopGuard
-        if ($global:AgentUpdateServiceTestCalls.Count -ne 1 -or $global:AgentUpdateServiceTestCalls[0] -ne 'KamenRaider Stream Guard') { throw 'Guard stop did not target only the managed Guard service.' }
-    } catch { $failures.Add($_.Exception.Message) }
-    $aclRoot = Join-Path ([IO.Path]::GetTempPath()) ('kr-update-acl-' + [guid]::NewGuid().ToString('N'))
-    try {
-        New-Item -ItemType Directory -Path $aclRoot | Out-Null
-        $sid = [Security.Principal.SecurityIdentifier]::new('S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')
-        $trusted = Get-TrustedInstallSids @($sid)
-        $global:AgentUpdateTestAcl = New-PrivateInstallSecurity -ServiceSid $sid -Directory -ReadOnly
-        Assert-AgentUpdatePathAcl -Path $aclRoot -TrustedSids $trusted -RequireReadOnlySid $sid
-        $global:AgentUpdateTestAcl = New-PrivateInstallSecurity -ServiceSid $sid -Directory
-        $rejected = $false
-        try { Assert-AgentUpdatePathAcl -Path $aclRoot -TrustedSids $trusted -RequireReadOnlySid $sid } catch { $rejected = $true }
-        if (-not $rejected) { throw 'Service-writable Agent binaries were accepted.' }
-        $script:realAclCheck = ${function:Assert-AgentUpdatePathAcl}
-        $script:realSystemRootCheck = ${function:Assert-AgentUpdateSystemRoot}
-        $global:UpdateAclChecks = [Collections.Generic.List[object]]::new()
-        function Assert-AgentUpdatePathAcl {
-            param($Path,$TrustedSids,$RequireModifySid,$RequireReadOnlySid,$DisallowServiceWriteSid,[switch]$Private)
-            $global:UpdateAclChecks.Add([pscustomobject]@{ Path=$Path; Private=[bool]$Private })
+        $api = Get-AgentUpdateLiveServiceApi -AgentServiceName 'KamenRaider Agent'
+        if ($api.PSObject.Properties.Name -contains 'StopGuard' -or $api.PSObject.Properties.Name -contains 'StartGuard') {
+            throw 'The update service API must not manage a Stream Guard service.'
         }
-        function Assert-AgentUpdateSystemRoot { param($Path) }
-        Assert-AgentUpdateTrustedTree -Path $aclRoot -TrustedSids $trusted -ServiceSid $sid -ReadOnly -Private
-        $rootCheck = @($global:UpdateAclChecks | Where-Object { $_.Path -eq $aclRoot })
-        if ($rootCheck.Count -ne 1 -or -not $rootCheck[0].Private) { throw 'The recovery directory itself must have a private ACL.' }
-        if (@($global:UpdateAclChecks | Where-Object { $_.Path -ne $aclRoot -and $_.Private }).Count -ne 0) { throw 'Normal read access on a trusted recovery ancestor must not be treated as a private-data leak.' }
+        & $api.StopAgent
+        if ($global:AgentUpdateServiceStatus -ne 'Stopped') { throw 'StopAgent did not stop the Agent service.' }
+        & $api.StartAgent
+        if ($global:AgentUpdateServiceStatus -ne 'Running') { throw 'StartAgent did not start the Agent service.' }
+        $expectedCalls = 'stop:KamenRaider Agent,start:KamenRaider Agent'
+        if (($global:AgentUpdateServiceTestCalls -join ',') -ne $expectedCalls) {
+            throw "Update service API called unexpected services: $($global:AgentUpdateServiceTestCalls -join ',')"
+        }
     } catch { $failures.Add($_.Exception.Message) }
-    finally {
-        if ($script:realAclCheck) { Set-Item Function:\Assert-AgentUpdatePathAcl $script:realAclCheck }
-        if ($script:realSystemRootCheck) { Set-Item Function:\Assert-AgentUpdateSystemRoot $script:realSystemRootCheck }
-        Remove-Variable UpdateAclChecks -Scope Global -ErrorAction SilentlyContinue
-        if (Test-Path -LiteralPath $aclRoot) { Remove-Item -LiteralPath $aclRoot -Recurse -Force }
-    }
-    if ($failures.Count) { throw ($failures -join "`n") }
-    Write-Output 'Agent update service query and stop tests passed with fake services only.'
 } finally {
-    Remove-Item Function:\Get-CimInstance -Force
     Remove-Item Function:\Get-Service -Force
     Remove-Item Function:\Stop-Service -Force
-    Remove-Item Function:\Get-Acl -Force
+    Remove-Item Function:\Start-Service -Force
     Remove-Variable AgentUpdateServiceTestCalls -Scope Global -ErrorAction SilentlyContinue
-    Remove-Variable AgentUpdateTestAcl -Scope Global -ErrorAction SilentlyContinue
+    Remove-Variable AgentUpdateServiceStatus -Scope Global -ErrorAction SilentlyContinue
 }
+
+# The legacy update package must ship the idempotent Guard-removal migration and
+# no longer ship the removed Stream Guard setup script.
+$root = Join-Path ([IO.Path]::GetTempPath()) ('kr-update-service-api-' + [guid]::NewGuid().ToString('N'))
+try {
+    New-Item -ItemType Directory -Path (Join-Path $root 'Agent') -Force | Out-Null
+    [IO.File]::WriteAllText((Join-Path $root 'Agent\Agent.exe'), 'fixture')
+    [IO.File]::WriteAllText((Join-Path $root 'Agent\Agent.deps.json'), '{"libraries":{"Agent/2.3.4":{"type":"project"}}}')
+    [IO.File]::WriteAllText((Join-Path $root 'AgentPackage.manifest.json'), '{"packageFormatVersion":1,"agentInformationalVersion":"2.3.4","sourceCommit":"0123456789ab","sourceDirty":false,"releaseBuild":true,"agentUpdateChallengeProtocol":1}')
+    foreach ($name in @('Install-AgentPackage.ps1','Install-Service.ps1','Install-TightVncServer.ps1','Remove-StreamGuard.ps1','PrivateInstallFiles.ps1','ServiceInstallTransaction.ps1','Update-AgentPackage.ps1','Update-Agent.ps1')) {
+        [IO.File]::WriteAllText((Join-Path $root $name), 'fixture')
+    }
+    try {
+        Assert-AgentUpdatePackageRoot -PackageRoot $root -TargetVersion '2.3.4' | Out-Null
+        Remove-Item -LiteralPath (Join-Path $root 'Remove-StreamGuard.ps1') -Force
+        $rejected = $false
+        try { Assert-AgentUpdatePackageRoot -PackageRoot $root -TargetVersion '2.3.4' | Out-Null } catch { $rejected = $_.Exception.Message -like '*Remove-StreamGuard.ps1*' }
+        if (-not $rejected) { throw 'The update package must require Remove-StreamGuard.ps1.' }
+        [IO.File]::WriteAllText((Join-Path $root 'Prepare-SunshineStreamGate.ps1'), 'fixture')
+        $rejected = $false
+        try { Assert-AgentUpdatePackageRoot -PackageRoot $root -TargetVersion '2.3.4' | Out-Null } catch { $rejected = $_.Exception.Message -like '*Unexpected Agent package file*' }
+        if (-not $rejected) { throw 'The update package must reject the removed Prepare-SunshineStreamGate.ps1.' }
+    } catch { $failures.Add($_.Exception.Message) }
+} finally {
+    if (Test-Path -LiteralPath $root) {
+        $resolved = [IO.Path]::GetFullPath($root)
+        $tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\') + '\'
+        if (-not $resolved.StartsWith($tempRoot, [StringComparison]::OrdinalIgnoreCase) -or [IO.Path]::GetFileName($resolved) -notlike 'kr-update-service-api-*') { throw 'Unsafe update service API test cleanup path.' }
+        Remove-Item -LiteralPath $resolved -Recurse -Force
+    }
+}
+
+if ($failures.Count) { throw ($failures -join "`n") }
+Write-Output 'Agent update service SID/ACL, Agent-only service API, and Guard-migration package contract tests passed with fake services and temporary files.'
