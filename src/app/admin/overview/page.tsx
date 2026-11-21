@@ -11,6 +11,7 @@ import {
 import { MemberTable } from "@/components/admin/member-table";
 import { Button } from "@/components/ui/button";
 import { CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { AdminStatsTablePageSkeleton } from "@/components/loading";
 import { getAdminData } from "@/lib/admin";
 import { formatBalance } from "@/lib/money";
 
@@ -63,7 +64,7 @@ async function AdminOverview() {
 
 export default function OverviewPage() {
   return (
-    <Suspense fallback={<p role="status">กำลังโหลดภาพรวมระบบ…</p>}>
+    <Suspense fallback={<AdminStatsTablePageSkeleton label="กำลังโหลดภาพรวมระบบ" />}>
       <AdminOverview />
     </Suspense>
   );

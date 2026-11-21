@@ -86,7 +86,7 @@ public sealed class SunshineMaintenanceTests
 
             using (var verify = Open(path))
             {
-                Assert.Equal(27L, Scalar(verify, "PRAGMA user_version"));
+                Assert.Equal(28L, Scalar(verify, "PRAGMA user_version"));
                 // Existing outbox and audit rows keep their identity and payload.
                 Assert.Equal(42L, Scalar(verify, "SELECT rowid FROM command_outbox WHERE command_id='command'"));
                 Assert.Equal("ApplyLease", Scalar(verify, "SELECT type FROM command_outbox WHERE command_id='command'"));
@@ -128,7 +128,7 @@ public sealed class SunshineMaintenanceTests
                 foreignKeys.CommandText = "PRAGMA foreign_key_check";
                 using var rows = foreignKeys.ExecuteReader();
                 Assert.False(rows.Read());
-                ControllerDatabaseMaintenance.ValidateCanonicalSchema(verify, 27);
+                ControllerDatabaseMaintenance.ValidateCanonicalSchema(verify, 28);
                 ControllerDatabaseMaintenance.ValidateSunshineMaintenanceSchema(verify);
             }
 
@@ -136,7 +136,7 @@ public sealed class SunshineMaintenanceTests
             using (new ControllerDatabase(path)) { }
             using (var restarted = Open(path))
             {
-                Assert.Equal(27L, Scalar(restarted, "PRAGMA user_version"));
+                Assert.Equal(28L, Scalar(restarted, "PRAGMA user_version"));
                 Assert.Equal(2L, Scalar(restarted, "SELECT COUNT(*) FROM command_outbox"));
                 Assert.Equal(2L, Scalar(restarted, "SELECT COUNT(*) FROM machine_admin_actions"));
                 Assert.DoesNotContain("migration_rowid", Columns(restarted, "command_outbox"));

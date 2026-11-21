@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Suspense } from "react";
 import { CustomerHistory } from "@/components/history/customer-history";
+import { HistoryPageSkeleton } from "@/components/loading";
 import { requireSession } from "@/lib/session";
 
 export const metadata: Metadata = {
@@ -15,7 +16,7 @@ async function ProtectedHistory() {
 
 export default function HistoryPage() {
   return (
-    <Suspense fallback={<p role="status" className="p-6">กำลังตรวจสอบบัญชี…</p>}>
+    <Suspense fallback={<HistoryPageSkeleton />}>
       <ProtectedHistory />
     </Suspense>
   );

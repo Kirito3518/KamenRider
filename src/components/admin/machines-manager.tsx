@@ -16,7 +16,9 @@ import { PendingMachines } from "@/components/admin/machines/pending-machines";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
+import { CardsGridSkeleton, LoadingRegion, StatGridSkeleton, TableSkeleton } from "@/components/loading";
 import type { Machine } from "@/lib/machine-contracts";
 
 type SettingsTarget = { machineId: string; mode: MachineSettingsMode };
@@ -146,7 +148,7 @@ export function MachinesManager({ actorId }: { actorId: string }) {
         title="เครื่องและ Agent"
         titleSuffix={
           <Badge variant="outline">
-            {machines === null ? "กำลังโหลด" : `${machines.length.toLocaleString("th-TH")} เครื่อง`}
+            {machines === null ? <Skeleton className="h-3.5 w-12 rounded-full" /> : `${machines.length.toLocaleString("th-TH")} เครื่อง`}
           </Badge>
         }
         description="อนุมัติเครื่องใหม่ ตั้งค่าชื่อ ราคา และเครือข่าย ดูแล Agent update จากที่เดียว — การควบคุมเครื่อง การเช่า และ VNC อยู่ที่ PC Control"
@@ -184,20 +186,30 @@ export function MachinesManager({ actorId }: { actorId: string }) {
         </Alert>
       ) : null}
 
-      <MachineStats machines={machines} now={now} />
+      {machines === null && !loadError ? (
+        <LoadingRegion label="กำลังโหลดข้อมูลเครื่องและ Agent" className="flex flex-col gap-4">
+          <StatGridSkeleton count={4} />
+          <CardsGridSkeleton count={1} rows={1} columns="grid-cols-1" cardClassName="h-28" />
+          <TableSkeleton rows={4} columns={6} />
+        </LoadingRegion>
+      ) : (
+        <>
+          <MachineStats machines={machines} now={now} />
 
-      <PendingMachines
-        machines={machines}
-        onOpenSettings={(machineId) => setSettingsTarget({ machineId, mode: "settings" })}
-        onApprove={(machineId) => setSettingsTarget({ machineId, mode: "approve" })}
-      />
+          <PendingMachines
+            machines={machines}
+            onOpenSettings={(machineId) => setSettingsTarget({ machineId, mode: "settings" })}
+            onApprove={(machineId) => setSettingsTarget({ machineId, mode: "approve" })}
+          />
 
-      <ApprovedMachinesTable
-        machines={machines}
-        now={now}
-        onOpenSettings={(machineId) => setSettingsTarget({ machineId, mode: "settings" })}
-        onOpenInstall={() => setInstallOpen(true)}
-      />
+          <ApprovedMachinesTable
+            machines={machines}
+            now={now}
+            onOpenSettings={(machineId) => setSettingsTarget({ machineId, mode: "settings" })}
+            onOpenInstall={() => setInstallOpen(true)}
+          />
+        </>
+      )}
 
       <p className="text-xs text-muted-foreground">
         ระบบเช่าจริง — ราคาต่อชั่วโมงจะถูกหักจากยอดเงินสมาชิกเมื่อมีการเช่า และความพร้อมจริงยังต้องผ่านการตรวจสอบ Agent

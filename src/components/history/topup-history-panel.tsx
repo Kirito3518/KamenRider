@@ -29,8 +29,11 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
+import {
+  LoadingRegion,
+  TableSkeleton,
+} from "@/components/loading";
 import {
   Table,
   TableBody,
@@ -268,11 +271,9 @@ export function TopupHistoryPanel({
       </div>
 
       {loading && !data ? (
-        <div className="flex flex-col gap-2">
-          {Array.from({ length: 5 }).map((_, index) => (
-            <Skeleton key={index} className="h-12 w-full" />
-          ))}
-        </div>
+        <LoadingRegion label="กำลังโหลดประวัติการเติมเงิน">
+          <TableSkeleton rows={5} columns={7} footer />
+        </LoadingRegion>
       ) : error ? (
         <Alert variant="destructive">
           <CircleAlert aria-hidden />

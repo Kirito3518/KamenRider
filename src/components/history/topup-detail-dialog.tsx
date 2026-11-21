@@ -12,7 +12,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Skeleton } from "@/components/ui/skeleton";
+import { DialogSkeleton, LoadingRegion } from "@/components/loading";
 import { formatBalance } from "@/lib/money";
 import { formatBangkokDateTime } from "@/lib/date-range";
 import type { TopupDetail } from "@/lib/topup/types";
@@ -71,18 +71,18 @@ export function TopupDetailDialog({
         <DialogHeader>
           <DialogTitle>รายละเอียดการเติมเงิน</DialogTitle>
           <DialogDescription>
-            {detail
-              ? `เลขอ้างอิง ${detail.reference}`
-              : "กำลังโหลดรายละเอียดรายการ"}
+            {detail ? (
+              `เลขอ้างอิง ${detail.reference}`
+            ) : (
+              <span className="sr-only">กำลังโหลดรายละเอียดรายการ</span>
+            )}
           </DialogDescription>
         </DialogHeader>
 
         {loading ? (
-          <div className="flex flex-col gap-3">
-            <Skeleton className="h-6 w-48" />
-            <Skeleton className="h-24 w-full" />
-            <Skeleton className="h-40 w-full" />
-          </div>
+          <LoadingRegion label="กำลังโหลดรายละเอียดรายการ">
+            <DialogSkeleton />
+          </LoadingRegion>
         ) : error ? (
           <Alert variant="destructive">
             <CircleAlert aria-hidden />

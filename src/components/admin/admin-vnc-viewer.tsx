@@ -1,6 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { Loader2 } from "lucide-react";
+import { SkeletonBlock } from "@/components/loading";
 
 type Ticket = {
   ticket: string;
@@ -114,6 +116,7 @@ export function AdminVncViewerButton({ machineId }: { machineId: string }) {
           role="dialog"
           aria-modal="true"
           aria-labelledby="admin-vnc-title"
+          aria-busy={busy}
           className="fixed inset-0 z-50 flex flex-col bg-background p-3 sm:p-5"
         >
           <header className="flex flex-wrap items-center justify-between gap-3 pb-3">
@@ -121,8 +124,16 @@ export function AdminVncViewerButton({ machineId }: { machineId: string }) {
               <h2 id="admin-vnc-title" className="text-lg font-semibold">
                 VNC · {machineId} · ดูอย่างเดียว
               </h2>
-              <p role="status" aria-live="polite" className="text-sm">
-                {status || "กำลังเตรียม viewer…"}
+              <p
+                role="status"
+                aria-live="polite"
+                className="flex items-center gap-2 text-sm"
+              >
+                <Loader2
+                  aria-hidden="true"
+                  className="size-4 animate-spin motion-reduce:animate-none"
+                />
+                <span>{status || "กำลังเตรียม viewer…"}</span>
               </p>
             </div>
             <button type="button" className="rounded border p-2" onClick={close}>
@@ -167,7 +178,11 @@ export function AdminVncViewerButton({ machineId }: { machineId: string }) {
                 );
               }}
             />
-          ) : null}
+          ) : (
+            <div className="min-h-0 w-full flex-1" aria-hidden="true">
+              <SkeletonBlock className="h-full min-h-48 w-full" radius="rounded border" />
+            </div>
+          )}
         </section>
       ) : null}
     </>

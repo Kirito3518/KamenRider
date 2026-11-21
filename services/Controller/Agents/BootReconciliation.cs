@@ -78,8 +78,13 @@ public sealed partial class ControllerDatabase
             RegisterBoot(tx, verified.MachineId, request.BootId, now.ToUnixTimeMilliseconds(), preserveActive: true);
             ExecuteLease(tx, "UPDATE command_outbox SET status='invalidated',payload=CASE WHEN type='PairPin' THEN '{}' ELSE payload END WHERE machine_id=$id AND status='pending'; DELETE FROM pairing_offers WHERE machine_id=$id",
                 ("$id", verified.MachineId));
-            ExecuteLease(tx, "UPDATE leases SET state='failed',ended_at=COALESCE(ended_at,$now),pending_revision=NULL,pending_expires_at=NULL WHERE machine_id=$id AND state='preparing'; UPDATE leases SET boot_id=$boot,pending_revision=NULL,pending_expires_at=NULL WHERE machine_id=$id AND state='active'; UPDATE leases SET state='completed',allocation_held=0,ended_at=COALESCE(ended_at,$now) WHERE machine_id=$id AND state='ending'; UPDATE leases SET allocation_held=0 WHERE machine_id=$id AND state='failed'",
+            // A prepared offline lease becomes active only after the renter explicitly pressed
+            // Power. Its paid clock starts when the Agent is reachable, never while waiting for WOL.
+            ExecuteLease(tx, "UPDATE leases SET state='active',boot_id=$boot,revision=1,starts_at=$now,expires_at=$now+duration_seconds*1000,ended_at=NULL,pending_revision=NULL,pending_expires_at=NULL WHERE machine_id=$id AND state='preparing' AND boot_id IS NULL AND wake_requested_at_unix_ms IS NOT NULL",
                 ("$id", verified.MachineId), ("$boot", request.BootId), ("$now", now.ToUnixTimeMilliseconds()));
+            ExecuteLease(tx, "UPDATE leases SET state='failed',ended_at=COALESCE(ended_at,$now),pending_revision=NULL,pending_expires_at=NULL,allocation_held=0 WHERE machine_id=$id AND state='preparing' AND boot_id IS NULL; UPDATE leases SET boot_id=$boot,pending_revision=NULL,pending_expires_at=NULL WHERE machine_id=$id AND state='active'; UPDATE leases SET state='completed',allocation_held=0,ended_at=COALESCE(ended_at,$now) WHERE machine_id=$id AND state='ending'; UPDATE leases SET allocation_held=0 WHERE machine_id=$id AND state='failed'",
+                ("$id", verified.MachineId), ("$boot", request.BootId), ("$now", now.ToUnixTimeMilliseconds()));
+            RefreshClearingWindows(tx);
             PurgePairingSecrets(tx, now.ToUnixTimeMilliseconds());
             ExecuteLease(tx, "INSERT INTO machine_heartbeats(machine_id,last_seen,boot_id,readiness,agent_version) VALUES($id,$at,$boot,'notReady',NULL) ON CONFLICT(machine_id) DO UPDATE SET last_seen=$at,boot_id=$boot,readiness='notReady',agent_version=NULL",
                 ("$id", verified.MachineId), ("$at", now.ToString("O")), ("$boot", request.BootId));

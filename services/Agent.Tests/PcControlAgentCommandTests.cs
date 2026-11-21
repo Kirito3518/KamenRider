@@ -8,7 +8,9 @@ namespace Agent.Tests;
 
 /// <summary>
 /// PC-control commands are the only stream cut on lease end/expiry/shutdown: the enforcer asks
-/// IStreamCleanup (Sunshine unpair-all) and must not let a failed cleanup strand the lease.
+/// IStreamCleanup (Sunshine unpair-all) before it shuts the machine down, and must not let a failed
+/// cleanup strand the lease. An EndLease whose shutdown request fails is reported failed so the
+/// Controller keeps the machine leased instead of handing it to a new renter.
 /// </summary>
 public class PcControlAgentCommandTests
 {
@@ -48,13 +50,14 @@ public class PcControlAgentCommandTests
     sealed class Power : IShutdown
     {
         public int Calls;
+        public bool Fail;
         public List<string>? Events;
 
         public Task RequestImmediateShutdownAsync(CancellationToken ct)
         {
             Calls++;
             Events?.Add("shutdown");
-            return Task.CompletedTask;
+            return Fail ? Task.FromException(new IOException("Immediate shutdown rejected by the OS")) : Task.CompletedTask;
         }
     }
 
@@ -94,9 +97,12 @@ public class PcControlAgentCommandTests
     }
 
     [Fact]
-    public async Task EndLeaseClearsPairedClientsAndAcknowledges()
+    public async Task EndLeaseClearsPairedClientsThenRequestsShutdownAndAcknowledges()
     {
         using var f = new Fixture();
+        var events = new List<string>();
+        f.Cleanup.Events = events;
+        f.Power.Events = events;
         Assert.Equal("applied", (await f.Enforcer.ApplyAsync(f.LeaseCommand(), default)).Status);
         await f.Enforcer.ConfirmAsync(new("rental", 1, "boot", f.Clock.Now.AddSeconds(60)), default);
         Assert.True(f.Enforcer.CanStream);
@@ -106,7 +112,31 @@ public class PcControlAgentCommandTests
         Assert.Equal(new CommandResult("end", "applied", 1), result);
         Assert.Null(f.Enforcer.Current);
         Assert.Null(await f.Store.LoadAsync(default));
+        Assert.Equal(new[] { "cleanup", "shutdown" }, events);
         Assert.Equal(1, f.Cleanup.Calls);
+        Assert.Equal(1, f.Power.Calls);
+        Assert.False(f.Enforcer.CanStream);
+    }
+
+    [Fact]
+    public async Task EndLeaseShutdownFailureStillClearsLocalLeaseAndReturnsFailed()
+    {
+        using var f = new Fixture();
+        await f.Enforcer.ApplyAsync(f.LeaseCommand(), default);
+        await f.Enforcer.ConfirmAsync(new("rental", 1, "boot", f.Clock.Now.AddSeconds(60)), default);
+        f.Power.Fail = true;
+
+        var result = await f.Enforcer.EndLeaseAsync(f.EndCommand(), default);
+
+        // The shutdown never landed, so the Controller must see a failure (stable code, no exception
+        // text) and keep the machine leased; the local lease is still cleared to fail closed.
+        Assert.Equal("failed", result.Status);
+        Assert.Equal("ShutdownFailed", result.ErrorCode);
+        Assert.DoesNotContain("rejected", result.ErrorCode);
+        Assert.Null(f.Enforcer.Current);
+        Assert.Null(await f.Store.LoadAsync(default));
+        Assert.Equal(1, f.Cleanup.Calls);
+        Assert.Equal(1, f.Power.Calls);
         Assert.False(f.Enforcer.CanStream);
     }
 
@@ -120,11 +150,13 @@ public class PcControlAgentCommandTests
 
         var result = await f.Enforcer.EndLeaseAsync(f.EndCommand(), default);
 
-        // The rental has ended: a failed best-effort stream cut must not strand the lease.
+        // The rental has ended: a failed best-effort stream cut must not strand the lease, and the
+        // shutdown request is still made.
         Assert.Equal(new CommandResult("end", "applied", 1), result);
         Assert.Null(f.Enforcer.Current);
         Assert.Null(await f.Store.LoadAsync(default));
         Assert.Equal(1, f.Cleanup.Calls);
+        Assert.Equal(1, f.Power.Calls);
     }
 
     [Fact]
@@ -201,6 +233,24 @@ public class PcControlAgentCommandTests
     }
 
     [Fact]
+    public async Task ExpiryClearsPairedClientsBeforeRequestingShutdown()
+    {
+        using var f = new Fixture();
+        var events = new List<string>();
+        f.Cleanup.Events = events;
+        f.Power.Events = events;
+        await f.Enforcer.ApplyAsync(f.LeaseCommand(), default);
+        f.Clock.Advance(60);
+
+        await f.Enforcer.EnforceAsync(default);
+        await f.Cleanup.Finished.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        // Expiry starts the unpair-all before it asks the machine to power off (it does not wait for
+        // cleanup to finish, but the cleanup is always initiated first).
+        Assert.Equal(new[] { "cleanup", "shutdown" }, events);
+    }
+
+    [Fact]
     public async Task ExpiryStillShutsDownWhenCleanupFails()
     {
         using var f = new Fixture();
@@ -229,7 +279,8 @@ public class PcControlAgentCommandTests
         Assert.Contains(results, result => result.CommandId == "shutdown" && result.Status == "applied");
         Assert.Null(f.Enforcer.Current);
         Assert.Equal(2, f.Cleanup.Calls);
-        Assert.Equal(1, f.Power.Calls);
+        // EndLease now requests the immediate shutdown itself; ShutdownMachine asks again.
+        Assert.Equal(2, f.Power.Calls);
     }
 
     [Fact]

@@ -51,8 +51,8 @@ import {
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
+import { PageSkeleton, SkeletonBlock } from "@/components/loading";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import type { SlipProvider } from "@/lib/topup/constants";
 import type {
@@ -83,15 +83,23 @@ function enabledChannelCount(data: AdminTopupSettingsResponse): number {
 
 function LoadingSettings() {
   return (
-    <div className="flex flex-col gap-4" role="status" aria-label="กำลังโหลดการตั้งค่า">
-      <div className="grid items-start gap-4 md:grid-cols-2 xl:grid-cols-12">
-        <Skeleton className="h-36 md:col-span-2 xl:col-span-7" />
-        <Skeleton className="h-36 md:col-span-2 xl:col-span-5" />
-        <Skeleton className="h-36 md:col-span-2 xl:col-span-4" />
-        <Skeleton className="h-48 md:col-span-2 xl:col-span-8" />
+    <PageSkeleton label="กำลังโหลดการตั้งค่าเติมเงิน" className="gap-4">
+      <div className="flex flex-wrap items-center gap-2">
+        {Array.from({ length: 5 }).map((_, index) => (
+          <SkeletonBlock
+            key={index}
+            className="h-8 w-24"
+            radius="rounded-xl"
+          />
+        ))}
       </div>
-      <span className="sr-only">กำลังโหลดการตั้งค่า…</span>
-    </div>
+      <div className="grid items-start gap-4 md:grid-cols-2 xl:grid-cols-12">
+        <SkeletonBlock className="h-36 md:col-span-2 xl:col-span-7" />
+        <SkeletonBlock className="h-36 md:col-span-2 xl:col-span-5" />
+        <SkeletonBlock className="h-36 md:col-span-2 xl:col-span-4" />
+        <SkeletonBlock className="h-48 md:col-span-2 xl:col-span-8" />
+      </div>
+    </PageSkeleton>
   );
 }
 

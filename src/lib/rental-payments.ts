@@ -507,14 +507,41 @@ export type ControllerLeaseSnapshot = {
 };
 
 function formatUnusedDuration(seconds: number) {
-  const totalMinutes = Math.max(0, Math.floor(seconds / 60));
-  const hours = Math.floor(totalMinutes / 60);
-  const minutes = totalMinutes % 60;
-  if (hours === 0) return `${minutes} นาที`;
-  return minutes === 0 ? `${hours} ชม.` : `${hours} ชม. ${minutes} นาที`;
+  const totalSeconds = Math.max(0, Math.floor(seconds));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const remainderSeconds = totalSeconds % 60;
+  const parts: string[] = [];
+  if (hours > 0) parts.push(`${hours} ชม.`);
+  if (minutes > 0) parts.push(`${minutes} นาที`);
+  if (remainderSeconds > 0 || parts.length === 0) parts.push(`${remainderSeconds} วินาที`);
+  return parts.join(" ");
 }
 
-/** Refund rules: full refund when the machine never started, otherwise prorated by elapsed time. */
+/**
+ * Prorates `paidSatang` by the unused fraction of the paid window and rounds
+ * **half-up to the nearest satang** (0.5 satang rounds up, anything below rounds
+ * down). The unused fraction is never rounded down to whole satang or baht:
+ * e.g. `8000 × 2400 / 7200 = 2666.67` satang refunds 2667 satang.
+ *
+ * Integer arithmetic (BigInt) is used so no floating-point drift can move the
+ * result across a half-satang boundary for large charges.
+ */
+function proratedRefundSatang(paidSatang: number, unusedMs: number, paidMs: number) {
+  if (paidSatang <= 0 || unusedMs <= 0 || paidMs <= 0) return 0;
+  const numerator = BigInt(paidSatang) * BigInt(unusedMs);
+  const denominator = BigInt(paidMs);
+  const two = BigInt(2);
+  // floor((2n + d) / 2d) === round-half-up(n / d) for non-negative integers.
+  return Number((numerator * two + denominator) / (denominator * two));
+}
+
+/**
+ * Refund rules: the whole charge is refunded when the lease never became active
+ * (no start instant, or it ended at/before its start), otherwise the unused
+ * fraction of the total paid window — base duration plus charged extension
+ * seconds/satang — is prorated and rounded half-up to satang.
+ */
 function calculateRefund(payment: RentalPayment, lease: ControllerLeaseSnapshot) {
   const paidSatang = payment.amountSatang + payment.extensionSatang;
   const paidSeconds = payment.durationSeconds + payment.extensionSeconds;
@@ -523,18 +550,17 @@ function calculateRefund(payment: RentalPayment, lease: ControllerLeaseSnapshot)
   const startedAt = lease.startsAtUtc ? Date.parse(lease.startsAtUtc) : Number.NaN;
   const endedAt = lease.endedAtUtc ? Date.parse(lease.endedAtUtc) : Number.NaN;
 
-  if (!Number.isFinite(startedAt)) {
-    const terminal = lease.state === "failed" || lease.state === "ending" || lease.state === "completed";
-    if (!terminal) return { refundSatang: 0, note: "" };
+  // The Controller records starts_at only once the lease actually starts, so a
+  // missing start instant (or an end at/before it) means nothing was consumed.
+  if (!Number.isFinite(startedAt) || (Number.isFinite(endedAt) && endedAt <= startedAt))
     return { refundSatang: paidSatang, note: "คืนเต็มจำนวน เพราะเครื่องไม่พร้อมก่อนเริ่มเช่า" };
-  }
   if (!Number.isFinite(endedAt)) return { refundSatang: 0, note: "" };
 
   const paidMs = paidSeconds * 1000;
   const usedMs = Math.min(Math.max(endedAt - startedAt, 0), paidMs);
   const unusedMs = paidMs - usedMs;
   if (unusedMs <= 0) return { refundSatang: 0, note: "" };
-  const refundSatang = Math.floor((paidSatang * unusedMs) / paidMs);
+  const refundSatang = proratedRefundSatang(paidSatang, unusedMs, paidMs);
   if (refundSatang <= 0) return { refundSatang: 0, note: "" };
   return {
     refundSatang,

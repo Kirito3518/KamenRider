@@ -21,7 +21,7 @@ export function GET(request: Request) {
         .filter(
           (m) =>
             m.approvalStatus === "approved" &&
-            m.canRent === true &&
+            (m.availability ?? "rentable") === "rentable" &&
             Number.isSafeInteger(m.hourlyPriceMinorUnits) &&
             m.hourlyPriceMinorUnits >= 100 &&
             m.hourlyPriceMinorUnits % 100 === 0,
@@ -30,7 +30,7 @@ export function GET(request: Request) {
           id: m.machineId,
           name: m.displayName,
           priceSatang: m.hourlyPriceMinorUnits,
-          status: "available",
+          status: rentalStatus(m.operationalState, m.canRent),
           cpu: formatSpec(m.cpu),
           gpu: formatSpec(m.gpu),
           ram: ramGibibytes(m.ramBytes),
@@ -45,4 +45,21 @@ export function GET(request: Request) {
         })),
     true,
   );
+}
+
+function rentalStatus(operationalState: string | undefined, canRent: boolean) {
+  switch (operationalState) {
+    case "available":
+      return canRent ? ("available" as const) : ("notReady" as const);
+    case "awaitingPower":
+    case "booting":
+    case "busy":
+    case "clearing":
+    case "onlineIdle":
+    case "maintenance":
+    case "disabled":
+      return operationalState;
+    default:
+      return canRent ? ("available" as const) : ("notReady" as const);
+  }
 }

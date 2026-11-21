@@ -21,11 +21,11 @@
 | ยอดต่อเวลา | `hourlyPriceSatang × ชั่วโมงที่ต่อ` (ใช้ราคา snapshot ของรายการนั้น) หักทันทีตอนต่อเวลา |
 | เงินคืน | prorate ตามเวลาจริงเป็นวินาที และคืนเป็นสตางค์ (อาจมีเศษสตางค์ในยอดเงิน) |
 
-ตัวอย่างการคืนเงิน: เช่า 2 ชม. ราคา ฿40/ชม. (฿80) ใช้ไป 1 ชม. 20 นาที → เหลือ 40 นาที → คืน `floor(8000 × 2400 / 7200) = 2666` สตางค์ (฿26.66)
+ตัวอย่างการคืนเงิน: เช่า 2 ชม. ราคา ฿40/ชม. (฿80) ใช้ไป 1 ชม. 20 นาที → เหลือ 40 นาที → คืน `round-half-up(8000 × 2400 / 7200) = 2667` สตางค์ (฿26.67)
 
 ### กติกาคืนเงินแบบละเอียด
 
-1. **เริ่มนับเวลาแล้ว** (`startsAtUtc` มีค่า) และมี `endedAtUtc`: `usedMs = clamp(endedAt − startsAt, 0, paidSeconds×1000)` แล้ว `refund = floor(paidSatang × (paidSeconds×1000 − usedMs) / (paidSeconds×1000))`
+1. **เริ่มนับเวลาแล้ว** (`startsAtUtc` มีค่า) และมี `endedAtUtc`: `usedMs = clamp(endedAt − startsAt, 0, paidSeconds×1000)` แล้ว `refund = round-half-up(paidSatang × (paidSeconds×1000 − usedMs) / (paidSeconds×1000))` เป็นสตางค์ (ปัดครึ่งขึ้น)
 2. **ไม่เคยเริ่ม** (เช่น เครื่องเตรียมไม่สำเร็จ หรือถูกปิดก่อนเริ่ม): คืนเต็มจำนวนที่ชำระ
 3. **ยังไม่สิ้นสุด** (`active`/`preparing`): ยังไม่คืน
 4. เพดาน: คืนไม่เกินยอดที่ชำระและไม่เกินยอดที่ยังไม่เคยคืน; เรียกซ้ำไม่คืนซ้ำ (CAS ด้วย `settled_at IS NULL`)
@@ -35,9 +35,10 @@
 
 ## ที่เก็บข้อมูล
 
-### Controller (schema 25)
+### Controller (schema 28)
 
-Migration `025-lease-ended-at.sql` เพิ่ม `leases.ended_at INTEGER` (nullable) ใช้บันทึกเวลาสิ้นสุดจริงครั้งแรกเมื่อ lease ออกจากช่วง active:
+Migration `025-lease-ended-at.sql` เพิ่ม `leases.ended_at INTEGER` (nullable) ใช้บันทึกเวลาสิ้นสุดจริงครั้งแรกเมื่อ lease ออกจากช่วง active
+Migration `028-rental-power-lifecycle.sql` เพิ่ม `machines.availability` (`rentable`/`maintenance`/`disabled`), `machines.clearing_until_unix_ms`, `leases.wake_requested_at_unix_ms` และ `leases.wake_request_id` สำหรับรอบเช่าแบบ "จองก่อน แล้วลูกค้ากดเปิดเครื่องเอง":
 
 | จุดเปลี่ยนสถานะ | `ended_at` |
 | --- | --- |

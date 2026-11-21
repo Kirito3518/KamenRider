@@ -72,3 +72,17 @@ export function leaseErrorMessage(error: unknown) {
 export function leaseErrorStatus(error: unknown) {
   return error instanceof LeaseApiError ? error.status : 0;
 }
+
+export function requestRentalPower(rentalId: string) {
+  return leaseApi<{ canRequestPower?: boolean; wakeRequestedAtUtc?: string | null }>(
+    `/api/my-leases/${encodeURIComponent(rentalId)}/power`,
+    { requestId: crypto.randomUUID() },
+  );
+}
+
+export function cancelRental(rentalId: string, expectedRevision: number) {
+  return leaseApi<{ lease: unknown; refundedSatang: number; paymentRefundedSatang: number }>(
+    `/api/my-leases/${encodeURIComponent(rentalId)}/cancel`,
+    { expectedRevision, idempotencyKey: crypto.randomUUID() },
+  );
+}

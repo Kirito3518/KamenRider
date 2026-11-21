@@ -110,6 +110,7 @@ public sealed partial class ControllerDatabase {
             else continue;
             ExecuteLease(tx,"UPDATE command_outbox SET status='applied' WHERE command_id=$id",("$id",command.CommandId));
         }
+        RefreshClearingWindows(tx);
     }
     private ActiveLeaseConfirmation? ConfirmLease(SqliteTransaction tx,string machineId,string boot,string readiness) {
         if(readiness!="ready" || IsRestoreQuarantined(tx)) return null;

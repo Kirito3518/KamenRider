@@ -1,8 +1,9 @@
 "use client";
 
 import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
-import { Bot, ShieldAlert } from "lucide-react";
+import { Bot, Loader2, ShieldAlert } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { FormSkeleton, LoadingRegion } from "@/components/loading";
 import { isAgentOnline, updateStatusLabels, type AgentRelease } from "@/lib/agent-releases";
 import type { Machine } from "@/lib/machine-contracts";
 
@@ -468,6 +469,13 @@ function AgentRecoveryIntentControl({ machine, actorId, onUpdated }: { machine: 
             }).finally(() => setBusy(false));
           }}
         >
+          {busy && !open ? (
+            <Loader2
+              aria-hidden="true"
+              data-icon="inline-start"
+              className="animate-spin motion-reduce:animate-none"
+            />
+          ) : null}
           {busy && !open ? "กำลังตรวจ held chain…" : confirmedIntentActive ? "Recovery intent ยัง active" : attempt ? "ตรวจสอบ recovery request เดิม" : confirmedIntent ? "ตรวจสอบ held context ใหม่" : "ขอ recovery intent"}
         </Button>
         <p className="max-w-xl text-sm text-muted-foreground">Recovery intent จะคง hold ไว้ ไม่ออกคำสั่ง successor และยังไม่ทำให้ update พร้อม</p>
@@ -492,7 +500,7 @@ function AgentRecoveryIntentControl({ machine, actorId, onUpdated }: { machine: 
                 <textarea aria-label="เหตุผล recovery" className="min-h-20 rounded-xl border border-transparent bg-background px-3 py-2 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/30" maxLength={512} required rows={3} value={reason} onChange={(event) => setReason(event.target.value)} />
               </label>
               <p className="text-sm text-muted-foreground">Controller ตรวจสอบความเข้ากันได้ของ release กับ held chain ก่อนรับ intent</p>
-              <Button type="button" size="sm" className="self-start" disabled={!targetReleaseVersion || !reason.trim() || reason.length > 512 || /[\u0000-\u001f\u007f]/.test(reason) || busy} onClick={createIntent}>{busy ? "กำลังบันทึก intent…" : "สร้าง recovery intent"}</Button>
+              <Button type="button" size="sm" className="self-start" disabled={!targetReleaseVersion || !reason.trim() || reason.length > 512 || /[\u0000-\u001f\u007f]/.test(reason) || busy} onClick={createIntent}>{busy ? <Loader2 aria-hidden="true" data-icon="inline-start" className="animate-spin motion-reduce:animate-none" /> : null}{busy ? "กำลังบันทึก intent…" : "สร้าง recovery intent"}</Button>
             </>
           ) : null}
         </div>
@@ -642,9 +650,18 @@ export function AgentUpdateControl({ machine, actorId, onUpdated }: { machine: M
         </Button>
         <AgentRecoveryIntentControl key={`${actorId}:${machine.machineId}`} machine={machine} actorId={actorId} onUpdated={onUpdated} />
       </div>
-      {open ? (
+          {open ? (
         <div className="flex flex-col gap-3 rounded-2xl bg-muted/50 p-4">
-          {busy && !releases ? <p role="status" className="text-sm">กำลังโหลด release…</p> : null}
+          {busy && !releases ? (
+            <LoadingRegion label="กำลังโหลดรายการ release">
+              <FormSkeleton
+                fields={2}
+                withActions={false}
+                maxWidth="max-w-full"
+                className="gap-3"
+              />
+            </LoadingRegion>
+          ) : null}
           {releases ? (
             choices.length ? (
               <>

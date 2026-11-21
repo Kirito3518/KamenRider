@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Suspense } from "react";
 import { requireSession } from "@/lib/session";
 import { TopupPageWithSearch } from "@/components/topup/topup-page";
+import { TopupPageSkeleton } from "@/components/loading";
 
 export const metadata: Metadata = {
   title: "เติมเงิน | KamenRaiderPlay",
@@ -15,7 +16,7 @@ async function ProtectedTopup() {
 
 export default function TopupRoute() {
   return (
-    <Suspense fallback={<p role="status" className="p-6">กำลังตรวจสอบบัญชี…</p>}>
+    <Suspense fallback={<TopupPageSkeleton />}>
       <ProtectedTopup />
     </Suspense>
   );

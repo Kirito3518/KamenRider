@@ -28,6 +28,7 @@ import {
 } from "@/components/ui/dialog";
 import { Field, FieldDescription, FieldError, FieldGroup, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { getVncTargetForExplicitSave } from "@/lib/admin-vnc-target-drafts.mjs";
@@ -49,6 +50,7 @@ export type MachineMetadataInput = {
   sunshinePort: number;
   vncLocalIp: string | null;
   parsecEnabled: boolean;
+  availability: string;
 };
 
 export type MachineSettingsMode = "settings" | "approve";
@@ -57,6 +59,7 @@ type SettingsDraft = {
   displayName: string;
   price: string;
   parsecEnabled: boolean;
+  availability: string;
   moonlightPort: string;
   sunshinePort: string;
   vncDraft: string;
@@ -81,6 +84,7 @@ function draftFromMachine(machine: Machine | null): SettingsDraft {
     displayName: machine?.displayName || machine?.machineId || "",
     price: machine ? String(machine.hourlyPriceMinorUnits / 100) : "",
     parsecEnabled: machine?.parsecEnabled === true,
+    availability: machine?.availability ?? "rentable",
     moonlightPort: machine ? String(machine.moonlightPort) : "",
     sunshinePort: machine ? String(machine.sunshinePort) : "",
     vncDraft: machine?.vncLocalIp ?? "",
@@ -205,6 +209,25 @@ function GeneralTab({
             </span>
           </span>
         </label>
+      </Field>
+      <Field>
+        <FieldLabel htmlFor="machine-availability">สถานะการให้เช่า</FieldLabel>
+        <Select
+          value={draft.availability}
+          onValueChange={(value) => onChange({ availability: String(value ?? "rentable") })}
+        >
+          <SelectTrigger id="machine-availability" className="w-full">
+            <SelectValue placeholder="เลือกสถานะ" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="rentable">เปิดให้เช่า</SelectItem>
+            <SelectItem value="maintenance">ซ่อมบำรุง</SelectItem>
+            <SelectItem value="disabled">ปิดให้เช่า</SelectItem>
+          </SelectContent>
+        </Select>
+        <FieldDescription>
+          โหมดนี้มีผลกับการเช่าใหม่ — เครื่องที่กำลังเช่าอยู่ต้องยกเลิกหรือรอหมดเวลาก่อน
+        </FieldDescription>
       </Field>
       <ReadOnlyRows
         rows={[
@@ -547,6 +570,7 @@ export function MachineSettingsDialog({
         sunshinePort,
         vncLocalIp: vncTarget,
         parsecEnabled: draft.parsecEnabled,
+        availability: draft.availability,
       });
       return true;
     } catch (cause) {

@@ -21,9 +21,11 @@ import { authClient } from "@/lib/auth-client";
 import { formatBalance } from "@/lib/money";
 import type { Lease } from "@/lib/machine-contracts";
 import { ActiveRentalCard } from "@/components/my-machines/active-rental-card";
+import { PowerOnRentalCard } from "@/components/my-machines/power-on-rental-card";
 import { leaseApi, leaseErrorMessage } from "@/components/my-machines/lease-api";
+import { CardsGridSkeleton, LoadingRegion } from "@/components/loading";
 
-const leaseRefreshIntervalMs = 15_000;
+const leaseRefreshIntervalMs = 3_000;
 
 function mergeExtendedLease(current: Lease, updated: Lease): Lease {
   // The extend endpoint returns the raw Controller lease; keep the enriched
@@ -50,7 +52,8 @@ export function MyMachines() {
   const { data: session, refetch: refetchSession } = authClient.useSession();
   const reduceMotion = useReducedMotion();
   const [leases, setLeases] = useState<Lease[]>([]);
-  const [message, setMessage] = useState("กำลังโหลด…");
+  const [message, setMessage] = useState("");
+  const [loading, setLoading] = useState(true);
   const [now, setNow] = useState(0);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [extensionNotice, setExtensionNotice] = useState<{
@@ -82,14 +85,17 @@ export function MyMachines() {
           setNow(Date.now());
           setLeases(data);
           setMessage("");
+          setLoading(false);
         }
       } catch (error) {
         if (
           active &&
           leaseMutationsInFlight.current === 0 &&
           mutationVersionAtStart === leaseMutationVersion.current
-        )
+        ) {
           setMessage(leaseErrorMessage(error));
+          setLoading(false);
+        }
       } finally {
         inFlight = false;
         if (
@@ -161,16 +167,16 @@ export function MyMachines() {
     }
   }
 
-  const activeLeases = leases.filter((lease) => lease.state === "active");
-  const preparingCount = leases.filter(
-    (lease) => lease.state === "pending" || lease.state === "preparing",
-  ).length;
+  const visibleLeases = leases.filter(
+    (lease) => lease.state === "active" || lease.state === "preparing",
+  );
+  const pendingPayments = leases.filter((lease) => lease.state === "pending").length;
   const selectedLease =
-    activeLeases.find((lease) => lease.id === selectedId) ??
-    activeLeases[0] ??
+    visibleLeases.find((lease) => lease.id === selectedId) ??
+    visibleLeases[0] ??
     null;
   const nameCounts = new Map<string, number>();
-  for (const lease of activeLeases) {
+  for (const lease of visibleLeases) {
     const name = leaseName(lease);
     nameCounts.set(name, (nameCounts.get(name) ?? 0) + 1);
   }
@@ -184,6 +190,19 @@ export function MyMachines() {
     extensionNotice && selectedLease?.id === extensionNotice.leaseId
       ? extensionNotice.text
       : null;
+  const renderLeaseCard = (lease: Lease) =>
+    lease.state === "preparing" ? (
+      <PowerOnRentalCard key={lease.id} lease={lease} onRefresh={() => void refreshLeasesRef.current?.()} />
+    ) : (
+      <ActiveRentalCard
+        lease={lease}
+        balanceSatang={session?.user.balanceSatang ?? 0}
+        now={now}
+        extensionNotice={lease.id === selectedLease?.id ? notice : null}
+        onRefresh={() => void refreshLeasesRef.current?.()}
+        onExtend={(hours, idempotencyKey) => extendLease(lease, hours, idempotencyKey)}
+      />
+    );
 
   return (
     <div className="flex min-h-screen flex-col">
@@ -222,12 +241,18 @@ export function MyMachines() {
 
         <p
           role="status"
-          className="mt-4 min-h-5 text-sm text-muted-foreground"
+          className="mt-4 min-h-5 text-sm text-destructive"
         >
           {message}
         </p>
 
-        {preparingCount > 0 ? (
+        {loading ? (
+          <LoadingRegion label="กำลังโหลดเครื่องของฉัน" className="mt-2">
+            <CardsGridSkeleton count={1} rows={1} columns="grid-cols-1" cardClassName="h-[360px]" />
+          </LoadingRegion>
+        ) : null}
+
+        {!loading && pendingPayments > 0 ? (
           <div
             role="status"
             className="mb-4 flex items-center gap-3 rounded-2xl border border-dashed bg-muted/30 p-4 text-sm"
@@ -235,16 +260,16 @@ export function MyMachines() {
             <Spinner />
             <div className="flex flex-col gap-0.5">
               <p className="font-medium">
-                กำลังเตรียมเครื่อง {preparingCount} รายการ
+                กำลังตรวจสอบการชำระเงิน {pendingPayments} รายการ
               </p>
               <p className="text-muted-foreground">
-                เครื่องจะแสดงในหน้านี้เมื่อพร้อมให้เชื่อมต่อ
+                เมื่อชำระเงินสำเร็จ เครื่องจะปรากฏเป็นการ์ดเปิดเครื่องที่นี่
               </p>
             </div>
           </div>
         ) : null}
 
-        {!message && activeLeases.length === 0 && preparingCount === 0 ? (
+        {!loading && !message && visibleLeases.length === 0 && pendingPayments === 0 ? (
           <Empty className="mt-6 border">
             <EmptyHeader>
               <EmptyMedia variant="icon">
@@ -270,7 +295,7 @@ export function MyMachines() {
           </Empty>
         ) : null}
 
-        {activeLeases.length > 1 && selectedLease ? (
+        {!loading && visibleLeases.length > 1 && selectedLease ? (
           <Tabs
             value={selectedLease.id}
             onValueChange={(value) => setSelectedId(String(value))}
@@ -280,7 +305,7 @@ export function MyMachines() {
               aria-label="เลือกเครื่องที่กำลังเช่า"
               className="h-auto w-full flex-wrap sm:w-fit"
             >
-              {activeLeases.map((lease) => (
+              {visibleLeases.map((lease) => (
                 <TabsTrigger key={lease.id} value={lease.id}>
                   <Monitor aria-hidden />
                   {tabLabel(lease)}
@@ -296,33 +321,13 @@ export function MyMachines() {
                   exit={reduceMotion ? undefined : { opacity: 0, y: -8 }}
                   transition={{ duration: 0.18 }}
                 >
-                  <ActiveRentalCard
-                    lease={selectedLease}
-                    balanceSatang={session?.user.balanceSatang ?? 0}
-                    now={now}
-                    extensionNotice={notice}
-                    onRefresh={() => void refreshLeasesRef.current?.()}
-                    onExtend={(hours, idempotencyKey) =>
-                      extendLease(selectedLease, hours, idempotencyKey)
-                    }
-                  />
+                  {renderLeaseCard(selectedLease)}
                 </motion.div>
               </AnimatePresence>
             </TabsContent>
           </Tabs>
-        ) : selectedLease ? (
-          <div className="mt-2">
-            <ActiveRentalCard
-              lease={selectedLease}
-              balanceSatang={session?.user.balanceSatang ?? 0}
-              now={now}
-              extensionNotice={notice}
-              onRefresh={() => void refreshLeasesRef.current?.()}
-              onExtend={(hours, idempotencyKey) =>
-                extendLease(selectedLease, hours, idempotencyKey)
-              }
-            />
-          </div>
+        ) : !loading && selectedLease ? (
+          <div className="mt-2">{renderLeaseCard(selectedLease)}</div>
         ) : null}
       </main>
       <Footer />

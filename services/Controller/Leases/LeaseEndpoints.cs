@@ -42,6 +42,24 @@ public static class LeaseEndpoints {
             catch(ArgumentException) { return Results.BadRequest(new {error="Invalid lease request"}); }
             catch(InvalidOperationException) { return Results.Conflict(new {error="Lease conflict"}); }
         });
+        app.MapPost("/internal/leases/{id}/power",async (string id,LeasePowerRequest request,HttpContext context,LeaseService leases,CancellationToken ct)=> {
+            var actor=Actor(context);if(string.IsNullOrWhiteSpace(actor)||request is null||!Guid.TryParse(request.RequestId,out _)) return Results.BadRequest(new {error="Invalid power request"});
+            var lease=await leases.GetLeaseAsync(id,ct);if(lease is null) return Results.NotFound();
+            if(lease.UserId!=actor) return Results.StatusCode(403);
+            try { return Results.Ok(await leases.RequestPowerAsync(id,actor,request.RequestId,ct)); }
+            catch(KeyNotFoundException) { return Results.NotFound(); }
+            catch(UnauthorizedAccessException) { return Results.StatusCode(403); }
+            catch(InvalidOperationException) { return Results.Conflict(new {error="Power request is not available"}); }
+        });
+        app.MapPost("/internal/leases/{id}/cancel",async (string id,LeaseCancelRequest request,HttpContext context,LeaseService leases,CancellationToken ct)=> {
+            var actor=Actor(context);if(string.IsNullOrWhiteSpace(actor)||request is null||string.IsNullOrWhiteSpace(request.IdempotencyKey)) return Results.BadRequest(new {error="Invalid cancel request"});
+            var lease=await leases.GetLeaseAsync(id,ct);if(lease is null) return Results.NotFound();
+            if(lease.UserId!=actor) return Results.StatusCode(403);
+            try { return Results.Ok(await leases.CancelUserLeaseAsync(id,actor,request.ExpectedRevision,request.IdempotencyKey,ct)); }
+            catch(KeyNotFoundException) { return Results.NotFound(); }
+            catch(UnauthorizedAccessException) { return Results.StatusCode(403); }
+            catch(InvalidOperationException) { return Results.Conflict(new {error="Lease conflict"}); }
+        });
         app.MapGet("/internal/users/{userId}/leases",async (string userId,HttpContext context,LeaseService leases,CancellationToken ct)=> {
             if(string.IsNullOrWhiteSpace(Actor(context))||Actor(context)!=userId) return Results.StatusCode(403);
             try { return Results.Ok(await leases.GetUserLeasesAsync(userId,ct)); }

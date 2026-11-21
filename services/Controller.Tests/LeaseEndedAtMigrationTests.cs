@@ -21,8 +21,8 @@ public sealed class LeaseEndedAtMigrationTests
             using (new ControllerDatabase(path)) { }
             using (var verify = Open(path))
             {
-                Assert.Equal(27L, Scalar(verify, "PRAGMA user_version"));
-                Assert.Equal("ended_at", Columns(verify, "leases")[^1]);
+                Assert.Equal(28L, Scalar(verify, "PRAGMA user_version"));
+                Assert.Contains("ended_at", Columns(verify, "leases")); Assert.Equal("wake_request_id", Columns(verify, "leases")[^1]);
                 // Existing rows keep their data and gain an unset end instant.
                 Assert.Equal(1L, Scalar(verify, "SELECT COUNT(*) FROM leases WHERE ended_at IS NULL"));
                 Assert.Equal("active", Scalar(verify, "SELECT state FROM leases WHERE id='live'"));
@@ -38,13 +38,13 @@ public sealed class LeaseEndedAtMigrationTests
                 foreignKeys.CommandText = "PRAGMA foreign_key_check";
                 using var rows = foreignKeys.ExecuteReader();
                 Assert.False(rows.Read());
-                ControllerDatabaseMaintenance.ValidateCanonicalSchema(verify, 27);
+                ControllerDatabaseMaintenance.ValidateCanonicalSchema(verify, 28);
             }
 
             // Reopening an already migrated database must not re-run the additive ALTER TABLE.
             using (new ControllerDatabase(path)) { }
             using var restarted = Open(path);
-            Assert.Equal(27L, Scalar(restarted, "PRAGMA user_version"));
+            Assert.Equal(28L, Scalar(restarted, "PRAGMA user_version"));
             Assert.Equal(1, Columns(restarted, "leases").Count(column => column == "ended_at"));
             Assert.Equal(0L, Scalar(restarted, "SELECT COUNT(*) FROM leases WHERE ended_at IS NOT NULL"));
         }

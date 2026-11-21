@@ -1,6 +1,7 @@
 import { getAdminMembers } from "@/lib/admin";
 import { Suspense } from "react";
 import { MembersManager } from "@/components/admin/members-manager";
+import { AdminUsersPageSkeleton } from "@/components/loading";
 
 async function AdminUsers({ searchParams }: { searchParams: PageProps<"/admin/users">["searchParams"] }) {
   const raw = await searchParams;
@@ -9,5 +10,9 @@ async function AdminUsers({ searchParams }: { searchParams: PageProps<"/admin/us
 }
 
 export default function AdminUsersPage({ searchParams }: PageProps<"/admin/users">) {
-  return <Suspense fallback={<p role="status">กำลังโหลดสมาชิก…</p>}><AdminUsers searchParams={searchParams} /></Suspense>;
+  return (
+    <Suspense fallback={<AdminUsersPageSkeleton />}>
+      <AdminUsers searchParams={searchParams} />
+    </Suspense>
+  );
 }

@@ -157,7 +157,7 @@ describe("MyMachines", () => {
     ).toBeDefined();
     expect(screen.queryByText("PC DONE")).toBeNull();
     expect(screen.queryByText("PC PENDING")).toBeNull();
-    expect(screen.getByText(/กำลังเตรียมเครื่อง 1 รายการ/)).toBeDefined();
+    expect(screen.getByText(/กำลังตรวจสอบการชำระเงิน 1 รายการ/)).toBeDefined();
     expect(screen.getByText("พร้อมเชื่อมต่อ")).toBeDefined();
     expect(screen.getByText("กำลังใช้งาน")).toBeDefined();
     expect(screen.getByText("฿800.00")).toBeDefined();
@@ -184,7 +184,7 @@ describe("MyMachines", () => {
     expect(screen.queryByText("PC DONE")).toBeNull();
   });
 
-  it("keeps the preparing notice instead of the empty state", async () => {
+  it("shows a power card for a prepared rental instead of the empty state", async () => {
     leases = [
       lease({
         id: "rental-pending",
@@ -200,8 +200,9 @@ describe("MyMachines", () => {
     render(<MyMachines />);
 
     expect(
-      await screen.findByText(/กำลังเตรียมเครื่อง 1 รายการ/),
+      await screen.findByRole("heading", { level: 2, name: "PC PENDING" }),
     ).toBeDefined();
+    expect(screen.getByRole("button", { name: "เปิดเครื่อง PC PENDING" })).toBeDefined();
     expect(screen.queryByText("ยังไม่มีเครื่องที่กำลังเช่า")).toBeNull();
   });
 
@@ -379,7 +380,7 @@ describe("MyMachines", () => {
     });
 
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(15_000);
+      await vi.advanceTimersByTimeAsync(3_000);
     });
     expect(fetchSpy).toHaveBeenCalledTimes(2);
 

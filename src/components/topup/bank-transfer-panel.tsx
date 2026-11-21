@@ -9,6 +9,7 @@ import {
   Clock3,
   Copy,
   History,
+  Loader2,
   RotateCcw,
 } from "lucide-react";
 import toast from "react-hot-toast";
@@ -216,7 +217,7 @@ export function BankTransferPanel({
         <SlipUploader topup={topup} onUpdated={onUpdated} />
       ) : (
         <Alert>
-          <Clock3 aria-hidden />
+          <Loader2 aria-hidden className="animate-spin motion-reduce:animate-none" />
           <AlertTitle>กำลังตรวจสอบสลิป</AlertTitle>
           <AlertDescription>
             {topup.verificationMessage ||

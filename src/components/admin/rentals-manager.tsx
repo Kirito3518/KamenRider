@@ -61,8 +61,13 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
+import {
+  InlineSkeleton,
+  LoadingRegion,
+  SkeletonBlock,
+  TableSkeleton,
+} from "@/components/loading";
 import {
   Table,
   TableBody,
@@ -403,8 +408,20 @@ export function RentalsManager() {
           >
             <AdminStatCard
               label={card.label}
-              value={data ? card.value : <Skeleton className="h-7 w-20" />}
-              hint={data ? card.hint : "กำลังโหลดข้อมูล"}
+              value={
+                data ? (
+                  card.value
+                ) : (
+                  <SkeletonBlock className="h-7 w-20" />
+                )
+              }
+              hint={
+                data ? (
+                  card.hint
+                ) : (
+                  <SkeletonBlock className="h-3 w-28" radius="rounded-full" />
+                )
+              }
               icon={card.icon}
               tone={card.tone}
             />
@@ -426,7 +443,7 @@ export function RentalsManager() {
           </CardHeader>
           <CardContent>
             {loading && !data ? (
-              <Skeleton className="h-60 w-full" />
+              <SkeletonBlock className="h-60 w-full" />
             ) : noChartData ? (
               <p className="flex h-60 items-center justify-center text-sm text-muted-foreground">
                 ยังไม่มีข้อมูลรายได้ในช่วงที่เลือก
@@ -463,7 +480,7 @@ export function RentalsManager() {
           </CardHeader>
           <CardContent>
             {loading && !data ? (
-              <Skeleton className="h-60 w-full" />
+              <SkeletonBlock className="h-60 w-full" />
             ) : noChartData ? (
               <p className="flex h-60 items-center justify-center text-sm text-muted-foreground">
                 ยังไม่มีข้อมูลรายการในช่วงที่เลือก
@@ -494,9 +511,11 @@ export function RentalsManager() {
           <div>
             <p className="font-medium">ตารางประวัติการเช่า</p>
             <p className="text-xs text-muted-foreground" role="status" aria-live="polite">
-              {loading && !data
-                ? "กำลังโหลด…"
-                : `แสดง ${entries.length} จาก ${data?.pagination.total ?? 0} รายการ`}
+              {loading && !data ? (
+                <InlineSkeleton lines={1} widths={["w-40"]} />
+              ) : (
+                `แสดง ${entries.length} จาก ${data?.pagination.total ?? 0} รายการ`
+              )}
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-1">
@@ -527,11 +546,9 @@ export function RentalsManager() {
           </div>
         </div>
         {loading && !data ? (
-          <div className="flex flex-col gap-2 p-4">
-            {Array.from({ length: 5 }).map((_, index) => (
-              <Skeleton key={index} className="h-12 w-full" />
-            ))}
-          </div>
+          <LoadingRegion label="กำลังโหลดตารางประวัติการเช่า" className="p-4">
+            <TableSkeleton rows={5} columns={9} frame={false} />
+          </LoadingRegion>
         ) : entries.length === 0 ? (
           <Empty className="border-0 py-10">
             <EmptyHeader>

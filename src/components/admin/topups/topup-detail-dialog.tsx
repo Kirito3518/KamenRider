@@ -29,8 +29,8 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
+import { DialogSkeleton, LoadingRegion } from "@/components/loading";
 import { formatBangkokDateTime } from "@/lib/date-range";
 import { formatBalance } from "@/lib/money";
 import { maskAccountNumber } from "@/lib/topup/amount";
@@ -249,18 +249,18 @@ export function TopupDetailDialog({
         <DialogHeader>
           <DialogTitle>รายละเอียดรายการเติมเงิน</DialogTitle>
           <DialogDescription>
-            {detail
-              ? `${detail.reference} · ${detail.userName || detail.userEmail}`
-              : "กำลังโหลดรายละเอียดรายการ"}
+            {detail ? (
+              `${detail.reference} · ${detail.userName || detail.userEmail}`
+            ) : (
+              <span className="sr-only">กำลังโหลดรายละเอียดรายการ</span>
+            )}
           </DialogDescription>
         </DialogHeader>
 
         {loading && !detail ? (
-          <div className="flex flex-col gap-3" aria-label="กำลังโหลดรายละเอียดรายการ">
-            <Skeleton className="h-6 w-52" />
-            <Skeleton className="h-28 w-full" />
-            <Skeleton className="h-40 w-full" />
-          </div>
+          <LoadingRegion label="กำลังโหลดรายละเอียดรายการ">
+            <DialogSkeleton />
+          </LoadingRegion>
         ) : error && !detail ? (
           <Alert variant="destructive">
             <CircleAlert aria-hidden />

@@ -10,6 +10,8 @@ public record MachineUpdate(string DisplayName, long HourlyPriceMinorUnits, int 
     public string? VncLocalIp { get; init; }
     /// <summary>Admin opt-in for renter-supplied Parsec account login; omitted means unchanged.</summary>
     public bool? ParsecEnabled { get; init; }
+    /// <summary>rentable, maintenance or disabled; omitted means unchanged.</summary>
+    public string? Availability { get; init; }
 }
 public record MachineDto(string MachineId, string ApprovalStatus, string DisplayName, long HourlyPriceMinorUnits, string LocalIp, string MacAddress, int MoonlightPort, int SunshinePort, long ConfigRevision, DateTimeOffset? LastSeenAt, string? BootId, string Readiness, string? AgentVersion, string? ApprovedBy, DateTimeOffset? ApprovedAt) {
     public long? AppliedConfigRevision {get;init;}
@@ -33,6 +35,14 @@ public record MachineDto(string MachineId, string ApprovalStatus, string Display
     public bool ParsecEnabled { get; init; }
     /// <summary>Whether the Agent currently advertises a usable Parsec installation.</summary>
     public bool ParsecAvailable { get; init; }
+    /// <summary>Admin-controlled availability mode: rentable, maintenance or disabled.</summary>
+    public string Availability { get; init; } = "rentable";
+    /// <summary>Derived lifecycle state shown to customers and administrators.</summary>
+    public string OperationalState { get; init; } = "unknown";
+    /// <summary>When the post-lease cleaning window ends (null when not clearing).</summary>
+    public DateTimeOffset? ClearingUntilUtc { get; init; }
+    /// <summary>True when the machine is offline and the Controller can send Wake-on-LAN.</summary>
+    public bool WakeReady { get; init; }
 }
 
 public record MachineIdentityConfirmation(string Fingerprint);

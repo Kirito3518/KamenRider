@@ -31,6 +31,7 @@ import {
 } from "@/lib/rental-machines";
 import { MachineCard } from "@/components/rent/machine-card";
 import { RentalDialog } from "@/components/rent/rental-dialog";
+import { CardsGridSkeleton, LoadingRegion } from "@/components/loading";
 
 const filters: { value: MachineFilter; label: string }[] = [
   { value: "all", label: "ทั้งหมด" },
@@ -52,7 +53,8 @@ export function RentalBrowser() {
   const [rentalMachines, setMachines] = useState<
     import("@/lib/rental-machines").RentalMachine[]
   >([]);
-  const [loadMessage, setLoadMessage] = useState("กำลังโหลดเครื่อง…");
+  const [loadMessage, setLoadMessage] = useState("");
+  const [loading, setLoading] = useState(true);
   useEffect(() => {
     let active = true;
     let current: AbortController | undefined;
@@ -68,12 +70,14 @@ export function RentalBrowser() {
           setMachines(machines);
           setSelected((selected) => selected ? machines.find((machine: RentalMachine) => machine.id === selected.id && machine.status === "available") ?? null : null);
           setLoadMessage("");
+          setLoading(false);
         }
       } catch {
         if (active && !abort.signal.aborted) {
           setMachines([]);
           setSelected(null);
           setLoadMessage("ติดต่อระบบเครื่องไม่ได้ กรุณาลองใหม่");
+          setLoading(false);
         }
       }
     }
@@ -139,9 +143,21 @@ export function RentalBrowser() {
           </dl>
         </header>
 
-        <p role="status" className="mt-5">
-          {loadMessage}
-        </p>
+        {loadMessage ? (
+          <p role="status" className="mt-5 text-sm text-destructive">
+            {loadMessage}
+          </p>
+        ) : null}
+        {loading ? (
+          <LoadingRegion label="กำลังโหลดรายการเครื่อง" className="mt-9">
+            <CardsGridSkeleton
+              count={5}
+              rows={1}
+              columns="grid-cols-1 min-[520px]:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5"
+              cardClassName="h-[330px]"
+            />
+          </LoadingRegion>
+        ) : (
         <Tabs
           value={filter}
           onValueChange={(value) => setFilter(value as MachineFilter)}
@@ -230,6 +246,7 @@ export function RentalBrowser() {
             </TabsContent>
           ))}
         </Tabs>
+        )}
       </main>
       <Footer />
       <RentalDialog

@@ -9,8 +9,8 @@ import {
 } from "@/components/admin/admin-page";
 import { MemberTable } from "@/components/admin/member-table";
 import { CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { getAdminData } from "@/lib/admin";
-import { formatBalance } from "@/lib/money";
+import { AdminStatsTablePageSkeleton } from "@/components/loading";
+import { getAdminData } from "@/lib/admin";import { formatBalance } from "@/lib/money";
 
 async function AdminBalances() {
   const { members, summary } = await getAdminData();
@@ -56,7 +56,7 @@ async function AdminBalances() {
 
 export default function BalancesPage() {
   return (
-    <Suspense fallback={<p role="status">กำลังโหลดยอดเงินสมาชิก…</p>}>
+    <Suspense fallback={<AdminStatsTablePageSkeleton label="กำลังโหลดยอดเงินสมาชิก" />}>
       <AdminBalances />
     </Suspense>
   );

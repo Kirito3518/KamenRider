@@ -99,15 +99,23 @@ private DateTimeOffset EffectiveNow(){var now=time.GetUtcNow();if(serverTime is 
    if(current is not {} s||s.BootId!=boot.BootId||s.RentalId!=command.RentalId||s.Revision!=command.LeaseRevision||boot.UptimeMilliseconds>=EnforcementDeadline(s))return failed;
    target=s;confirmed=false;
   }
-  // The only stream cut is Sunshine's own unpair-all. Best effort: a failed cleanup must not
-  // strand the lease or money; boot cleanup and the shutdown paths retry it.
+  // Lease-end lifecycle: cut the stream before the machine goes down. The only stream cut is
+  // Sunshine's own unpair-all (plus the Parsec rental-end cleanup). Both are best effort - a failed
+  // cleanup must not strand the lease or money, and shutdown still proceeds; boot cleanup retries it.
   await ClearStreamAccessAsync(ct);
   lock(state){if(!ReferenceEquals(current,target)||fault is not null||IsMaintenanceFenceHeld()||command.ValidUntilUtc<=EffectiveNow())return failed;}
+  // Power off only after the stream was cut. A failed shutdown request must not leave the lease in
+  // a state where the Controller could hand the machine to a new renter, so the result stays failed
+  // with a stable code (never exception text) even though the local lease is cleared below anyway.
+  var shutdownAccepted=true;
+  try{await shutdown.RequestImmediateShutdownAsync(ct);}
+  catch(OperationCanceledException) when(ct.IsCancellationRequested){throw;}
+  catch{shutdownAccepted=false;}
   try{await store.ClearAsync(ct);}catch(Exception ex) when(ex is IOException or UnauthorizedAccessException){lock(state){fault="LeaseStorageFailed";}return failed;}
   lock(state){
    if(!ReferenceEquals(current,target)||boot.BootId!=target.BootId)return failed;
    current=null;pendingInitial=null;fault=null;requiresControllerTime=false;controllerTimeObserved=false;importSaved=false;recoveryDeadline=null;serverTime=null;serverUptime=0;confirmed=false;shutdownState=0;initialized=true;
-   return new(command.CommandId,"applied",command.LeaseRevision);
+   return shutdownAccepted?new(command.CommandId,"applied",command.LeaseRevision):new(command.CommandId,"failed",command.LeaseRevision,"ShutdownFailed");
   }
  }finally{commands.Release();}}
  public async Task<CommandResult> ShutdownMachineAsync(CommandEnvelope command,CancellationToken ct){await commands.WaitAsync(ct);try{

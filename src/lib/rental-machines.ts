@@ -1,7 +1,11 @@
 export type MachineStatus =
   | "available"
+  | "awaitingPower"
+  | "booting"
   | "busy"
+  | "clearing"
   | "maintenance"
+  | "onlineIdle"
   | "notReady"
   | "unknown"
   | "unreachable"
@@ -38,7 +42,11 @@ export const machineStatusLabels: Record<MachineStatus, string> = {
   pending: "รออนุมัติ",
   ending: "กำลังสิ้นสุด",
   available: "ว่าง",
+  awaitingPower: "รอเปิดเครื่อง",
+  booting: "กำลังเปิดเครื่อง",
   busy: "กำลังใช้งาน",
+  clearing: "กำลังเคลียร์",
+  onlineIdle: "ออนไลน์แต่ไม่ว่าง",
   maintenance: "ซ่อม",
 };
 

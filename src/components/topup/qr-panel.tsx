@@ -8,6 +8,7 @@ import {
   Clock3,
   Download,
   History,
+  Loader2,
   QrCode,
   RotateCcw,
 } from "lucide-react";
@@ -208,7 +209,7 @@ export function QrPanel({
         <SlipUploader topup={topup} onUpdated={onUpdated} />
       ) : (
         <Alert>
-          <Clock3 aria-hidden />
+          <Loader2 aria-hidden className="animate-spin motion-reduce:animate-none" />
           <AlertTitle>กำลังตรวจสอบสลิป</AlertTitle>
           <AlertDescription>
             {topup.verificationMessage ||

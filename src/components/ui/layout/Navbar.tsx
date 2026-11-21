@@ -6,7 +6,6 @@ import {
   CircleHelp,
   History,
   Home,
-  LoaderCircle,
   LogIn,
   Menu,
   Monitor,
@@ -19,6 +18,7 @@ import {
 import { useRef, useState, type MouseEventHandler } from "react";
 import { useThemeTransition } from "@/hooks/use-theme-transition";
 import { Button } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
 import { AuthDialog } from "@/components/auth/auth-dialog";
 import { authClient } from "@/lib/auth-client";
 import { AccountDropdown } from "@/components/auth/account-dropdown";
@@ -72,7 +72,16 @@ function ThemeToggle() {
 
 function LoginButton({ onClick, onNavigate, mobile = false }: { onClick: MouseEventHandler<HTMLButtonElement>; onNavigate?: () => void; mobile?: boolean }) {
   const { data: session, isPending } = authClient.useSession();
-  if (isPending) return <Button disabled aria-label="กำลังโหลดบัญชี" className={mobile ? "size-9 px-0" : undefined}><LoaderCircle className="size-4 animate-spin" /><span className={mobile ? "sr-only" : undefined}>กำลังโหลด…</span></Button>;
+  if (isPending) return (
+    <div
+      role="status"
+      aria-busy="true"
+      className={cn("inline-flex items-center justify-center", mobile ? "size-9" : "h-9 w-24")}
+    >
+      <span className="sr-only">กำลังโหลดบัญชี</span>
+      <Skeleton aria-hidden="true" className="size-full rounded-full" />
+    </div>
+  );
   if (session) return <AccountDropdown user={session.user} onNavigate={onNavigate} />;
   return <Button onClick={onClick} className={mobile ? "max-[399px]:size-9 max-[399px]:px-0" : undefined}>{mobile && <LogIn className="min-[400px]:hidden" />}<span className={mobile ? "max-[399px]:sr-only" : undefined}>เข้าสู่ระบบ</span></Button>;
 }

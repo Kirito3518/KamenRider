@@ -119,7 +119,7 @@ describe("RentalDialog", () => {
     expect(body.hours).toBe(1);
     expect(body.requestId).toMatch(/^[0-9a-f-]{36}$/);
     expect(onClose).toHaveBeenCalled();
-    expect(h.success).toHaveBeenCalledWith("ส่งคำขอเช่าแล้ว กำลังเตรียมเครื่องให้คุณ");
+    expect(h.success).toHaveBeenCalledWith("ชำระเงินแล้ว ไปกดเปิดเครื่องในหน้าเครื่องของฉัน");
   });
 
   it("shows the server's refusal message and stays on the dialog", async () => {

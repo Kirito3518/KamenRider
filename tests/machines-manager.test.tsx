@@ -610,6 +610,7 @@ describe("MachinesManager dashboard", () => {
         sunshinePort: 47990,
         vncLocalIp: null,
         parsecEnabled: false,
+        availability: "rentable",
         expectedRevision: 1,
       }),
     );
@@ -671,6 +672,7 @@ describe("MachinesManager dashboard", () => {
         sunshinePort: 48001,
         vncLocalIp: "192.168.1.60",
         parsecEnabled: false,
+        availability: "rentable",
         expectedRevision: 1,
       }),
     );

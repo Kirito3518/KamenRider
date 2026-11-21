@@ -54,7 +54,7 @@ public class BootTests {
  [Fact] public async Task ExpiredLeaseIsNeverResumedAndCleanupReleasesAllocationWithoutShutdownCommand() {
   using var f=new LeaseFixture();var lease=await f.Active();f.Time.Now=f.Time.Now.AddSeconds(60);
   var result=BootChallengeTests.Prove(f,BootChallengeTests.Issue(f));Assert.Equal("PrepareAvailable",result.Action);Assert.Null(result.Lease);
-  Assert.Empty(f.Sync("new").Commands);Assert.Equal("completed",f.Db.GetLease(lease.Id)!.State);await f.Create("next");
+  Assert.Empty(f.Sync("new").Commands);Assert.Equal("completed",f.Db.GetLease(lease.Id)!.State);f.Time.Now=f.Time.Now.AddSeconds(31);await f.Create("next");
  }
  [Fact] public async Task PreparingLeaseCannotBeResumedAfterReboot() {
   using var f=new LeaseFixture();var lease=await f.Create();var result=BootChallengeTests.Prove(f,BootChallengeTests.Issue(f));

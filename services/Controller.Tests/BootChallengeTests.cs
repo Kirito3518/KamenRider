@@ -13,7 +13,7 @@ public class BootChallengeTests {
  }
  [Fact] public async Task ReplayedProofCannotReleaseReplacementAllocation() {
   using var f=new LeaseFixture();await f.Active();f.Time.Now=f.Time.Now.AddMinutes(2);f.Sync();var challenge=Issue(f);
-  Assert.Equal("PrepareAvailable",Prove(f,challenge).Action);f.Sync("new");var next=await f.Create("next");
+  Assert.Equal("PrepareAvailable",Prove(f,challenge).Action);f.Sync("new");f.ForceMachineOffline();f.Time.Now=f.Time.Now.AddSeconds(21);var next=await f.Create("next");
   Assert.Equal("Hold",Prove(f,challenge).Action);Assert.Equal("preparing",f.Db.GetLease(next.Id)!.State);
   await Assert.ThrowsAsync<InvalidOperationException>(()=>f.Create("third"));
  }

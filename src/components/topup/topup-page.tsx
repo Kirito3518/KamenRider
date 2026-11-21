@@ -26,8 +26,8 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
+import { PageSkeleton, SkeletonBlock } from "@/components/loading";
 import { Footer } from "@/components/ui/layout/Footer";
 import { Navbar } from "@/components/ui/layout/Navbar";
 import { formatBalance } from "@/lib/money";
@@ -241,10 +241,17 @@ export function TopupPage({
         ) : null}
 
         {loading && !config ? (
-          <div className="mt-6 flex flex-col gap-3">
-            <Skeleton className="h-12 w-full rounded-2xl" />
-            <Skeleton className="h-72 w-full rounded-3xl" />
-          </div>
+          <PageSkeleton label="กำลังโหลดข้อมูลการเติมเงิน" className="mt-6 gap-3">
+            <SkeletonBlock className="h-12 w-full" />
+            <div className="rounded-3xl border bg-card p-4">
+              <SkeletonBlock className="h-4 w-40" radius="rounded-full" />
+              <div className="mt-4 flex flex-col gap-3">
+                <SkeletonBlock className="h-16 w-full" />
+                <SkeletonBlock className="h-16 w-full" />
+                <SkeletonBlock className="h-16 w-full" />
+              </div>
+            </div>
+          </PageSkeleton>
         ) : config ? (
           <motion.div
             initial={reduceMotion ? false : { opacity: 0, y: 10 }}

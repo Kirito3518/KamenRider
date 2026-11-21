@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { MyMachines } from "@/components/my-machines/my-machines";
 import { Suspense } from "react";
 import { requireSession } from "@/lib/session";
+import { CardsGridSkeleton, SitePageSkeleton } from "@/components/loading";
 
 export const metadata: Metadata = {
   title: "เครื่องของฉัน | KamenRaiderPlay",
@@ -14,5 +15,15 @@ async function ProtectedMachines() {
 }
 
 export default function MyMachinesPage() {
-  return <Suspense fallback={<p role="status">กำลังตรวจสอบบัญชี…</p>}><ProtectedMachines /></Suspense>;
+  return (
+    <Suspense
+      fallback={
+        <SitePageSkeleton label="กำลังโหลดเครื่องของฉัน">
+          <CardsGridSkeleton count={1} rows={1} columns="grid-cols-1" cardClassName="h-[360px]" />
+        </SitePageSkeleton>
+      }
+    >
+      <ProtectedMachines />
+    </Suspense>
+  );
 }

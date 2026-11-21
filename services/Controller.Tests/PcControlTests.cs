@@ -99,7 +99,7 @@ public class PcControlTests
         Assert.Equal(1L, Scalar(fixture.Path,
             "SELECT COUNT(*) FROM command_outbox WHERE machine_id='pc' AND type='ShutdownMachine' AND status='pending'"));
         Assert.Equal(1L, Scalar(fixture.Path,
-            "SELECT COUNT(*) FROM leases WHERE id=$id AND state='ending' AND allocation_held=1", ("$id", lease.Id)));
+            "SELECT COUNT(*) FROM leases WHERE id=$id AND state='ending' AND allocation_held=0", ("$id", lease.Id)));
 
         var retried = fixture.Db.RequestMachinePowerOff("pc", "admin-1", "power-request-1");
         Assert.Equal(response.CommandId, retried.CommandId);
@@ -127,7 +127,7 @@ public class PcControlTests
         Assert.Equal(1L, Scalar(fixture.Path,
             "SELECT COUNT(*) FROM command_outbox WHERE rental_id=$id AND type='EndLease' AND status='pending'", ("$id", lease.Id)));
         Assert.Equal(1L, Scalar(fixture.Path,
-            "SELECT COUNT(*) FROM leases WHERE id=$id AND state='active' AND allocation_held=1", ("$id", lease.Id)));
+            "SELECT COUNT(*) FROM leases WHERE id=$id AND state='ending' AND allocation_held=0", ("$id", lease.Id)));
 
         var retried = fixture.Db.CancelMachineLease("pc", lease.Revision, "cancel-1", "cancel-request-1", "admin-1");
         Assert.Equal(lease.Id, retried.Id);

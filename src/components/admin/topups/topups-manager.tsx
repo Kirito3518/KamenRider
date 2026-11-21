@@ -7,6 +7,7 @@ import {
   ChevronRight,
   CircleAlert,
   Eye,
+  Loader2,
   ReceiptText,
   RefreshCw,
 } from "lucide-react";
@@ -51,8 +52,14 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
+import {
+  CardsGridSkeleton,
+  LoadingRegion,
+  SkeletonBlock,
+  StatGridSkeleton,
+  TableSkeleton,
+} from "@/components/loading";
 import {
   Table,
   TableBody,
@@ -344,8 +351,18 @@ export function TopupsManager() {
                   {`ช่วงข้อมูล ${rangeLabel} · เรียงตาม${sortLabel(query.sort)} · เวลาไทย`}
                 </CardDescription>
                 <CardAction>
-                  <span className="text-xs text-muted-foreground">
-                    {loading ? "กำลังอัปเดต…" : `${total.toLocaleString("th-TH")} รายการ`}
+                  <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                    {loading ? (
+                      <>
+                        <Loader2
+                          aria-hidden="true"
+                          className="size-3 animate-spin motion-reduce:animate-none"
+                        />
+                        กำลังอัปเดต…
+                      </>
+                    ) : (
+                      `${total.toLocaleString("th-TH")} รายการ`
+                    )}
                   </span>
                 </CardAction>
               </CardHeader>
@@ -598,7 +615,7 @@ export function TopupsManager() {
       />
 
       <p role="status" aria-live="polite" className="sr-only">
-        {loading ? "กำลังโหลดประวัติการเติมเงิน…" : error || ""}
+        {error || ""}
       </p>
     </AdminPage>
   );
@@ -640,22 +657,26 @@ function RangeSelector({
 
 function DashboardSkeleton() {
   return (
-    <div className="flex flex-col gap-4" aria-hidden>
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-6">
-        {Array.from({ length: 6 }).map((_, index) => (
-          <Skeleton key={index} className="h-28 w-full" />
-        ))}
+    <LoadingRegion
+      label="กำลังโหลดประวัติการเติมเงิน"
+      className="flex flex-col gap-4"
+    >
+      <StatGridSkeleton
+        count={6}
+        columns="sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-6"
+      />
+      <CardsGridSkeleton
+        count={2}
+        columns="xl:grid-cols-2"
+        rows={0}
+        cardClassName="h-80"
+      />
+      <div className="rounded-2xl border bg-card p-4">
+        <SkeletonBlock className="h-10 w-full" />
+        <div className="mt-3">
+          <TableSkeleton rows={5} columns={8} frame={false} />
+        </div>
       </div>
-      <div className="grid gap-3 xl:grid-cols-2">
-        <Skeleton className="h-80 w-full" />
-        <Skeleton className="h-80 w-full" />
-      </div>
-      <div className="flex flex-col gap-2 rounded-2xl border bg-card p-4">
-        <Skeleton className="h-10 w-full" />
-        {Array.from({ length: 5 }).map((_, index) => (
-          <Skeleton key={index} className="h-12 w-full" />
-        ))}
-      </div>
-    </div>
+    </LoadingRegion>
   );
 }

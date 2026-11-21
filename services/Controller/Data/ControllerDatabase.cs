@@ -55,7 +55,7 @@ public sealed partial class ControllerDatabase : IDisposable
             }
             ControllerDatabaseMaintenance.ValidateCanonicalSchema(connection, startingUserVersion);
             using var transaction=connection.BeginTransaction();
-            foreach (var name in new[] { "001-machines.sql", "002-leases-commands.sql", "003-pairing.sql", "004-boot-challenges.sql", "005-config-acks.sql", "006-enrollment-tickets.sql", "007-admin-vnc-sessions.sql", "008-vnc-approved-target.sql", "009-agent-version.sql", "010-completed-leases.sql", "011-readiness-diagnostics.sql", "012-agent-releases.sql", "013-agent-update-downloads.sql", "014-agent-maintenance-chains.sql", "015-agent-sync-proof.sql", "016-agent-sync-challenge-rate-limit.sql", "017-agent-release-contract.sql", "018-agent-update-source-binding.sql", "019-controller-restore-quarantine.sql", "020-agent-update-recovery-intents.sql", "021-agent-update-recovery-successors.sql", "022-agent-update-confirmations.sql", "023-pc-control-commands.sql", "024-machine-profile-sunshine.sql", "025-lease-ended-at.sql", "026-sunshine-maintenance-commands.sql", "027-parsec-attempts.sql" }) {
+            foreach (var name in new[] { "001-machines.sql", "002-leases-commands.sql", "003-pairing.sql", "004-boot-challenges.sql", "005-config-acks.sql", "006-enrollment-tickets.sql", "007-admin-vnc-sessions.sql", "008-vnc-approved-target.sql", "009-agent-version.sql", "010-completed-leases.sql", "011-readiness-diagnostics.sql", "012-agent-releases.sql", "013-agent-update-downloads.sql", "014-agent-maintenance-chains.sql", "015-agent-sync-proof.sql", "016-agent-sync-challenge-rate-limit.sql", "017-agent-release-contract.sql", "018-agent-update-source-binding.sql", "019-controller-restore-quarantine.sql", "020-agent-update-recovery-intents.sql", "021-agent-update-recovery-successors.sql", "022-agent-update-confirmations.sql", "023-pc-control-commands.sql", "024-machine-profile-sunshine.sql", "025-lease-ended-at.sql", "026-sunshine-maintenance-commands.sql", "027-parsec-attempts.sql", "028-rental-power-lifecycle.sql" }) {
                 if(name=="003-pairing.sql"){using var version=connection.CreateCommand();version.Transaction=transaction;version.CommandText="PRAGMA user_version";if((long)version.ExecuteScalar()!>=3)continue;}
                 if(name=="004-boot-challenges.sql"){using var version=connection.CreateCommand();version.Transaction=transaction;version.CommandText="PRAGMA user_version";if((long)version.ExecuteScalar()!>=4)continue;}
                 if(name=="010-completed-leases.sql"){using var version=connection.CreateCommand();version.Transaction=transaction;version.CommandText="PRAGMA user_version";if((long)version.ExecuteScalar()!>=10)continue;}
@@ -76,6 +76,7 @@ public sealed partial class ControllerDatabase : IDisposable
                 if(name=="025-lease-ended-at.sql"){using var version=connection.CreateCommand();version.Transaction=transaction;version.CommandText="PRAGMA user_version";if((long)version.ExecuteScalar()!>=25)continue;}
                 if(name=="026-sunshine-maintenance-commands.sql"){using var version=connection.CreateCommand();version.Transaction=transaction;version.CommandText="PRAGMA user_version";if((long)version.ExecuteScalar()!>=26)continue;}
                 if(name=="027-parsec-attempts.sql"){using var version=connection.CreateCommand();version.Transaction=transaction;version.CommandText="PRAGMA user_version";if((long)version.ExecuteScalar()!>=27)continue;}
+                if(name=="028-rental-power-lifecycle.sql"){using var version=connection.CreateCommand();version.Transaction=transaction;version.CommandText="PRAGMA user_version";if((long)version.ExecuteScalar()!>=28)continue;}
                 if(name=="008-vnc-approved-target.sql") {
                     using var columns=connection.CreateCommand();columns.Transaction=transaction;columns.CommandText="PRAGMA table_info(machines)";using var rows=columns.ExecuteReader();
                     var hasVncLocalIp=false;while(rows.Read())if(rows.GetString(1)=="vnc_local_ip")hasVncLocalIp=true;
@@ -90,7 +91,7 @@ public sealed partial class ControllerDatabase : IDisposable
                 using var reader=new StreamReader(resource);
                 using var cmd=connection.CreateCommand(); cmd.Transaction=transaction; cmd.CommandText=reader.ReadToEnd(); cmd.ExecuteNonQuery();
             }
-            ControllerDatabaseMaintenance.ValidateCanonicalSchema(connection, 27, transaction);
+            ControllerDatabaseMaintenance.ValidateCanonicalSchema(connection, 28, transaction);
             ControllerDatabaseMaintenance.ValidateMaintenanceChainSchema(connection,transaction);
             ControllerDatabaseMaintenance.ValidateSyncProofSchema(connection,transaction);
             ControllerDatabaseMaintenance.ValidateRestoreStateSchema(connection, transaction);
@@ -107,7 +108,7 @@ public sealed partial class ControllerDatabase : IDisposable
                 invalidateRuntimeProofs.ExecuteNonQuery();
             }
             transaction.Commit();
-            ControllerDatabaseMaintenance.ValidateCanonicalSchema(connection, 27);
+            ControllerDatabaseMaintenance.ValidateCanonicalSchema(connection, 28);
             ControllerDatabaseMaintenance.ValidateRestoreStateSchema(connection);
             ControllerDatabaseMaintenance.ValidateRecoverySchema(connection);
             ControllerDatabaseMaintenance.ValidateMachineProfileSchema(connection);
@@ -374,10 +375,23 @@ public sealed partial class ControllerDatabase : IDisposable
             throw new ArgumentException("Invalid MAC address");
     }
     private static void Ports(int moon,int sun) {if(moon is <1 or >65535 || sun is <1 or >65535)throw new ArgumentException("Invalid port");}
-    private static (string Readiness,bool CanRent) EvaluateRentability(string approvalStatus,long revision,DateTimeOffset now,DateTimeOffset? lastSeen,string? reportedReadiness,bool allocationHeld,bool maintenanceLocked,long? appliedRevision,bool currentProof,bool restoreQuarantined) {
+    private static (string Readiness,string OperationalState,bool CanRent) EvaluateRentability(string approvalStatus,string availability,long revision,DateTimeOffset now,DateTimeOffset? lastSeen,string? reportedReadiness,long? clearingUntil,bool allocationHeld,string? allocationState,string? allocationBoot,long? allocationWakeRequested,bool maintenanceLocked,long? appliedRevision,bool restoreQuarantined) {
         var readiness=lastSeen is null?"unknown":now-lastSeen.Value>TimeSpan.FromSeconds(20)?"unreachable":reportedReadiness??"unknown";
-        var canRent=approvalStatus=="approved" && readiness=="ready" && !allocationHeld && !maintenanceLocked && appliedRevision==revision && currentProof && !restoreQuarantined;
-        return (readiness,canRent);
+        if (restoreQuarantined) return (readiness,"unknown",false);
+        if (approvalStatus!="approved") return (readiness,"pending",false);
+        if (maintenanceLocked) return (readiness,"maintenance",false);
+        if (availability!="rentable") return (readiness,availability,false);
+        if (allocationHeld) {
+            if (allocationState=="preparing" && allocationBoot is null)
+                return (readiness,allocationWakeRequested is null?"awaitingPower":"booting",false);
+            if (allocationState=="ending") return (readiness,"clearing",false);
+            return (readiness,"busy",false);
+        }
+        if (clearingUntil is not null && clearingUntil.Value>now.ToUnixTimeMilliseconds()) return (readiness,"clearing",false);
+        if (lastSeen is null || now-lastSeen.Value>TimeSpan.FromSeconds(20)) return (readiness,"available",true);
+        // `CanRent` remains the legacy eligibility bit used by administrative workflows; the
+        // public rental list uses OperationalState and never offers an online idle machine.
+        return (readiness,"onlineIdle",readiness=="ready"&&appliedRevision==revision);
     }
     public MachineDto[] List() => List(null);
     private MachineDto[] List(SqliteTransaction? existingTransaction) {lock(gate) {
@@ -389,15 +403,16 @@ public sealed partial class ControllerDatabase : IDisposable
             if(existingTransaction is null) {using var tx=connection.BeginTransaction();ExpireUnstartedAgentUpdates(tx,now.ToUnixTimeMilliseconds());tx.Commit();}
             else ExpireUnstartedAgentUpdates(existingTransaction,now.ToUnixTimeMilliseconds());
         }
-        using var cmd=Command("SELECT m.machine_id,m.approval_status,m.display_name,m.hourly_price,m.local_ip,m.mac_address,m.moonlight_port,m.sunshine_port,m.revision,m.approved_by,m.approved_at,h.last_seen,h.boot_id,h.readiness,EXISTS(SELECT 1 FROM leases l WHERE l.machine_id=m.machine_id AND l.allocation_held=1),a.applied_revision,m.vnc_local_ip,p.last_proven_version,(SELECT COUNT(*) FROM admin_vnc_sessions v WHERE v.machine_id=m.machine_id AND v.used_at_unix_ms IS NOT NULL AND v.ended_at_unix_ms IS NULL AND v.used_at_unix_ms > $activeVncSince),d.diagnostics_json,COALESCE(c.held,0),o.operation_id,o.target_version,o.status,p.last_proven_runtime_epoch,p.last_proven_tick,m.hostname,m.cpu,m.gpu,m.ram_bytes,m.sunshine_credential_revision,m.parsec_enabled,EXISTS(SELECT 1 FROM machine_parsec_state s WHERE s.machine_id=m.machine_id AND s.available=1) FROM machines m LEFT JOIN machine_heartbeats h ON h.machine_id=m.machine_id LEFT JOIN machine_config_acks a ON a.machine_id=m.machine_id LEFT JOIN machine_readiness_diagnostics d ON d.machine_id=m.machine_id LEFT JOIN agent_sync_proof_state p ON p.machine_id=m.machine_id LEFT JOIN agent_maintenance_chains c ON c.chain_id=(SELECT c1.chain_id FROM agent_maintenance_chains c1 WHERE c1.machine_id=m.machine_id ORDER BY c1.held DESC,c1.rowid DESC LIMIT 1) LEFT JOIN agent_update_operations o ON o.operation_id=c.current_head_operation_id ORDER BY m.machine_id",("$activeVncSince",now.AddHours(-1).ToUnixTimeMilliseconds()));
+        using var cmd=Command("SELECT m.machine_id,m.approval_status,m.display_name,m.hourly_price,m.local_ip,m.mac_address,m.moonlight_port,m.sunshine_port,m.revision,m.approved_by,m.approved_at,h.last_seen,h.boot_id,h.readiness,EXISTS(SELECT 1 FROM leases l WHERE l.machine_id=m.machine_id AND l.allocation_held=1),a.applied_revision,m.vnc_local_ip,p.last_proven_version,(SELECT COUNT(*) FROM admin_vnc_sessions v WHERE v.machine_id=m.machine_id AND v.used_at_unix_ms IS NOT NULL AND v.ended_at_unix_ms IS NULL AND v.used_at_unix_ms > $activeVncSince),d.diagnostics_json,COALESCE(c.held,0),o.operation_id,o.target_version,o.status,p.last_proven_runtime_epoch,p.last_proven_tick,m.hostname,m.cpu,m.gpu,m.ram_bytes,m.sunshine_credential_revision,m.parsec_enabled,EXISTS(SELECT 1 FROM machine_parsec_state s WHERE s.machine_id=m.machine_id AND s.available=1),m.availability,m.clearing_until_unix_ms,(SELECT l.state FROM leases l WHERE l.machine_id=m.machine_id AND l.allocation_held=1 LIMIT 1),(SELECT l.boot_id FROM leases l WHERE l.machine_id=m.machine_id AND l.allocation_held=1 LIMIT 1),(SELECT l.wake_requested_at_unix_ms FROM leases l WHERE l.machine_id=m.machine_id AND l.allocation_held=1 LIMIT 1) FROM machines m LEFT JOIN machine_heartbeats h ON h.machine_id=m.machine_id LEFT JOIN machine_config_acks a ON a.machine_id=m.machine_id LEFT JOIN machine_readiness_diagnostics d ON d.machine_id=m.machine_id LEFT JOIN agent_sync_proof_state p ON p.machine_id=m.machine_id LEFT JOIN agent_maintenance_chains c ON c.chain_id=(SELECT c1.chain_id FROM agent_maintenance_chains c1 WHERE c1.machine_id=m.machine_id ORDER BY c1.held DESC,c1.rowid DESC LIMIT 1) LEFT JOIN agent_update_operations o ON o.operation_id=c.current_head_operation_id ORDER BY m.machine_id",("$activeVncSince",now.AddHours(-1).ToUnixTimeMilliseconds()));
         cmd.Transaction=existingTransaction;
         using var r=cmd.ExecuteReader(); var rows=new List<MachineDto>();
         while(r.Read()) {
             DateTimeOffset? seen=r.IsDBNull(11)?null:DateTimeOffset.Parse(r.GetString(11));
             long? appliedRevision=r.IsDBNull(15)?null:r.GetInt64(15);
-            var currentProof=IsRecentProvenHeartbeat(r.IsDBNull(24)?null:r.GetString(24),r.IsDBNull(25)?null:r.GetInt64(25));
-            var rentability=EvaluateRentability(r.GetString(1),r.GetInt64(8),now,seen,r.IsDBNull(13)?null:r.GetString(13),r.GetInt64(14)!=0,r.GetInt64(20)!=0,appliedRevision,currentProof,restoreQuarantined);
-            rows.Add(new MachineDto(r.GetString(0),r.GetString(1),r.GetString(2),r.GetInt64(3),r.GetString(4),r.GetString(5),r.GetInt32(6),r.GetInt32(7),r.GetInt64(8),seen,r.IsDBNull(12)?null:r.GetString(12),rentability.Readiness,r.IsDBNull(17)?null:r.GetString(17),r.IsDBNull(9)?null:r.GetString(9),r.IsDBNull(10)?null:DateTimeOffset.Parse(r.GetString(10))) {AppliedConfigRevision=appliedRevision,VncLocalIp=r.IsDBNull(16)?null:r.GetString(16),ActiveAdminVncSessions=r.GetInt32(18),CanRent=rentability.CanRent,AllocationHeld=r.GetInt64(14)!=0,ReadinessDiagnostics=r.IsDBNull(19)?null:JsonSerializer.Deserialize<ReadinessDiagnostic[]>(r.GetString(19)),AgentUpdateOperationId=r.IsDBNull(21)?null:r.GetString(21),AgentUpdateTargetVersion=r.IsDBNull(22)?null:r.GetString(22),AgentUpdateStatus=r.IsDBNull(23)?null:r.GetString(23),Hostname=OptionalReportedProfileText(r,26),Cpu=OptionalReportedProfileText(r,27),Gpu=OptionalReportedProfileText(r,28),RamBytes=r.GetInt64(29),AppliedSunshineCredentialRevision=r.GetInt64(30),ParsecEnabled=r.GetInt64(31)!=0,ParsecAvailable=r.GetInt64(32)!=0});
+            DateTimeOffset? clearingUntil=r.IsDBNull(34)?null:DateTimeOffset.FromUnixTimeMilliseconds(r.GetInt64(34));
+            var rentability=EvaluateRentability(r.GetString(1),r.GetString(33),r.GetInt64(8),now,seen,r.IsDBNull(13)?null:r.GetString(13),clearingUntil is null?null:clearingUntil.Value.ToUnixTimeMilliseconds(),r.GetInt64(14)!=0,r.IsDBNull(35)?null:r.GetString(35),r.IsDBNull(36)?null:r.GetString(36),r.IsDBNull(37)?null:r.GetInt64(37),r.GetInt64(20)!=0,appliedRevision,restoreQuarantined);
+            var mac=r.GetString(5);
+            rows.Add(new MachineDto(r.GetString(0),r.GetString(1),r.GetString(2),r.GetInt64(3),r.GetString(4),mac,r.GetInt32(6),r.GetInt32(7),r.GetInt64(8),seen,r.IsDBNull(12)?null:r.GetString(12),rentability.Readiness,r.IsDBNull(17)?null:r.GetString(17),r.IsDBNull(9)?null:r.GetString(9),r.IsDBNull(10)?null:DateTimeOffset.Parse(r.GetString(10))) {AppliedConfigRevision=appliedRevision,VncLocalIp=r.IsDBNull(16)?null:r.GetString(16),ActiveAdminVncSessions=r.GetInt32(18),CanRent=rentability.CanRent,AllocationHeld=r.GetInt64(14)!=0,ReadinessDiagnostics=r.IsDBNull(19)?null:JsonSerializer.Deserialize<ReadinessDiagnostic[]>(r.GetString(19)),AgentUpdateOperationId=r.IsDBNull(21)?null:r.GetString(21),AgentUpdateTargetVersion=r.IsDBNull(22)?null:r.GetString(22),AgentUpdateStatus=r.IsDBNull(23)?null:r.GetString(23),Hostname=OptionalReportedProfileText(r,26),Cpu=OptionalReportedProfileText(r,27),Gpu=OptionalReportedProfileText(r,28),RamBytes=r.GetInt64(29),AppliedSunshineCredentialRevision=r.GetInt64(30),ParsecEnabled=r.GetInt64(31)!=0,ParsecAvailable=r.GetInt64(32)!=0,Availability=r.GetString(33),OperationalState=rentability.OperationalState,ClearingUntilUtc=clearingUntil,WakeReady=!string.IsNullOrWhiteSpace(mac)});
         }
         r.Close();
         for(var i=0;i<rows.Count;i++){var row=rows[i];rows[i]=row with {PublicKeyFingerprint=Convert.ToHexString(SHA256.HashData(Convert.FromBase64String(PublicKey(row.MachineId)!)))};}
@@ -406,8 +421,10 @@ public sealed partial class ControllerDatabase : IDisposable
     public MachineDto Update(string id, MachineUpdate update,long expectedRevision) {lock(gate) {
         Ports(update.MoonlightPort,update.SunshinePort); if(string.IsNullOrWhiteSpace(update.DisplayName)||update.HourlyPriceMinorUnits<=0||update.HourlyPriceMinorUnits%100!=0)throw new ArgumentException("Name and a positive whole-baht price required");
         var vncLocalIp=VncTargetAddress(update.VncLocalIp);
+        var availability=update.Availability?.Trim().ToLowerInvariant();
+        if(availability is not null&&availability is not ("rentable" or "maintenance" or "disabled"))throw new ArgumentException("Invalid machine availability");
         var parsecEnabled = update.ParsecEnabled is null ? (object)DBNull.Value : update.ParsecEnabled.Value ? 1 : 0;
-        using var cmd=Command("UPDATE machines SET display_name=$name,hourly_price=$price,moonlight_port=$moon,sunshine_port=$sun,vnc_local_ip=$vnc,parsec_enabled=CASE WHEN $parsec IS NULL THEN parsec_enabled ELSE $parsec END,revision=revision+1 WHERE machine_id=$id AND revision=$revision",("$name",update.DisplayName.Trim()),("$price",update.HourlyPriceMinorUnits),("$moon",update.MoonlightPort),("$sun",update.SunshinePort),("$vnc",vncLocalIp),("$parsec",parsecEnabled),("$id",id),("$revision",expectedRevision));
+        using var cmd=Command("UPDATE machines SET display_name=$name,hourly_price=$price,moonlight_port=$moon,sunshine_port=$sun,vnc_local_ip=$vnc,parsec_enabled=CASE WHEN $parsec IS NULL THEN parsec_enabled ELSE $parsec END,availability=CASE WHEN $availability IS NULL THEN availability ELSE $availability END,revision=revision+1 WHERE machine_id=$id AND revision=$revision",("$name",update.DisplayName.Trim()),("$price",update.HourlyPriceMinorUnits),("$moon",update.MoonlightPort),("$sun",update.SunshinePort),("$vnc",vncLocalIp),("$parsec",parsecEnabled),("$availability",availability is null?(object)DBNull.Value:availability),("$id",id),("$revision",expectedRevision));
         if(cmd.ExecuteNonQuery()!=1)throw new InvalidOperationException("Revision conflict or missing machine");
         if(update.ParsecEnabled is false)
         {

@@ -104,6 +104,34 @@ export function PcControlCard({
   const leaseActionable =
     lease !== null && lease.state === "active" && lease.pendingRevision === null && !terminalLeaseStates.has(lease.state);
   const remaining = lease?.remainingSeconds ?? null;
+  const lifecycle = machine.operationalState ?? "unknown";
+  const lifecycleLabel =
+    lifecycle === "available"
+      ? "พร้อมเช่า (ปิดเครื่อง)"
+      : lifecycle === "awaitingPower"
+        ? "รอลูกค้ากดเปิดเครื่อง"
+        : lifecycle === "booting"
+          ? "กำลังเปิดเครื่อง"
+          : lifecycle === "clearing"
+            ? "กำลังเคลียร์ 30 วิ"
+            : lifecycle === "onlineIdle"
+              ? "ออนไลน์แต่ไม่มีผู้เช่า"
+              : lifecycle === "maintenance" || machine.availability === "maintenance"
+                ? "ซ่อมบำรุง"
+                : lifecycle === "disabled" || machine.availability === "disabled"
+                  ? "ปิดให้เช่า"
+                  : online
+                    ? "ออนไลน์"
+                    : "ออฟไลน์";
+  const wakeBlocked =
+    busy ||
+    online ||
+    lifecycle === "clearing" ||
+    lifecycle === "booting" ||
+    lifecycle === "awaitingPower" ||
+    lifecycle === "maintenance" ||
+    lifecycle === "disabled" ||
+    lifecycle === "onlineIdle";
 
   return (
     <Card size="sm" className="rounded-2xl border shadow-none ring-0">
@@ -111,8 +139,8 @@ export function PcControlCard({
         <CardTitle className="truncate">{machine.displayName || machine.machineId}</CardTitle>
         <CardDescription className="truncate font-mono text-xs">{machine.machineId}</CardDescription>
         <CardAction className="flex flex-wrap justify-end gap-1.5">
-          <Badge variant={lease ? "busy" : online ? "available" : "maintenance"}>
-            {lease ? pcControlStatusLabels[lease.state] || lease.state : online ? "ออนไลน์" : "ออฟไลน์"}
+          <Badge variant={lease ? "busy" : lifecycle === "available" ? "available" : lifecycle === "onlineIdle" ? "destructive" : "maintenance"}>
+            {lease ? pcControlStatusLabels[lease.state] || lease.state : lifecycleLabel}
           </Badge>
           {machine.approvalStatus !== "approved" ? (
             <Badge variant="outline">{machine.approvalStatus === "pending" ? "รออนุมัติ" : machine.approvalStatus}</Badge>
@@ -161,7 +189,7 @@ export function PcControlCard({
 
         <div className="flex flex-col gap-3">
           <ActionGroup label="เครื่อง" icon={Power} tone="primary">
-            <Button variant="success" size="sm" onClick={onWake} disabled={busy || online}>
+            <Button variant="success" size="sm" onClick={onWake} disabled={wakeBlocked}>
               <Power data-icon="inline-start" />
               เปิดเครื่อง
             </Button>

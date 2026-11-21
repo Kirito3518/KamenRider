@@ -26,8 +26,8 @@ public sealed class AgentRecoveryTests
         using var version = connection.CreateCommand();
         version.CommandText = "PRAGMA user_version";
 
-        Assert.Equal(27L, Convert.ToInt64(version.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture));
-        ControllerDatabaseMaintenance.ValidateCanonicalSchema(connection, 27);
+        Assert.Equal(28L, Convert.ToInt64(version.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture));
+        ControllerDatabaseMaintenance.ValidateCanonicalSchema(connection, 28);
         ControllerDatabaseMaintenance.ValidateRecoverySchema(connection);
         ControllerDatabaseMaintenance.ValidateRecoverySuccessorSchema(connection);
         ControllerDatabaseMaintenance.ValidateUpdateConfirmationSchema(connection);

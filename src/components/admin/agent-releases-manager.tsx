@@ -2,7 +2,14 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
-import { AlertTriangle, Box, CheckCircle2, Package, Radio, Tag } from "lucide-react";
+import { AlertTriangle, Box, CheckCircle2, Loader2, Package, Radio, Tag } from "lucide-react";
+import {
+  InlineSkeleton,
+  ListSkeleton,
+  LoadingRegion,
+  ProgressStatus,
+  SkeletonBlock,
+} from "@/components/loading";
 import { AdminCard, AdminPage, AdminPageHeader, AdminStatCard, AdminStatGrid } from "@/components/admin/admin-page";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -118,26 +125,62 @@ export function AgentReleasesManager() {
       <AdminStatGrid>
         <AdminStatCard
           label="Agent รายงานเวอร์ชัน"
-          value={machines ? `${versioned} / ${machines.length}` : machineError ? "โหลดไม่ได้" : "กำลังโหลด…"}
+          value={
+            machines ? (
+              `${versioned} / ${machines.length}`
+            ) : machineError ? (
+              "โหลดไม่ได้"
+            ) : (
+              <SkeletonBlock className="h-7 w-24" />
+            )
+          }
           hint="จาก heartbeat ล่าสุด รวมเครื่องที่ออฟไลน์"
           icon={Box}
         />
         <AdminStatCard
           label="ออนไลน์ (heartbeat 20 วินาที)"
-          value={machines ? `${online} / ${machines.length}` : machineError ? "โหลดไม่ได้" : "กำลังโหลด…"}
+          value={
+            machines ? (
+              `${online} / ${machines.length}`
+            ) : machineError ? (
+              "โหลดไม่ได้"
+            ) : (
+              <SkeletonBlock className="h-7 w-24" />
+            )
+          }
           hint="ติดต่อได้ภายใน 20 วินาที"
           icon={Radio}
           tone="available"
         />
         <AdminStatCard
           label="stable ล่าสุดที่เผยแพร่"
-          value={releases ? latestStable?.version || "ยังไม่มี stable" : releaseError ? "โหลดไม่ได้" : "กำลังโหลด…"}
+          value={
+            releases ? (
+              latestStable?.version || "ยังไม่มี stable"
+            ) : releaseError ? (
+              "โหลดไม่ได้"
+            ) : (
+              <SkeletonBlock className="h-7 w-20" />
+            )
+          }
           hint="ช่องทาง stable"
           icon={Tag}
         />
         <AdminStatCard
           label="ใช้ stable ล่าสุด"
-          value={machines && releases ? latestStable ? `${current} / ${machines.length}` : "ยังไม่มี stable" : machineError || releaseError ? "โหลดไม่ได้" : "กำลังโหลด…"}
+          value={
+            machines && releases ? (
+              latestStable ? (
+                `${current} / ${machines.length}`
+              ) : (
+                "ยังไม่มี stable"
+              )
+            ) : machineError || releaseError ? (
+              "โหลดไม่ได้"
+            ) : (
+              <SkeletonBlock className="h-7 w-24" />
+            )
+          }
           hint="เครื่องที่รายงานเวอร์ชันตรงกับ stable ล่าสุด"
           icon={CheckCircle2}
           tone="busy"
@@ -152,7 +195,15 @@ export function AgentReleasesManager() {
           </CardTitle>
         </CardHeader>
         <CardContent className="text-sm">
-          {!machines ? <p className="text-muted-foreground">{machineError || "กำลังโหลดสถานะเครื่อง…"}</p> : (
+          {!machines ? (
+            machineError ? (
+              <p className="text-muted-foreground">{machineError}</p>
+            ) : (
+              <LoadingRegion label="กำลังโหลดสถานะเครื่อง">
+                <InlineSkeleton lines={2} widths={["w-64 max-w-full", "w-44"]} />
+              </LoadingRegion>
+            )
+          ) : (
             <div className="flex flex-col gap-2">
               {offline ? <p>{offline} เครื่อง ยังไม่รายงานหรือติดต่อไม่ได้ภายใน 20 วินาที</p> : null}
               {failed ? <p>{failed} เครื่อง อัปเดตล้มเหลวและต้องตรวจสอบการกู้คืน</p> : null}
@@ -171,14 +222,32 @@ export function AgentReleasesManager() {
               <CardDescription>นับเฉพาะเครื่องที่เคยมีการอัปเดต · ผลอัปเดตแยกจากการอนุมัติและความพร้อมให้เช่า</CardDescription>
             </CardHeader>
             <CardContent>
-              {!machines ? <p>{machineError || "กำลังโหลดสถานะเครื่อง…"}</p> : <dl className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+              {!machines ? (
+                machineError ? (
+                  <p>{machineError}</p>
+                ) : (
+                  <LoadingRegion
+                    label="กำลังโหลดสถานะเครื่อง"
+                    className="grid grid-cols-2 gap-4 sm:grid-cols-4"
+                  >
+                    {Array.from({ length: 4 }).map((_, index) => (
+                      <div key={index} className="flex flex-col gap-1">
+                        <SkeletonBlock className="h-3 w-20" radius="rounded-full" />
+                        <SkeletonBlock className="h-6 w-10" />
+                      </div>
+                    ))}
+                  </LoadingRegion>
+                )
+              ) : (
+                <dl className="grid grid-cols-2 gap-4 sm:grid-cols-4">
                 {Object.entries(updateStatusLabels).map(([status, label]) => {
                   const count = machines.filter((machine) => machine.agentUpdateStatus === status).length;
                   return <div key={status} aria-label={`${label}: ${count}`} className="flex flex-col gap-1">
                     <dt className="text-xs text-muted-foreground">{label}</dt><dd className="text-xl font-semibold tabular-nums">{count}</dd>
                   </div>;
                 })}
-              </dl>}
+                </dl>
+              )}
             </CardContent>
           </AdminCard>
         </section>
@@ -189,11 +258,26 @@ export function AgentReleasesManager() {
               <CardDescription>จาก heartbeat ล่าสุด รวมเครื่องที่ออฟไลน์</CardDescription>
             </CardHeader>
             <CardContent>
-              {!machines ? <p>{machineError || "กำลังโหลดสถานะเครื่อง…"}</p> : !machines.length ? <p>ยังไม่มีเครื่องในระบบ</p> : <ul className="flex flex-col gap-2">
-                {Array.from(versions, ([version, count]) => <li key={version} aria-label={`${version}: ${count} เครื่อง`} className="flex items-start justify-between gap-3 text-sm">
-                  <span className="min-w-0 break-all">{version}</span><span className="shrink-0 tabular-nums">{count} เครื่อง</span>
-                </li>)}
-              </ul>}
+              {!machines ? (
+                machineError ? (
+                  <p>{machineError}</p>
+                ) : (
+                  <LoadingRegion label="กำลังโหลดเวอร์ชันเครื่อง">
+                    <InlineSkeleton
+                      lines={4}
+                      widths={["w-full", "w-4/5", "w-full", "w-3/4"]}
+                    />
+                  </LoadingRegion>
+                )
+              ) : !machines.length ? (
+                <p>ยังไม่มีเครื่องในระบบ</p>
+              ) : (
+                <ul className="flex flex-col gap-2">
+                  {Array.from(versions, ([version, count]) => <li key={version} aria-label={`${version}: ${count} เครื่อง`} className="flex items-start justify-between gap-3 text-sm">
+                    <span className="min-w-0 break-all">{version}</span><span className="shrink-0 tabular-nums">{count} เครื่อง</span>
+                  </li>)}
+                </ul>
+              )}
               <Link className="mt-4 inline-block text-sm underline underline-offset-4" href="/admin/machines">เลือกเครื่องเพื่อ Update Agent</Link>
             </CardContent>
           </AdminCard>
@@ -206,7 +290,19 @@ export function AgentReleasesManager() {
           <CardDescription>SHA-256 คำนวณและตรวจสอบโดย Controller เมื่อเผยแพร่ · release เดิมไม่สามารถเขียนทับได้</CardDescription>
         </CardHeader>
         <CardContent>
-          {!releases ? <p role="status" className="text-sm">{releaseError || "กำลังโหลด release…"}</p> : !releases.length ? <p className="text-sm text-muted-foreground">ยังไม่มี release ที่เผยแพร่</p> : (
+          {!releases ? (
+            releaseError ? (
+              <p role="status" className="text-sm">
+                {releaseError}
+              </p>
+            ) : (
+              <LoadingRegion label="กำลังโหลดรายการ release">
+                <ListSkeleton count={3} />
+              </LoadingRegion>
+            )
+          ) : !releases.length ? (
+            <p className="text-sm text-muted-foreground">ยังไม่มี release ที่เผยแพร่</p>
+          ) : (
             <ul className="divide-y rounded-xl border">
               {releases.map((release) => <li key={release.version} className="flex flex-col gap-1 p-3 text-sm">
                 <div className="flex flex-wrap items-center gap-2">
@@ -234,8 +330,23 @@ export function AgentReleasesManager() {
             <label className="flex flex-col text-sm">Release notes<textarea className={fieldClassName} name="releaseNotes" required rows={2} /></label>
             <label className="flex flex-col text-sm">AgentPackage.zip<input className={fieldClassName} name="package" type="file" accept=".zip,application/zip" required /></label>
             <div className="md:col-span-2 xl:col-span-4">
-              <Button type="submit" disabled={uploading}>{uploading ? "กำลังเผยแพร่…" : "เผยแพร่ release"}</Button>
-              <p role="status" aria-live="polite" className="mt-2 text-sm">{uploadStatus}</p>
+              <Button type="submit" disabled={uploading}>
+                {uploading ? (
+                  <Loader2
+                    aria-hidden="true"
+                    data-icon="inline-start"
+                    className="animate-spin motion-reduce:animate-none"
+                  />
+                ) : null}
+                {uploading ? "กำลังเผยแพร่…" : "เผยแพร่ release"}
+              </Button>
+              {uploading ? (
+                <ProgressStatus className="mt-2">{uploadStatus}</ProgressStatus>
+              ) : (
+                <p role="status" aria-live="polite" className="mt-2 text-sm">
+                  {uploadStatus}
+                </p>
+              )}
             </div>
           </form>
         </CardContent>

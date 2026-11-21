@@ -30,8 +30,12 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
+import {
+  LoadingRegion,
+  StatGridSkeleton,
+  TableSkeleton,
+} from "@/components/loading";
 import {
   Table,
   TableBody,
@@ -286,11 +290,14 @@ export function RentalHistoryPanel({
       </div>
 
       {loading && !data ? (
-        <div className="flex flex-col gap-2">
-          {Array.from({ length: 5 }).map((_, index) => (
-            <Skeleton key={index} className="h-12 w-full" />
-          ))}
-        </div>
+        <LoadingRegion label="กำลังโหลดประวัติการเช่า" className="flex flex-col gap-4">
+          <StatGridSkeleton
+            count={5}
+            columns="grid-cols-2 sm:grid-cols-3 lg:grid-cols-5"
+            className="gap-3"
+          />
+          <TableSkeleton rows={5} columns={8} footer />
+        </LoadingRegion>
       ) : error ? (
         <Alert variant="destructive">
           <CircleAlert aria-hidden />

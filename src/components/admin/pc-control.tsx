@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
+import { CardsGridSkeleton, LoadingRegion } from "@/components/loading";
 import { cn } from "@/lib/utils";
 import { PcControlCard } from "@/components/admin/pc-control-card";
 import { PcControlVncDialog } from "@/components/admin/pc-control-vnc";
@@ -194,7 +195,7 @@ export function PcControl() {
       <AdminPageHeader
         icon={Monitor}
         title="PC Control"
-        titleSuffix={<Badge variant="outline">{machines.length} เครื่อง</Badge>}
+        titleSuffix={<Badge variant="outline">{snapshot ? `${machines.length} เครื่อง` : <Skeleton className="h-3.5 w-12 rounded-full" />}</Badge>}
         description="ควบคุมเครื่องที่ให้เช่า เปิดจอ VNC เมื่อต้องการ และจัดการเวลา/การเช่าได้จากการ์ดเดียว"
         actions={
           <Button variant="outline" size="sm" onClick={() => void load()} disabled={loading}>
@@ -235,11 +236,14 @@ export function PcControl() {
       ) : null}
 
       {loading && !snapshot ? (
-        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-          {Array.from({ length: 3 }, (_, index) => (
-            <Skeleton key={index} className="h-80 w-full rounded-2xl" />
-          ))}
-        </div>
+        <LoadingRegion label="กำลังโหลดเครื่องใน PC Control">
+          <CardsGridSkeleton
+            count={3}
+            rows={1}
+            columns="md:grid-cols-2 xl:grid-cols-3"
+            cardClassName="h-80"
+          />
+        </LoadingRegion>
       ) : machines.length === 0 ? (
         <Empty>
           <EmptyHeader>

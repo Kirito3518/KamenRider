@@ -56,7 +56,6 @@ public class LeaseHistoryTests
         using var f = new LeaseFixture();
         var lease = await f.Create();
         Assert.Null(lease.EndedAtUtc);
-        Assert.Single(f.Sync().Commands);
 
         f.Time.Now = f.Time.Now.AddMinutes(5);
         f.Sync();

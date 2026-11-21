@@ -93,7 +93,7 @@ export function RentalDialog({
       }
       setRequestId(null);
       await refetch();
-      toast.success("ส่งคำขอเช่าแล้ว กำลังเตรียมเครื่องให้คุณ");
+      toast.success("ชำระเงินแล้ว ไปกดเปิดเครื่องในหน้าเครื่องของฉัน");
       onClose();
       router.push("/my-machines");
     } catch {
@@ -127,7 +127,7 @@ export function RentalDialog({
         <DialogHeader className="pr-8">
           <DialogTitle>เช่าเครื่อง {machine?.name || machine?.id}</DialogTitle>
           <DialogDescription>
-            ชำระค่าเช่าจากยอดเงินคงเหลือของคุณ แล้วระบบจะเตรียมเครื่องให้ทันที
+            ชำระค่าเช่าจากยอดเงินคงเหลือของคุณ แล้วไปกดปุ่มเปิดเครื่องในหน้าเครื่องของฉัน
           </DialogDescription>
         </DialogHeader>
         {machine && (
@@ -150,10 +150,16 @@ export function RentalDialog({
             </dl>
 
             {sessionPending ? (
-              <p role="status" className="flex items-center gap-2 text-sm text-muted-foreground">
-                <Spinner data-icon="inline-start" />
-                กำลังตรวจสอบบัญชี…
-              </p>
+              <div
+                role="status"
+                aria-busy="true"
+                aria-label="กำลังตรวจสอบบัญชี"
+                className="flex flex-col gap-2 rounded-2xl border p-4"
+              >
+                <span className="sr-only">กำลังตรวจสอบบัญชี</span>
+                <span className="h-4 w-32 animate-pulse rounded-full bg-muted" aria-hidden />
+                <span className="h-9 w-full animate-pulse rounded-xl bg-muted" aria-hidden />
+              </div>
             ) : !session ? (
               <div className="flex flex-col gap-3 rounded-2xl border p-4">
                 <p className="text-sm">กรุณาเข้าสู่ระบบก่อนทำการเช่า</p>

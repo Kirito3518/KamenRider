@@ -510,7 +510,7 @@ public class DatabaseMaintenanceTests
 
             using (var snapshot = OpenDatabase(destination))
             {
-                Assert.Equal(27L, Scalar(snapshot, "PRAGMA user_version"));
+                Assert.Equal(28L, Scalar(snapshot, "PRAGMA user_version"));
                 Assert.Equal(1L, Scalar(snapshot, $"SELECT COUNT(*) FROM agent_sync_proof_state WHERE machine_id='source-machine' AND sequence=8 AND token_sequence=8 AND token_digest='{tokenDigest}' AND last_proven_sequence=7 AND last_proven_version='1.2.3'"));
                 Assert.Equal(1L, Scalar(snapshot, "SELECT COUNT(*) FROM agent_signed_request_scopes WHERE machine_id='source-machine' AND key_fingerprint='" + fingerprint + "' AND path='/agent/sync' AND cutoff_second=1000"));
                 Assert.Equal(1L, Scalar(snapshot, $"SELECT COUNT(*) FROM agent_signed_request_nonces WHERE machine_id='source-machine' AND nonce_digest='{syncNonceDigest}' AND signed_second=1001 AND retention_second=1001"));
@@ -1098,7 +1098,7 @@ public class DatabaseMaintenanceTests
             restored.Open();
             using var version = restored.CreateCommand();
             version.CommandText = "PRAGMA user_version";
-            Assert.Equal(27L, version.ExecuteScalar());
+            Assert.Equal(28L, version.ExecuteScalar());
         }
         finally { DeleteRoot(root); }
     }
@@ -1146,7 +1146,7 @@ public class DatabaseMaintenanceTests
                 restored.Open();
                 using var version = restored.CreateCommand();
                 version.CommandText = "PRAGMA user_version";
-                Assert.Equal(27L, version.ExecuteScalar());
+                Assert.Equal(28L, version.ExecuteScalar());
             }
             using var recovery = new ControllerDatabase(recoveryPath!);
             Assert.Equal("preserved-machine", Assert.Single(recovery.List()).MachineId);

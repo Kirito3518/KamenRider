@@ -35,6 +35,14 @@ export type Machine = {
   parsecEnabled?: boolean;
   /** Agent currently advertises a usable Parsec installation (parsecd.exe detected). */
   parsecAvailable?: boolean;
+  /** Admin-controlled availability mode: rentable, maintenance or disabled. */
+  availability?: string;
+  /** Derived lifecycle state: available, awaitingPower, booting, busy, clearing, onlineIdle, ... */
+  operationalState?: string;
+  /** End of the 30-second post-lease clearing window, when applicable. */
+  clearingUntilUtc?: string | null;
+  /** True when the machine is offline and its MAC is available for Wake-on-LAN. */
+  wakeReady?: boolean;
   localIp: string;
   vncLocalIp: string | null;
   hourlyPriceMinorUnits: number;
@@ -83,6 +91,10 @@ export type Lease = {
   startsAtUtc?: string | null;
   expiresAtUtc: string | null;
   endedAtUtc?: string | null;
+  /** Set after the renter explicitly presses Power; a prepared lease waits for that press. */
+  wakeRequestedAtUtc?: string | null;
+  /** True while the renter may still press Power to boot this prepared lease. */
+  canRequestPower?: boolean;
   payment?: LeasePaymentInfo | null;
 };
 export type Offer = { pairingIds: string[]; validUntilUtc: string } | null;

@@ -9,6 +9,13 @@ export async function PATCH(
     const revision = integer(b.expectedRevision);
     if (b.parsecEnabled !== undefined && typeof b.parsecEnabled !== "boolean")
       throw new TypeError("Invalid parsecEnabled");
+    if (
+      b.availability !== undefined &&
+      !["rentable", "maintenance", "disabled"].includes(String(b.availability))
+    )
+      throw new TypeError("Invalid availability");
+    const availability =
+      b.availability === undefined ? undefined : String(b.availability);
     let vncLocalIp: string | null;
     if (b.vncLocalIp === undefined) {
       const machines = await call<Array<{ machineId: string; vncLocalIp: string | null }>>("/internal/machines");
@@ -23,6 +30,7 @@ export async function PATCH(
       sunshinePort: integer(b.sunshinePort, 1, 65535),
       vncLocalIp,
       ...(b.parsecEnabled === undefined ? {} : { parsecEnabled: b.parsecEnabled }),
+      ...(availability === undefined ? {} : { availability }),
     };
     return call(
       `/internal/machines/${segment(machineId)}?expectedRevision=${revision}`,

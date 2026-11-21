@@ -36,6 +36,7 @@ import {
 } from "@/lib/rental-history";
 import type { Lease } from "@/lib/machine-contracts";
 import { ExtendRentalDialog } from "@/components/my-machines/extend-rental-dialog";
+import { CancelRentalButton } from "@/components/my-machines/cancel-rental-button";
 import { MoonlightDialog } from "@/components/my-machines/moonlight-dialog";
 import { ParsecDialog } from "@/components/my-machines/parsec-dialog";
 
@@ -450,6 +451,10 @@ export function ActiveRentalCard({
             </p>
           ) : null}
         </CardContent>
+
+        <div className="flex justify-end px-4">
+          <CancelRentalButton lease={lease} onCancelled={onRefresh} />
+        </div>
 
         <CardFooter className="grid grid-cols-2 gap-2 sm:grid-cols-4">
           <Button

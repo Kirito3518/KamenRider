@@ -5,7 +5,7 @@ import { enabledProviders, getAuth } from "@/lib/auth";
 import { AccountSettings } from "@/components/auth/account-settings";
 import { Navbar } from "@/components/ui/layout/Navbar";
 import { Footer } from "@/components/ui/layout/Footer";
-
+import { AccountPageSkeleton } from "@/components/loading";
 export const metadata = { title: "บัญชีของฉัน | KamenRaiderPlay" };
 
 async function Account() {
@@ -38,7 +38,7 @@ export default function AccountPage() {
     <div className="flex min-h-screen flex-col">
       <Navbar />
       <main className="mx-auto w-full max-w-xl flex-1 px-5 pt-32 pb-16">
-        <Suspense fallback={<p role="status">กำลังโหลดบัญชี…</p>}>
+        <Suspense fallback={<AccountPageSkeleton />}>
           <Account />
         </Suspense>
       </main>

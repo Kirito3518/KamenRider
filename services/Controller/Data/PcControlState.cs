@@ -111,10 +111,11 @@ public sealed partial class ControllerDatabase
             }
             if (leaseId is not null)
             {
-                ExecuteLease(tx, "UPDATE leases SET state=CASE WHEN state IN ('preparing','active') THEN 'ending' ELSE state END,expires_at=$now,ended_at=COALESCE(ended_at,CASE WHEN state IN ('preparing','active') THEN $now END),pending_revision=NULL,pending_expires_at=NULL WHERE id=$lease",
+                ExecuteLease(tx, "UPDATE leases SET state=CASE WHEN state IN ('preparing','active') THEN 'ending' ELSE state END,expires_at=$now,ended_at=COALESCE(ended_at,CASE WHEN state IN ('preparing','active') THEN $now END),pending_revision=NULL,pending_expires_at=NULL,allocation_held=0 WHERE id=$lease",
                     ("$now", nowMs), ("$lease", leaseId));
                 ExecuteLease(tx, "UPDATE command_outbox SET status='expired' WHERE rental_id=$lease AND status='pending' AND type<>'ShutdownMachine'",
                     ("$lease", leaseId));
+                RefreshClearingWindows(tx);
             }
             var commandId = Guid.NewGuid().ToString("N");
             var validUntil = now.AddMilliseconds(PcControlCommandValidityMilliseconds).ToUnixTimeMilliseconds();
@@ -192,6 +193,20 @@ public sealed partial class ControllerDatabase
             var now = clock.GetUtcNow();
             var nowMs = now.ToUnixTimeMilliseconds();
             ExpireLeases(tx, nowMs);
+            if (FindMachineAdminAction(tx, actorId, requestId) is { } priorAction)
+            {
+                string? priorRental;
+                using (var priorCommand = Command("SELECT rental_id FROM command_outbox WHERE command_id=$command", ("$command", priorAction)))
+                {
+                    priorCommand.Transaction = tx;
+                    priorRental = priorCommand.ExecuteScalar() as string;
+                }
+                if (priorRental is not null && FindLease(tx, priorRental) is { } existingPrior)
+                {
+                    tx.Commit();
+                    return existingPrior.Dto;
+                }
+            }
             var lease = FindAllocationLeaseForMachine(tx, machineId, "active");
             var scope = "cancel:" + lease.Dto.Id;
             var fingerprint = Digest(Convert.ToString(expectedRevision, System.Globalization.CultureInfo.InvariantCulture));
@@ -207,11 +222,12 @@ public sealed partial class ControllerDatabase
             if (HasPendingCommand(tx, lease.Dto.Id, "EndLease"))
                 throw new InvalidOperationException("Lease cancellation is already in progress");
             // The effective end of a cancelled lease is the cancellation request, not the Agent ack.
-            ExecuteLease(tx, "UPDATE leases SET ended_at=COALESCE(ended_at,$now) WHERE id=$lease",
+            ExecuteLease(tx, "UPDATE leases SET ended_at=COALESCE(ended_at,$now),state=CASE WHEN state IN ('preparing','active') THEN 'ending' ELSE state END,allocation_held=0,pending_revision=NULL,pending_expires_at=NULL WHERE id=$lease",
                 ("$now", nowMs), ("$lease", lease.Dto.Id));
+            RefreshClearingWindows(tx);
             var validUntil = Math.Min(nowMs + PcControlCommandValidityMilliseconds,
                 lease.Dto.ExpiresAtUtc?.ToUnixTimeMilliseconds() ?? nowMs + PcControlCommandValidityMilliseconds);
-            var commandId = AddCommand(tx, lease, "EndLease", lease.Dto.Revision, lease.Boot!, validUntil, new { });
+            var commandId = lease.Boot is null ? Guid.NewGuid().ToString("N") : AddCommand(tx, lease, "EndLease", lease.Dto.Revision, lease.Boot, validUntil, new { });
             SaveRequest(tx, scope, idempotencyKey, fingerprint, lease.Dto.Id);
             RecordMachineAdminAction(tx, machineId, actorId, requestId, "cancelLease", commandId,
                 Digest(lease.Dto.Id, requestId, "cancelLease"), nowMs);

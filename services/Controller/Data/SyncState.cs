@@ -136,7 +136,7 @@ public sealed partial class ControllerDatabase
         }
 
         string? unbound;
-        using (var cmd = LeaseCommand(tx, "SELECT id FROM leases WHERE machine_id=$id AND state='preparing' AND boot_id IS NULL", ("$id", id)))
+        using (var cmd = LeaseCommand(tx, "SELECT id FROM leases WHERE machine_id=$id AND state='preparing' AND boot_id IS NULL AND wake_requested_at_unix_ms IS NOT NULL", ("$id", id)))
             unbound = cmd.ExecuteScalar() as string;
         if (unbound is not null) PrepareCommand(tx, FindLease(tx, unbound)!, request.BootId);
         ApplyResults(tx, id, request, now.ToUnixTimeMilliseconds());

@@ -22,6 +22,11 @@ import {
 import { Field, FieldError, FieldGroup, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
+import {
+  InlineSkeleton,
+  LoadingRegion,
+  SkeletonBlock,
+} from "@/components/loading";
 import type { SunshineCredentialState } from "@/lib/machine-contracts";
 import { formatLocalDateTime } from "@/lib/machine-specs";
 
@@ -183,13 +188,21 @@ export function SunshineCredentialManager() {
         title="ตั้งค่า Sunshine"
         titleSuffix={
           <Badge variant={configured ? "available" : "outline"}>
-            {credential
-              ? configured
-                ? "ตั้งค่าแล้ว"
-                : "ยังไม่ได้ตั้งค่า"
-              : loading
-                ? "กำลังโหลด"
-                : "ไม่ทราบสถานะ"}
+            {credential ? (
+              configured ? (
+                "ตั้งค่าแล้ว"
+              ) : (
+                "ยังไม่ได้ตั้งค่า"
+              )
+            ) : loading ? (
+              <InlineSkeleton
+                lines={1}
+                widths={["w-20"]}
+                lineClassName="h-5"
+              />
+            ) : (
+              "ไม่ทราบสถานะ"
+            )}
           </Badge>
         }
         description="บัญชีจัดการ Sunshine ใช้ร่วมกันทั้งระบบ ตั้งครั้งเดียวแล้ว Controller จะส่งให้เฉพาะ Agent ที่อนุมัติแล้ว"
@@ -219,9 +232,19 @@ export function SunshineCredentialManager() {
         </CardHeader>
         <CardContent>
           {loading && !credential ? (
-            <p role="status" className="text-sm text-muted-foreground">
-              กำลังโหลดสถานะ Sunshine…
-            </p>
+            <LoadingRegion label="กำลังโหลดสถานะ Sunshine">
+              <dl className="grid gap-4 text-sm sm:grid-cols-2">
+                {Array.from({ length: 4 }).map((_, index) => (
+                  <div key={index} className="flex flex-col gap-1">
+                    <SkeletonBlock
+                      className="h-3 w-28"
+                      radius="rounded-full"
+                    />
+                    <SkeletonBlock className="h-5 w-40 max-w-full" />
+                  </div>
+                ))}
+              </dl>
+            </LoadingRegion>
           ) : null}
           {loadError ? (
             <p role="alert" className="text-sm text-destructive">
