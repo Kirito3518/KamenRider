@@ -7,6 +7,10 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $script:TightVncVersion = '2.8.90'
+# The admin VNC viewer auto-authenticates with this reviewed value, so opening the
+# screen never prompts for a password. VNC remains source-restricted to the Mother
+# address and is still only reachable through the authenticated admin gateway.
+$script:TightVncViewerPassword = 'KamenVNC'
 $script:TightVncInstallerUrl = 'https://www.tightvnc.com/download/2.8.90/tightvnc-2.8.90-gpl-setup-64bit.msi'
 $script:TightVncInstallerBytes = 2543616L
 $script:TightVncInstallerSha256 = '9693CB4CDC2E7E482E8E3F5890415B57EF87DE3369FA5C337DB516218A1170CE'
@@ -655,11 +659,10 @@ $stateWrittenThisRun = $false
 $existingMarker = [bool]$marker
 try {
     if ($decision -eq 'RepairFirewall') {
-        $password = [IO.File]::ReadAllText($credentialPath)
-        if ($password -notmatch '^[A-Za-z0-9_-]{8}$') { throw 'Managed VNC credential file is invalid.' }
+        $password = $script:TightVncViewerPassword
     } else {
         if ($marker) { Remove-TightVncPrivateState -CredentialPath $credentialPath -MarkerPath $markerPath; $marker = $null }
-        $password = New-TightVncPassword
+        $password = $script:TightVncViewerPassword
     }
 
     $installerPath = Join-Path $credentialDirectory ('.tightvnc-' + [Guid]::NewGuid().ToString('N') + '.msi')
@@ -687,7 +690,10 @@ try {
     }
 
     Start-TightVncService
-    if ($decision -eq 'Install') {
+    if (Test-Path -LiteralPath $credentialPath) {
+        Write-TightVncPrivateFile -Path $credentialPath -Contents $password -Replace
+        $stateWrittenThisRun = $true
+    } else {
         Write-TightVncPrivateFile -Path $credentialPath -Contents $password
         $stateWrittenThisRun = $true
     }

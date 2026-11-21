@@ -4,8 +4,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Monitor, RotateCcw, X } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
+import type { PcControlMachine } from "@/lib/pc-control";
 
 type Ticket = { ticket: string; expiresAtUtc: string; webSocketUrl: string };
 
@@ -142,5 +144,34 @@ export function PcControlVnc({ machineId, onClose }: { machineId: string; onClos
         </p>
       ) : null}
     </div>
+  );
+}
+
+/**
+ * One VNC session at a time: the parent holds a single `machine` value. Rendering the session
+ * inside a modal keeps the PC Control cards usable after close and prevents an accidental
+ * second stream from being opened in another card.
+ */
+export function PcControlVncDialog({
+  machine,
+  onClose,
+}: {
+  machine: PcControlMachine | null;
+  onClose: () => void;
+}) {
+  return (
+    <Dialog open={machine !== null} onOpenChange={(next) => { if (!next) onClose(); }}>
+      <DialogContent className="sm:max-w-6xl" showCloseButton={false}>
+        <DialogHeader>
+          <DialogTitle className="text-lg">
+            หน้าจอ VNC · {machine?.displayName || machine?.machineId}
+          </DialogTitle>
+          <DialogDescription>
+            ดูอย่างเดียว ไม่สามารถควบคุมเมาส์หรือคีย์บอร์ดจากหน้านี้ · เปิดได้ทีละจอ
+          </DialogDescription>
+        </DialogHeader>
+        {machine ? <PcControlVnc machineId={machine.machineId} onClose={onClose} /> : null}
+      </DialogContent>
+    </Dialog>
   );
 }

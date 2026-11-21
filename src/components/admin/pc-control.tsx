@@ -11,6 +11,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { cn } from "@/lib/utils";
 import { PcControlCard } from "@/components/admin/pc-control-card";
+import { PcControlVncDialog } from "@/components/admin/pc-control-vnc";
 import {
   PcControlConfirmDialog,
   PcControlPairDialog,
@@ -53,7 +54,7 @@ export function PcControl() {
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [busyMachine, setBusyMachine] = useState<string | null>(null);
-  const [openVnc, setOpenVnc] = useState<string | null>(null);
+  const [vncTarget, setVncTarget] = useState<PcControlMachine | null>(null);
   const [pairTarget, setPairTarget] = useState<PcControlMachine | null>(null);
   const [timeTarget, setTimeTarget] = useState<PcControlMachine | null>(null);
   const [confirmTarget, setConfirmTarget] = useState<ConfirmTarget>(null);
@@ -257,10 +258,8 @@ export function PcControl() {
               machine={machine}
               now={now}
               busy={busyMachine === machine.machineId}
-              vncOpen={openVnc === machine.machineId}
               onWake={() => void wake(machine)}
-              onOpenVnc={() => setOpenVnc(machine.machineId)}
-              onCloseVnc={() => setOpenVnc((current) => (current === machine.machineId ? null : current))}
+              onOpenVnc={() => setVncTarget(machine)}
               onPair={() => setPairTarget(machine)}
               onTime={() => setTimeTarget(machine)}
               onAddTime={() => void adjustTime(machine, 3600)}
@@ -298,6 +297,11 @@ export function PcControl() {
           void adjustTime(timeTarget, delta);
           setTimeTarget(null);
         }}
+      />
+      <PcControlVncDialog
+        key={"vnc:" + (vncTarget?.machineId ?? "closed")}
+        machine={vncTarget}
+        onClose={() => setVncTarget(null)}
       />
     </AdminPage>
   );

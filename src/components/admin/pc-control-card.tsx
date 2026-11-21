@@ -19,7 +19,6 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
-import { PcControlVnc } from "@/components/admin/pc-control-vnc";
 import { cn } from "@/lib/utils";
 import {
   agentOnline,
@@ -74,10 +73,8 @@ export function PcControlCard({
   machine,
   now,
   busy,
-  vncOpen,
   onWake,
   onOpenVnc,
-  onCloseVnc,
   onPair,
   onTime,
   onAddTime,
@@ -90,10 +87,8 @@ export function PcControlCard({
   machine: PcControlMachine;
   now: number;
   busy: boolean;
-  vncOpen: boolean;
   onWake: () => void;
   onOpenVnc: () => void;
-  onCloseVnc: () => void;
   onPair: () => void;
   onTime: () => void;
   onAddTime: () => void;
@@ -126,25 +121,21 @@ export function PcControlCard({
         </CardAction>
       </CardHeader>
       <CardContent className="flex flex-col gap-4">
-        {vncOpen ? (
-          <PcControlVnc machineId={machine.machineId} onClose={onCloseVnc} />
-        ) : (
-          <Empty className="border border-dashed py-8">
-            <EmptyHeader>
-              <EmptyMedia variant="icon">
-                <Monitor aria-hidden />
-              </EmptyMedia>
-              <EmptyTitle>จอ VNC ปิดอยู่</EmptyTitle>
-              <EmptyDescription>เปิดดูหน้าจอเมื่อต้องการ ไม่มีการสตรีมตลอดเวลา</EmptyDescription>
-            </EmptyHeader>
-            <EmptyContent>
-              <Button variant="default" size="sm" onClick={onOpenVnc} disabled={busy || !machine.localIp}>
-                <Monitor data-icon="inline-start" />
-                เปิดจอ
-              </Button>
-            </EmptyContent>
-          </Empty>
-        )}
+        <Empty className="border border-dashed py-8">
+          <EmptyHeader>
+            <EmptyMedia variant="icon">
+              <Monitor aria-hidden />
+            </EmptyMedia>
+            <EmptyTitle>จอ VNC ปิดอยู่</EmptyTitle>
+            <EmptyDescription>เปิดดูหน้าจอเมื่อต้องการ ไม่มีการสตรีมตลอดเวลา</EmptyDescription>
+          </EmptyHeader>
+          <EmptyContent>
+            <Button variant="default" size="sm" onClick={onOpenVnc} disabled={busy || !machine.localIp}>
+              <Monitor data-icon="inline-start" />
+              เปิดจอ
+            </Button>
+          </EmptyContent>
+        </Empty>
 
         <div className="flex flex-col gap-2 rounded-2xl bg-muted/50 p-3 text-sm">
           {lease ? (
