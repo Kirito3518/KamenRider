@@ -110,7 +110,7 @@ export function buildOneLinerInstaller(options) {
     "    }",
     "",
     "    $bootstrapScript = [IO.File]::ReadAllText($bootstrapPath)",
-    "    Write-Host 'Installing KamenRaider Agent, Stream Guard and TightVNC...'",
+    "    Write-Host 'Installing KamenRaider Agent and TightVNC...'",
     "    & ([ScriptBlock]::Create($bootstrapScript)) `",
     `        -ControllerUrl ${controllerUrl} \``,
     `        -PackageUrl ${packageUrl} \``,
