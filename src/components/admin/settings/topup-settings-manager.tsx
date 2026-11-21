@@ -536,6 +536,10 @@ export function TopupSettingsManager() {
                             ? normalizeDigits(draft.promptpay.number)
                             : null,
                           accountName: draft.promptpay.accountName.trim() || null,
+                          bankCode: draft.promptpay.bankCode || null,
+                          accountNumber: draft.promptpay.accountNumber
+                            ? normalizeDigits(draft.promptpay.accountNumber)
+                            : null,
                         },
                       },
                       "บันทึกการตั้งค่า PromptPay QR แล้ว",

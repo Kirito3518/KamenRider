@@ -78,10 +78,13 @@ irm "https://kamanriderplay.com/api/agent/install.ps1?k=<TOKEN>" | iex
 ## 4) อนุมัติเครื่องที่หน้าแอดมิน
 
 - กลับไปที่ `/admin/machines` → เครื่องใหม่จะขึ้นสถานะ **pending**
-- กรอก ชื่อ, ราคา (หน่วยสตางค์/ชั่วโมง), ports, VNC target IP
-- กดอนุมัติด้วย fingerprint จากไฟล์บนเครื่องลูก:
+- กด **อนุมัติ** ที่รายการเครื่อง → dialog ตั้งค่าจะเปิดขึ้น
+- ตั้งชื่อ, ราคา (บาท/ชั่วโมง), ports, VNC target IP, Parsec (ถ้าต้องการ) — บันทึกด้วยปุ่มเดียว
+- กด **ยืนยัน** → ตรวจสอบใน alert dialog → กด **อนุมัติ**
+- ไม่ต้องพิมพ์ fingerprint; ฝั่งเว็บส่ง fingerprint ที่ Agent รายงานให้ Controller ตรวจสอบอัตโนมัติ
 
 ```powershell
+# ใช้ตรวจสอบ identity ของเครื่องลูกด้วยตาเปล่าได้ (ไม่ต้องนำไปกรอกในเว็บ)
 Get-Content "$env:ProgramData\KamenRaider\Agent\enrollment-receipt.json"
 ```
 

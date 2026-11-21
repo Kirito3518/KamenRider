@@ -430,6 +430,22 @@ async function handleVerifiedSlip(
   }
   const recipientCheck = checkRecipient(row, slip);
   if (!recipientCheck.ok) {
+    if (recipientCheck.outcome === "insufficient") {
+      const message = `${recipientCheck.message} — รอผู้ดูแลตรวจสอบ`;
+      const next = markTopupProcessingUnknown(database, {
+        topupId: row.id,
+        code: recipientCheck.code,
+        message,
+        slip,
+        now,
+      });
+      return {
+        topup: getTopupDetail(database, next),
+        balanceSatang: readUserBalance(database, row.user_id),
+        outcome: "processing",
+        message,
+      };
+    }
     const failed = markTopupFailed(database, {
       topupId: row.id,
       verificationStatus: "rejected",
@@ -471,6 +487,7 @@ async function handleVerifiedSlip(
       topupId: row.id,
       code: "missing_trans_ref",
       message,
+      slip,
       now,
     });
     return {
@@ -494,6 +511,7 @@ async function handleVerifiedSlip(
         senderName: slip.senderName,
         receiverName: slip.receiverName,
         receiverAccount: slip.receiverAccountNumber,
+        receiverProxy: slip.receiverProxyValue,
         bankCode: slip.receiverBankCode,
         dateIso: slip.dateIso,
         code: isRetry ? "verified_recovered" : "verified",

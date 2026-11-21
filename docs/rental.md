@@ -87,13 +87,15 @@ Migration `025-lease-ended-at.sql` เพิ่ม `leases.ended_at INTEGER` (nu
 - `GET /api/rentals` (เจ้าของ): `{ balanceSatang, controllerAvailable, summary, entries }` — ถ้า Controller ล่มจะ fallback แสดงข้อมูลการชำระเงินโดย `state: "unknown"` และ `controllerAvailable: false`
 - `GET /api/admin/rentals` (แอดมิน): join lease ล่าสุด 500 รายการ + payment + ชื่อ/อีเมลสมาชิก; `summary` มีรายได้สุทธิ/คืนเงินทั้งหมดจาก payment table
 - `GET /api/my-leases`: ข้อมูล lease สำหรับหน้า `/my-machines` พร้อม `payment` ต่อรายการ และ entry `pending` สำหรับการเช่าที่ยังรอยืนยัน
+- `/my-machines` กรองแสดงเฉพาะ `state=active`; รายการ `pending`/`preparing` แสดงเป็นแถบ "กำลังเตรียมเครื่อง"; รายการที่สิ้นสุดแล้วดูได้ที่ `/history`
+- Parsec เป็น flow 2 รอบ: รอบแรกขออีเมลยืนยัน IP, รอบสองส่งด้วย `retryAttemptId` หลังลูกค้ายืนยันอีเมล (รายละเอียดใน [parsec.md](parsec.md))
 
 ## หน้าเว็บ
 
 | หน้า | ลูกค้าเห็น |
 | --- | --- |
 | `/rent` | ราคาเต็มบาท/ชม., จำนวนชั่วโมงเต็ม, ยอดรวม, ยอดเงินคงเหลือ, ปุ่มยืนยันการเช่า (ต้อง login) |
-| `/my-machines` | สถานะ/เวลา/การจับคู่, ราคาและยอดที่ชำระ, ต่อเวลาเป็นชั่วโมงพร้อมยอดที่จะหัก, ยอดเงินคงเหลือ |
+| `/my-machines` | แสดงเฉพาะเครื่องที่กำลังเช่า (state `active`); มี Tabs ตามชื่อเครื่องเมื่อเช่าหลายเครื่อง; สถานะ/เวลา/ราคา, ต่อเวลาผ่าน dialog, เชื่อมต่อ Moonlight (PIN) หรือ Parsec (2 รอบ) ผ่าน dialog, ยอดเงินคงเหลือ |
 | `/history` | 2 Tabs: ประวัติการเติมเงิน และประวัติการเช่า (เวลาเริ่ม–สิ้นสุดจริง, ยอดชำระ/คืน/สุทธิ, สถานะ, ค้นหา/กรอง/แบ่งหน้า) |
 | `/admin/rentals` | Dashboard ประวัติการเช่า: stat cards, กราฟรายได้/จำนวน, ผู้เช่า/เครื่อง/เวลา/ยอดชำระ/คืน/สุทธิ, ค้นหา/กรอง/เรียง/แบ่งหน้า, รายละเอียด |
 

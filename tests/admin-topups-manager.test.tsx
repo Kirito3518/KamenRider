@@ -16,9 +16,17 @@ import type {
   TopupChartPoint,
 } from "@/lib/topup/types";
 
+const toastMock = vi.hoisted(() => {
+  const fn = vi.fn();
+  return Object.assign(fn, { success: vi.fn(), error: vi.fn() });
+});
+
+vi.mock("react-hot-toast", () => ({ default: toastMock }));
+
 const DASHBOARD_URL = "/api/admin/topups";
 const DETAIL_URL = "/api/admin/topups/t1";
 const VERIFY_URL = "/api/admin/topups/t1/verify";
+const REVIEW_URL = "/api/admin/topups/t1/review";
 
 const CREATED_ALICE = Date.parse("2026-11-18T03:00:00.000Z");
 const CREATED_BOB = Date.parse("2026-11-17T03:00:00.000Z");
@@ -45,6 +53,7 @@ const ALICE_ENTRY: AdminTopupEntry = {
   slipProvider: "easyslip",
   slipTransRef: "SLIP001",
   slipAmountSatang: 12_000,
+  canReview: false,
 };
 
 const BOB_ENTRY: AdminTopupEntry = {
@@ -69,6 +78,7 @@ const BOB_ENTRY: AdminTopupEntry = {
   slipProvider: "slipok",
   slipTransRef: null,
   slipAmountSatang: null,
+  canReview: true,
 };
 
 const STATS: AdminTopupStats = {
@@ -132,6 +142,8 @@ const DETAIL: AdminTopupDetail = {
   slipSenderName: "Alice",
   slipReceiverName: "Kamen Rider Shop",
   slipReceiverAccountMasked: "123••••7890",
+  slipReceiverProxyMasked: null,
+  slipBankCode: null,
   slipImageUrl: "/api/topups/t1/slip",
   verifiedAt: CREATED_ALICE + 60_000,
   verificationCode: "200",
@@ -169,6 +181,8 @@ const DETAIL: AdminTopupDetail = {
   userName: "Alice",
   userEmail: "alice@example.com",
   providerRequestId: "req-1",
+  canReview: false,
+  review: null,
   attempts: [
     {
       id: "a1",
@@ -217,6 +231,23 @@ const UPDATED_DETAIL: AdminTopupDetail = {
   ],
 };
 
+const REVIEWABLE_DETAIL: AdminTopupDetail = {
+  ...DETAIL,
+  status: "processing",
+  verificationStatus: "unknown",
+  verificationCode: "recipient_unverified",
+  verificationMessage: "ไม่สามารถยืนยันบัญชีผู้รับในสลิปได้ — รอผู้ดูแลตรวจสอบ",
+  completedAt: null,
+  creditedSatang: 0,
+  canReview: true,
+  canRetry: true,
+  review: {
+    outcome: "match",
+    message: "บัญชีผู้รับและยอดเงินตรงกับรายการ",
+  },
+  slipBankCode: "004",
+};
+
 type MockState = {
   entries: AdminTopupEntry[];
   total: number;
@@ -229,6 +260,7 @@ type MockState = {
   verifyOutcome: "completed" | "processing" | "failed";
   verifyCalls: number;
   detailCalls: number;
+  reviewCalls: number;
 };
 
 let state: MockState;
@@ -312,6 +344,9 @@ function dashboardFor(url: URL): AdminTopupDashboardResponse {
 
 describe("Admin TopupsManager", () => {
   beforeEach(() => {
+    toastMock.mockReset();
+    toastMock.success.mockReset();
+    toastMock.error.mockReset();
     state = {
       entries: [ALICE_ENTRY, BOB_ENTRY],
       total: 22,
@@ -324,6 +359,7 @@ describe("Admin TopupsManager", () => {
       verifyOutcome: "completed",
       verifyCalls: 0,
       detailCalls: 0,
+      reviewCalls: 0,
     };
     fetchSpy = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(String(input), "http://localhost");
@@ -352,6 +388,51 @@ describe("Admin TopupsManager", () => {
           balanceSatang: 20_000,
           outcome: state.verifyOutcome,
           message: state.verifyMessage,
+        });
+      }
+      if (url.pathname === REVIEW_URL) {
+        if (init?.method !== "POST") {
+          throw new Error(`Expected POST for ${url.pathname}`);
+        }
+        state.reviewCalls += 1;
+        const body = JSON.parse(String(init?.body ?? "{}")) as {
+          action?: string;
+        };
+        if (body.action === "reject") {
+          state.detail = {
+            ...REVIEWABLE_DETAIL,
+            status: "failed",
+            canReview: false,
+            review: null,
+            verificationStatus: "rejected",
+            verificationCode: "manual_rejected",
+            verificationMessage: "ผู้ดูแลปฏิเสธรายการเติมเงินนี้",
+            failureCode: "manual_rejected",
+            failureMessage: "ผู้ดูแลปฏิเสธรายการเติมเงินนี้",
+          };
+          return json({
+            topup: state.detail,
+            balanceSatang: 120_000,
+            outcome: "failed",
+            message: "ผู้ดูแลปฏิเสธรายการเติมเงินนี้",
+          });
+        }
+        state.detail = {
+          ...REVIEWABLE_DETAIL,
+          status: "completed",
+          creditedSatang: 12_000,
+          completedAt: CREATED_ALICE + 120_000,
+          canReview: false,
+          review: null,
+          verificationStatus: "verified",
+          verificationCode: "manual_approved",
+          verificationMessage: "ผู้ดูแลอนุมัติหลังตรวจสอบสลิป",
+        };
+        return json({
+          topup: state.detail,
+          balanceSatang: 120_000,
+          outcome: "completed",
+          message: "ผู้ดูแลอนุมัติรายการและเพิ่มยอดเงินแล้ว",
         });
       }
       throw new Error(`Unexpected fetch URL: ${String(input)}`);
@@ -392,6 +473,7 @@ describe("Admin TopupsManager", () => {
     expect(screen.getByText("โอนผ่านธนาคาร")).toBeDefined();
     expect(screen.getByText("กำลังตรวจสอบ")).toBeDefined();
     expect(screen.getByText("รอผลตรวจสอบ")).toBeDefined();
+    expect(screen.getByText("รอตรวจสอบ")).toBeDefined();
     expect(screen.getAllByText("ตรวจสอบผ่าน").length).toBeGreaterThan(0);
     expect(screen.getAllByText("฿120.00").length).toBeGreaterThan(0);
     expect(screen.getAllByText("฿80.00").length).toBeGreaterThan(0);
@@ -560,6 +642,65 @@ describe("Admin TopupsManager", () => {
     );
     expect(within(dialog).getByText("ครั้งที่ 2")).toBeDefined();
     expect(state.detailCalls).toBeGreaterThanOrEqual(2);
+  });
+
+  it("approves a row that was waiting for review and shows a success toast", async () => {
+    state.detail = REVIEWABLE_DETAIL;
+    await renderLoaded();
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "ดูรายละเอียด TP-2026-11-18-0001",
+      }),
+    );
+    const dialog = await screen.findByRole("dialog");
+    expect(
+      within(dialog).getByText("ตรวจสอบและอนุมัติ (รอตรวจสอบ)"),
+    ).toBeDefined();
+    expect(within(dialog).getByText("บัญชีผู้รับตรงกับรายการ")).toBeDefined();
+
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "อนุมัติรายการ" }),
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "ยืนยันอนุมัติ" }),
+    );
+
+    await waitFor(() => expect(state.reviewCalls).toBe(1));
+    const reviewCall = fetchSpy.mock.calls.find(
+      ([input]) => String(input) === REVIEW_URL,
+    );
+    expect(reviewCall).toBeDefined();
+    expect((reviewCall?.[1] as RequestInit | undefined)?.method).toBe("POST");
+    expect(
+      JSON.parse(String((reviewCall?.[1] as RequestInit | undefined)?.body)),
+    ).toEqual({ action: "approve" });
+    expect(toastMock.success).toHaveBeenCalledWith(
+      "ผู้ดูแลอนุมัติรายการและเพิ่มยอดเงินแล้ว",
+    );
+  });
+
+  it("rejects a row that was waiting for review and shows an error toast", async () => {
+    state.detail = REVIEWABLE_DETAIL;
+    await renderLoaded();
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "ดูรายละเอียด TP-2026-11-18-0001",
+      }),
+    );
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "ปฏิเสธรายการ" }),
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "ยืนยันปฏิเสธ" }),
+    );
+
+    await waitFor(() => expect(state.reviewCalls).toBe(1));
+    expect(toastMock.error).toHaveBeenCalledWith(
+      "ผู้ดูแลปฏิเสธรายการเติมเงินนี้",
+    );
   });
 
   it("shows a detail loading error inside the dialog", async () => {

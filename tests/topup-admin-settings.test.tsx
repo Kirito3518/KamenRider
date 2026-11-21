@@ -52,6 +52,8 @@ function initialData(): AdminTopupSettingsResponse {
         type: "msisdn",
         number: "0899999999",
         accountName: "ร้านค้าทดสอบ",
+        bankCode: "004",
+        accountNumber: "1234567890",
       },
       bankTransfer: { enabled: false },
       coupon: {
@@ -151,13 +153,24 @@ async function handleFetch(
       };
     }
     const promptpay = body.promptpay as
-      | { enabled?: boolean; type?: "msisdn" | "natId" }
+      | {
+          enabled?: boolean;
+          type?: "msisdn" | "natId";
+          bankCode?: string | null;
+          accountNumber?: string | null;
+        }
       | undefined;
     if (promptpay) {
       next.settings.promptpay = {
         ...next.settings.promptpay,
         enabled: Boolean(promptpay.enabled),
         ...(promptpay.type ? { type: promptpay.type } : {}),
+        ...(promptpay.bankCode !== undefined
+          ? { bankCode: promptpay.bankCode }
+          : {}),
+        ...(promptpay.accountNumber !== undefined
+          ? { accountNumber: promptpay.accountNumber }
+          : {}),
       };
     }
     if (typeof body.slipProvider === "string") {
@@ -377,6 +390,56 @@ describe("TopupSettingsManager", () => {
       isActive: true,
     });
     expect(await screen.findByText("ร้านค้าใหม่")).toBeDefined();
+  });
+
+  it("uses one bank select and asks only for the account number and name", async () => {
+    await renderLoaded();
+
+    fireEvent.click(screen.getByRole("tab", { name: "บัญชีธนาคาร" }));
+    fireEvent.click(screen.getByRole("button", { name: "เพิ่มบัญชีธนาคาร" }));
+
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByLabelText("เลือกธนาคาร")).toBeDefined();
+    expect(within(dialog).getByLabelText("เลขที่บัญชี")).toBeDefined();
+    expect(within(dialog).getByLabelText("ชื่อบัญชี")).toBeDefined();
+    expect(
+      within(dialog).queryByLabelText("รหัสธนาคาร (3 หลัก)"),
+    ).toBeNull();
+    expect(within(dialog).queryByLabelText("ชื่อธนาคาร")).toBeNull();
+    expect(within(dialog).queryByText("โลโก้ธนาคาร")).toBeNull();
+    expect(
+      within(dialog).queryByRole("button", { name: /อัปโหลดโลโก้/ }),
+    ).toBeNull();
+  });
+
+  it("requires the PromptPay bank and account number before enabling", async () => {
+    serverData.settings.promptpay.enabled = true;
+    await renderLoaded();
+
+    fireEvent.click(screen.getByRole("tab", { name: "PromptPay QR" }));
+    const accountNumber = await screen.findByLabelText(
+      "เลขที่บัญชีของ PromptPay",
+    );
+    expect(screen.getByLabelText("เลือกธนาคารของบัญชี PromptPay")).toBeDefined();
+    fireEvent.change(accountNumber, { target: { value: "" } });
+    fireEvent.click(
+      screen.getByRole("button", { name: "บันทึก PromptPay QR" }),
+    );
+
+    expect(
+      await screen.findByText("กรุณาระบุเลขที่บัญชีของบัญชี PromptPay"),
+    ).toBeDefined();
+  });
+
+  it("marks the selected slip provider with the solid primary style", async () => {
+    await renderLoaded();
+
+    fireEvent.click(screen.getByRole("tab", { name: "ตรวจสอบสลิป" }));
+    const easySlip = await screen.findByRole("button", { name: "EasySlip" });
+    const slipOk = screen.getByRole("button", { name: "SlipOk" });
+    expect(easySlip.getAttribute("aria-pressed")).toBe("true");
+    expect(slipOk.getAttribute("aria-pressed")).toBe("false");
+    expect(easySlip.className).toContain("aria-pressed:bg-primary");
   });
 
   it("saves a new EasySlip key, clears the input and only shows the masked key", async () => {

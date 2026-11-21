@@ -1,7 +1,7 @@
 "use client";
 
-import { useRef, useState, type FormEvent } from "react";
-import { Activity, Bot, Network, Settings2, ShieldAlert } from "lucide-react";
+import { useRef, useState } from "react";
+import { Activity, Bot, Network, Settings2, ShieldAlert, ShieldCheck } from "lucide-react";
 import { AgentUpdateControl } from "@/components/admin/agent-update-control";
 import { MachineDiagnostics } from "@/components/admin/machines/machine-diagnostics";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -13,6 +13,7 @@ import {
   AlertDialogDescription,
   AlertDialogFooter,
   AlertDialogHeader,
+  AlertDialogMedia,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
@@ -29,10 +30,7 @@ import { Field, FieldDescription, FieldError, FieldGroup, FieldLabel } from "@/c
 import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import {
-  getSavedVncTargetForMetadataUpdate,
-  getVncTargetForExplicitSave,
-} from "@/lib/admin-vnc-target-drafts.mjs";
+import { getVncTargetForExplicitSave } from "@/lib/admin-vnc-target-drafts.mjs";
 import {
   approvalLabel,
   approvalTone,
@@ -41,6 +39,7 @@ import {
   readinessTone,
 } from "@/lib/machine-display";
 import type { Machine } from "@/lib/machine-contracts";
+import { formatBalance } from "@/lib/money";
 import { formatLocalDateTime, formatRamBytes, formatSpec } from "@/lib/machine-specs";
 
 export type MachineMetadataInput = {
@@ -50,6 +49,17 @@ export type MachineMetadataInput = {
   sunshinePort: number;
   vncLocalIp: string | null;
   parsecEnabled: boolean;
+};
+
+export type MachineSettingsMode = "settings" | "approve";
+
+type SettingsDraft = {
+  displayName: string;
+  price: string;
+  parsecEnabled: boolean;
+  moonlightPort: string;
+  sunshinePort: string;
+  vncDraft: string;
 };
 
 type NetworkCheck =
@@ -66,7 +76,20 @@ function parsePort(value: string) {
   return Number.isSafeInteger(parsed) && parsed >= 1 && parsed <= 65535 ? parsed : null;
 }
 
+function draftFromMachine(machine: Machine | null): SettingsDraft {
+  return {
+    displayName: machine?.displayName || machine?.machineId || "",
+    price: machine ? String(machine.hourlyPriceMinorUnits / 100) : "",
+    parsecEnabled: machine?.parsecEnabled === true,
+    moonlightPort: machine ? String(machine.moonlightPort) : "",
+    sunshinePort: machine ? String(machine.sunshinePort) : "",
+    vncDraft: machine?.vncLocalIp ?? "",
+  };
+}
+
 const portErrorText = "พอร์ตต้องเป็นจำนวนเต็มระหว่าง 1–65535";
+const vncErrorText =
+  "กรอก IPv4 LAN ส่วนตัว (10/8, 172.16/12, 192.168/16) หรือ IPv6 ULA เท่านั้น";
 
 function ReadOnlyRows({ rows }: { rows: Array<{ label: string; value: string; mono?: boolean }> }) {
   return (
@@ -85,55 +108,29 @@ function ReadOnlyRows({ rows }: { rows: Array<{ label: string; value: string; mo
 
 function GeneralTab({
   machine,
-  onSave,
+  draft,
+  onChange,
+  submitted,
+  nameError,
+  priceError,
+  disabled,
+  approveMode,
   onReject,
 }: {
   machine: Machine;
-  onSave: (machine: Machine, input: MachineMetadataInput) => Promise<void>;
+  draft: SettingsDraft;
+  onChange: (patch: Partial<SettingsDraft>) => void;
+  submitted: boolean;
+  nameError: string;
+  priceError: string;
+  disabled: boolean;
+  approveMode: boolean;
   onReject: (machine: Machine) => Promise<void>;
 }) {
-  const [displayName, setDisplayName] = useState(machine.displayName || machine.machineId);
-  const [price, setPrice] = useState(String(machine.hourlyPriceMinorUnits / 100));
-  const [parsecEnabled, setParsecEnabled] = useState(machine.parsecEnabled === true);
-  const [busy, setBusy] = useState(false);
-  const [submitted, setSubmitted] = useState(false);
-  const [error, setError] = useState("");
   const [rejectOpen, setRejectOpen] = useState(false);
   const [rejecting, setRejecting] = useState(false);
   const [rejectError, setRejectError] = useState("");
-
-  const trimmedName = displayName.trim();
-  const nameError = !trimmedName
-    ? "กรอกชื่อที่แสดง"
-    : trimmedName.length > 128
-      ? "ชื่อต้องไม่เกิน 128 ตัวอักษร"
-      : "";
-  const priceValue = Number(price);
-  const priceInvalid = !Number.isSafeInteger(priceValue) || priceValue < 1;
-  const priceError = priceInvalid ? "ราคาต้องเป็นจำนวนเต็มบาทตั้งแต่ 1 บาท" : "";
   const pending = isPendingMachine(machine);
-
-  async function submit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    setSubmitted(true);
-    setError("");
-    if (nameError || priceInvalid || busy) return;
-    setBusy(true);
-    try {
-      await onSave(machine, {
-        displayName: trimmedName,
-        hourlyPriceMinorUnits: priceValue * 100,
-        moonlightPort: machine.moonlightPort,
-        sunshinePort: machine.sunshinePort,
-        vncLocalIp: getSavedVncTargetForMetadataUpdate(machine),
-        parsecEnabled,
-      });
-    } catch (cause) {
-      setError(errorMessage(cause, "บันทึกข้อมูลทั่วไปไม่สำเร็จ"));
-    } finally {
-      setBusy(false);
-    }
-  }
 
   async function rejectMachine() {
     if (rejecting) return;
@@ -151,88 +148,74 @@ function GeneralTab({
 
   return (
     <div className="flex flex-col gap-6">
-      <form className="flex flex-col gap-6" onSubmit={submit} noValidate>
-        <FieldGroup className="gap-4">
-          <div className="grid gap-4 sm:grid-cols-2">
-            <Field data-invalid={submitted && Boolean(nameError)}>
-              <FieldLabel htmlFor="machine-display-name">ชื่อที่แสดง</FieldLabel>
-              <Input
-                id="machine-display-name"
-                value={displayName}
-                maxLength={128}
-                aria-invalid={submitted && Boolean(nameError)}
-                disabled={busy}
-                onChange={(event) => setDisplayName(event.currentTarget.value)}
-              />
-              {submitted && nameError ? (
-                <FieldError>{nameError}</FieldError>
-              ) : (
-                <FieldDescription>ชื่อนี้แสดงให้ผู้เช่าเห็นแทน machine ID</FieldDescription>
-              )}
-            </Field>
-            <Field data-invalid={submitted && priceInvalid}>
-              <FieldLabel htmlFor="machine-hourly-price">ราคา (บาท/ชั่วโมง)</FieldLabel>
-              <Input
-                id="machine-hourly-price"
-                type="number"
-                min={1}
-                step={1}
-                inputMode="numeric"
-                value={price}
-                aria-invalid={submitted && priceInvalid}
-                disabled={busy}
-                onChange={(event) => setPrice(event.currentTarget.value)}
-              />
-              {submitted && priceError ? (
-                <FieldError>{priceError}</FieldError>
-              ) : (
-                <FieldDescription>ราคาต้องเป็นจำนวนเต็มบาท (เช่น 10, 20, 30)</FieldDescription>
-              )}
-            </Field>
-          </div>
-        </FieldGroup>
-        <Field>
-          <label className="flex items-start gap-3 text-sm">
-            <input
-              type="checkbox"
-              className="mt-0.5 size-4"
-              checked={parsecEnabled}
-              disabled={busy}
-              onChange={(event) => setParsecEnabled(event.currentTarget.checked)}
+      <FieldGroup className="gap-4">
+        <div className="grid gap-4 sm:grid-cols-2">
+          <Field data-invalid={submitted && Boolean(nameError)}>
+            <FieldLabel htmlFor="machine-display-name">ชื่อที่แสดง</FieldLabel>
+            <Input
+              id="machine-display-name"
+              value={draft.displayName}
+              maxLength={128}
+              aria-invalid={submitted && Boolean(nameError)}
+              disabled={disabled}
+              onChange={(event) => onChange({ displayName: event.currentTarget.value })}
             />
-            <span className="flex flex-col gap-1">
-              <span className="font-medium">เปิดให้ลูกค้าเข้าสู่ระบบ Parsec ด้วยบัญชีของตัวเอง</span>
-              <span className="text-muted-foreground">
-                Agent จะแสดงปุ่ม “เชื่อมต่อด้วย Parsec” เฉพาะเมื่อตรวจพบ Parsec บนเครื่องนี้
-                {machine.parsecAvailable === true ? " (ตรวจพบแล้ว)" : " (ยังไม่ตรวจพบ)"}
-                — ลูกค้ากรอกรหัสในเบราว์เซอร์และถูกเข้ารหัสก่อนส่งถึงเครื่อง
-              </span>
-            </span>
-          </label>
-        </Field>
-        <ReadOnlyRows
-          rows={[
-            { label: "Machine ID", value: machine.machineId, mono: true },
-            { label: "Hostname", value: formatSpec(machine.hostname) },
-            { label: "CPU", value: formatSpec(machine.cpu) },
-            { label: "GPU", value: formatSpec(machine.gpu) },
-            { label: "RAM", value: formatRamBytes(machine.ramBytes) },
-            { label: "ติดต่อล่าสุด", value: formatLocalDateTime(machine.lastSeenAt) },
-          ]}
-        />
-        {error ? (
-          <Alert variant="destructive">
-            <AlertTitle>บันทึกข้อมูลไม่สำเร็จ</AlertTitle>
-            <AlertDescription>{error}</AlertDescription>
-          </Alert>
-        ) : null}
-        <div className="flex justify-end">
-          <Button type="submit" disabled={busy}>
-            {busy ? <Spinner data-icon="inline-start" /> : null}
-            บันทึกข้อมูลทั่วไป
-          </Button>
+            {submitted && nameError ? (
+              <FieldError>{nameError}</FieldError>
+            ) : (
+              <FieldDescription>ชื่อนี้แสดงให้ผู้เช่าเห็นแทน machine ID</FieldDescription>
+            )}
+          </Field>
+          <Field data-invalid={submitted && Boolean(priceError)}>
+            <FieldLabel htmlFor="machine-hourly-price">ราคา (บาท/ชั่วโมง)</FieldLabel>
+            <Input
+              id="machine-hourly-price"
+              type="number"
+              min={1}
+              step={1}
+              inputMode="numeric"
+              value={draft.price}
+              aria-invalid={submitted && Boolean(priceError)}
+              disabled={disabled}
+              onChange={(event) => onChange({ price: event.currentTarget.value })}
+            />
+            {submitted && priceError ? (
+              <FieldError>{priceError}</FieldError>
+            ) : (
+              <FieldDescription>ราคาต้องเป็นจำนวนเต็มบาท (เช่น 10, 20, 30)</FieldDescription>
+            )}
+          </Field>
         </div>
-      </form>
+      </FieldGroup>
+      <Field>
+        <label className="flex items-start gap-3 text-sm">
+          <input
+            type="checkbox"
+            className="mt-0.5 size-4"
+            checked={draft.parsecEnabled}
+            disabled={disabled}
+            onChange={(event) => onChange({ parsecEnabled: event.currentTarget.checked })}
+          />
+          <span className="flex flex-col gap-1">
+            <span className="font-medium">เปิดให้ลูกค้าเข้าสู่ระบบ Parsec ด้วยบัญชีของตัวเอง</span>
+            <span className="text-muted-foreground">
+              Agent จะแสดงปุ่ม “เชื่อมต่อด้วย Parsec” เฉพาะเมื่อตรวจพบ Parsec บนเครื่องนี้
+              {machine.parsecAvailable === true ? " (ตรวจพบแล้ว)" : " (ยังไม่ตรวจพบ)"}
+              — ลูกค้ากรอกรหัสในเบราว์เซอร์และถูกเข้ารหัสก่อนส่งถึงเครื่อง
+            </span>
+          </span>
+        </label>
+      </Field>
+      <ReadOnlyRows
+        rows={[
+          { label: "Machine ID", value: machine.machineId, mono: true },
+          { label: "Hostname", value: formatSpec(machine.hostname) },
+          { label: "CPU", value: formatSpec(machine.cpu) },
+          { label: "GPU", value: formatSpec(machine.gpu) },
+          { label: "RAM", value: formatRamBytes(machine.ramBytes) },
+          { label: "ติดต่อล่าสุด", value: formatLocalDateTime(machine.lastSeenAt) },
+        ]}
+      />
 
       {pending ? (
         <div className="flex flex-col gap-3 rounded-2xl border border-status-busy/30 bg-status-busy/10 p-4">
@@ -243,12 +226,20 @@ function GeneralTab({
             <div className="flex flex-col gap-1">
               <p className="font-medium">เครื่องนี้ยังรออนุมัติ</p>
               <p className="text-sm text-muted-foreground">
-                ตั้งค่าชื่อ ราคา และเครือข่ายให้ครบก่อน แล้วอนุมัติจากรายการเครื่องที่รออนุมัติด้านบน
+                {approveMode
+                  ? "ตั้งค่าชื่อ ราคา และเครือข่ายให้ครบ แล้วกด “ยืนยัน” ด้านล่างเพื่อตรวจสอบและอนุมัติ"
+                  : "ตั้งค่าให้ครบแล้วอนุมัติจากปุ่ม “อนุมัติ” ในรายการเครื่องที่รออนุมัติ"}
               </p>
             </div>
           </div>
           <div className="flex justify-end">
-            <Button type="button" variant="destructive" size="sm" onClick={() => setRejectOpen(true)}>
+            <Button
+              type="button"
+              variant="destructive"
+              size="sm"
+              onClick={() => setRejectOpen(true)}
+              disabled={disabled}
+            >
               ปฏิเสธเครื่องนี้
             </Button>
           </div>
@@ -285,33 +276,36 @@ function GeneralTab({
 
 function NetworkTab({
   machine,
-  onSave,
+  draft,
+  onChange,
+  submitted,
+  moonlightInvalid,
+  sunshineInvalid,
+  vncInvalid,
+  disabled,
 }: {
   machine: Machine;
-  onSave: (machine: Machine, input: MachineMetadataInput) => Promise<void>;
+  draft: SettingsDraft;
+  onChange: (patch: Partial<SettingsDraft>) => void;
+  submitted: boolean;
+  moonlightInvalid: boolean;
+  sunshineInvalid: boolean;
+  vncInvalid: boolean;
+  disabled: boolean;
 }) {
-  const [moonlightPort, setMoonlightPort] = useState(String(machine.moonlightPort));
-  const [sunshinePort, setSunshinePort] = useState(String(machine.sunshinePort));
-  const [vncDraft, setVncDraft] = useState(machine.vncLocalIp ?? "");
   const [check, setCheck] = useState<NetworkCheck | null>(null);
   const [message, setMessage] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [submitted, setSubmitted] = useState(false);
-  const [error, setError] = useState("");
   const checkRun = useRef(0);
-
-  const moonlightInvalid = submitted && parsePort(moonlightPort) === null;
-  const sunshineInvalid = submitted && parsePort(sunshinePort) === null;
 
   function updateVncDraft(value: string) {
     checkRun.current += 1;
-    setVncDraft(value);
+    onChange({ vncDraft: value });
     setCheck(null);
     setMessage("");
   }
 
   async function checkVncTarget() {
-    const targetAddress = getVncTargetForExplicitSave(vncDraft);
+    const targetAddress = getVncTargetForExplicitSave(draft.vncDraft);
     if (!targetAddress) {
       setCheck(null);
       setMessage("กรอก IPv4 LAN ส่วนตัวหรือ IPv6 ULA ที่ยืนยันกับเครื่องจริงก่อนตรวจสอบ");
@@ -342,42 +336,11 @@ function NetworkTab({
     }
   }
 
-  async function submit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    setSubmitted(true);
-    setError("");
-    const moonlight = parsePort(moonlightPort);
-    const sunshine = parsePort(sunshinePort);
-    const target = getVncTargetForExplicitSave(vncDraft);
-    if (moonlight === null || sunshine === null) return;
-    if (!target) {
-      setMessage("กรอก IPv4 LAN ส่วนตัวหรือ IPv6 ULA ที่ยืนยันกับเครื่องจริงก่อนบันทึก");
-      return;
-    }
-    if (busy) return;
-    setBusy(true);
-    try {
-      await onSave(machine, {
-        displayName: machine.displayName,
-        hourlyPriceMinorUnits: machine.hourlyPriceMinorUnits,
-        moonlightPort: moonlight,
-        sunshinePort: sunshine,
-        vncLocalIp: target,
-        parsecEnabled: machine.parsecEnabled === true,
-      });
-      setMessage("บันทึกการตั้งค่าเครือข่ายแล้ว");
-    } catch (cause) {
-      setError(errorMessage(cause, "บันทึกการตั้งค่าเครือข่ายไม่สำเร็จ"));
-    } finally {
-      setBusy(false);
-    }
-  }
-
   return (
-    <form className="flex flex-col gap-6" onSubmit={submit} noValidate>
+    <div className="flex flex-col gap-6">
       <FieldGroup className="gap-4">
         <div className="grid gap-4 sm:grid-cols-2">
-          <Field data-invalid={moonlightInvalid}>
+          <Field data-invalid={submitted && moonlightInvalid}>
             <FieldLabel htmlFor="machine-moonlight-port">Moonlight port</FieldLabel>
             <Input
               id="machine-moonlight-port"
@@ -386,14 +349,18 @@ function NetworkTab({
               max={65535}
               step={1}
               inputMode="numeric"
-              value={moonlightPort}
-              aria-invalid={moonlightInvalid}
-              disabled={busy}
-              onChange={(event) => setMoonlightPort(event.currentTarget.value)}
+              value={draft.moonlightPort}
+              aria-invalid={submitted && moonlightInvalid}
+              disabled={disabled}
+              onChange={(event) => onChange({ moonlightPort: event.currentTarget.value })}
             />
-            {moonlightInvalid ? <FieldError>{portErrorText}</FieldError> : <FieldDescription>พอร์ต GameStream ที่ Moonlight ใช้</FieldDescription>}
+            {submitted && moonlightInvalid ? (
+              <FieldError>{portErrorText}</FieldError>
+            ) : (
+              <FieldDescription>พอร์ต GameStream ที่ Moonlight ใช้</FieldDescription>
+            )}
           </Field>
-          <Field data-invalid={sunshineInvalid}>
+          <Field data-invalid={submitted && sunshineInvalid}>
             <FieldLabel htmlFor="machine-sunshine-port">Management port</FieldLabel>
             <Input
               id="machine-sunshine-port"
@@ -402,36 +369,46 @@ function NetworkTab({
               max={65535}
               step={1}
               inputMode="numeric"
-              value={sunshinePort}
-              aria-invalid={sunshineInvalid}
-              disabled={busy}
-              onChange={(event) => setSunshinePort(event.currentTarget.value)}
+              value={draft.sunshinePort}
+              aria-invalid={submitted && sunshineInvalid}
+              disabled={disabled}
+              onChange={(event) => onChange({ sunshinePort: event.currentTarget.value })}
             />
-            {sunshineInvalid ? <FieldError>{portErrorText}</FieldError> : <FieldDescription>พอร์ต HTTPS ของ Sunshine management</FieldDescription>}
+            {submitted && sunshineInvalid ? (
+              <FieldError>{portErrorText}</FieldError>
+            ) : (
+              <FieldDescription>พอร์ต HTTPS ของ Sunshine management</FieldDescription>
+            )}
           </Field>
         </div>
-        <Field>
-          <FieldLabel htmlFor="machine-vnc-target">IP เป้าหมาย VNC (ตรวจสอบกับเครื่องจริงก่อนบันทึก)</FieldLabel>
+        <Field data-invalid={submitted && vncInvalid}>
+          <FieldLabel htmlFor="machine-vnc-target">IP เป้าหมาย VNC</FieldLabel>
           <div className="flex flex-col gap-2 sm:flex-row">
             <Input
               id="machine-vnc-target"
-              value={vncDraft}
-              disabled={busy}
+              value={draft.vncDraft}
+              aria-invalid={submitted && vncInvalid}
+              disabled={disabled}
               onChange={(event) => updateVncDraft(event.currentTarget.value)}
             />
             <Button
               type="button"
               variant="outline"
               className="shrink-0"
-              disabled={busy || check?.state === "checking"}
+              disabled={disabled || check?.state === "checking"}
               onClick={() => void checkVncTarget()}
             >
               {check?.state === "checking" ? "กำลังตรวจสอบ VNC…" : "ตรวจสอบ VNC"}
             </Button>
           </div>
-          <FieldDescription>
-            รับเฉพาะ IPv4 LAN ส่วนตัว (10/8, 172.16/12, 192.168/16) หรือ IPv6 ULA เท่านั้น
-          </FieldDescription>
+          {submitted && vncInvalid ? (
+            <FieldError>{vncErrorText}</FieldError>
+          ) : (
+            <FieldDescription>
+              เว้นว่างได้หากยังไม่ต้องการเปิด VNC · รับเฉพาะ IPv4 LAN ส่วนตัว (10/8, 172.16/12, 192.168/16)
+              หรือ IPv6 ULA
+            </FieldDescription>
+          )}
         </Field>
         {check ? (
           <p role="status" aria-live="polite" className="text-sm text-muted-foreground">
@@ -446,19 +423,7 @@ function NetworkTab({
         ) : null}
         {message ? <p role="status" aria-live="polite" className="text-sm">{message}</p> : null}
       </FieldGroup>
-      {error ? (
-        <Alert variant="destructive">
-          <AlertTitle>บันทึกการตั้งค่าเครือข่ายไม่สำเร็จ</AlertTitle>
-          <AlertDescription>{error}</AlertDescription>
-        </Alert>
-      ) : null}
-      <div className="flex justify-end">
-        <Button type="submit" disabled={busy || check?.state === "checking"}>
-          {busy ? <Spinner data-icon="inline-start" /> : null}
-          บันทึกการตั้งค่าเครือข่าย
-        </Button>
-      </div>
-    </form>
+    </div>
   );
 }
 
@@ -509,79 +474,312 @@ function AgentTab({
 export function MachineSettingsDialog({
   machine,
   open,
+  mode = "settings",
   actorId,
   onOpenChange,
   onSave,
   onReject,
   onUpdated,
+  onApprove,
 }: {
   machine: Machine | null;
   open: boolean;
+  mode?: MachineSettingsMode;
   actorId: string;
   onOpenChange: (open: boolean) => void;
   onSave: (machine: Machine, input: MachineMetadataInput) => Promise<void>;
   onReject: (machine: Machine) => Promise<void>;
   onUpdated: () => Promise<boolean>;
+  onApprove?: (machine: Machine) => Promise<void>;
 }) {
+  const [tab, setTab] = useState("general");
+  const [draft, setDraft] = useState<SettingsDraft>(() => draftFromMachine(machine));
+  const [submitted, setSubmitted] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState("");
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [approving, setApproving] = useState(false);
+  const [approveError, setApproveError] = useState("");
+
+  const name = machine?.displayName || machine?.machineId || "";
+  const fingerprint = machine?.publicKeyFingerprint ?? null;
+  const approveMode = mode === "approve";
+  const trimmedName = draft.displayName.trim();
+  const nameError = !trimmedName
+    ? "กรอกชื่อที่แสดง"
+    : trimmedName.length > 128
+      ? "ชื่อต้องไม่เกิน 128 ตัวอักษร"
+      : "";
+  const priceValue = Number(draft.price);
+  const priceError =
+    Number.isSafeInteger(priceValue) && priceValue >= 1
+      ? ""
+      : "ราคาต้องเป็นจำนวนเต็มบาทตั้งแต่ 1 บาท";
+  const moonlightPort = parsePort(draft.moonlightPort);
+  const sunshinePort = parsePort(draft.sunshinePort);
+  const vncTarget = draft.vncDraft.trim()
+    ? getVncTargetForExplicitSave(draft.vncDraft)
+    : null;
+  const vncInvalid = draft.vncDraft.trim().length > 0 && vncTarget === null;
+
+  function patchDraft(patch: Partial<SettingsDraft>) {
+    setDraft((current) => ({ ...current, ...patch }));
+  }
+
+  async function persistDraft(): Promise<boolean> {
+    setSubmitted(true);
+    setSaveError("");
+    if (!machine || saving) return false;
+    if (nameError || priceError) {
+      setTab("general");
+      return false;
+    }
+    if (moonlightPort === null || sunshinePort === null || vncInvalid) {
+      setTab("network");
+      return false;
+    }
+    setSaving(true);
+    try {
+      await onSave(machine, {
+        displayName: trimmedName,
+        hourlyPriceMinorUnits: priceValue * 100,
+        moonlightPort,
+        sunshinePort,
+        vncLocalIp: vncTarget,
+        parsecEnabled: draft.parsecEnabled,
+      });
+      return true;
+    } catch (cause) {
+      setSaveError(errorMessage(cause, "บันทึกการตั้งค่าไม่สำเร็จ"));
+      return false;
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function primaryAction() {
+    if (approveMode) {
+      const saved = await persistDraft();
+      if (!saved) return;
+      setApproveError("");
+      setConfirmOpen(true);
+      return;
+    }
+    await persistDraft();
+  }
+
+  async function approve() {
+    if (!machine || !onApprove || approving) return;
+    if (!fingerprint) {
+      setApproveError("Agent ยังไม่รายงาน fingerprint จึงยังอนุมัติไม่ได้");
+      return;
+    }
+    setApproving(true);
+    setApproveError("");
+    try {
+      await onApprove(machine);
+      setConfirmOpen(false);
+    } catch (cause) {
+      setApproveError(errorMessage(cause, "อนุมัติเครื่องไม่สำเร็จ"));
+    } finally {
+      setApproving(false);
+    }
+  }
+
+  function handleOpenChange(next: boolean) {
+    if (!next && (saving || approving || confirmOpen)) return;
+    onOpenChange(next);
+  }
+
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[85dvh] overflow-y-auto sm:max-w-3xl">
-        <DialogHeader>
-          <DialogTitle>
-            {machine ? `ตั้งค่าเครื่อง ${machine.displayName || machine.machineId}` : "ตั้งค่าเครื่อง"}
-          </DialogTitle>
-          <DialogDescription>
-            {machine ? (
-              <span className="flex flex-wrap items-center gap-2">
-                <span className="font-mono text-xs">{machine.machineId}</span>
-                <Badge variant={approvalTone(machine.approvalStatus)}>{approvalLabel(machine.approvalStatus)}</Badge>
-                <Badge variant={readinessTone(machine.readiness)}>{readinessLabel(machine.readiness)}</Badge>
-              </span>
-            ) : (
-              "ไม่พบข้อมูลเครื่องล่าสุด"
-            )}
-          </DialogDescription>
-        </DialogHeader>
-        {machine ? (
-          <Tabs defaultValue="general" className="gap-6">
-            <TabsList className="w-full justify-start overflow-x-auto sm:w-fit">
-              <TabsTrigger value="general">
-                <Settings2 aria-hidden />
-                ทั่วไป
-              </TabsTrigger>
-              <TabsTrigger value="network">
-                <Network aria-hidden />
-                เครือข่าย
-              </TabsTrigger>
-              <TabsTrigger value="agent">
-                <Bot aria-hidden />
-                Agent
-              </TabsTrigger>
-              <TabsTrigger value="diagnostics">
-                <Activity aria-hidden />
-                ผลตรวจ
-              </TabsTrigger>
-            </TabsList>
-            <TabsContent value="general" keepMounted className="min-h-80">
-              <GeneralTab machine={machine} onSave={onSave} onReject={onReject} />
-            </TabsContent>
-            <TabsContent value="network" keepMounted className="min-h-80">
-              <NetworkTab machine={machine} onSave={onSave} />
-            </TabsContent>
-            <TabsContent value="agent" keepMounted className="min-h-80">
-              <AgentTab machine={machine} actorId={actorId} onUpdated={onUpdated} />
-            </TabsContent>
-            <TabsContent value="diagnostics" keepMounted className="min-h-80">
-              <MachineDiagnostics machine={machine} />
-            </TabsContent>
-          </Tabs>
-        ) : null}
-        <DialogFooter>
-          <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
-            ปิด
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+    <>
+      <Dialog open={open} onOpenChange={handleOpenChange}>
+        <DialogContent className="max-h-[85dvh] overflow-y-auto sm:max-w-3xl">
+          <DialogHeader>
+            <DialogTitle>
+              {machine
+                ? approveMode
+                  ? `ตั้งค่าและอนุมัติเครื่อง ${name}`
+                  : `ตั้งค่าเครื่อง ${name}`
+                : "ตั้งค่าเครื่อง"}
+            </DialogTitle>
+            <DialogDescription>
+              {machine ? (
+                <span className="flex flex-wrap items-center gap-2">
+                  <span className="font-mono text-xs">{machine.machineId}</span>
+                  <Badge variant={approvalTone(machine.approvalStatus)}>{approvalLabel(machine.approvalStatus)}</Badge>
+                  <Badge variant={readinessTone(machine.readiness)}>{readinessLabel(machine.readiness)}</Badge>
+                </span>
+              ) : (
+                "ไม่พบข้อมูลเครื่องล่าสุด"
+              )}
+            </DialogDescription>
+          </DialogHeader>
+
+          {machine ? (
+            <>
+              {approveMode && !fingerprint ? (
+                <Alert variant="destructive">
+                  <ShieldAlert aria-hidden />
+                  <AlertTitle>ยังอนุมัติไม่ได้</AlertTitle>
+                  <AlertDescription>
+                    Agent ยังไม่รายงาน fingerprint — เครื่องต้องลงทะเบียนและส่ง fingerprint ก่อนอนุมัติ
+                  </AlertDescription>
+                </Alert>
+              ) : null}
+
+              <Tabs value={tab} onValueChange={setTab} className="gap-6">
+                <TabsList className="w-full justify-start overflow-x-auto sm:w-fit">
+                  <TabsTrigger value="general">
+                    <Settings2 aria-hidden />
+                    ทั่วไป
+                  </TabsTrigger>
+                  <TabsTrigger value="network">
+                    <Network aria-hidden />
+                    เครือข่าย
+                  </TabsTrigger>
+                  <TabsTrigger value="agent">
+                    <Bot aria-hidden />
+                    Agent
+                  </TabsTrigger>
+                  <TabsTrigger value="diagnostics">
+                    <Activity aria-hidden />
+                    ผลตรวจ
+                  </TabsTrigger>
+                </TabsList>
+                <TabsContent value="general" keepMounted className="min-h-80">
+                  <GeneralTab
+                    machine={machine}
+                    draft={draft}
+                    onChange={patchDraft}
+                    submitted={submitted}
+                    nameError={nameError}
+                    priceError={priceError}
+                    disabled={saving || approving}
+                    approveMode={approveMode}
+                    onReject={onReject}
+                  />
+                </TabsContent>
+                <TabsContent value="network" keepMounted className="min-h-80">
+                  <NetworkTab
+                    machine={machine}
+                    draft={draft}
+                    onChange={patchDraft}
+                    submitted={submitted}
+                    moonlightInvalid={moonlightPort === null}
+                    sunshineInvalid={sunshinePort === null}
+                    vncInvalid={vncInvalid}
+                    disabled={saving || approving}
+                  />
+                </TabsContent>
+                <TabsContent value="agent" keepMounted className="min-h-80">
+                  <AgentTab machine={machine} actorId={actorId} onUpdated={onUpdated} />
+                </TabsContent>
+                <TabsContent value="diagnostics" keepMounted className="min-h-80">
+                  <MachineDiagnostics machine={machine} />
+                </TabsContent>
+              </Tabs>
+
+              {saveError ? (
+                <Alert variant="destructive" role="alert">
+                  <AlertTitle>บันทึกการตั้งค่าไม่สำเร็จ</AlertTitle>
+                  <AlertDescription>{saveError}</AlertDescription>
+                </Alert>
+              ) : null}
+
+              {approveMode ? (
+                <p className="text-xs text-muted-foreground">
+                  กด “ยืนยัน” ระบบจะบันทึกการตั้งค่า แล้วเปิดหน้าต่างยืนยันอนุมัติ
+                </p>
+              ) : null}
+            </>
+          ) : null}
+
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => onOpenChange(false)}
+              disabled={saving || approving}
+            >
+              {approveMode ? "ยกเลิก" : "ปิด"}
+            </Button>
+            <Button
+              type="button"
+              onClick={() => void primaryAction()}
+              disabled={!machine || saving || (approveMode && !fingerprint)}
+            >
+              {saving ? (
+                <Spinner data-icon="inline-start" />
+              ) : approveMode ? (
+                <ShieldCheck data-icon="inline-start" />
+              ) : null}
+              {saving ? "กำลังบันทึก…" : approveMode ? "ยืนยัน" : "บันทึกการตั้งค่า"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <AlertDialog
+        open={confirmOpen}
+        onOpenChange={(next) => {
+          if (!next && !approving) setConfirmOpen(false);
+        }}
+      >
+        <AlertDialogContent size="sm">
+          <AlertDialogHeader>
+            <AlertDialogMedia>
+              <ShieldCheck aria-hidden />
+            </AlertDialogMedia>
+            <AlertDialogTitle>ยืนยันอนุมัติเครื่อง {name}</AlertDialogTitle>
+            <AlertDialogDescription>
+              ตรวจสอบการตั้งค่าแล้วกด “อนุมัติ” — ระบบจะใช้ fingerprint ที่ Agent
+              รายงานโดยอัตโนมัติ ไม่ต้องกรอกยืนยัน
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 rounded-2xl bg-muted/50 p-3 text-sm">
+            <dt className="text-muted-foreground">Machine ID</dt>
+            <dd className="truncate font-mono text-xs">{machine?.machineId ?? "—"}</dd>
+            <dt className="text-muted-foreground">ชื่อที่แสดง</dt>
+            <dd className="truncate">{trimmedName || "—"}</dd>
+            <dt className="text-muted-foreground">ราคา/ชม.</dt>
+            <dd className="tabular-nums">
+              {Number.isSafeInteger(priceValue) && priceValue >= 1
+                ? formatBalance(priceValue * 100)
+                : "—"}
+            </dd>
+            <dt className="text-muted-foreground">Moonlight port</dt>
+            <dd className="tabular-nums">{draft.moonlightPort || "—"}</dd>
+            <dt className="text-muted-foreground">Management port</dt>
+            <dd className="tabular-nums">{draft.sunshinePort || "—"}</dd>
+            <dt className="text-muted-foreground">VNC target</dt>
+            <dd className="truncate">{vncTarget ?? "ยังไม่ตั้งค่า"}</dd>
+            <dt className="text-muted-foreground">Parsec</dt>
+            <dd>{draft.parsecEnabled ? "เปิด" : "ปิด"}</dd>
+          </dl>
+          {approveError ? (
+            <Alert variant="destructive">
+              <AlertTitle>อนุมัติเครื่องไม่สำเร็จ</AlertTitle>
+              <AlertDescription>{approveError}</AlertDescription>
+            </Alert>
+          ) : null}
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={approving}>กลับไปแก้ไข</AlertDialogCancel>
+            <AlertDialogAction
+              variant="success"
+              disabled={approving || !fingerprint}
+              onClick={() => void approve()}
+            >
+              {approving ? (
+                <Spinner data-icon="inline-start" />
+              ) : (
+                <ShieldCheck data-icon="inline-start" />
+              )}
+              อนุมัติ
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </>
   );
 }

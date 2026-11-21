@@ -6,6 +6,7 @@ import {
   BANK_PRESETS,
   getBankPreset,
   getBankPresetByLogoKey,
+  getBankSurfaceStyle,
   isKnownBankLogoKey,
 } from "@/lib/topup/banks";
 
@@ -35,5 +36,13 @@ describe("bank presets", () => {
     for (const bank of BANK_PRESETS) {
       expect(existsSync(join(process.cwd(), "public", bank.logoUrl))).toBe(true);
     }
+  });
+
+  it("derives a soft brand surface for bank cards", () => {
+    expect(getBankSurfaceStyle(getBankPreset("004"))).toEqual({
+      backgroundColor: "#138f2d1f",
+      borderColor: "#138f2d59",
+    });
+    expect(getBankSurfaceStyle(undefined)).toBeUndefined();
   });
 });

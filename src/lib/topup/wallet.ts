@@ -36,6 +36,7 @@ export type CreditSlipInput = {
     senderName: string | null;
     receiverName: string | null;
     receiverAccount: string | null;
+    receiverProxy?: string | null;
     bankCode: string | null;
     dateIso: string | null;
     code: string;
@@ -221,7 +222,7 @@ export function creditSlipTopup(
         `status = 'completed', credited_satang = ?, requested_satang = COALESCE(requested_satang, ?),
          slip_provider = ?, slip_trans_ref = ?, slip_amount_satang = ?,
          slip_sender_name = ?, slip_receiver_name = ?, slip_receiver_account = ?,
-         slip_bank_code = ?, slip_date = ?, verification_status = 'verified',
+         slip_receiver_proxy = ?, slip_bank_code = ?, slip_date = ?, verification_status = 'verified',
          verification_code = ?, verification_message = ?, verified_at = ?,
          verified_recovered = ?, processing_token = NULL,
          provider_request_id = COALESCE(?, provider_request_id),
@@ -235,6 +236,7 @@ export function creditSlipTopup(
           input.slip.senderName,
           input.slip.receiverName,
           input.slip.receiverAccount,
+          input.slip.receiverProxy ?? null,
           input.slip.bankCode,
           input.slip.dateIso,
           input.slip.code.slice(0, 120),
@@ -310,6 +312,88 @@ export function creditTrueMoneyTopup(
         "รับซองอั่งเปาสำเร็จ",
       );
       return { row: nextRow, balanceSatang, repeated: false };
+    })
+    .immediate();
+}
+
+/**
+ * Credit a stuck processing row after an Admin reviewed the slip manually.
+ * The selected-account comparison and amount checks happen in the review
+ * service before this function is called; this function owns the money CAS.
+ */
+export function creditReviewedTopup(
+  database: Database.Database,
+  input: {
+    topupId: string;
+    amountSatang: number;
+    note: string;
+    now?: number;
+  },
+): { row: TopupRow; balanceSatang: number; repeated: boolean } {
+  ensureTopupSchema(database);
+  assertAmount(input.amountSatang);
+  const now = input.now ?? Date.now();
+  return database
+    .transaction(() => {
+      const row = requireTopupRow(database, input.topupId);
+      if (row.status === "completed") {
+        const balance =
+          (
+            database
+              .prepare("SELECT balanceSatang FROM user WHERE id = ?")
+              .get(row.user_id) as { balanceSatang: number } | undefined
+          )?.balanceSatang ?? 0;
+        return { row, balanceSatang: balance, repeated: true };
+      }
+      if (row.status !== "processing") {
+        throw new TopupError(
+          "transaction-finished",
+          "รายการนี้ไม่ได้อยู่ในสถานะที่ผู้ดูแลอนุมัติได้",
+          409,
+        );
+      }
+      if (row.slip_provider && row.slip_trans_ref) {
+        assertNoDuplicateSlipRef(database, row, row.slip_provider, row.slip_trans_ref);
+      }
+      const balanceSatang = applyCredit(database, row, input.amountSatang, now);
+      const result = database
+        .prepare(
+          `UPDATE topup_transactions SET status = 'completed', credited_satang = ?,
+             requested_satang = COALESCE(requested_satang, ?),
+             verification_status = 'verified', verification_code = 'manual_approved',
+             verification_message = ?, verified_at = ?, verified_recovered = 0,
+             processing_token = NULL, completed_at = ?, updated_at = ?
+           WHERE id = ? AND status = 'processing'`,
+        )
+        .run(
+          input.amountSatang,
+          input.amountSatang,
+          input.note.slice(0, 300),
+          now,
+          now,
+          now,
+          row.id,
+        );
+      if (result.changes !== 1) {
+        throw new TopupError(
+          "verification-in-progress",
+          "รายการนี้ถูกดำเนินการจากคำขออื่นแล้ว กรุณารีเฟรช",
+          409,
+        );
+      }
+      recordTopupEvent(database, {
+        topupId: row.id,
+        fromStatus: "processing",
+        toStatus: "completed",
+        reason: input.note,
+        actor: "admin",
+        now,
+      });
+      return {
+        row: requireTopupRow(database, row.id),
+        balanceSatang,
+        repeated: false,
+      };
     })
     .immediate();
 }

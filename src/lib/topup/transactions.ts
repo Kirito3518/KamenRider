@@ -18,6 +18,7 @@ import {
 import { maskAccountNumber, maskPhone, maskPromptpayNumber } from "@/lib/topup/amount";
 import { TopupError } from "@/lib/topup/errors";
 import { createTopupReference } from "@/lib/topup/reference";
+import type { NormalizedSlip } from "@/lib/topup/providers/types";
 import { ensureTopupSchema } from "@/lib/topup/schema";
 import type {
   TopupDetail,
@@ -61,6 +62,7 @@ export type TopupRow = {
   slip_sender_name: string | null;
   slip_receiver_name: string | null;
   slip_receiver_account: string | null;
+  slip_receiver_proxy: string | null;
   slip_bank_code: string | null;
   slip_date: string | null;
   verification_status: VerificationStatus;
@@ -126,6 +128,10 @@ export type CreateTopupInput = {
     type: "msisdn" | "natId";
     number: string;
     accountName: string;
+    /** PromptPay payee's bank identity, checked against the slip receiver. */
+    bankCode?: string;
+    bankName?: string;
+    accountNumber?: string;
   };
   truemoney?: {
     phone: string;
@@ -255,10 +261,10 @@ export function createTopup(
               input.fingerprint.slice(0, 500),
               input.expiresAt,
               input.bank?.id ?? null,
-              input.bank?.code ?? null,
-              input.bank?.name ?? null,
-              input.bank?.accountNumber ?? null,
-              input.bank?.accountName ?? null,
+              input.bank?.code ?? input.promptpay?.bankCode ?? null,
+              input.bank?.name ?? input.promptpay?.bankName ?? null,
+              input.bank?.accountNumber ?? input.promptpay?.accountNumber ?? null,
+              input.bank?.accountName ?? input.promptpay?.accountName ?? null,
               input.promptpay?.type ?? null,
               input.promptpay?.number ?? null,
               input.truemoney?.phone ?? null,
@@ -585,6 +591,7 @@ export function markTopupFailed(
     failureCode: string;
     failureMessage: string;
     providerRequestId?: string | null;
+    actor?: "system" | "admin" | "user";
     now?: number;
   },
 ): TopupRow {
@@ -619,7 +626,7 @@ export function markTopupFailed(
         fromStatus: row.status,
         toStatus: "failed",
         reason: input.failureMessage,
-        actor: "system",
+        actor: input.actor ?? "system",
         now,
       });
       return requireTopupRow(database, input.topupId);
@@ -635,6 +642,8 @@ export function markTopupProcessingUnknown(
     message: string;
     providerRequestId?: string | null;
     retryAfterSeconds?: number | null;
+    /** Parsed receiver facts kept for the Admin review queue. */
+    slip?: NormalizedSlip | null;
     now?: number;
   },
 ): TopupRow {
@@ -644,12 +653,33 @@ export function markTopupProcessingUnknown(
     .transaction(() => {
       const row = requireTopupRow(database, input.topupId);
       if (row.status !== "processing" && row.status !== "pending") return row;
+      // The review snapshot must not claim a slip reference another row already
+      // owns; the unique index would abort the update. The image hash still
+      // protects against a reused slip while this row waits for review.
+      let slipTransRef = input.slip?.transRef ?? null;
+      if (slipTransRef && input.slip?.provider) {
+        const duplicate = database
+          .prepare(
+            "SELECT id FROM topup_transactions WHERE slip_provider = ? AND slip_trans_ref = ? AND id <> ?",
+          )
+          .get(input.slip.provider, slipTransRef, input.topupId);
+        if (duplicate) slipTransRef = null;
+      }
       database
         .prepare(
           `UPDATE topup_transactions SET status = 'processing',
              verification_status = 'unknown', verification_code = ?,
              verification_message = ?, failure_code = ?, failure_message = ?,
              processing_token = NULL, provider_request_id = COALESCE(?, provider_request_id),
+             slip_provider = COALESCE(?, slip_provider),
+             slip_trans_ref = COALESCE(?, slip_trans_ref),
+             slip_amount_satang = COALESCE(?, slip_amount_satang),
+             slip_sender_name = COALESCE(?, slip_sender_name),
+             slip_receiver_name = COALESCE(?, slip_receiver_name),
+             slip_receiver_account = COALESCE(?, slip_receiver_account),
+             slip_receiver_proxy = COALESCE(?, slip_receiver_proxy),
+             slip_bank_code = COALESCE(?, slip_bank_code),
+             slip_date = COALESCE(?, slip_date),
              updated_at = ?
            WHERE id = ? AND status IN ('pending','processing')`,
         )
@@ -659,6 +689,15 @@ export function markTopupProcessingUnknown(
           input.code.slice(0, 80),
           input.message.slice(0, 300),
           input.providerRequestId ?? null,
+          input.slip?.provider ?? null,
+          slipTransRef,
+          input.slip?.amountSatang ?? null,
+          input.slip?.senderName ?? null,
+          input.slip?.receiverName ?? null,
+          input.slip?.receiverAccountNumber ?? null,
+          input.slip?.receiverProxyValue ?? null,
+          input.slip?.receiverBankCode ?? null,
+          input.slip?.dateIso ?? null,
           now,
           input.topupId,
         );
@@ -865,6 +904,10 @@ export function topupDetailFromRow(
     slipReceiverAccountMasked: row.slip_receiver_account
       ? maskAccountNumber(row.slip_receiver_account)
       : null,
+    slipReceiverProxyMasked: row.slip_receiver_proxy
+      ? maskAccountNumber(row.slip_receiver_proxy)
+      : null,
+    slipBankCode: row.slip_bank_code,
     slipImageUrl: row.slip_image_path ? `/api/topups/${row.id}/slip` : null,
     verifiedAt: row.verified_at,
     verificationCode: row.verification_code,

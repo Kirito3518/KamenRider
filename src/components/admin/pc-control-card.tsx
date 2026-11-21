@@ -1,11 +1,26 @@
 "use client";
 
-import { Clock, KeyRound, Minus, Monitor, Plus, Power, PowerOff, RefreshCw, Unlink, UserRound, XCircle } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
+import type { ReactNode } from "react";
+import {
+  Clock,
+  KeyRound,
+  Minus,
+  Monitor,
+  Plus,
+  Power,
+  PowerOff,
+  RefreshCw,
+  Unlink,
+  UserRound,
+  XCircle,
+} from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
 import { PcControlVnc } from "@/components/admin/pc-control-vnc";
+import { cn } from "@/lib/utils";
 import {
   agentOnline,
   formatPcControlDateTime,
@@ -16,6 +31,44 @@ import {
 
 const activeUpdateStatuses = new Set(["awaitingInstaller", "installing", "awaitingHeartbeat", "rollingBack"]);
 const terminalLeaseStates = new Set(["ending", "failed", "completed"]);
+
+const groupToneClassName = {
+  primary: "text-primary",
+  available: "text-status-available",
+  busy: "text-status-busy",
+} as const;
+
+/**
+ * One action cluster inside the PC card. The group label and tone keep the
+ * colour-coded buttons scannable without relying on colour alone: the label
+ * says what the cluster is for, the button colour says how risky it is.
+ */
+function ActionGroup({
+  label,
+  icon: Icon,
+  tone,
+  children,
+}: {
+  label: string;
+  icon: LucideIcon;
+  tone: keyof typeof groupToneClassName;
+  children: ReactNode;
+}) {
+  return (
+    <div role="group" aria-label={label} className="flex flex-col gap-1.5">
+      <p
+        className={cn(
+          "flex items-center gap-1.5 text-xs font-medium",
+          groupToneClassName[tone],
+        )}
+      >
+        <Icon aria-hidden className="size-3.5" />
+        {label}
+      </p>
+      <div className="flex flex-wrap gap-1.5">{children}</div>
+    </div>
+  );
+}
 
 export function PcControlCard({
   machine,
@@ -85,7 +138,7 @@ export function PcControlCard({
               <EmptyDescription>เปิดดูหน้าจอเมื่อต้องการ ไม่มีการสตรีมตลอดเวลา</EmptyDescription>
             </EmptyHeader>
             <EmptyContent>
-              <Button variant="outline" size="sm" onClick={onOpenVnc} disabled={busy || !machine.localIp}>
+              <Button variant="default" size="sm" onClick={onOpenVnc} disabled={busy || !machine.localIp}>
                 <Monitor data-icon="inline-start" />
                 เปิดจอ
               </Button>
@@ -115,43 +168,54 @@ export function PcControlCard({
           )}
         </div>
 
-        <div className="flex flex-wrap gap-2">
-          <Button variant="outline" size="sm" onClick={onWake} disabled={busy || online}>
-            <Power data-icon="inline-start" />
-            เปิดเครื่อง
-          </Button>
-          <Button variant="destructive" size="sm" onClick={onPowerOff} disabled={busy || !online}>
-            <PowerOff data-icon="inline-start" />
-            ปิดเครื่อง
-          </Button>
-          <Button variant="outline" size="sm" onClick={onRestartSunshine} disabled={busy || !online || updateLocked}>
-            <RefreshCw data-icon="inline-start" />
-            รีสตาร์ท Sunshine
-          </Button>
-          <Button variant="outline" size="sm" onClick={onUnpairSunshine} disabled={busy || !online || updateLocked}>
-            <Unlink data-icon="inline-start" />
-            ยกเลิกการจับคู่ Sunshine
-          </Button>
-          <Button variant="outline" size="sm" onClick={onPair} disabled={busy || !leaseActionable}>
-            <KeyRound data-icon="inline-start" />
-            เชื่อมต่อพิน
-          </Button>
-          <Button variant="outline" size="sm" onClick={onAddTime} disabled={busy || !leaseActionable}>
-            <Plus data-icon="inline-start" />
-            1 ชม.
-          </Button>
-          <Button variant="outline" size="sm" onClick={onReduceTime} disabled={busy || !leaseActionable}>
-            <Minus data-icon="inline-start" />
-            1 ชม.
-          </Button>
-          <Button variant="outline" size="sm" onClick={onTime} disabled={busy || !leaseActionable}>
-            <Clock data-icon="inline-start" />
-            กำหนดเวลา
-          </Button>
-          <Button variant="secondary" size="sm" onClick={onCancel} disabled={busy || !leaseActionable}>
-            <XCircle data-icon="inline-start" />
-            ยกเลิกการเช่า
-          </Button>
+        <div className="flex flex-col gap-3">
+          <ActionGroup label="เครื่อง" icon={Power} tone="primary">
+            <Button variant="success" size="sm" onClick={onWake} disabled={busy || online}>
+              <Power data-icon="inline-start" />
+              เปิดเครื่อง
+            </Button>
+            <Button variant="destructive" size="sm" onClick={onPowerOff} disabled={busy || !online}>
+              <PowerOff data-icon="inline-start" />
+              ปิดเครื่อง
+            </Button>
+          </ActionGroup>
+
+          <ActionGroup label="ซ่อมบำรุง Sunshine" icon={RefreshCw} tone="busy">
+            <Button variant="busy" size="sm" onClick={onRestartSunshine} disabled={busy || !online || updateLocked}>
+              <RefreshCw data-icon="inline-start" />
+              รีสตาร์ท Sunshine
+            </Button>
+            <Button variant="busy" size="sm" onClick={onUnpairSunshine} disabled={busy || !online || updateLocked}>
+              <Unlink data-icon="inline-start" />
+              ยกเลิกการจับคู่ Sunshine
+            </Button>
+          </ActionGroup>
+
+          <ActionGroup label="เชื่อมต่อ" icon={KeyRound} tone="primary">
+            <Button variant="default" size="sm" onClick={onPair} disabled={busy || !leaseActionable}>
+              <KeyRound data-icon="inline-start" />
+              เชื่อมต่อพิน
+            </Button>
+          </ActionGroup>
+
+          <ActionGroup label="เวลาเช่า" icon={Clock} tone="primary">
+            <Button variant="success" size="sm" onClick={onAddTime} disabled={busy || !leaseActionable}>
+              <Plus data-icon="inline-start" />
+              +1 ชม.
+            </Button>
+            <Button variant="busy" size="sm" onClick={onReduceTime} disabled={busy || !leaseActionable}>
+              <Minus data-icon="inline-start" />
+              −1 ชม.
+            </Button>
+            <Button variant="default" size="sm" onClick={onTime} disabled={busy || !leaseActionable}>
+              <Clock data-icon="inline-start" />
+              กำหนดเวลา
+            </Button>
+            <Button variant="destructive" size="sm" onClick={onCancel} disabled={busy || !leaseActionable}>
+              <XCircle data-icon="inline-start" />
+              ยกเลิกการเช่า
+            </Button>
+          </ActionGroup>
         </div>
       </CardContent>
     </Card>

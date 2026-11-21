@@ -6,8 +6,20 @@ import {
   CircleCheck,
   ImageIcon,
   ShieldCheck,
+  ShieldX,
 } from "lucide-react";
+import toast from "react-hot-toast";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -114,6 +126,11 @@ export function TopupDetailDialog({
   const [verifying, setVerifying] = useState(false);
   const [notice, setNotice] = useState<VerifyNotice | null>(null);
   const [verifyError, setVerifyError] = useState("");
+  const [reviewAction, setReviewAction] = useState<"approve" | "reject" | null>(
+    null,
+  );
+  const [reviewBusy, setReviewBusy] = useState(false);
+  const [reviewError, setReviewError] = useState("");
 
   const open = topupId !== null;
 
@@ -165,11 +182,56 @@ export function TopupDetailDialog({
               : "info",
         message: result.message || "ส่งคำขอตรวจสอบสลิปใหม่แล้ว",
       });
+      if (result.outcome === "completed") {
+        toast.success(result.message || "ตรวจสอบสลิปผ่านและเพิ่มยอดเงินแล้ว");
+      } else if (result.outcome === "failed") {
+        toast.error(result.message || "ตรวจสอบสลิปไม่ผ่าน");
+      } else {
+        toast(result.message || "ส่งคำขอตรวจสอบสลิปใหม่แล้ว");
+      }
       refreshDetail();
     } catch (cause) {
-      setVerifyError(clientErrorMessage(cause));
+      const message = clientErrorMessage(cause);
+      setVerifyError(message);
+      toast.error(message);
     } finally {
       setVerifying(false);
+    }
+  }
+
+  async function submitReview(action: "approve" | "reject") {
+    if (!topupId || reviewBusy) return;
+    setReviewBusy(true);
+    setReviewError("");
+    try {
+      const result = await topupFetch<TopupSlipResponse>(
+        `/api/admin/topups/${encodeURIComponent(topupId)}/review`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action }),
+        },
+      );
+      setNotice({
+        tone:
+          result.outcome === "completed"
+            ? "success"
+            : result.outcome === "failed"
+              ? "failure"
+              : "info",
+        message: result.message,
+      });
+      if (result.outcome === "completed") toast.success(result.message);
+      else if (result.outcome === "failed") toast.error(result.message);
+      else toast(result.message);
+      setReviewAction(null);
+      refreshDetail();
+    } catch (cause) {
+      const message = clientErrorMessage(cause);
+      setReviewError(message);
+      toast.error(message);
+    } finally {
+      setReviewBusy(false);
     }
   }
 
@@ -222,10 +284,74 @@ export function TopupDetailDialog({
             verifying={verifying}
             notice={notice}
             verifyError={verifyError}
+            reviewError={reviewError}
+            reviewBusy={reviewBusy}
             onReverify={() => void reverify()}
+            onReview={setReviewAction}
           />
         ) : null}
       </DialogContent>
+
+      <AlertDialog
+        open={reviewAction !== null}
+        onOpenChange={(next) => {
+          if (!next && !reviewBusy) setReviewAction(null);
+        }}
+      >
+        <AlertDialogContent size="sm">
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {reviewAction === "approve"
+                ? "ยืนยันอนุมัติรายการ"
+                : "ยืนยันปฏิเสธรายการ"}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {reviewAction === "approve"
+                ? "ระบบจะตรวจบัญชีผู้รับกับบัญชีที่ลูกค้าเลือกอีกครั้งก่อนเพิ่มยอดเงิน — ถ้าไม่ตรงจะปฏิเสธรายการทันที"
+                : "รายการนี้จะถูกทำเครื่องหมายว่าไม่ผ่านการตรวจสอบ และจะไม่มีการเพิ่มยอดเงิน"}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          {detail?.review?.outcome === "mismatch" &&
+          reviewAction === "approve" ? (
+            <Alert variant="destructive">
+              <ShieldX aria-hidden />
+              <AlertTitle>บัญชีผู้รับไม่ตรงกับรายการ</AlertTitle>
+              <AlertDescription>
+                {detail.review.message} — ระบบจะปฏิเสธรายการเมื่อยืนยัน
+              </AlertDescription>
+            </Alert>
+          ) : null}
+          {reviewError ? (
+            <Alert variant="destructive">
+              <AlertTitle>ดำเนินการไม่สำเร็จ</AlertTitle>
+              <AlertDescription>{reviewError}</AlertDescription>
+            </Alert>
+          ) : null}
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={reviewBusy}>
+              ไม่ใช่ตอนนี้
+            </AlertDialogCancel>
+            <AlertDialogAction
+              variant={reviewAction === "reject" ? "destructive" : "success"}
+              disabled={reviewBusy}
+              onClick={() =>
+                reviewAction ? void submitReview(reviewAction) : undefined
+              }
+            >
+              {reviewBusy ? (
+                <Spinner data-icon="inline-start" />
+              ) : reviewAction === "reject" ? (
+                <ShieldX data-icon="inline-start" />
+              ) : (
+                <ShieldCheck data-icon="inline-start" />
+              )}
+              {reviewAction === "reject"
+                ? "ยืนยันปฏิเสธ"
+                : "ยืนยันอนุมัติ"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </Dialog>
   );
 }
@@ -235,13 +361,19 @@ function DetailBody({
   verifying,
   notice,
   verifyError,
+  reviewError,
+  reviewBusy,
   onReverify,
+  onReview,
 }: {
   detail: AdminTopupDetail;
   verifying: boolean;
   notice: VerifyNotice | null;
   verifyError: string;
+  reviewError: string;
+  reviewBusy: boolean;
   onReverify: () => void;
+  onReview: (action: "approve" | "reject") => void;
 }) {
   const amount = entryAmount(detail);
   const canReverify =
@@ -260,6 +392,7 @@ function DetailBody({
         <StatusBadge status={detail.status} />
         <ChannelBadge channel={detail.channel} />
         <VerificationBadge status={detail.verificationStatus} />
+        {detail.canReview ? <Badge variant="busy">รอตรวจสอบ</Badge> : null}
       </div>
 
       {notice ? (
@@ -437,11 +570,82 @@ function DetailBody({
           <DetailRow label="บัญชีผู้รับในสลิป">
             <span className="font-mono text-xs">{detail.slipReceiverAccountMasked || "—"}</span>
           </DetailRow>
+          <DetailRow label="PromptPay ผู้รับในสลิป">
+            <span className="font-mono text-xs">{detail.slipReceiverProxyMasked || "—"}</span>
+          </DetailRow>
+          <DetailRow label="ธนาคารผู้รับในสลิป">
+            <span className="font-mono text-xs">{detail.slipBankCode || "—"}</span>
+          </DetailRow>
           <DetailRow label="จำนวนครั้งที่ตรวจสอบ">
             {detail.attemptsCount.toLocaleString("th-TH")}
           </DetailRow>
         </dl>
       </section>
+
+      {detail.canReview && detail.review ? (
+        <section
+          aria-label="อนุมัติรายการที่รอตรวจสอบ"
+          className="flex flex-col gap-3 rounded-2xl border border-status-busy/30 bg-status-busy/5 p-4"
+        >
+          <SectionTitle>
+            <span className="inline-flex items-center gap-2">
+              <ShieldCheck aria-hidden className="size-4 text-status-busy" />
+              ตรวจสอบและอนุมัติ (รอตรวจสอบ)
+            </span>
+          </SectionTitle>
+          <Alert
+            variant={detail.review.outcome === "mismatch" ? "destructive" : "default"}
+          >
+            {detail.review.outcome === "mismatch" ? (
+              <ShieldX aria-hidden />
+            ) : (
+              <ShieldCheck aria-hidden />
+            )}
+            <AlertTitle>
+              {detail.review.outcome === "match"
+                ? "บัญชีผู้รับตรงกับรายการ"
+                : detail.review.outcome === "mismatch"
+                  ? "บัญชีผู้รับไม่ตรงกับรายการ"
+                  : "ข้อมูลจากผู้ให้บริการไม่พอสำหรับยืนยันอัตโนมัติ"}
+            </AlertTitle>
+            <AlertDescription>{detail.review.message}</AlertDescription>
+          </Alert>
+          <p className="text-xs leading-relaxed text-muted-foreground">
+            การอนุมัติจะเทียบบัญชีผู้รับในสลิปกับบัญชีที่ลูกค้าเลือกไว้ให้ก่อน
+            และถ้าไม่ตรง ระบบจะปฏิเสธรายการทันทีโดยไม่เพิ่มยอดเงิน
+            {detail.review.outcome === "insufficient"
+              ? " — กรณีข้อมูลไม่พอ ผู้ดูแลต้องตรวจรูปสลิปด้วยตนเองก่อนอนุมัติ"
+              : ""}
+          </p>
+          <div className="flex flex-wrap gap-2">
+            <Button
+              type="button"
+              variant="success"
+              disabled={reviewBusy || detail.review.outcome === "mismatch"}
+              onClick={() => onReview("approve")}
+            >
+              {reviewBusy ? (
+                <Spinner data-icon="inline-start" />
+              ) : (
+                <ShieldCheck data-icon="inline-start" />
+              )}
+              อนุมัติรายการ
+            </Button>
+            <Button
+              type="button"
+              variant="destructive"
+              disabled={reviewBusy}
+              onClick={() => onReview("reject")}
+            >
+              <ShieldX data-icon="inline-start" />
+              ปฏิเสธรายการ
+            </Button>
+          </div>
+          {reviewError ? (
+            <p className="text-sm text-destructive">{reviewError}</p>
+          ) : null}
+        </section>
+      ) : null}
 
       {canReverify ? (
         <section
@@ -451,7 +655,7 @@ function DetailBody({
           <SectionTitle>ตรวจสอบสลิปซ้ำ</SectionTitle>
           <p className="text-xs text-muted-foreground">
             สำหรับรายการที่ค้างสถานะกำลังตรวจสอบ ระบบจะเรียกผู้ให้บริการอีกครั้งและบันทึกผล
-            อัตโนมัติ ไม่มีการเพิ่มยอดเงินด้วยมือ
+            อัตโนมัติ — ใช้ปุ่มอนุมัติ/ปฏิเสธด้านบนเมื่อต้องการตัดสินรายการที่รอตรวจสอบ
           </p>
           <Button
             type="button"

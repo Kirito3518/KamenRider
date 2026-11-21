@@ -273,20 +273,23 @@ export function TopupPage({
                         bankName={firstBankAccount.bankName}
                         logoKey={firstBankAccount.logoKey}
                         logoDataUrl={firstBankAccount.logoDataUrl}
-                        className="size-7 rounded-lg"
+                        className="size-11 rounded-xl"
                       />
                     ) : bankRail === "bank_transfer" && bankPreset ? (
                       <BankLogo
                         bankCode={bankPreset.code}
                         bankName={bankPreset.name}
                         logoKey={bankPreset.key}
-                        className="size-7 rounded-lg"
+                        className="size-11 rounded-xl"
                       />
                     ) : bankRail === "bank_transfer" ? (
                       <Landmark aria-hidden className="size-6 text-primary" />
                     ) : (
                       <QrCode aria-hidden className="size-6 text-primary" />
                     )
+                  }
+                  iconSurfaceClassName={
+                    bankRail === "bank_transfer" ? "bg-transparent" : undefined
                   }
                   onClick={() => {
                     if (!bankEnabled) return;
@@ -405,6 +408,7 @@ function ChannelRow({
   title,
   subtitle,
   icon,
+  iconSurfaceClassName,
   badge,
   disabled = false,
   selected = false,
@@ -413,6 +417,7 @@ function ChannelRow({
   title: string;
   subtitle: string;
   icon: ReactNode;
+  iconSurfaceClassName?: string;
   badge: string;
   disabled?: boolean;
   selected?: boolean;
@@ -429,7 +434,12 @@ function ChannelRow({
         disabled && "cursor-not-allowed opacity-55",
       )}
     >
-      <span className="flex size-11 shrink-0 items-center justify-center rounded-xl bg-muted/70">
+      <span
+        className={cn(
+          "flex size-11 shrink-0 items-center justify-center rounded-xl bg-muted/70",
+          iconSurfaceClassName,
+        )}
+      >
         {icon}
       </span>
       <span className="min-w-0 flex-1">

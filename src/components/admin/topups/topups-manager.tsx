@@ -25,6 +25,7 @@ import {
   sortLabel,
 } from "@/components/admin/topups/topup-labels";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   CardAction,
@@ -530,7 +531,12 @@ export function TopupsManager() {
                               <StatusBadge status={entry.status} />
                             </TableCell>
                             <TableCell>
-                              <VerificationBadge status={entry.verificationStatus} />
+                              <div className="flex flex-wrap items-center gap-1">
+                                <VerificationBadge status={entry.verificationStatus} />
+                                {entry.canReview ? (
+                                  <Badge variant="busy">รอตรวจสอบ</Badge>
+                                ) : null}
+                              </div>
                             </TableCell>
                             <TableCell className="text-right">
                               <Button

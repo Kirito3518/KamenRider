@@ -1,15 +1,13 @@
 "use client";
 
-import { type ChangeEvent, type FormEvent, useState } from "react";
-import { Landmark, Upload } from "lucide-react";
+import { type FormEvent, useState } from "react";
+import { Landmark } from "lucide-react";
 import { BANK_PRESETS, getBankPreset } from "@/lib/topup/banks";
 import type { BankAccountAdmin } from "@/lib/topup/types";
 import {
   type BankAccountFormValues,
   type FieldErrors,
   type TopupMutationResult,
-  LOGO_FILE_ACCEPT,
-  MAX_LOGO_BYTES,
   formatAccountNumber,
   hasFieldErrors,
   normalizeDigits,
@@ -33,7 +31,6 @@ import {
   FieldError,
   FieldGroup,
   FieldLabel,
-  FieldTitle,
 } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import {
@@ -47,15 +44,46 @@ import {
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
 
-const CUSTOM_BANK_VALUE = "custom";
+type BankSelection = {
+  value: string;
+  name: string;
+  code: string;
+  logoKey: string | null;
+  logoDataUrl: string | null;
+};
 
-const BANK_SELECT_ITEMS = [
-  ...BANK_PRESETS.map((preset) => ({
+function presetSelection(preset: (typeof BANK_PRESETS)[number]): BankSelection {
+  return {
     value: preset.code,
-    label: `${preset.name} (${preset.code})`,
-  })),
-  { value: CUSTOM_BANK_VALUE, label: "ธนาคารอื่น (กำหนดรหัสเอง)" },
-];
+    name: preset.name,
+    code: preset.code,
+    logoKey: preset.key,
+    logoDataUrl: null,
+  };
+}
+
+/**
+ * New accounts can start from any standard preset. Accounts created before the
+ * preset-only form may use a custom bank code; that row stays selectable so the
+ * account can still be edited without inventing separate code/name inputs.
+ */
+function bankSelections(account: BankAccountAdmin | null): BankSelection[] {
+  const selections: BankSelection[] = BANK_PRESETS.map(presetSelection);
+  if (
+    account &&
+    !getBankPreset(account.bankCode) &&
+    !selections.some((selection) => selection.value === account.bankCode)
+  ) {
+    selections.push({
+      value: account.bankCode,
+      name: account.bankName,
+      code: account.bankCode,
+      logoKey: account.logoKey,
+      logoDataUrl: account.logoDataUrl,
+    });
+  }
+  return selections;
+}
 
 function defaultForm(): BankAccountFormValues {
   const preset = BANK_PRESETS[0];
@@ -82,11 +110,6 @@ function formFromAccount(account: BankAccountAdmin): BankAccountFormValues {
   };
 }
 
-function initialBankSelection(account: BankAccountAdmin | null): string {
-  if (!account) return BANK_PRESETS[0].code;
-  return getBankPreset(account.bankCode) ? account.bankCode : CUSTOM_BANK_VALUE;
-}
-
 /**
  * Dialog wrapper. The form is a keyed child so opening it for another account
  * starts from a fresh initial state without a state-syncing effect.
@@ -106,7 +129,7 @@ export function BankAccountDialog({
 }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[88dvh] overflow-y-auto sm:max-w-2xl">
+      <DialogContent className="max-h-[88dvh] overflow-y-auto sm:max-w-xl">
         <DialogHeader>
           <DialogTitle>
             {account ? "แก้ไขบัญชีธนาคาร" : "เพิ่มบัญชีธนาคาร"}
@@ -140,65 +163,30 @@ function BankAccountDialogForm({
   const [values, setValues] = useState<BankAccountFormValues>(() =>
     account ? formFromAccount(account) : defaultForm(),
   );
-  const [bankSelection, setBankSelection] = useState(() =>
-    initialBankSelection(account),
-  );
   const [errors, setErrors] = useState<FieldErrors>({});
   const [formError, setFormError] = useState("");
-  const [logoError, setLogoError] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const selections = bankSelections(account);
 
   function update(patch: Partial<BankAccountFormValues>) {
     setValues((current) => ({ ...current, ...patch }));
   }
 
   function handleBankChange(next: string | null) {
-    const selection = next ?? CUSTOM_BANK_VALUE;
-    setBankSelection(selection);
-    const preset = getBankPreset(selection);
-    if (preset) {
-      update({
-        bankCode: preset.code,
-        bankName: preset.name,
-        logoKey: preset.key,
-        logoDataUrl: null,
-      });
-    }
+    const selection = selections.find((item) => item.value === next);
+    if (!selection) return;
+    update({
+      bankCode: selection.code,
+      bankName: selection.name,
+      logoKey: selection.logoKey,
+      logoDataUrl: selection.logoDataUrl,
+    });
     setErrors((current) => ({
       ...current,
       bankCode: undefined,
       bankName: undefined,
     }));
     setFormError("");
-  }
-
-  function handleFileChange(event: ChangeEvent<HTMLInputElement>) {
-    const file = event.currentTarget.files?.[0];
-    event.currentTarget.value = "";
-    if (!file) return;
-    setLogoError("");
-    if (!["image/png", "image/jpeg", "image/webp"].includes(file.type)) {
-      setLogoError("โลโก้ต้องเป็นรูป PNG, JPEG หรือ WebP");
-      return;
-    }
-    if (file.size > MAX_LOGO_BYTES) {
-      setLogoError("โลโก้ต้องมีขนาดไม่เกิน 32 KB");
-      return;
-    }
-    const reader = new FileReader();
-    reader.onload = () => {
-      const result = typeof reader.result === "string" ? reader.result : "";
-      if (!result.startsWith("data:image/")) {
-        setLogoError("อ่านไฟล์โลโก้ไม่สำเร็จ กรุณาเลือกไฟล์ใหม่");
-        return;
-      }
-      update({ logoKey: null, logoDataUrl: result });
-      setErrors((current) => ({ ...current, logo: undefined }));
-    };
-    reader.onerror = () => {
-      setLogoError("อ่านไฟล์โลโก้ไม่สำเร็จ กรุณาเลือกไฟล์ใหม่");
-    };
-    reader.readAsDataURL(file);
   }
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
@@ -210,13 +198,14 @@ function BankAccountDialogForm({
       bankName: values.bankName.trim(),
       accountNumber: normalizeDigits(values.accountNumber),
       accountName: values.accountName.trim(),
-      logoKey: values.logoKey,
-      logoDataUrl: values.logoDataUrl,
     };
     const nextErrors = validateBankAccountForm(nextValues);
     if (hasFieldErrors(nextErrors)) {
       setErrors(nextErrors);
-      setFormError("");
+      setFormError(
+        Object.values(nextErrors).find((message) => Boolean(message)) ??
+          "ข้อมูลบัญชีไม่ถูกต้อง",
+      );
       return;
     }
     setSubmitting(true);
@@ -231,8 +220,6 @@ function BankAccountDialogForm({
     setFormError(topupErrorMessage(result.error));
   }
 
-  const presetLocked = bankSelection !== CUSTOM_BANK_VALUE;
-
   return (
     <form
       onSubmit={(event) => void handleSubmit(event)}
@@ -243,8 +230,11 @@ function BankAccountDialogForm({
         <Field>
           <FieldLabel htmlFor="topup-bank-select">ธนาคาร</FieldLabel>
           <Select
-            items={BANK_SELECT_ITEMS}
-            value={bankSelection}
+            items={selections.map(({ value, name, code }) => ({
+              value,
+              label: `${name} (${code})`,
+            }))}
+            value={values.bankCode}
             onValueChange={handleBankChange}
           >
             <SelectTrigger
@@ -256,72 +246,29 @@ function BankAccountDialogForm({
             </SelectTrigger>
             <SelectContent>
               <SelectGroup>
-                {BANK_PRESETS.map((preset) => (
-                  <SelectItem key={preset.code} value={preset.code}>
+                {selections.map((selection) => (
+                  <SelectItem key={selection.value} value={selection.value}>
                     <span className="flex items-center gap-2">
                       <BankLogoTile
-                        bankCode={preset.code}
-                        bankName={preset.name}
-                        logoKey={preset.key}
+                        bankCode={selection.code}
+                        bankName={selection.name}
+                        logoKey={selection.logoKey}
+                        logoDataUrl={selection.logoDataUrl}
                         className="size-6 rounded-md text-[8px]"
                       />
                       <span>
-                        {preset.name} ({preset.code})
+                        {selection.name} ({selection.code})
                       </span>
                     </span>
                   </SelectItem>
                 ))}
-                <SelectItem value={CUSTOM_BANK_VALUE}>
-                  ธนาคารอื่น (กำหนดรหัสเอง)
-                </SelectItem>
               </SelectGroup>
             </SelectContent>
           </Select>
           <FieldDescription>
-            เลือกธนาคารเพื่อใช้รหัสและโลโก้มาตรฐาน หรือเลือก &quot;ธนาคารอื่น&quot;
-            เพื่อกรอกเอง
+            เลือกธนาคารเพื่อใช้รหัส ชื่อ และโลโก้มาตรฐานโดยอัตโนมัติ
           </FieldDescription>
         </Field>
-
-        <div className="grid gap-4 sm:grid-cols-2">
-          <Field data-invalid={Boolean(errors.bankCode)}>
-            <FieldLabel htmlFor="topup-bank-code">รหัสธนาคาร (3 หลัก)</FieldLabel>
-            <Input
-              id="topup-bank-code"
-              name="bankCode"
-              inputMode="numeric"
-              maxLength={3}
-              value={values.bankCode}
-              readOnly={presetLocked}
-              aria-invalid={Boolean(errors.bankCode)}
-              onChange={(event) => {
-                update({
-                  bankCode: event.currentTarget.value
-                    .replace(/\D+/g, "")
-                    .slice(0, 3),
-                });
-                setErrors((current) => ({ ...current, bankCode: undefined }));
-              }}
-            />
-            {errors.bankCode ? <FieldError>{errors.bankCode}</FieldError> : null}
-          </Field>
-          <Field data-invalid={Boolean(errors.bankName)}>
-            <FieldLabel htmlFor="topup-bank-name">ชื่อธนาคาร</FieldLabel>
-            <Input
-              id="topup-bank-name"
-              name="bankName"
-              maxLength={100}
-              value={values.bankName}
-              readOnly={presetLocked}
-              aria-invalid={Boolean(errors.bankName)}
-              onChange={(event) => {
-                update({ bankName: event.currentTarget.value });
-                setErrors((current) => ({ ...current, bankName: undefined }));
-              }}
-            />
-            {errors.bankName ? <FieldError>{errors.bankName}</FieldError> : null}
-          </Field>
-        </div>
 
         <div className="grid gap-4 sm:grid-cols-2">
           <Field data-invalid={Boolean(errors.accountNumber)}>
@@ -381,96 +328,6 @@ function BankAccountDialogForm({
             ) : null}
           </Field>
         </div>
-
-        <Field data-invalid={Boolean(errors.logo || logoError)}>
-          <FieldTitle>โลโก้ธนาคาร</FieldTitle>
-          <FieldDescription>
-            เลือกโลโก้สำเร็จรูป หรืออัปโหลด PNG/JPEG/WebP ไม่เกิน 32 KB
-          </FieldDescription>
-          <div
-            role="group"
-            aria-label="เลือกโลโก้ธนาคารสำเร็จรูป"
-            className="grid grid-cols-4 gap-2 sm:grid-cols-6"
-          >
-            {BANK_PRESETS.map((preset) => {
-              const selected =
-                !values.logoDataUrl && values.logoKey === preset.key;
-              return (
-                <button
-                  key={preset.key}
-                  type="button"
-                  aria-label={`ใช้โลโก้ ${preset.name}`}
-                  aria-pressed={selected}
-                  onClick={() => {
-                    update({ logoKey: preset.key, logoDataUrl: null });
-                    setErrors((current) => ({ ...current, logo: undefined }));
-                    setLogoError("");
-                  }}
-                  className={
-                    selected
-                      ? "flex h-16 flex-col items-center justify-center gap-1 rounded-xl border-2 border-primary bg-primary/5 p-1"
-                      : "flex h-16 flex-col items-center justify-center gap-1 rounded-xl border border-border p-1 hover:bg-muted/60"
-                  }
-                >
-                  <BankLogoTile
-                    bankCode={preset.code}
-                    bankName={preset.name}
-                    logoKey={preset.key}
-                    className="size-8"
-                  />
-                  <span className="text-[10px] text-muted-foreground">
-                    {preset.key.toUpperCase()}
-                  </span>
-                </button>
-              );
-            })}
-          </div>
-
-          <div className="flex flex-wrap items-center gap-3">
-            <label
-              htmlFor="topup-bank-logo-file"
-              className="inline-flex cursor-pointer items-center gap-2 rounded-full border border-border px-3 py-1.5 text-sm hover:bg-muted"
-            >
-              <Upload aria-hidden className="size-4" />
-              อัปโหลดโลโก้
-              <input
-                id="topup-bank-logo-file"
-                name="logoFile"
-                type="file"
-                accept={LOGO_FILE_ACCEPT}
-                className="sr-only"
-                onChange={handleFileChange}
-              />
-            </label>
-            {values.logoDataUrl ? (
-              <>
-                <BankLogoTile
-                  bankCode={values.bankCode}
-                  bankName={values.bankName}
-                  logoDataUrl={values.logoDataUrl}
-                />
-                <span className="text-xs text-muted-foreground">
-                  ใช้รูปที่อัปโหลด
-                </span>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  onClick={() =>
-                    update({
-                      logoDataUrl: null,
-                      logoKey: getBankPreset(values.bankCode)?.key ?? null,
-                    })
-                  }
-                >
-                  ลบรูปที่อัปโหลด
-                </Button>
-              </>
-            ) : null}
-          </div>
-          {logoError ? <FieldError>{logoError}</FieldError> : null}
-          {errors.logo ? <FieldError>{errors.logo}</FieldError> : null}
-        </Field>
 
         <Field orientation="horizontal">
           <FieldLabel htmlFor="topup-bank-active">เปิดใช้งานบัญชีนี้</FieldLabel>

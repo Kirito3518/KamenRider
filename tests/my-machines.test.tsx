@@ -4,13 +4,21 @@ import {
   fireEvent,
   render,
   screen,
-  waitFor,
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MyMachines } from "@/components/my-machines/my-machines";
 
 vi.mock("@/components/ui/layout/Navbar", () => ({ Navbar: () => null }));
 vi.mock("@/components/ui/layout/Footer", () => ({ Footer: () => null }));
+vi.mock("react-hot-toast", () => ({
+  default: { success: vi.fn(), error: vi.fn() },
+}));
+vi.mock("motion/react", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("motion/react")>();
+  return { ...actual, useReducedMotion: () => true };
+});
+
+const authState = vi.hoisted(() => ({ balanceSatang: 100_000 }));
 vi.mock("@/lib/auth-client", () => ({
   authClient: {
     useSession: () => ({
@@ -20,7 +28,7 @@ vi.mock("@/lib/auth-client", () => ({
           name: "Renter",
           email: "renter@example.com",
           image: null,
-          balanceSatang: 100_000,
+          balanceSatang: authState.balanceSatang,
           role: "user",
         },
       },
@@ -30,31 +38,43 @@ vi.mock("@/lib/auth-client", () => ({
   },
 }));
 
-const HEARTBEAT_AT = "2026-11-08T03:04:05.000Z";
-const LEASES = [
-  {
+const NOW = Date.parse("2026-11-08T03:30:00.000Z");
+const HEARTBEAT_AT = "2026-11-08T03:25:00.000Z";
+
+function payment(overrides: Record<string, unknown> = {}) {
+  return {
+    hourlyPriceSatang: 40_000,
+    durationSeconds: 7_200,
+    extensionSeconds: 0,
+    paidSatang: 80_000,
+    refundedSatang: 0,
+    extendable: true,
+    ...overrides,
+  };
+}
+
+function lease(overrides: Record<string, unknown> = {}) {
+  return {
     id: "rental-1",
     machineId: "pc-one",
+    machineDisplayName: "PC ONE",
     state: "active",
     revision: 1,
     pendingRevision: null,
-    expiresAtUtc: "2026-11-08T04:00:00.000Z",
-    connection: { address: null, stale: false },
+    startsAtUtc: "2026-11-08T02:30:00.000Z",
+    expiresAtUtc: "2026-11-08T04:30:00.000Z",
+    endedAtUtc: null,
+    connection: { address: "203.0.113.7:47989", stale: false },
     agent: { reachability: "reachable", lastSeenAt: HEARTBEAT_AT },
-    payment: {
-      hourlyPriceSatang: 40_000,
-      durationSeconds: 3600,
-      extensionSeconds: 0,
-      paidSatang: 40_000,
-      refundedSatang: 0,
-      extendable: true,
-    },
-  },
-];
+    payment: payment(),
+    parsec: null,
+    ...overrides,
+  };
+}
 
-function response(body: unknown) {
+function response(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
-    status: 200,
+    status,
     headers: { "Content-Type": "application/json" },
   });
 }
@@ -67,18 +87,33 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-describe("MyMachines lease refresh", () => {
+describe("MyMachines", () => {
   let fetchSpy: ReturnType<typeof vi.fn>;
+  let leases: unknown[];
+  let leaseListRequests: number;
   let visibilityDescriptor: PropertyDescriptor | undefined;
 
   beforeEach(() => {
-    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    authState.balanceSatang = 100_000;
+    vi.useFakeTimers({
+      toFake: ["setInterval", "clearInterval", "Date"],
+      now: NOW,
+    });
     visibilityDescriptor = Object.getOwnPropertyDescriptor(
       document,
       "visibilityState",
     );
     setVisibility("visible");
-    fetchSpy = vi.fn(async () => response(LEASES));
+    leases = [lease()];
+    leaseListRequests = 0;
+    fetchSpy = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/my-leases") {
+        leaseListRequests += 1;
+        return response(leases);
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
     vi.stubGlobal("fetch", fetchSpy);
   });
 
@@ -94,93 +129,235 @@ describe("MyMachines lease refresh", () => {
     vi.restoreAllMocks();
   });
 
-  it("shows the Controller reachability and last heartbeat on each lease", async () => {
-    render(<MyMachines />);
-
-    expect(await screen.findByText("pc-one")).toBeDefined();
-    expect(screen.getByText("Agent ติดต่อได้")).toBeDefined();
-    expect(screen.getByText(`Heartbeat ล่าสุด: ${HEARTBEAT_AT}`)).toBeDefined();
-  });
-
-  it("renders the Agent-reported machine display name when provided", async () => {
-    fetchSpy.mockImplementation(async () =>
-      response([{ ...LEASES[0], machineDisplayName: "DESKTOP-RENTER" }]),
-    );
-
-    render(<MyMachines />);
-
-    expect(await screen.findByText("DESKTOP-RENTER")).toBeDefined();
-  });
-
-  it("shows the verified connect address for the renter's active lease", async () => {
-    fetchSpy.mockImplementation(async () =>
-      response([
-        {
-          ...LEASES[0],
-          connection: { address: "203.0.113.7:47989", stale: false },
-        },
-      ]),
-    );
+  it("shows only active rentals and explains preparing rentals", async () => {
+    leases = [
+      lease(),
+      lease({
+        id: "rental-done",
+        machineId: "pc-done",
+        machineDisplayName: "PC DONE",
+        state: "completed",
+      }),
+      lease({
+        id: "rental-pending",
+        machineId: "pc-pending",
+        machineDisplayName: "PC PENDING",
+        state: "pending",
+        startsAtUtc: null,
+        expiresAtUtc: null,
+        connection: { address: null, stale: false },
+        agent: { reachability: "unknown", lastSeenAt: null },
+      }),
+    ];
 
     render(<MyMachines />);
 
     expect(
-      await screen.findByText("เชื่อมต่อ: 203.0.113.7:47989"),
+      await screen.findByRole("heading", { level: 2, name: "PC ONE" }),
+    ).toBeDefined();
+    expect(screen.queryByText("PC DONE")).toBeNull();
+    expect(screen.queryByText("PC PENDING")).toBeNull();
+    expect(screen.getByText(/กำลังเตรียมเครื่อง 1 รายการ/)).toBeDefined();
+    expect(screen.getByText("พร้อมเชื่อมต่อ")).toBeDefined();
+    expect(screen.getByText("กำลังใช้งาน")).toBeDefined();
+    expect(screen.getByText("฿800.00")).toBeDefined();
+    expect(screen.getByText("฿400.00 / ชม.")).toBeDefined();
+    // The ip:port lives in the Moonlight dialog, not on the card itself.
+    expect(screen.queryByText("203.0.113.7:47989")).toBeNull();
+  });
+
+  it("shows the empty state when no rental is active or preparing", async () => {
+    leases = [
+      lease({
+        id: "rental-done",
+        machineId: "pc-done",
+        machineDisplayName: "PC DONE",
+        state: "completed",
+      }),
+    ];
+
+    render(<MyMachines />);
+
+    expect(
+      await screen.findByText("ยังไม่มีเครื่องที่กำลังเช่า"),
+    ).toBeDefined();
+    expect(screen.queryByText("PC DONE")).toBeNull();
+  });
+
+  it("keeps the preparing notice instead of the empty state", async () => {
+    leases = [
+      lease({
+        id: "rental-pending",
+        machineId: "pc-pending",
+        machineDisplayName: "PC PENDING",
+        state: "preparing",
+        startsAtUtc: null,
+        expiresAtUtc: null,
+        connection: { address: null, stale: false },
+      }),
+    ];
+
+    render(<MyMachines />);
+
+    expect(
+      await screen.findByText(/กำลังเตรียมเครื่อง 1 รายการ/),
+    ).toBeDefined();
+    expect(screen.queryByText("ยังไม่มีเครื่องที่กำลังเช่า")).toBeNull();
+  });
+
+  it("renders one card at a time behind machine-name tabs", async () => {
+    leases = [
+      lease(),
+      lease({
+        id: "rental-2",
+        machineId: "pc-two",
+        machineDisplayName: "PC TWO",
+        connection: { address: "203.0.113.8:47989", stale: false },
+      }),
+    ];
+
+    render(<MyMachines />);
+
+    const tabOne = await screen.findByRole("tab", { name: /PC ONE/ });
+    const tabTwo = screen.getByRole("tab", { name: /PC TWO/ });
+    expect(tabOne.getAttribute("aria-selected")).toBe("true");
+    expect(
+      screen.getByRole("heading", { level: 2, name: "PC ONE" }),
     ).toBeDefined();
     expect(
-      screen.queryByText(
-        "ข้อมูลที่อยู่เชื่อมต่ออาจล้าสมัย — ตรวจสอบกับผู้ดูแลก่อนใช้งาน",
-      ),
+      screen.queryByRole("heading", { level: 2, name: "PC TWO" }),
     ).toBeNull();
+    expect(screen.getAllByText("เชื่อมต่อเครื่อง")).toHaveLength(1);
+
+    fireEvent.click(tabTwo);
+
+    expect(
+      await screen.findByRole("heading", { level: 2, name: "PC TWO" }),
+    ).toBeDefined();
+    expect(
+      screen.queryByRole("heading", { level: 2, name: "PC ONE" }),
+    ).toBeNull();
+    expect(screen.getAllByText("เชื่อมต่อเครื่อง")).toHaveLength(1);
+  });
+
+  it("shows the offline status when the Agent is unreachable", async () => {
+    leases = [
+      lease({
+        agent: { reachability: "unreachable", lastSeenAt: HEARTBEAT_AT },
+      }),
+    ];
+
+    render(<MyMachines />);
+
+    expect(
+      await screen.findByText("ขาดการติดต่อกับเครื่อง"),
+    ).toBeDefined();
+    expect(screen.getByText("ออฟไลน์")).toBeDefined();
+    expect(screen.getByText("ติดต่อล่าสุด 5 นาทีที่แล้ว")).toBeDefined();
   });
 
   it("flags a stale connect address", async () => {
-    fetchSpy.mockImplementation(async () =>
-      response([
-        {
-          ...LEASES[0],
-          connection: { address: "203.0.113.7:47989", stale: true },
-        },
-      ]),
-    );
+    leases = [
+      lease({ connection: { address: "203.0.113.7:47989", stale: true } }),
+    ];
 
     render(<MyMachines />);
 
+    expect(await screen.findByText("ที่อยู่อาจเปลี่ยน")).toBeDefined();
     expect(
-      await screen.findByText("เชื่อมต่อ: 203.0.113.7:47989"),
-    ).toBeDefined();
-    expect(
-      screen.getByText(
-        "ข้อมูลที่อยู่เชื่อมต่ออาจล้าสมัย — ตรวจสอบกับผู้ดูแลก่อนใช้งาน",
-      ),
+      screen.getByText("ที่อยู่เชื่อมต่ออาจล้าสมัย"),
     ).toBeDefined();
   });
 
-  it("does not show a connect address unless the lease is active", async () => {
-    fetchSpy.mockImplementation(async () =>
-      response([
-        {
-          ...LEASES[0],
-          state: "ending",
-          connection: { address: "203.0.113.9:47989", stale: false },
-        },
-      ]),
-    );
+  it("waits for a verified connect address", async () => {
+    leases = [lease({ connection: { address: null, stale: false } })];
 
     render(<MyMachines />);
 
-    expect(await screen.findByText("pc-one")).toBeDefined();
-    expect(screen.queryByText(/203\.0\.113\.9/)).toBeNull();
-    expect(screen.queryByText(/^เชื่อมต่อ:/)).toBeNull();
+    expect(await screen.findByText("รอที่อยู่")).toBeDefined();
+    expect(screen.getByText("รอที่อยู่เชื่อมต่อ")).toBeDefined();
   });
 
-  it("explains when an active lease has no verified connect address", async () => {
+  it("shows the Parsec option only when the machine is enabled for it", async () => {
+    leases = [lease()];
+    const view = render(<MyMachines />);
+    await screen.findByRole("heading", { level: 2, name: "PC ONE" });
+    expect(screen.queryByRole("button", { name: /Parsec/ })).toBeNull();
+    view.unmount();
+
+    leases = [
+      lease({
+        parsec: {
+          available: true,
+          bootKeyId: "boot-key-1",
+          publicKey: "public-key",
+          attempt: null,
+        },
+      }),
+    ];
+    render(<MyMachines />);
+    const parsecButton = await screen.findByRole("button", { name: /Parsec/ });
+    expect((parsecButton as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("disables Parsec when the Agent has not advertised it", async () => {
+    leases = [
+      lease({
+        parsec: {
+          available: false,
+          bootKeyId: null,
+          publicKey: null,
+          attempt: null,
+        },
+      }),
+    ];
+
     render(<MyMachines />);
 
+    const parsecButton = await screen.findByRole("button", {
+      name: /Parsec/,
+    });
+    expect((parsecButton as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByText("ยังไม่พร้อม")).toBeDefined();
+  });
+
+  it("removes leases omitted by an authoritative refresh", async () => {
+    leases = [
+      lease(),
+      lease({
+        id: "rental-2",
+        machineId: "pc-two",
+        machineDisplayName: "PC TWO",
+      }),
+    ];
+    fetchSpy.mockImplementation(async (input: RequestInfo | URL) => {
+      if (String(input) !== "/api/my-leases")
+        throw new Error(`Unexpected request: ${String(input)}`);
+      leaseListRequests += 1;
+      leases =
+        leaseListRequests === 1
+          ? leases
+          : leases.filter(
+              (item) => (item as { id: string }).id === "rental-1",
+            );
+      return response(leases);
+    });
+
+    render(<MyMachines />);
     expect(
-      await screen.findByText(
-        "เชื่อมต่อ: ยังไม่มีที่อยู่สาธารณะที่ตรวจสอบแล้ว กรุณาติดต่อผู้ดูแล",
-      ),
+      await screen.findByRole("tab", { name: /PC TWO/ }),
+    ).toBeDefined();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "รีเฟรช" }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(leaseListRequests).toBe(2);
+    expect(screen.queryByRole("tab", { name: /PC TWO/ })).toBeNull();
+    expect(
+      screen.getByRole("heading", { level: 2, name: "PC ONE" }),
     ).toBeDefined();
   });
 
@@ -195,7 +372,7 @@ describe("MyMachines lease refresh", () => {
     });
     expect(fetchSpy).toHaveBeenCalledTimes(1);
 
-    firstRequest.resolve(response(LEASES));
+    firstRequest.resolve(response(leases));
     await act(async () => {
       await Promise.resolve();
       await Promise.resolve();
@@ -224,217 +401,93 @@ describe("MyMachines lease refresh", () => {
     expect(fetchSpy).toHaveBeenCalledTimes(3);
   });
 
-  it("keeps an extension pending when an older in-flight poll resolves", async () => {
-    const stalePoll = deferred<Response>();
-    const otherLease = {
-      ...LEASES[0],
-      id: "rental-2",
-      machineId: "pc-two",
-      state: "ending",
-      revision: 4,
-      pendingRevision: null,
-      agent: {
-        reachability: "unreachable",
-        lastSeenAt: "2026-11-08T02:00:00.000Z",
+  it("extends a rental through the dialog and keeps the pending ACK visible", async () => {
+    const initial = lease();
+    leases = [initial];
+    fetchSpy.mockImplementation(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url === "/api/my-leases") return response(leases);
+        if (url === "/api/my-leases/rental-1/extend") {
+          expect(JSON.parse(String(init?.body))).toMatchObject({
+            additionalSeconds: 7_200,
+            expectedRevision: 1,
+          });
+          leases = [{ ...initial, revision: 2, pendingRevision: 2 }];
+          return response(leases[0]);
+        }
+        throw new Error(`Unexpected request: ${url}`);
       },
-    };
-    let leaseListRequests = 0;
-    fetchSpy.mockImplementation((input: RequestInfo | URL) => {
-      const path = String(input);
-      if (path === "/api/my-leases") {
-        leaseListRequests += 1;
-        if (leaseListRequests === 1)
-          return Promise.resolve(response([...LEASES, otherLease]));
-        if (leaseListRequests === 2) return stalePoll.promise;
-        return Promise.resolve(
-          response([{ ...LEASES[0], pendingRevision: 2 }, otherLease]),
-        );
-      }
-      if (path === "/api/my-leases/rental-1/extend")
-        return Promise.resolve(
-          response({ ...LEASES[0], pendingRevision: 2 }),
-        );
-      throw new Error(`Unexpected request: ${path}`);
-    });
-
-    render(<MyMachines />);
-    expect(await screen.findByText("pc-one")).toBeDefined();
-    expect(await screen.findByText("pc-two")).toBeDefined();
-
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(15_000);
-    });
-    expect(leaseListRequests).toBe(2);
-
-    fireEvent.click(screen.getByRole("button", { name: "ต่อเวลา" }));
-    expect(
-      await screen.findByText("ต่อเวลาแล้ว รอเครื่องยืนยันการเปลี่ยนแปลง"),
-    ).toBeDefined();
-    const showsPendingRevision = (_text: string, element: Element | null) =>
-      element?.tagName === "P" &&
-      element.textContent?.includes("Revision 1") === true &&
-      element.textContent.includes("รอ ACK 2");
-    expect(
-      screen.getByText(showsPendingRevision),
-    ).toBeDefined();
-
-    stalePoll.resolve(response([...LEASES, otherLease]));
-    await act(async () => {
-      await Promise.resolve();
-      await Promise.resolve();
-    });
-    await waitFor(() => expect(leaseListRequests).toBe(3));
-
-    expect(
-      screen.getByText(showsPendingRevision),
-    ).toBeDefined();
-    expect(
-      (screen.getByRole("button", { name: "ต่อเวลา" }) as HTMLButtonElement)
-        .disabled,
-    ).toBe(true);
-    expect(screen.getByText("Agent ติดต่อได้")).toBeDefined();
-    expect(screen.getByText(`Heartbeat ล่าสุด: ${HEARTBEAT_AT}`)).toBeDefined();
-    expect(screen.getByText("Agent ติดต่อไม่ได้")).toBeDefined();
-    expect(
-      screen.getByText("Heartbeat ล่าสุด: 2026-11-08T02:00:00.000Z"),
-    ).toBeDefined();
-  });
-
-  it("removes leases omitted by an authoritative same-version refresh", async () => {
-    const otherLease = {
-      ...LEASES[0],
-      id: "rental-2",
-      machineId: "pc-two",
-      state: "ending",
-      agent: {
-        reachability: "unreachable",
-        lastSeenAt: "2026-11-08T02:00:00.000Z",
-      },
-    };
-    let leaseListRequests = 0;
-    fetchSpy.mockImplementation((input: RequestInfo | URL) => {
-      if (String(input) !== "/api/my-leases")
-        throw new Error(`Unexpected request: ${String(input)}`);
-      leaseListRequests += 1;
-      return Promise.resolve(
-        response(leaseListRequests === 1 ? [...LEASES, otherLease] : LEASES),
-      );
-    });
-
-    render(<MyMachines />);
-    expect(await screen.findByText("pc-two")).toBeDefined();
-
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "รีเฟรช" }));
-      await Promise.resolve();
-      await Promise.resolve();
-    });
-
-    expect(leaseListRequests).toBe(2);
-    expect(screen.queryByText("pc-two")).toBeNull();
-    expect(screen.getByText("pc-one")).toBeDefined();
-  });
-
-  it("clears a pending revision when an authoritative refresh cancels it", async () => {
-    const pendingLease = { ...LEASES[0], pendingRevision: 2 };
-    let leaseListRequests = 0;
-    fetchSpy.mockImplementation((input: RequestInfo | URL) => {
-      if (String(input) !== "/api/my-leases")
-        throw new Error(`Unexpected request: ${String(input)}`);
-      leaseListRequests += 1;
-      return Promise.resolve(
-        response(leaseListRequests === 1 ? [pendingLease] : LEASES),
-      );
-    });
-
-    render(<MyMachines />);
-    expect(await screen.findByText("pc-one")).toBeDefined();
-    const showsPendingAck = (_text: string, element: Element | null) =>
-      element?.tagName === "P" &&
-      element.textContent?.includes("รอ ACK 2") === true;
-    expect(screen.getByText(showsPendingAck)).toBeDefined();
-    const extendButton = screen.getByRole("button", {
-      name: "ต่อเวลา",
-    }) as HTMLButtonElement;
-    expect(extendButton.disabled).toBe(true);
-
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "รีเฟรช" }));
-      await Promise.resolve();
-      await Promise.resolve();
-    });
-
-    expect(leaseListRequests).toBe(2);
-    expect(screen.queryByText(showsPendingAck)).toBeNull();
-    expect(extendButton.disabled).toBe(false);
-  });
-
-  it("does not let a delayed extension response undo a newer poll snapshot", async () => {
-    const delayedExtension = deferred<Response>();
-    const acknowledgedLease = {
-      ...LEASES[0],
-      revision: 2,
-      pendingRevision: null,
-    };
-    let leaseListRequests = 0;
-    const requestOrder: string[] = [];
-    fetchSpy.mockImplementation((input: RequestInfo | URL) => {
-      const path = String(input);
-      requestOrder.push(path);
-      if (path === "/api/my-leases") {
-        leaseListRequests += 1;
-        return Promise.resolve(
-          response(leaseListRequests === 1 ? LEASES : [acknowledgedLease]),
-        );
-      }
-      if (path === "/api/my-leases/rental-1/extend")
-        return delayedExtension.promise;
-      throw new Error(`Unexpected request: ${path}`);
-    });
-
-    render(<MyMachines />);
-    expect(await screen.findByText("pc-one")).toBeDefined();
-    fireEvent.click(screen.getByRole("button", { name: "ต่อเวลา" }));
-    expect(
-      (screen.getByRole("button", { name: "ต่อเวลา" }) as HTMLButtonElement)
-        .disabled,
-    ).toBe(true);
-
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "รีเฟรช" }));
-      await Promise.resolve();
-      await Promise.resolve();
-    });
-    expect(requestOrder).toEqual([
-      "/api/my-leases",
-      "/api/my-leases/rental-1/extend",
-      "/api/my-leases",
-    ]);
-    const showsPendingRevision = (_text: string, element: Element | null) =>
-      element?.tagName === "P" &&
-      element.textContent?.includes("Revision 1") === true &&
-      !element.textContent.includes("รอ ACK");
-    expect(screen.getByText(showsPendingRevision)).toBeDefined();
-
-    delayedExtension.resolve(
-      response({ ...LEASES[0], pendingRevision: 2 }),
     );
+
+    render(<MyMachines />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "ต่อเวลา" }),
+    );
+
+    fireEvent.change(
+      screen.getByLabelText("ระยะเวลา (ชั่วโมง)"),
+      { target: { value: "2" } },
+    );
+    fireEvent.click(screen.getByRole("button", { name: "ยืนยันต่อเวลา" }));
+
     expect(
       await screen.findByText("ต่อเวลาแล้ว รอเครื่องยืนยันการเปลี่ยนแปลง"),
     ).toBeDefined();
-    await waitFor(() => expect(leaseListRequests).toBe(3));
-    const showsAcknowledgedRevision = (
-      _text: string,
-      element: Element | null,
-    ) =>
-      element?.tagName === "P" &&
-      element.textContent?.includes("Revision 2") === true &&
-      !element.textContent.includes("รอ ACK");
-    expect(screen.getByText(showsAcknowledgedRevision)).toBeDefined();
+    expect(
+      screen.getAllByText("กำลังรอเครื่องยืนยันการต่อเวลา").length,
+    ).toBeGreaterThan(0);
     expect(
       (screen.getByRole("button", { name: "ต่อเวลา" }) as HTMLButtonElement)
         .disabled,
-    ).toBe(false);
+    ).toBe(true);
+  });
+
+  it("blocks extension when the remaining balance is too low", async () => {
+    authState.balanceSatang = 1_000;
+    leases = [lease({ payment: payment({ hourlyPriceSatang: 40_000 }) })];
+
+    render(<MyMachines />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "ต่อเวลา" }),
+    );
+
+    expect(screen.getByText("ยอดเงินไม่เพียงพอ")).toBeDefined();
+    expect(
+      (
+        screen.getByRole("button", {
+          name: "ยืนยันต่อเวลา",
+        }) as HTMLButtonElement
+      ).disabled,
+    ).toBe(true);
+  });
+
+  it("cannot extend a legacy lease without a payment record", async () => {
+    leases = [lease({ payment: null })];
+
+    render(<MyMachines />);
+
+    expect(
+      await screen.findByText(/ไม่มีข้อมูลการชำระเงิน/),
+    ).toBeDefined();
+    expect(
+      (screen.getByRole("button", { name: "ต่อเวลา" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
+  });
+
+  it("disables extension while a previous extension waits for the Agent", async () => {
+    leases = [lease({ pendingRevision: 2 })];
+
+    render(<MyMachines />);
+
+    expect(
+      await screen.findAllByText("กำลังรอเครื่องยืนยันการต่อเวลา"),
+    ).not.toHaveLength(0);
+    expect(
+      (screen.getByRole("button", { name: "ต่อเวลา" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
   });
 
   function setVisibility(state: DocumentVisibilityState) {

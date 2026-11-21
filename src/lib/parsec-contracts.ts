@@ -31,7 +31,8 @@ export type ParsecLeaseState = {
 export const PARSEC_STATE_LABELS: Record<ParsecAttemptState, string> = {
   queued: "กำลังส่งคำขอไปยังเครื่อง",
   starting: "กำลังเข้าสู่ระบบ Parsec บนเครื่อง",
-  waiting_email: "Parsec ขอยืนยันอีเมล/อุปกรณ์ — โปรดยืนยันแล้วลองอีกครั้ง",
+  waiting_email:
+    "Parsec ขอยืนยันอีเมล/IP — โปรดยืนยันในอีเมลแล้วกด “ยืนยันอีเมลแล้ว”",
   ready: "เชื่อมต่อ Parsec สำเร็จ",
   failed: "เชื่อมต่อ Parsec ไม่สำเร็จ",
 };
@@ -58,6 +59,7 @@ export const PARSEC_ERROR_LABELS: Record<string, string> = {
   TWO_FACTOR_UNSUPPORTED: "Parsec นี้ขอรหัส 2FA ซึ่งระบบยังไม่รองรับ",
   PARSEC_BUSY: "มีการเข้าสู่ระบบ Parsec อื่นกำลังทำงานอยู่",
   LOGIN_UNCONFIRMED: "ไม่พบหลักฐานว่าเข้าสู่ระบบ Parsec สำเร็จ",
+  EMAIL_VERIFIED: "ยืนยันอีเมลแล้ว กำลังเชื่อมต่ออีกครั้ง",
   LEASE_ENDED: "การเช่าสิ้นสุดแล้ว",
   AGENT_REBOOTED: "เครื่องรีสตาร์ตระหว่างดำเนินการ",
   INTERNAL: "เกิดข้อผิดพลาดภายใน Agent",

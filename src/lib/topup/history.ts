@@ -29,6 +29,7 @@ import {
   topupEntryFromRow,
   type TopupRow,
 } from "@/lib/topup/transactions";
+import { compareReview, isReviewableTopup } from "@/lib/topup/services/review-service";
 import type {
   AdminTopupDashboardResponse,
   AdminTopupDetail,
@@ -243,6 +244,8 @@ export function getAdminTopupDetail(
     responseExcerpt: attempt.response_excerpt,
     createdAt: attempt.created_at,
   }));
+  const canReview = isReviewableTopup(row);
+  const review = canReview ? compareReview(row) : null;
   return {
     ...detail,
     userId: row.user_id,
@@ -250,6 +253,10 @@ export function getAdminTopupDetail(
     userEmail: row.user_email,
     providerRequestId: row.provider_request_id,
     attempts,
+    canReview,
+    review: review
+      ? { outcome: review.outcome, message: review.message }
+      : null,
   };
 }
 
@@ -396,6 +403,7 @@ export function listAdminTopups(
     slipProvider: row.slip_provider,
     slipTransRef: row.slip_trans_ref,
     slipAmountSatang: row.slip_amount_satang,
+    canReview: isReviewableTopup(row),
   }));
 
   const start = range.start ?? Date.now() - 29 * 24 * 60 * 60 * 1_000;

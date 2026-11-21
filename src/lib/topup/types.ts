@@ -73,6 +73,8 @@ export type TopupDetail = TopupEntry & {
   slipSenderName: string | null;
   slipReceiverName: string | null;
   slipReceiverAccountMasked: string | null;
+  slipReceiverProxyMasked: string | null;
+  slipBankCode: string | null;
   slipImageUrl: string | null;
   verifiedAt: number | null;
   verificationCode: string | null;
@@ -163,6 +165,10 @@ export type TopupSettingsAdmin = {
     type: PromptpayType;
     number: string | null;
     accountName: string | null;
+    /** Bank of the PromptPay account, used to verify the slip's receiving bank. */
+    bankCode: string | null;
+    /** Bank account number of the PromptPay account, used to verify the slip. */
+    accountNumber: string | null;
   };
   bankTransfer: { enabled: boolean };
   coupon: { enabled: boolean; message: string };
@@ -227,6 +233,13 @@ export type AdminTopupEntry = TopupEntry & {
   slipProvider: SlipProvider | null;
   slipTransRef: string | null;
   slipAmountSatang: number | null;
+  /** True when the row is waiting for an Admin approve/reject decision. */
+  canReview: boolean;
+};
+
+export type AdminTopupReview = {
+  outcome: "match" | "mismatch" | "insufficient";
+  message: string;
 };
 
 export type AdminTopupStats = {
@@ -285,6 +298,8 @@ export type AdminTopupDetail = TopupDetail & {
   userEmail: string;
   providerRequestId: string | null;
   attempts: TopupAttemptView[];
+  canReview: boolean;
+  review: AdminTopupReview | null;
 };
 
 export type TopupBankAccountCreateInput = {

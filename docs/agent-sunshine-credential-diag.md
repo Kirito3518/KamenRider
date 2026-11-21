@@ -113,4 +113,4 @@ Get-Service 'KamenRaider Agent','KamenRaider Stream Guard','SunshineService' |
 1. SunshineService ต้อง Running (Guard เปิดให้เพราะ lease active)
 2. ตั้ง Sunshine credential ให้ตรงกับ fleet (`kamenrider` / รหัสที่ตั้ง) — ดู `docs/sunshine-password-reset.md`
 3. เปิด Moonlight → `192.168.1.25:47989` → ให้ขึ้น PIN
-4. `/my-machines` → “โหลดช่องจับคู่จาก Agent” → เลือกช่อง → กรอก PIN → ส่ง
+4. `/my-machines` → กดปุ่ม **Moonlight** → คัดลอกที่อยู่ด้านบน → กรอก PIN จาก Moonlight → **ยืนยัน PIN**

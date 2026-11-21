@@ -9,7 +9,8 @@ const buttonVariants = cva(
       variant: {
         default: "bg-primary text-primary-foreground hover:bg-primary/80",
         discord: "bg-discord text-discord-foreground hover:bg-discord/90",
-        busy: "border-status-busy/30 bg-status-busy/15 text-status-busy disabled:opacity-100",
+        busy: "border-status-busy/30 bg-status-busy/15 text-status-busy hover:bg-status-busy/25 focus-visible:border-status-busy/40 focus-visible:ring-status-busy/20",
+        success: "border-status-available/30 bg-status-available/15 text-status-available hover:bg-status-available/25 focus-visible:border-status-available/40 focus-visible:ring-status-available/20 dark:bg-status-available/20 dark:hover:bg-status-available/30",
         maintenance: "border-status-maintenance/30 bg-status-maintenance/15 text-status-maintenance disabled:opacity-100",
         outline:
           "border-border bg-background hover:bg-muted hover:text-foreground aria-expanded:bg-muted aria-expanded:text-foreground dark:bg-transparent dark:hover:bg-input/30",

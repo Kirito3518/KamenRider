@@ -11,6 +11,7 @@ import {
   isValidNatId,
   isValidPhoneNumber,
 } from "@/lib/topup/amount";
+import { getBankPreset } from "@/lib/topup/banks";
 import {
   MAX_BANK_LOGO_BYTES,
   type BankRail,
@@ -143,6 +144,8 @@ export type SettingsUpdatePayload = {
     type?: PromptpayType;
     number?: string | null;
     accountName?: string | null;
+    bankCode?: string | null;
+    accountNumber?: string | null;
   };
   bankTransfer?: { enabled: boolean };
   coupon?: { enabled: boolean; message?: string };
@@ -290,6 +293,8 @@ export type SettingsDraft = {
     type: PromptpayType;
     number: string;
     accountName: string;
+    bankCode: string;
+    accountNumber: string;
   };
   bankTransfer: { enabled: boolean };
   coupon: { enabled: boolean; message: string };
@@ -307,6 +312,8 @@ export function settingsDraftFromAdmin(settings: TopupSettingsAdmin): SettingsDr
       type: settings.promptpay.type,
       number: settings.promptpay.number ?? "",
       accountName: settings.promptpay.accountName ?? "",
+      bankCode: settings.promptpay.bankCode ?? "",
+      accountNumber: settings.promptpay.accountNumber ?? "",
     },
     bankTransfer: { enabled: settings.bankTransfer.enabled },
     coupon: {
@@ -351,6 +358,8 @@ export function validatePromptPay(
   const numberValid =
     draft.type === "msisdn" ? isValidPhoneNumber(number) : isValidNatId(number);
   const accountName = draft.accountName.trim();
+  const bankCode = draft.bankCode.trim();
+  const accountNumber = normalizeDigits(draft.accountNumber);
 
   if (number && !numberValid) {
     errors.number = promptpayValidationMessage(draft.type);
@@ -361,6 +370,16 @@ export function validatePromptPay(
     errors.accountName = "ชื่อบัญชีต้องไม่เกิน 120 ตัวอักษร";
   } else if (draft.enabled && !accountName) {
     errors.accountName = "กรุณาระบุชื่อบัญชีสำหรับตรวจสอบสลิป";
+  }
+  if (bankCode && !getBankPreset(bankCode)) {
+    errors.bankCode = "เลือกธนาคารจากรายการที่รองรับ";
+  } else if (draft.enabled && !bankCode) {
+    errors.bankCode = "กรุณาเลือกธนาคารของบัญชี PromptPay";
+  }
+  if (accountNumber && !isValidBankAccountNumber(accountNumber)) {
+    errors.accountNumber = "เลขที่บัญชีต้องเป็นตัวเลข 8–15 หลัก";
+  } else if (draft.enabled && !accountNumber) {
+    errors.accountNumber = "กรุณาระบุเลขที่บัญชีของบัญชี PromptPay";
   }
   if (draft.enabled && !options.easySlipConfigured) {
     errors.form = "ต้องตั้งค่า EasySlip API Key ก่อนเปิด PromptPay QR";
@@ -437,9 +456,6 @@ export function validateBankAccountForm(
     errors.accountName = "กรอกชื่อบัญชีอย่างน้อย 2 ตัวอักษร";
   } else if (accountName.length > 120) {
     errors.accountName = "ชื่อบัญชีต้องไม่เกิน 120 ตัวอักษร";
-  }
-  if (!values.logoKey && !values.logoDataUrl) {
-    errors.logo = "กรุณาเลือกหรืออัปโหลดโลโก้ธนาคาร";
   }
   return errors;
 }

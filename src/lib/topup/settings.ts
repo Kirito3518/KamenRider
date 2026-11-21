@@ -27,7 +27,7 @@ import {
   maskPromptpayNumber,
   maskSecret,
 } from "@/lib/topup/amount";
-import { isKnownBankLogoKey } from "@/lib/topup/banks";
+import { getBankPreset, isKnownBankLogoKey } from "@/lib/topup/banks";
 import { TopupError } from "@/lib/topup/errors";
 import { ensureTopupSchema } from "@/lib/topup/schema";
 import { decryptSecret, encryptSecret } from "@/lib/topup/secrets";
@@ -51,6 +51,8 @@ export type SettingsRow = {
   promptpay_type: PromptpayType;
   promptpay_number: string | null;
   promptpay_account_name: string | null;
+  promptpay_bank_code: string | null;
+  promptpay_account_number: string | null;
   bank_transfer_enabled: number;
   coupon_enabled: number;
   coupon_message: string;
@@ -168,6 +170,8 @@ function settingsForAdmin(
       type: row.promptpay_type,
       number: row.promptpay_number,
       accountName: row.promptpay_account_name,
+      bankCode: row.promptpay_bank_code,
+      accountNumber: row.promptpay_account_number,
     },
     bankTransfer: { enabled: row.bank_transfer_enabled === 1 },
     coupon: {
@@ -296,20 +300,29 @@ export function getPublicTopupConfig(database: Database.Database): TopupPublicCo
   }));
   const bankTransferEnabled = row.bank_transfer_enabled === 1;
   const promptpayEnabled = row.promptpay_enabled === 1;
+  // A PromptPay channel without the payee's bank/account cannot verify slips,
+  // so do not offer it to customers until the admin completes those fields.
+  const promptpayConfigured = Boolean(
+    row.promptpay_number &&
+      row.promptpay_account_name &&
+      row.promptpay_bank_code &&
+      row.promptpay_account_number,
+  );
+  const promptpayChannelEnabled = promptpayEnabled && promptpayConfigured;
   return {
     minSatang: TOPUP_MIN_SATANG,
     maxSatang: TOPUP_MAX_SATANG,
     qrExpirySeconds: Math.round(PROMPTPAY_QR_EXPIRY_MS / 1000),
     bankExpirySeconds: Math.round(BANK_TRANSFER_EXPIRY_MS / 1000),
     slipVerificationAvailable,
-    bankRail: promptpayEnabled
+    bankRail: promptpayChannelEnabled
       ? "promptpay_qr"
       : bankTransferEnabled
         ? "bank_transfer"
         : null,
     truemoney: { enabled: row.truemoney_enabled === 1 },
     promptpay: {
-      enabled: promptpayEnabled,
+      enabled: promptpayChannelEnabled,
       type: row.promptpay_number ? row.promptpay_type : null,
       numberMasked: maskPromptpayNumber(
         row.promptpay_type,
@@ -427,6 +440,8 @@ const settingsUpdateSchema = z
         type: z.enum(["msisdn", "natId"]).optional(),
         number: z.string().max(20).nullable().optional(),
         accountName: z.string().max(120).nullable().optional(),
+        bankCode: z.string().max(10).nullable().optional(),
+        accountNumber: z.string().max(20).nullable().optional(),
       })
       .strict()
       .optional(),
@@ -526,6 +541,8 @@ export function updateTopupSettings(
       let promptpayType = current.promptpay_type;
       let promptpayNumber = current.promptpay_number;
       let promptpayAccountName = current.promptpay_account_name;
+      let promptpayBankCode = current.promptpay_bank_code;
+      let promptpayAccountNumber = current.promptpay_account_number;
       let bankTransferEnabled = current.bank_transfer_enabled === 1;
       let couponEnabled = current.coupon_enabled === 1;
       let couponMessage = current.coupon_message;
@@ -571,7 +588,38 @@ export function updateTopupSettings(
         if (data.promptpay.accountName !== undefined) {
           promptpayAccountName = data.promptpay.accountName?.trim().slice(0, 120) || null;
         }
-        if (promptpayEnabled) {
+        if (data.promptpay.bankCode !== undefined) {
+          const code = data.promptpay.bankCode
+            ? normalizeDigits(data.promptpay.bankCode)
+            : null;
+          if (code) {
+            const preset = getBankPreset(code);
+            if (!preset) {
+              throw new TopupError(
+                "invalid-request",
+                "ธนาคารของบัญชี PromptPay ต้องเลือกจากรายการที่รองรับ",
+                400,
+              );
+            }
+            promptpayBankCode = preset.code;
+          } else {
+            promptpayBankCode = null;
+          }
+        }
+        if (data.promptpay.accountNumber !== undefined) {
+          const accountNumber = data.promptpay.accountNumber
+            ? normalizeDigits(data.promptpay.accountNumber)
+            : null;
+          if (accountNumber && !isValidBankAccountNumber(accountNumber)) {
+            throw new TopupError(
+              "invalid-request",
+              "เลขที่บัญชี PromptPay ต้องเป็นตัวเลข 8–15 หลัก",
+              400,
+            );
+          }
+          promptpayAccountNumber = accountNumber;
+        }
+        if (promptpayEnabled && data.promptpay) {
           if (!promptpayNumber) {
             throw new TopupError(
               "invalid-request",
@@ -587,6 +635,21 @@ export function updateTopupSettings(
               400,
             );
           }
+          if (!promptpayBankCode || !getBankPreset(promptpayBankCode)) {
+            throw new TopupError(
+              "invalid-request",
+              "กรุณาเลือกธนาคารของบัญชี PromptPay ก่อนเปิดช่องทาง",
+              400,
+            );
+          }
+          if (!promptpayAccountNumber) {
+            throw new TopupError(
+              "invalid-request",
+              "กรุณาระบุเลขที่บัญชี PromptPay ก่อนเปิดช่องทาง",
+              400,
+            );
+          }
+          isValidBankAccountNumber(promptpayAccountNumber);
         }
       }
 
@@ -652,7 +715,8 @@ export function updateTopupSettings(
           `UPDATE topup_settings SET
              truemoney_enabled = ?, truemoney_phone = ?,
              promptpay_enabled = ?, promptpay_type = ?, promptpay_number = ?,
-             promptpay_account_name = ?, bank_transfer_enabled = ?,
+             promptpay_account_name = ?, promptpay_bank_code = ?,
+             promptpay_account_number = ?, bank_transfer_enabled = ?,
              coupon_enabled = ?, coupon_message = ?, slip_provider = ?,
              updated_at = ?, updated_by = ?
            WHERE id = 1 AND updated_at = ?`,
@@ -664,6 +728,8 @@ export function updateTopupSettings(
           promptpayType,
           promptpayNumber,
           promptpayAccountName,
+          promptpayBankCode,
+          promptpayAccountNumber,
           bankTransferEnabled ? 1 : 0,
           couponEnabled ? 1 : 0,
           couponMessage,

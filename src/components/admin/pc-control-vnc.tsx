@@ -131,7 +131,7 @@ export function PcControlVnc({ machineId, onClose }: { machineId: string; onClos
         />
       ) : null}
       {!busy && !ticket && !error ? (
-        <Button variant="outline" size="sm" onClick={() => void start()}>
+        <Button variant="default" size="sm" onClick={() => void start()}>
           <Monitor data-icon="inline-start" />
           เปิดจออีกครั้ง
         </Button>

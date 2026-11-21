@@ -29,11 +29,23 @@
 `/admin/settings/topup` แบ่ง Tabs:
 
 1. **TrueMoney**: เปิด/ปิด, เบอร์ผู้รับ 10 หลัก
-2. **PromptPay QR**: เปิด/ปิด, ประเภท `msisdn`/`natId`, หมายเลข, ชื่อบัญชีสำหรับตรวจสลิป
-3. **บัญชีธนาคาร**: เปิด/ปิดช่องทาง, เพิ่ม/แก้ไข/archive บัญชี, ชื่อธนาคาร/รหัส/เลขบัญชี/ชื่อบัญชี, โลโก้ preset หรืออัปโหลด (PNG/JPEG/WebP ≤ 32 KB)
-   - Bank Select ใช้ preset: BBL `002`, KBANK `004`, KTB `006`, TMB `011`, SCB `014`, BAY `025`, GSB `030`, KK `069` พร้อมโลโก้จาก `public/topup/bank/`; ยังเพิ่มธนาคารอื่นด้วยรหัส/ชื่อเองได้
-4. **ตรวจสอบสลิป**: เลือกผู้ให้บริการ (ค่าเดียว), EasySlip API Key, SlipOk API Key + Branch ID, ปุ่มทดสอบการเชื่อมต่อ
+2. **PromptPay QR**: เปิด/ปิด, ประเภท `msisdn`/`natId`, หมายเลข PromptPay, **ธนาคารของบัญชี**, **เลขที่บัญชีธนาคาร**, ชื่อบัญชีสำหรับตรวจสลิป (ธนาคาร + เลขบัญชี + ชื่อ ใช้ตรวจผู้รับในสลิป) — ช่องทางจะแสดงให้ลูกค้าเมื่อข้อมูลครบเท่านั้น
+3. **บัญชีธนาคาร**: เปิด/ปิดช่องทาง, เพิ่ม/แก้ไข/archive บัญชี — ฟอร์มเหลือ **เลือกธนาคารจาก select เดียว** แล้วกรอกแค่เลขบัญชี/ชื่อบัญชี (ปิด/เปิดใช้งาน); รหัสธนาคาร ชื่อธนาคาร และโลโก้มาจาก preset อัตโนมัติ ไม่มีช่องกรอกซ้ำ/โลโก้ picker/อัปโหลดสำหรับบัญชีใหม่ (บัญชีเดิมที่ใช้ธนาคารนอก preset ยังเลือกแก้ไขได้)
+   - Bank Select ใช้ preset: BBL `002`, KBANK `004`, KTB `006`, TMB `011`, SCB `014`, BAY `025`, GSB `030`, KK `069` พร้อมโลโก้จาก `public/topup/bank/`
+   - โลโก้ preset เป็นสีขาวบนพื้นสีแบรนด์ของธนาคาร และหน้าลูกค้าใช้สีแบรนด์เดียวกันเป็น tint พื้นการ์ดบัญชีที่เลือก, ช่องทางธนาคาร และแผงโอนเงิน
+4. **ตรวจสอบสลิป**: เลือกผู้ให้บริการ (ค่าเดียว; ปุ่มที่เลือกใช้สี primary ชัดเจน), EasySlip API Key, SlipOk API Key + Branch ID, ปุ่มทดสอบการเชื่อมต่อ
 5. **คูปอง**: เปิด/ปิด + ข้อความแจ้ง
+
+## Admin อนุมัติรายการที่รอตรวจสอบ
+
+- รายการที่เข้าเงื่อนไข: `status = processing`, มีไฟล์สลิป, และ `verification_status` เป็น `unknown`/`error`/`pending`
+- หน้า `/admin/topups` แสดง badge **รอตรวจสอบ** ในตาราง; เปิดรายละเอียดแล้วมีปุ่ม **อนุมัติรายการ** / **ปฏิเสธรายการ** เฉพาะรายการที่รอตรวจสอบเท่านั้น
+- กดอนุมัติ → ระบบเทียบบัญชีผู้รับที่บันทึกไว้ในรายการกับข้อมูลผู้รับจากสลิป (ธนาคาร/ชื่อ/เลขบัญชี/PromptPay) และยอดเงินก่อนเพิ่มยอด:
+  - **ไม่ตรง** → reject รายการทันที ไม่เพิ่มยอด
+  - ตรง → credit เข้า wallet พร้อม `verification_code = manual_approved` และ audit event actor `admin`
+  - ข้อมูลไม่พอ (provider ปิดบัญชี/ไม่ส่งข้อมูล) → ให้ผู้ดูแลตรวจรูปสลิปแล้วอนุมัติ/ปฏิเสธเองได้
+- ทุก action มี toast แจ้งผล (react-hot-toast) และรีเฟรชรายละเอียด
+- การตรวจสลิปอัตโนมัติ: ถ้าผู้รับ **ไม่ตรง** จะ reject ทันที; ถ้า **ยืนยันไม่ได้** จะค้าง `processing` พร้อมเก็บข้อมูลผู้รับจากสลิปไว้ให้ Admin ตรวจ ไม่ credit อัตโนมัติ
 
 ข้อบังคับเวลาเปิดช่อง:
 - PromptPay ต้องมี EasySlip API Key (ใช้สร้าง QR)
@@ -72,6 +84,8 @@
 | `topup_events` | timeline การเปลี่ยนสถานะ |
 | `topup_settings_audit` | audit การแก้ settings/provider/bank account |
 
+Schema v2 เพิ่ม `topup_settings.promptpay_bank_code` และ `promptpay_account_number` สำหรับตรวจธนาคาร/เลขบัญชีผู้รับของ PromptPay; Schema v3 เพิ่ม `topup_transactions.slip_receiver_proxy` สำหรับเก็บ PromptPay proxy จากสลิปไว้ให้ Admin ตรวจ (migration อัตโนมัติเมื่อ start process ใหม่)
+
 Unique/กันซ้ำหลัก:
 - `topup_transactions.reference` unique
 - `UNIQUE(user_id, idempotency_key)` สำหรับ request ซ้ำ
@@ -99,12 +113,15 @@ Unique/กันซ้ำหลัก:
 
 ก่อน credit ต้องผ่านทั้งหมด:
 1. **ยอดเงิน** ตรงกับ `requested_satang` เป๊ะ
-2. **บัญชีผู้รับ**:
-   - PromptPay: proxy ตรง (full/masked) หรือชื่อผู้รับตรง
-   - โอนบัญชี: bank code ตรง + เลขบัญชีตรง (full/masked last4) หรือชื่อผู้รับตรง
+2. **บัญชีผู้รับ** (ใช้ข้อมูล snapshot ตอนสร้างรายการ — PromptPay เก็บธนาคาร/เลขบัญชี/ชื่อจาก settings, โอนบัญชีเก็บจากบัญชีที่เลือก):
+   - **ธนาคาร**: ถ้าทั้งฝั่งรายการและสลิปรู้รหัสธนาคาร ต้องตรงกัน (เทียบตัวเลข normalize) — ต่างธนาคาร = ไม่ผ่านทันที
+   - **ชื่อบัญชี**: ถ้าทั้งสองฝั่งมีชื่อ ต้องตรงกันตามกฎ normalize/คำนำหน้า/ตัวย่อ; ชื่อตรงอย่างเดียว **ไม่พอ** ต้องมีเลขบัญชีหรือ PromptPay proxy ตรงด้วย; ชื่อไม่ตรง = veto
+   - **เลขบัญชี/PromptPay proxy**: ต้องมีอย่างน้อยหนึ่งตัวจับคู่ได้ โดยรองรับ mask ของผู้ให้บริการ (`xxx-x-x7890-x`, `081xxx5678`) ผ่าน positional/template + visible-run comparison; ถ้าเลขไม่ตรง = ไม่ผ่าน; ถ้าข้อมูลไม่พอ = `recipient_unverified` และไม่ credit
 3. **วันที่สลิป** อยู่ในช่วง transaction −10 นาที ถึง now +5 นาที (ถ้า provider ให้เวลา)
 4. **ไม่ซ้ำ**: hash รูป + provider transRef + voucher unique
 5. มี `transRef` จาก provider (ถ้าไม่มีจะไม่ credit)
+
+กฎ receiver matching พอร์ตจาก reference `0jay-v2/apps/web/src/server/services/topup/validation.ts` (`receiverMatchesPayee`): bank/name เป็น veto, account/proxy เป็นตัวพิสูจน์, และ name alone ไม่เคยพอ
 
 ชื่อเทียบแบบ normalize คำนำหน้า/ช่องว่าง/`*`; เลขบัญชีเทียบเลขที่มองเห็น (masked) ตามกฎใน `src/lib/topup/verify.ts`
 

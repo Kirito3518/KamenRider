@@ -479,7 +479,7 @@ describe("MachinesManager dashboard", () => {
     await activateTab("เครือข่าย");
 
     const targetInput = (await screen.findByLabelText(
-      "IP เป้าหมาย VNC (ตรวจสอบกับเครื่องจริงก่อนบันทึก)",
+      "IP เป้าหมาย VNC",
     )) as HTMLInputElement;
     fireEvent.change(targetInput, { target: { value: " 192.168.1.18 " } });
     fireEvent.click(screen.getByRole("button", { name: "ตรวจสอบ VNC" }));
@@ -508,7 +508,7 @@ describe("MachinesManager dashboard", () => {
     await activateTab("เครือข่าย");
 
     const targetInput = (await screen.findByLabelText(
-      "IP เป้าหมาย VNC (ตรวจสอบกับเครื่องจริงก่อนบันทึก)",
+      "IP เป้าหมาย VNC",
     )) as HTMLInputElement;
     fireEvent.change(targetInput, { target: { value: "203.0.113.8" } });
     fireEvent.click(screen.getByRole("button", { name: "ตรวจสอบ VNC" }));
@@ -556,7 +556,7 @@ describe("MachinesManager dashboard", () => {
     expectNetworkIsolation(0);
   });
 
-  it("keeps the pending list collapsible and approves only an exactly typed fingerprint", async () => {
+  it("keeps the pending list collapsible and approves after setting the machine up", async () => {
     const pendingMachine = machineFixture({
       machineId: "permission-pc",
       displayName: "Permission PC",
@@ -564,11 +564,16 @@ describe("MachinesManager dashboard", () => {
       publicKeyFingerprint: FINGERPRINT,
     });
     let approved = false;
+    let patchBody: unknown = null;
     let approveBody: unknown = null;
     fetchSpy.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url === MACHINES_URL) {
         return jsonResponse([approved ? { ...pendingMachine, approvalStatus: "approved" } : pendingMachine]);
+      }
+      if (url === "/api/admin/machines/permission-pc" && init?.method === "PATCH") {
+        patchBody = JSON.parse(String(init.body));
+        return jsonResponse(pendingMachine);
       }
       if (url === "/api/admin/machines/permission-pc/approve" && init?.method === "POST") {
         approved = true;
@@ -590,25 +595,38 @@ describe("MachinesManager dashboard", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "อนุมัติเครื่อง permission-pc" }));
     const dialog = await screen.findByRole("dialog");
-    expect(within(dialog).getByText(FINGERPRINT)).toBeDefined();
-    const confirm = within(dialog).getByRole("button", { name: "ยืนยันอนุมัติ" }) as HTMLButtonElement;
-    expect(confirm.disabled).toBe(true);
+    expect(within(dialog).getByText("ตั้งค่าและอนุมัติเครื่อง Permission PC")).toBeDefined();
+    expect(within(dialog).queryByLabelText(/fingerprint/i)).toBeNull();
+    expect(within(dialog).queryByRole("button", { name: "บันทึกข้อมูลทั่วไป" })).toBeNull();
+    expect(within(dialog).queryByRole("button", { name: "บันทึกการตั้งค่าเครือข่าย" })).toBeNull();
 
-    const fingerprintInput = within(dialog).getByLabelText("พิมพ์ fingerprint เพื่อยืนยัน");
-    fireEvent.change(fingerprintInput, { target: { value: "wrong-fingerprint" } });
-    expect(confirm.disabled).toBe(true);
-    fireEvent.change(fingerprintInput, { target: { value: FINGERPRINT } });
-    expect(confirm.disabled).toBe(false);
-    fireEvent.click(confirm);
+    fireEvent.click(within(dialog).getByRole("button", { name: "ยืนยัน" }));
+
+    await waitFor(() =>
+      expect(patchBody).toEqual({
+        displayName: "Permission PC",
+        hourlyPriceMinorUnits: 100,
+        moonlightPort: 47989,
+        sunshinePort: 47990,
+        vncLocalIp: null,
+        parsecEnabled: false,
+        expectedRevision: 1,
+      }),
+    );
+    const alert = await screen.findByRole("alertdialog");
+    expect(within(alert).getByText("ยืนยันอนุมัติเครื่อง Permission PC")).toBeDefined();
+    expect(within(alert).queryByLabelText(/fingerprint/i)).toBeNull();
+
+    fireEvent.click(within(alert).getByRole("button", { name: "อนุมัติ" }));
 
     await waitFor(() => expect(approveBody).toEqual({ fingerprint: FINGERPRINT }));
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     expect(await screen.findByText("อนุมัติเครื่อง Permission PC แล้ว")).toBeDefined();
     expect(screen.queryByRole("button", { name: "อนุมัติเครื่อง permission-pc" })).toBeNull();
-    expect(fetchSpy.mock.calls.filter(([input]) => String(input) === MACHINES_URL)).toHaveLength(2);
   });
 
-  it("saves general settings with the expected revision and the previously saved VNC target", async () => {
+  it("saves all settings with one save button and the expected revision", async () => {
     let patchBody: unknown = null;
     let machineReads = 0;
     const savedMachine = machineFixture({
@@ -634,16 +652,23 @@ describe("MachinesManager dashboard", () => {
     await screen.findByText("edit-pc");
     await openSettings("edit-pc");
 
+    expect(screen.getByRole("button", { name: "บันทึกการตั้งค่า" })).toBeDefined();
+    expect(screen.queryByRole("button", { name: "บันทึกข้อมูลทั่วไป" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "บันทึกการตั้งค่าเครือข่าย" })).toBeNull();
+
     fireEvent.change(screen.getByLabelText("ชื่อที่แสดง"), { target: { value: "Edit PC 2" } });
     fireEvent.change(screen.getByLabelText("ราคา (บาท/ชั่วโมง)"), { target: { value: "250" } });
-    fireEvent.click(screen.getByRole("button", { name: "บันทึกข้อมูลทั่วไป" }));
+    await activateTab("เครือข่าย");
+    fireEvent.change(screen.getByLabelText("Moonlight port"), { target: { value: "48000" } });
+    fireEvent.change(screen.getByLabelText("Management port"), { target: { value: "48001" } });
+    fireEvent.click(screen.getByRole("button", { name: "บันทึกการตั้งค่า" }));
 
     await waitFor(() =>
       expect(patchBody).toEqual({
         displayName: "Edit PC 2",
         hourlyPriceMinorUnits: 25000,
-        moonlightPort: 47989,
-        sunshinePort: 47990,
+        moonlightPort: 48000,
+        sunshinePort: 48001,
         vncLocalIp: "192.168.1.60",
         parsecEnabled: false,
         expectedRevision: 1,

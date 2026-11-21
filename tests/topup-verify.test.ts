@@ -4,6 +4,9 @@ import {
   checkAmount,
   checkRecipient,
   checkSlipDate,
+  compareBankCode,
+  compareMaskedPair,
+  compareMaskedValue,
   maskedNumbersMatch,
   namesMatch,
 } from "@/lib/topup/verify";
@@ -66,7 +69,7 @@ describe("slip matching", () => {
     const result = checkRecipient(
       row({ channel: "bank_transfer" }),
       slip({
-        receiverAccountNumber: "xxx-x-x7890-x",
+        receiverAccountNumber: "xxx-xxx-7890",
         receiverProxyValue: null,
         receiverProxyType: null,
       }),
@@ -84,6 +87,61 @@ describe("slip matching", () => {
       }),
     );
     expect(result.ok).toBe(false);
+  });
+
+  it("rejects a known different bank even when account and name agree", () => {
+    const result = checkRecipient(
+      row({ channel: "bank_transfer" }),
+      slip({ receiverBankCode: "014" }),
+    );
+    expect(result.ok).toBe(false);
+    expect(result.code).toBe("bank_mismatch");
+  });
+
+  it("rejects a different receiver name even when the account matches", () => {
+    const result = checkRecipient(
+      row({ channel: "bank_transfer" }),
+      slip({ receiverName: "ร้าน อื่น" }),
+    );
+    expect(result.ok).toBe(false);
+    expect(result.code).toBe("name_mismatch");
+  });
+
+  it("never accepts a matching name alone without an account identifier", () => {
+    const result = checkRecipient(
+      row({ channel: "bank_transfer" }),
+      slip({ receiverAccountNumber: null, receiverProxyValue: null }),
+    );
+    expect(result.ok).toBe(false);
+    expect(result.code).toBe("recipient_unverified");
+  });
+
+  it("checks PromptPay bank, account and proxy together", () => {
+    expect(checkRecipient(row(), slip({ receiverBankCode: "014" })).code).toBe(
+      "bank_mismatch",
+    );
+    expect(
+      checkRecipient(
+        row(),
+        slip({
+          receiverProxyValue: "0899999999",
+          receiverAccountNumber: "1111111111",
+        }),
+      ).code,
+    ).toBe("account_mismatch");
+  });
+
+  it("normalizes bank codes and compares masked identifiers strictly", () => {
+    expect(compareBankCode("004", "4")).toBe("match");
+    expect(compareBankCode("004", "014")).toBe("mismatch");
+    expect(compareBankCode(null, "014")).toBe("insufficient");
+    expect(compareMaskedValue("1234567890", "xxx-xxx-7890")).toBe("match");
+    expect(compareMaskedValue("1234567890", "xxx-xxx-9999")).toBe("mismatch");
+    // Provider mask style that masks the final digit: 7890 is the visible run.
+    expect(compareMaskedValue("1234078905", "xxx-x-x7890-x")).toBe("match");
+    expect(compareMaskedValue("1234567890", "xxx-x-x7890-x")).toBe("mismatch");
+    expect(compareMaskedPair("0812345678", "081xxx5678")).toBe("match");
+    expect(compareMaskedPair("0812345678", "081xxx9999")).toBe("mismatch");
   });
 
   it("rejects stale slips and slips far in the future", () => {

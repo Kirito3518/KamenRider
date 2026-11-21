@@ -27,6 +27,7 @@ import {
 import { POST as postRetry } from "@/app/api/topups/[topupId]/retry/route";
 import { GET as getAdminTopups } from "@/app/api/admin/topups/route";
 import { GET as getAdminTopupDetail } from "@/app/api/admin/topups/[topupId]/route";
+import { POST as postAdminReview } from "@/app/api/admin/topups/[topupId]/review/route";
 import { GET as getAdminSettings } from "@/app/api/admin/topup-settings/route";
 import { ensureTopupSchema } from "@/lib/topup/schema";
 import {
@@ -94,6 +95,8 @@ function configurePromptpay(db: Database.Database) {
       type: "msisdn",
       number: "0812345678",
       accountName: "ร้านทดสอบ",
+      bankCode: "004",
+      accountNumber: "1234567890",
     },
   });
 }
@@ -227,6 +230,17 @@ describe("top-up customer routes", () => {
     expect(body.topup.channel).toBe("promptpay");
     expect(body.topup.qrImageDataUrl).toBe("data:image/png;base64,aGVsbG8=");
     expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(
+      db
+        .prepare(
+          "SELECT bank_code, receiver_account_number, receiver_account_name FROM topup_transactions WHERE id = ?",
+        )
+        .get(body.topup.id),
+    ).toEqual({
+      bank_code: "004",
+      receiver_account_number: "1234567890",
+      receiver_account_name: "ร้านทดสอบ",
+    });
 
     const repeated = await postPromptpay(
       postRequest("/api/topups/promptpay", { requestId, amountSatang: 10_000 }),
@@ -262,6 +276,46 @@ describe("top-up customer routes", () => {
     const repeated = await postSlip(slipRequest(topupId), context(topupId));
     expect((await repeated.json()).outcome).toBe("completed");
     expect(balance(db)).toBe(110_000);
+  });
+
+  it("rejects a slip whose receiver does not match the selected account", async () => {
+    fetchMock = fetchWithQrAndVerify(() =>
+      verifyMock({
+        receiver: {
+          bank: { id: "014" },
+          account: {
+            name: { th: "ร้านอื่น" },
+            value: "1111111111",
+            proxy: { type: "MSISDN", account: "0899999999" },
+          },
+        },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const created = await (
+      await postPromptpay(
+        postRequest("/api/topups/promptpay", {
+          requestId: crypto.randomUUID(),
+          amountSatang: 10_000,
+        }),
+      )
+    ).json();
+    const topupId = created.topup.id as string;
+    const response = await postSlip(slipRequest(topupId), context(topupId));
+    const body = await response.json();
+    expect(body.outcome).toBe("failed");
+    expect(balance(db)).toBe(100_000);
+    expect(
+      db
+        .prepare(
+          "SELECT status, verification_status, failure_code FROM topup_transactions WHERE id = ?",
+        )
+        .get(topupId),
+    ).toMatchObject({
+      status: "failed",
+      verification_status: "rejected",
+      failure_code: "recipient_mismatch",
+    });
   });
 
   it("rejects a duplicate slip without a second provider call", async () => {
@@ -599,5 +653,47 @@ describe("top-up admin routes", () => {
     expect(detail.topup.attempts).toHaveLength(1);
     expect(detail.topup.attempts[0].provider).toBe("easyslip");
     expect(JSON.stringify(detail)).not.toContain(EASYSLIP_KEY);
+  });
+
+  it("lets an Admin approve a row that waited for manual review", async () => {
+    const fetchMock = fetchWithQrAndVerify(() =>
+      verifyMock({
+        receiver: {
+          bank: { id: "004" },
+          account: {
+            name: { th: "ร้านทดสอบ" },
+          },
+        },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    h.session = USER;
+    const created = await (
+      await postPromptpay(
+        postRequest("/api/topups/promptpay", {
+          requestId: crypto.randomUUID(),
+          amountSatang: 10_000,
+        }),
+      )
+    ).json();
+    const topupId = created.topup.id as string;
+    const slip = await postSlip(slipRequest(topupId), context(topupId));
+    const slipBody = await slip.json();
+    expect(slipBody.outcome).toBe("processing");
+
+    h.session = ADMIN_SESSION;
+    const review = await postAdminReview(
+      postRequest(`/api/admin/topups/${topupId}/review`, { action: "approve" }),
+      context(topupId),
+    );
+    expect(review.status).toBe(200);
+    const body = await review.json();
+    expect(body.outcome).toBe("completed");
+    expect(balance(db)).toBe(110_000);
+    expect(
+      db
+        .prepare("SELECT verification_code FROM topup_transactions WHERE id = ?")
+        .get(topupId),
+    ).toMatchObject({ verification_code: "manual_approved" });
   });
 });

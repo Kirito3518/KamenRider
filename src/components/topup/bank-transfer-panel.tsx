@@ -19,6 +19,10 @@ import { Spinner } from "@/components/ui/spinner";
 import { formatBalance } from "@/lib/money";
 import { formatBangkokDateTime } from "@/lib/date-range";
 import {
+  getBankPreset,
+  getBankSurfaceStyle,
+} from "@/lib/topup/banks";
+import {
   formatBankAccountNumber,
   maskAccountNumber,
 } from "@/lib/topup/amount";
@@ -133,6 +137,7 @@ export function BankTransferPanel({
   }
 
   const accountNumber = topup.receiverAccountNumber || "";
+  const bankPreset = topup.bankCode ? getBankPreset(topup.bankCode) : undefined;
 
   return (
     <div className="flex flex-col gap-5">
@@ -146,7 +151,10 @@ export function BankTransferPanel({
         </Badge>
       </div>
 
-      <div className="rounded-2xl border bg-card p-4">
+      <div
+        className="rounded-2xl border bg-card p-4"
+        style={getBankSurfaceStyle(bankPreset)}
+      >
         <div className="flex items-center gap-3 border-b pb-3">
           <BankLogo
             bankCode={topup.bankCode || ""}

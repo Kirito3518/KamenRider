@@ -16,6 +16,7 @@ import {
   topupErrorMessage,
   validatePromptPay,
 } from "@/components/admin/settings/topup-settings-api";
+import { BankLogoTile } from "@/components/admin/settings/topup-settings-ui";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -34,9 +35,19 @@ import {
   FieldTitle,
 } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
+import { formatBankAccountNumber } from "@/lib/topup/amount";
+import { BANK_PRESETS } from "@/lib/topup/banks";
 import type { PromptpayType } from "@/lib/topup/constants";
 import type { TopupSettingsAdmin } from "@/lib/topup/types";
 
@@ -194,6 +205,100 @@ export function PromptPayCard({
               )}
             </Field>
 
+            <div className="grid gap-4 sm:grid-cols-2">
+              <Field data-invalid={Boolean(fieldErrors.bankCode)}>
+                <FieldLabel htmlFor="topup-promptpay-bank">
+                  ธนาคารของบัญชี PromptPay
+                </FieldLabel>
+                <Select
+                  items={BANK_PRESETS.map((preset) => ({
+                    value: preset.code,
+                    label: `${preset.name} (${preset.code})`,
+                  }))}
+                  value={draft.bankCode}
+                  onValueChange={(value) => {
+                    onChange({ bankCode: String(value ?? "") });
+                    setFieldErrors((current) => ({
+                      ...current,
+                      bankCode: undefined,
+                    }));
+                    setFormError("");
+                  }}
+                >
+                  <SelectTrigger
+                    id="topup-promptpay-bank"
+                    className="w-full rounded-xl"
+                    aria-label="เลือกธนาคารของบัญชี PromptPay"
+                  >
+                    <SelectValue placeholder="เลือกธนาคาร" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectGroup>
+                      {BANK_PRESETS.map((preset) => (
+                        <SelectItem key={preset.code} value={preset.code}>
+                          <span className="flex items-center gap-2">
+                            <BankLogoTile
+                              bankCode={preset.code}
+                              bankName={preset.name}
+                              logoKey={preset.key}
+                              className="size-6 rounded-md text-[8px]"
+                            />
+                            <span>
+                              {preset.name} ({preset.code})
+                            </span>
+                          </span>
+                        </SelectItem>
+                      ))}
+                    </SelectGroup>
+                  </SelectContent>
+                </Select>
+                {fieldErrors.bankCode ? (
+                  <FieldError>{fieldErrors.bankCode}</FieldError>
+                ) : (
+                  <FieldDescription>
+                    ใช้ตรวจธนาคารผู้รับในสลิปให้ตรงกับบัญชีจริง
+                  </FieldDescription>
+                )}
+              </Field>
+              <Field data-invalid={Boolean(fieldErrors.accountNumber)}>
+                <FieldLabel htmlFor="topup-promptpay-account-number">
+                  เลขที่บัญชีของ PromptPay
+                </FieldLabel>
+                <Input
+                  id="topup-promptpay-account-number"
+                  name="promptpayAccountNumber"
+                  inputMode="numeric"
+                  autoComplete="off"
+                  maxLength={20}
+                  placeholder="1234567890"
+                  value={draft.accountNumber}
+                  aria-invalid={Boolean(fieldErrors.accountNumber)}
+                  onChange={(event) => {
+                    onChange({
+                      accountNumber: event.currentTarget.value
+                        .replace(/\D+/g, "")
+                        .slice(0, 20),
+                    });
+                    setFieldErrors((current) => ({
+                      ...current,
+                      accountNumber: undefined,
+                    }));
+                    setFormError("");
+                  }}
+                />
+                {fieldErrors.accountNumber ? (
+                  <FieldError>{fieldErrors.accountNumber}</FieldError>
+                ) : (
+                  <FieldDescription>
+                    ใช้ตรวจเลขบัญชีผู้รับในสลิป · บันทึกล่าสุด:{" "}
+                    {saved.accountNumber
+                      ? formatBankAccountNumber(saved.accountNumber)
+                      : "ยังไม่ได้ตั้งค่า"}
+                  </FieldDescription>
+                )}
+              </Field>
+            </div>
+
             <Field data-invalid={Boolean(fieldErrors.accountName)}>
               <FieldLabel htmlFor="topup-promptpay-account-name">
                 ชื่อบัญชีสำหรับตรวจสอบสลิป
@@ -330,6 +435,18 @@ export function PromptPayReceiverCard({
           <div className="flex flex-col gap-1">
             <dt className="text-muted-foreground">ชื่อบัญชี</dt>
             <dd>{saved.accountName || "ยังไม่ได้ตั้งค่า"}</dd>
+          </div>
+          <div className="flex flex-col gap-1">
+            <dt className="text-muted-foreground">ธนาคาร / เลขบัญชี</dt>
+            <dd>
+              {saved.bankCode || saved.accountNumber
+                ? `${saved.bankCode ?? "—"} · ${
+                    saved.accountNumber
+                      ? formatBankAccountNumber(saved.accountNumber)
+                      : "—"
+                  }`
+                : "ยังไม่ได้ตั้งค่า"}
+            </dd>
           </div>
           <div className="flex flex-col gap-1">
             <dt className="text-muted-foreground">ตัวอย่างที่กำลังแก้ไข</dt>

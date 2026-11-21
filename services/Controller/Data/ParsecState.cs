@@ -101,7 +101,7 @@ public sealed partial class ControllerDatabase
             var capability = ReadMachineParsecCapability(tx, lease.Dto.MachineId);
             ParsecAttemptDto? attempt = null;
             using (var command = LeaseCommand(tx,
-                       $"SELECT {ParsecAttemptColumns} FROM parsec_attempts WHERE rental_id=$rental ORDER BY created_at_unix_ms DESC LIMIT 1",
+                       $"SELECT {ParsecAttemptColumns} FROM parsec_attempts WHERE rental_id=$rental ORDER BY created_at_unix_ms DESC, rowid DESC LIMIT 1",
                        ("$rental", rentalId)))
             using (var row = command.ExecuteReader())
                 if (row.Read()) attempt = ReadParsecAttempt(row);
@@ -174,6 +174,45 @@ public sealed partial class ControllerDatabase
                 throw new InvalidOperationException("Agent has not advertised Parsec");
 
             var now = clock.GetUtcNow().ToUnixTimeMilliseconds();
+
+            // Round two of Parsec's e-mail/IP challenge. The renter proves which challenged
+            // attempt they are continuing; the attempt must belong to this lease, renter and
+            // current Agent boot key. Replacing it is the only way to queue a second login while
+            // the first one is still waiting_email.
+            var retryAttemptId = string.IsNullOrWhiteSpace(request.RetryAttemptId)
+                ? null
+                : request.RetryAttemptId;
+            if (retryAttemptId is not null)
+            {
+                Identifier(retryAttemptId);
+                string retryState;
+                string? retryBootKeyId;
+                using (var retry = LeaseCommand(tx,
+                           "SELECT state,boot_key_id FROM parsec_attempts WHERE attempt_id=$attempt AND rental_id=$rental AND user_id=$user",
+                           ("$attempt", retryAttemptId), ("$rental", rentalId), ("$user", actorId)))
+                using (var row = retry.ExecuteReader())
+                {
+                    if (!row.Read())
+                        throw new InvalidOperationException("Retry attempt is not available for this lease");
+                    retryState = row.GetString(0);
+                    retryBootKeyId = row.IsDBNull(1) ? null : row.GetString(1);
+                }
+
+                if (retryState != ParsecStates.WaitingEmail ||
+                    !string.Equals(retryBootKeyId, capability.BootKeyId, StringComparison.Ordinal))
+                    throw new InvalidOperationException("Retry attempt is not awaiting e-mail verification");
+
+                // Mark the challenged attempt failed and invalidate its pending ParsecConnect in the
+                // same transaction. The unique partial index lease_parsec_pending allows only one
+                // pending ParsecConnect per rental, so this must happen before the new insert.
+                ExecuteLease(tx,
+                    "UPDATE parsec_attempts SET state='failed', error_code=$code, message=NULL, updated_at_unix_ms=$now WHERE attempt_id=$id AND state='waiting_email'",
+                    ("$code", ParsecErrorCodes.EmailVerified), ("$now", now), ("$id", retryAttemptId));
+                ExecuteLease(tx,
+                    "UPDATE command_outbox SET status='invalidated', payload='{}' WHERE type='ParsecConnect' AND rental_id=$rental AND status='pending'",
+                    ("$rental", rentalId));
+            }
+
             using (var running = LeaseCommand(tx,
                        "SELECT COUNT(*) FROM parsec_attempts WHERE rental_id=$rental AND state IN ('queued','starting','waiting_email')",
                        ("$rental", rentalId)))

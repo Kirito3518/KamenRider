@@ -135,6 +135,8 @@ export function SlipProviderSelectionCard({
       <CardContent className="flex flex-col gap-4">
         <ToggleGroup
           aria-label="เลือกผู้ให้บริการตรวจสลิป"
+          variant="outline"
+          size="lg"
           className="w-full sm:w-fit"
           value={[draftProvider]}
           onValueChange={(values) => {
@@ -145,13 +147,24 @@ export function SlipProviderSelectionCard({
             }
           }}
         >
-          <ToggleGroupItem value="easyslip" className="flex-1 sm:flex-none">
+          <ToggleGroupItem
+            value="easyslip"
+            className="flex-1 gap-2 sm:flex-none aria-pressed:border-primary aria-pressed:bg-primary aria-pressed:text-primary-foreground aria-pressed:hover:bg-primary/90"
+          >
+            <ShieldCheck data-icon="inline-start" />
             EasySlip
           </ToggleGroupItem>
-          <ToggleGroupItem value="slipok" className="flex-1 sm:flex-none">
+          <ToggleGroupItem
+            value="slipok"
+            className="flex-1 gap-2 sm:flex-none aria-pressed:border-primary aria-pressed:bg-primary aria-pressed:text-primary-foreground aria-pressed:hover:bg-primary/90"
+          >
+            <KeyRound data-icon="inline-start" />
             SlipOk
           </ToggleGroupItem>
         </ToggleGroup>
+        <p className="text-sm text-muted-foreground">
+          {PROVIDER_DESCRIPTIONS[draftProvider]}
+        </p>
 
         {pendingVerifications > 0 ? (
           <Alert>

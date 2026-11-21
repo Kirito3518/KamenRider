@@ -9,8 +9,10 @@ import {
   createTopup,
   expireStaleTopups,
   markTopupFailed,
+  markTopupProcessingUnknown,
   requireTopupRow,
 } from "@/lib/topup/transactions";
+import { manualReviewTopup } from "@/lib/topup/services/review-service";
 import { creditSlipTopup } from "@/lib/topup/wallet";
 import {
   archiveBankAccount,
@@ -119,6 +121,62 @@ function balance(db: Database.Database) {
       balanceSatang: number;
     }
   ).balanceSatang;
+}
+
+function createReviewableTopup(
+  db: Database.Database,
+  receiver: {
+    receiverName: string;
+    receiverBankCode: string;
+    receiverAccountNumber: string;
+  },
+) {
+  const now = Date.now();
+  const row = createTopup(db, {
+    userId: USER_ID,
+    userName: "Topup User",
+    userEmail: "topup@example.com",
+    channel: "promptpay",
+    requestedSatang: 10_000,
+    idempotencyKey: crypto.randomUUID(),
+    fingerprint: `review:${crypto.randomUUID()}`,
+    expiresAt: now + 60_000,
+    promptpay: {
+      type: "msisdn",
+      number: "0812345678",
+      accountName: "ร้านทดสอบ",
+      bankCode: "004",
+      bankName: "ธนาคารกสิกรไทย",
+      accountNumber: "1234567890",
+    },
+    now,
+  }).row;
+  const token = createProcessingToken();
+  beginSlipProcessing(db, {
+    topupId: row.id,
+    token,
+    path: `${row.id}.png`,
+    mime: "image/png",
+    hash: crypto.randomUUID().replace(/-/g, ""),
+  });
+  return markTopupProcessingUnknown(db, {
+    topupId: row.id,
+    code: "recipient_unverified",
+    message: "รอผู้ดูแลตรวจสอบ",
+    slip: {
+      provider: "easyslip",
+      transRef: `REF-${crypto.randomUUID()}`,
+      amountSatang: row.requested_satang,
+      dateIso: new Date().toISOString(),
+      senderName: "ผู้โอน",
+      receiverName: receiver.receiverName,
+      receiverBankCode: receiver.receiverBankCode,
+      receiverBankName: null,
+      receiverAccountNumber: receiver.receiverAccountNumber,
+      receiverProxyType: null,
+      receiverProxyValue: null,
+    },
+  });
 }
 
 describe("top-up schema and wallet credit", () => {
@@ -297,6 +355,8 @@ describe("top-up schema and wallet credit", () => {
           type: "msisdn",
           number: "0812345678",
           accountName: "ร้านทดสอบ",
+          bankCode: "004",
+          accountNumber: "1234567890",
         },
       }),
     ).toThrow(TopupError);
@@ -318,6 +378,17 @@ describe("top-up schema and wallet credit", () => {
     expect(getProviderCredentials(db, "easyslip")?.apiKey).toBe(easySlipKey);
 
     const afterKey = getAdminTopupSettings(db);
+    expect(() =>
+      updateTopupSettings(db, ACTOR, {
+        expectedUpdatedAt: afterKey.settings.updatedAt,
+        promptpay: {
+          enabled: true,
+          type: "msisdn",
+          number: "0812345678",
+          accountName: "ร้านทดสอบ",
+        },
+      }),
+    ).toThrow(TopupError);
     const enabled = updateTopupSettings(db, ACTOR, {
       expectedUpdatedAt: afterKey.settings.updatedAt,
       promptpay: {
@@ -325,6 +396,8 @@ describe("top-up schema and wallet credit", () => {
         type: "msisdn",
         number: "0812345678",
         accountName: "ร้านทดสอบ",
+        bankCode: "004",
+        accountNumber: "1234567890",
       },
     });
     expect(enabled.settings.promptpay.enabled).toBe(true);
@@ -372,5 +445,77 @@ describe("top-up schema and wallet credit", () => {
     expect(getPublicTopupConfig(db).bankTransfer.accounts.map((item) => item.id)).toEqual([
       second.id,
     ]);
+  });
+
+  it("lets an Admin approve a reviewed slip only when the selected account matches", () => {
+    const db = makeDb();
+    try {
+      const row = createReviewableTopup(db, {
+        receiverName: "ร้านทดสอบ",
+        receiverBankCode: "004",
+        receiverAccountNumber: "1234567890",
+      });
+      expect(requireTopupRow(db, row.id).status).toBe("processing");
+      const result = manualReviewTopup(db, ACTOR, row.id, { action: "approve" });
+      expect(result.outcome).toBe("completed");
+      expect(balance(db)).toBe(110_000);
+      const saved = requireTopupRow(db, row.id);
+      expect(saved.status).toBe("completed");
+      expect(saved.verification_code).toBe("manual_approved");
+    } finally {
+      db.close();
+    }
+  });
+
+  it("auto-rejects an Admin approval when the slip receiver does not match", () => {
+    const db = makeDb();
+    try {
+      const row = createReviewableTopup(db, {
+        receiverName: "ร้านอื่น",
+        receiverBankCode: "014",
+        receiverAccountNumber: "1111111111",
+      });
+      const result = manualReviewTopup(db, ACTOR, row.id, { action: "approve" });
+      expect(result.outcome).toBe("failed");
+      expect(balance(db)).toBe(100_000);
+      const saved = requireTopupRow(db, row.id);
+      expect(saved.status).toBe("failed");
+      expect(saved.failure_code).toBe("recipient_mismatch");
+    } finally {
+      db.close();
+    }
+  });
+
+  it("allows an Admin to reject a reviewed slip without crediting", () => {
+    const db = makeDb();
+    try {
+      const row = createReviewableTopup(db, {
+        receiverName: "ร้านทดสอบ",
+        receiverBankCode: "004",
+        receiverAccountNumber: "1234567890",
+      });
+      const result = manualReviewTopup(db, ACTOR, row.id, {
+        action: "reject",
+        reason: "ตรวจรูปสลิปแล้วไม่ตรง",
+      });
+      expect(result.outcome).toBe("failed");
+      expect(result.message).toBe("ตรวจรูปสลิปแล้วไม่ตรง");
+      expect(balance(db)).toBe(100_000);
+      expect(requireTopupRow(db, row.id).failure_code).toBe("manual_rejected");
+    } finally {
+      db.close();
+    }
+  });
+
+  it("does not review a row that is not awaiting review", () => {
+    const db = makeDb();
+    try {
+      const row = createSlipTopup(db);
+      expect(() =>
+        manualReviewTopup(db, ACTOR, row.id, { action: "approve" }),
+      ).toThrow(TopupError);
+    } finally {
+      db.close();
+    }
   });
 });

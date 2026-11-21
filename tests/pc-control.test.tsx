@@ -207,4 +207,50 @@ describe("PcControl", () => {
     const unpair = calls.find((call) => call.url === SUNSHINE_RESTART_URL && JSON.parse(String(call.init?.body)).action === "unpair")!;
     expect(JSON.parse(String(unpair.init?.body))).toMatchObject({ action: "unpair", force: true });
   });
+
+  it("groups colour-coded actions under a legend", async () => {
+    render(<PcControl />);
+    await screen.findByText("PC-01");
+
+    const legend = screen.getByRole("note", {
+      name: "คำอธิบายสีของปุ่ม",
+    });
+    expect(legend.textContent).toContain("เปิดใช้งาน / เพิ่มเวลา");
+    expect(legend.textContent).toContain("เชื่อมต่อ / ตั้งค่า");
+    expect(legend.textContent).toContain("ซ่อมบำรุง / ลดเวลา");
+    expect(legend.textContent).toContain("ปิด / ยกเลิก");
+
+    for (const name of [
+      "เครื่อง",
+      "ซ่อมบำรุง Sunshine",
+      "เชื่อมต่อ",
+      "เวลาเช่า",
+    ])
+      expect(screen.getByRole("group", { name })).toBeDefined();
+
+    expect(
+      screen.getByRole("button", { name: "เปิดเครื่อง" }).className,
+    ).toContain("text-status-available");
+    expect(
+      screen.getByRole("button", { name: "ปิดเครื่อง" }).className,
+    ).toContain("text-destructive");
+    expect(
+      screen.getByRole("button", { name: "รีสตาร์ท Sunshine" }).className,
+    ).toContain("text-status-busy");
+    expect(
+      screen.getByRole("button", { name: "เชื่อมต่อพิน" }).className,
+    ).toContain("bg-primary");
+    expect(
+      screen.getByRole("button", { name: "กำหนดเวลา" }).className,
+    ).toContain("bg-primary");
+    expect(
+      screen.getByRole("button", { name: "ยกเลิกการเช่า" }).className,
+    ).toContain("text-destructive");
+    expect(
+      screen.getByRole("button", { name: "+1 ชม." }).className,
+    ).toContain("text-status-available");
+    expect(
+      screen.getByRole("button", { name: "−1 ชม." }).className,
+    ).toContain("text-status-busy");
+  });
 });

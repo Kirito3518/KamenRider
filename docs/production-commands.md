@@ -352,8 +352,9 @@ Get-Content "$env:ProgramData\KamenRaider\Agent\enrollment-receipt.json"
 
 ```powershell
 # On https://$MotherIp/admin/machines:
-#  - the Child appears as pending -> fill name (empty lets hostname auto-fill), price in satang,
-#    Moonlight/Sunshine ports, confirmed VNC LAN IP -> Approve by typing the fingerprint.
+#  - the Child appears as pending -> click อนุมัติ -> settings dialog: fill name (empty lets hostname auto-fill),
+#    price in satang, Moonlight/Sunshine ports, VNC LAN IP (optional) -> click ยืนยัน -> click อนุมัติ.
+#    No fingerprint typing: the web sends the Agent-reported fingerprint automatically.
 ```
 
 ```powershell

@@ -36,6 +36,8 @@ public static class ParsecErrorCodes
     public const string Internal = "INTERNAL";
     public const string LeaseEnded = "LEASE_ENDED";
     public const string AgentRebooted = "AGENT_REBOOTED";
+    /// <summary>The renter confirmed Parsec's e-mail/IP challenge and asked for a fresh login round.</summary>
+    public const string EmailVerified = "EMAIL_VERIFIED";
 }
 
 /// <summary>The Agent's boot-only RSA public key, advertised in the signed heartbeat.</summary>
@@ -43,7 +45,16 @@ public sealed record ParsecCapability(string BootKeyId, string PublicKey, bool A
 
 public sealed record ParsecSealedSecret(string WrappedKey, string Iv, string Ciphertext);
 
-public sealed record ParsecAttemptRequest(string UserId, string IdempotencyKey, ParsecSealedSecret Secret);
+/// <summary>
+/// A renter login request. <paramref name="RetryAttemptId"/> is set only for round two of the
+/// e-mail/IP challenge: the named attempt must currently be <c>waiting_email</c> for the same
+/// lease, renter and boot key. It is optional so every first-round caller keeps working.
+/// </summary>
+public sealed record ParsecAttemptRequest(
+    string UserId,
+    string IdempotencyKey,
+    ParsecSealedSecret Secret,
+    string? RetryAttemptId = null);
 
 public sealed record ParsecAttemptDto(
     string AttemptId,

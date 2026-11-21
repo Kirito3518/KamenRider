@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { KeyRound, Minus, Plus, XCircle } from "lucide-react";
+import { KeyRound, Minus, Plus, PowerOff, RefreshCw, Unlink, XCircle } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import {
   AlertDialog,
@@ -79,8 +79,22 @@ export function PcControlConfirmDialog({
         </AlertDialogHeader>
         <AlertDialogFooter>
           <AlertDialogCancel disabled={busy}>ไม่ใช่ตอนนี้</AlertDialogCancel>
-          <AlertDialogAction variant={powerOff || kind === "cancel" ? "destructive" : "default"} onClick={onConfirm} disabled={busy}>
-            {busy ? <Spinner data-icon="inline-start" /> : null}
+          <AlertDialogAction
+            variant={powerOff || kind === "cancel" ? "destructive" : "busy"}
+            onClick={onConfirm}
+            disabled={busy}
+          >
+            {busy ? (
+              <Spinner data-icon="inline-start" />
+            ) : powerOff ? (
+              <PowerOff data-icon="inline-start" />
+            ) : kind === "cancel" ? (
+              <XCircle data-icon="inline-start" />
+            ) : restartSunshine ? (
+              <RefreshCw data-icon="inline-start" />
+            ) : (
+              <Unlink data-icon="inline-start" />
+            )}
             {powerOff
               ? "ปิดเครื่องทันที"
               : kind === "cancel"

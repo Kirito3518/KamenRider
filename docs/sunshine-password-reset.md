@@ -61,7 +61,7 @@ Get-Content 'C:\Program Files\Sunshine\config\sunshine_state.json' |
   ConvertFrom-Json | Select-Object username
 ```
 - username ต้องตรงกับที่ตั้ง
-- จากนั้นทดสอบ PIN: เปิด Moonlight → add `192.168.1.25:47989` → PIN → `/my-machines` → โหลดช่องจับคู่ → ส่ง PIN
+- จากนั้นทดสอบ PIN: เปิด Moonlight → add `192.168.1.25:47989` → PIN → `/my-machines` → กดปุ่ม Moonlight → คัดลอก address → กรอก PIN → ยืนยัน PIN
 
 ## หมายเหตุ
 - Stream Guard ตั้ง Sunshine เป็น Manual/Stopped และ firewall block จนกว่าจะมี active lease — เป็นปกติ

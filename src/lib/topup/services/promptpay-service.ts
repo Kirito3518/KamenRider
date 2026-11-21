@@ -1,5 +1,6 @@
 import type Database from "better-sqlite3";
 import { PROMPTPAY_QR_EXPIRY_MS } from "@/lib/topup/constants";
+import { getBankPreset } from "@/lib/topup/banks";
 import { TopupError } from "@/lib/topup/errors";
 import { ensureTopupSchema } from "@/lib/topup/schema";
 import { getProviderCredentials, getTopupSettingsRow } from "@/lib/topup/settings";
@@ -68,6 +69,16 @@ export async function createPromptpayTopup(
       409,
     );
   }
+  const promptpayBank = settings.promptpay_bank_code
+    ? getBankPreset(settings.promptpay_bank_code)
+    : undefined;
+  if (!promptpayBank || !settings.promptpay_account_number) {
+    throw new TopupError(
+      "not-configured",
+      "ยังไม่ได้ตั้งค่าธนาคารและเลขบัญชีของบัญชี PromptPay สำหรับตรวจสลิป",
+      409,
+    );
+  }
   const credentials = getProviderCredentials(database, "easyslip");
   if (!credentials) {
     throw new TopupError(
@@ -87,6 +98,8 @@ export async function createPromptpayTopup(
     type: settings.promptpay_type,
     number: settings.promptpay_number,
     name: settings.promptpay_account_name,
+    bankCode: promptpayBank.code,
+    accountNumber: settings.promptpay_account_number,
   });
   const created = createTopup(database, {
     userId: actor.id,
@@ -101,6 +114,9 @@ export async function createPromptpayTopup(
       type: settings.promptpay_type,
       number: settings.promptpay_number,
       accountName: settings.promptpay_account_name,
+      bankCode: promptpayBank.code,
+      bankName: promptpayBank.name,
+      accountNumber: settings.promptpay_account_number,
     },
     now,
   });

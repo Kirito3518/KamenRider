@@ -22,6 +22,11 @@ import {
 } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
 import { parseBahtToSatang, formatBahtNumber } from "@/lib/topup/amount";
+import {
+  getBankPreset,
+  getBankPresetByLogoKey,
+  getBankSurfaceStyle,
+} from "@/lib/topup/banks";
 import type {
   TopupCreateResponse,
   TopupDetail,
@@ -58,6 +63,10 @@ export function BankTransferForm({
   const unavailable = !config.bankTransfer.enabled;
   const verificationUnavailable = !config.slipVerificationAvailable;
   const selectedAccount = accounts.find((account) => account.id === accountId);
+  const selectedBank = selectedAccount
+    ? (getBankPresetByLogoKey(selectedAccount.logoKey) ??
+      getBankPreset(selectedAccount.bankCode))
+    : undefined;
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -219,31 +228,44 @@ export function BankTransferForm({
               </SelectTrigger>
               <SelectContent>
                 <SelectGroup>
-                  {accounts.map((account) => (
-                    <SelectItem key={account.id} value={account.id}>
-                      <span className="flex items-center gap-2">
-                        <BankLogo
-                          bankCode={account.bankCode}
-                          bankName={account.bankName}
-                          logoKey={account.logoKey}
-                          logoDataUrl={account.logoDataUrl}
-                          className="size-6 rounded-lg text-[8px]"
-                        />
-                        <span className="min-w-0">
-                          <span className="block truncate">{account.bankName}</span>
-                          <span className="block text-xs text-muted-foreground">
-                            {account.bankCode} · {account.accountNumber}
+                  {accounts.map((account) => {
+                    const bank =
+                      getBankPresetByLogoKey(account.logoKey) ??
+                      getBankPreset(account.bankCode);
+                    return (
+                      <SelectItem
+                        key={account.id}
+                        value={account.id}
+                        style={getBankSurfaceStyle(bank)}
+                        className="mb-1 last:mb-0 focus-visible:ring-2 focus-visible:ring-ring"
+                      >
+                        <span className="flex items-center gap-2">
+                          <BankLogo
+                            bankCode={account.bankCode}
+                            bankName={account.bankName}
+                            logoKey={account.logoKey}
+                            logoDataUrl={account.logoDataUrl}
+                            className="size-6 rounded-lg text-[8px]"
+                          />
+                          <span className="min-w-0">
+                            <span className="block truncate">{account.bankName}</span>
+                            <span className="block text-xs text-muted-foreground">
+                              {account.bankCode} · {account.accountNumber}
+                            </span>
                           </span>
                         </span>
-                      </span>
-                    </SelectItem>
-                  ))}
+                      </SelectItem>
+                    );
+                  })}
                 </SelectGroup>
               </SelectContent>
             </Select>
           </Field>
           {selectedAccount ? (
-            <div className="flex items-center gap-3 rounded-2xl border bg-muted/40 p-3 text-sm">
+            <div
+              className="flex items-center gap-3 rounded-2xl border bg-muted/40 p-3 text-sm"
+              style={getBankSurfaceStyle(selectedBank)}
+            >
               <BankLogo
                 bankCode={selectedAccount.bankCode}
                 bankName={selectedAccount.bankName}

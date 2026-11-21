@@ -86,6 +86,10 @@ export type Lease = {
   payment?: LeasePaymentInfo | null;
 };
 export type Offer = { pairingIds: string[]; validUntilUtc: string } | null;
+export type PairingCommandStatus = {
+  commandId: string;
+  status: "queued" | "succeeded" | "failed" | "expired";
+};
 /**
  * Fleet-wide Sunshine management credential metadata as exposed to the Admin
  * browser. The password is intentionally absent: it is write-only from the web

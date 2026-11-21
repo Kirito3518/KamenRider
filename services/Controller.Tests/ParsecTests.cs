@@ -128,6 +128,136 @@ public sealed class ParsecTests
     }
 
     [Fact]
+    public async Task WaitingEmailAttemptCanBeRetriedWithANewIdempotencyKey()
+    {
+        using var context = await ActiveAttempt();
+        var fixture = context.Fixture;
+
+        await ReportSignedStatus(fixture, new ParsecStatusReport(
+            context.Attempt.AttemptId, "boot-key-1", ParsecStates.WaitingEmail, null, null));
+        Assert.Equal(ParsecStates.WaitingEmail,
+            fixture.Db.GetParsecAttempt(context.LeaseId, context.Attempt.AttemptId, "alice").State);
+
+        // A plain second POST must still be rejected; only an explicit round-two marker may
+        // replace the challenged attempt.
+        Assert.Throws<InvalidOperationException>(() => fixture.Db.QueueParsecAttempt(context.LeaseId, "alice",
+            new ParsecAttemptRequest("alice", "idem-no-retry", SealedSecret())));
+
+        var oldCommandId = PendingParsecCommandId(fixture.Path, context.LeaseId);
+
+        var retry = fixture.Db.QueueParsecAttempt(context.LeaseId, "alice",
+            new ParsecAttemptRequest("alice", "idem-round-2", SealedSecret(), context.Attempt.AttemptId));
+
+        Assert.NotEqual(context.Attempt.AttemptId, retry.AttemptId);
+        Assert.Equal(ParsecStates.Queued, retry.State);
+
+        // Both attempts use the fixture clock's same millisecond; the rowid tie-breaker must
+        // make the newly queued retry the latest attempt.
+        var state = fixture.Db.GetLeaseParsecState(context.LeaseId, "alice");
+        Assert.Equal(retry.AttemptId, state.Attempt?.AttemptId);
+
+        var oldAttempt = fixture.Db.GetParsecAttempt(context.LeaseId, context.Attempt.AttemptId, "alice");
+        Assert.Equal(ParsecStates.Failed, oldAttempt.State);
+        Assert.Equal(ParsecErrorCodes.EmailVerified, oldAttempt.ErrorCode);
+        Assert.Null(oldAttempt.Message);
+
+        using var connection = Open(fixture.Path);
+        AssertCommand(connection, oldCommandId, "invalidated", "{}");
+        AssertSinglePendingParsecCommand(connection, context.LeaseId, retry.AttemptId);
+        Assert.Equal(2L, CountRentalAttempts(connection, context.LeaseId));
+
+        // The round-two idempotency key wins even though the old attempt is no longer retryable.
+        var repeated = fixture.Db.QueueParsecAttempt(context.LeaseId, "alice",
+            new ParsecAttemptRequest("alice", "idem-round-2", SealedSecret(), context.Attempt.AttemptId));
+        Assert.Equal(retry.AttemptId, repeated.AttemptId);
+        Assert.Equal(2L, CountRentalAttempts(connection, context.LeaseId));
+        AssertSinglePendingParsecCommand(connection, context.LeaseId, retry.AttemptId);
+    }
+
+    [Fact]
+    public async Task RetryRejectsAnAttemptOwnedByAnotherUser()
+    {
+        using var context = await ActiveAttempt();
+        var fixture = context.Fixture;
+        await ReportSignedStatus(fixture, new ParsecStatusReport(
+            context.Attempt.AttemptId, "boot-key-1", ParsecStates.WaitingEmail, null, null));
+
+        using (var connection = Open(fixture.Path))
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = "UPDATE parsec_attempts SET user_id='mallory' WHERE attempt_id=$id";
+            command.Parameters.AddWithValue("$id", context.Attempt.AttemptId);
+            Assert.Equal(1, command.ExecuteNonQuery());
+        }
+
+        Assert.Throws<InvalidOperationException>(() => fixture.Db.QueueParsecAttempt(context.LeaseId, "alice",
+            new ParsecAttemptRequest("alice", "idem-wrong-owner", SealedSecret(), context.Attempt.AttemptId)));
+        Assert.Equal(ParsecStates.WaitingEmail,
+            fixture.Db.GetParsecAttempt(context.LeaseId, context.Attempt.AttemptId, "alice").State);
+    }
+
+    [Fact]
+    public async Task RetryRejectsAnAttemptFromAnotherLease()
+    {
+        using var context = await ActiveAttempt();
+        var fixture = context.Fixture;
+        await ReportSignedStatus(fixture, new ParsecStatusReport(
+            context.Attempt.AttemptId, "boot-key-1", ParsecStates.WaitingEmail, null, null));
+
+        fixture.AddRentableMachine("pc2");
+        var secondLease = await ActivateOn(fixture, "pc2", "boot-2", "create-pc2");
+        var configRevision = fixture.Db.List().Single(machine => machine.MachineId == "pc2").ConfigRevision;
+        fixture.Db.Update("pc2", new MachineUpdate("PC2", 500, 1, 2) { ParsecEnabled = true }, configRevision);
+        configRevision = fixture.Db.List().Single(machine => machine.MachineId == "pc2").ConfigRevision;
+        fixture.Db.Sync("pc2", new SyncRequest("boot-2", "192.0.2.1", "001122334455", configRevision, "ready", [])
+        {
+            Parsec = Capability("boot-key-2"),
+        });
+
+        Assert.Throws<InvalidOperationException>(() => fixture.Db.QueueParsecAttempt(secondLease.Id, "alice",
+            new ParsecAttemptRequest("alice", "idem-wrong-lease", SealedSecret(), context.Attempt.AttemptId)));
+        Assert.Equal(ParsecStates.WaitingEmail,
+            fixture.Db.GetParsecAttempt(context.LeaseId, context.Attempt.AttemptId, "alice").State);
+    }
+
+    [Fact]
+    public async Task RetryRejectsAnAttemptFromAnotherBoot()
+    {
+        using var context = await ActiveAttempt();
+        var fixture = context.Fixture;
+        await ReportSignedStatus(fixture, new ParsecStatusReport(
+            context.Attempt.AttemptId, "boot-key-1", ParsecStates.WaitingEmail, null, null));
+
+        using (var connection = Open(fixture.Path))
+        using (var command = connection.CreateCommand())
+        {
+            // Simulate a capability refresh with a new boot key without letting
+            // StoreParsecCapability fail the old attempt first.
+            command.CommandText = "UPDATE machine_parsec_state SET boot_key_id='boot-key-2' WHERE machine_id='pc'";
+            Assert.Equal(1, command.ExecuteNonQuery());
+        }
+
+        Assert.Throws<InvalidOperationException>(() => fixture.Db.QueueParsecAttempt(context.LeaseId, "alice",
+            new ParsecAttemptRequest("alice", "idem-wrong-boot", SealedSecret(), context.Attempt.AttemptId)));
+        Assert.Equal(ParsecStates.WaitingEmail,
+            fixture.Db.GetParsecAttempt(context.LeaseId, context.Attempt.AttemptId, "alice").State);
+    }
+
+    [Fact]
+    public async Task RetryRejectsAnAttemptThatIsNotWaitingForEmail()
+    {
+        using var context = await ActiveAttempt();
+        var fixture = context.Fixture;
+        await ReportSignedStatus(fixture, new ParsecStatusReport(
+            context.Attempt.AttemptId, "boot-key-1", ParsecStates.Ready, null, "ok"));
+
+        Assert.Throws<InvalidOperationException>(() => fixture.Db.QueueParsecAttempt(context.LeaseId, "alice",
+            new ParsecAttemptRequest("alice", "idem-wrong-state", SealedSecret(), context.Attempt.AttemptId)));
+        Assert.Equal(ParsecStates.Ready,
+            fixture.Db.GetParsecAttempt(context.LeaseId, context.Attempt.AttemptId, "alice").State);
+    }
+
+    [Fact]
     public async Task SignedStatusReportUpdatesTheAttemptAndRejectsStaleBootKeys()
     {
         using var context = await ActiveAttempt();
@@ -211,6 +341,85 @@ public sealed class ParsecTests
         using var command = connection.CreateCommand();
         command.CommandText = "SELECT COUNT(*) FROM command_outbox WHERE type='ParsecConnect' AND status='pending'";
         Assert.Equal(0L, (long)command.ExecuteScalar()!);
+    }
+
+    private static async Task ReportSignedStatus(LeaseFixture fixture, ParsecStatusReport report)
+    {
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer();
+        builder.Services.AddSingleton(fixture.Db);
+        builder.Services.AddSingleton<AgentAuthentication>();
+        await using var app = builder.Build();
+        app.MapParsec();
+        await app.StartAsync();
+        using var client = app.GetTestServer().CreateClient();
+        using var request = SignedStatusRequest(fixture, report);
+        using var response = await client.SendAsync(request);
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+    }
+
+    /// <summary>
+    /// Creates, prepares and applies a second active lease on a non-default machine. The fixture's
+    /// helper only knows "pc", so this mirrors its prepare/apply two-step for a machine the caller
+    /// has already enrolled with <see cref="LeaseFixture.AddRentableMachine"/>.
+    /// </summary>
+    private static async Task<LeaseDto> ActivateOn(LeaseFixture fixture, string machineId, string boot,
+        string idempotencyKey)
+    {
+        var lease = await fixture.Leases.CreateLeaseAsync("alice", machineId, 60, idempotencyKey, default);
+        var configRevision = fixture.Db.List().Single(machine => machine.MachineId == machineId).ConfigRevision;
+        SyncResponse Sync(params CommandResult[] results) =>
+            fixture.Db.Sync(machineId,
+                new SyncRequest(boot, "192.0.2.1", "001122334455", configRevision, "ready", results));
+        var prepare = Assert.Single(Sync().Commands);
+        var apply = Assert.Single(Sync(new CommandResult(prepare.CommandId, "applied", prepare.LeaseRevision)).Commands);
+        Sync(new CommandResult(apply.CommandId, "applied", apply.LeaseRevision));
+        var active = (await fixture.Leases.GetLeaseAsync(lease.Id, default))!;
+        Assert.Equal("active", active.State);
+        return active;
+    }
+
+    private static string PendingParsecCommandId(string path, string rentalId)
+    {
+        using var connection = Open(path);
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            "SELECT command_id FROM command_outbox WHERE type='ParsecConnect' AND rental_id=$rental AND status='pending'";
+        command.Parameters.AddWithValue("$rental", rentalId);
+        return Assert.IsType<string>(command.ExecuteScalar());
+    }
+
+    private static void AssertCommand(SqliteConnection connection, string commandId, string status, string payload)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT status,payload FROM command_outbox WHERE command_id=$id";
+        command.Parameters.AddWithValue("$id", commandId);
+        using var row = command.ExecuteReader();
+        Assert.True(row.Read());
+        Assert.Equal(status, row.GetString(0));
+        Assert.Equal(payload, row.GetString(1));
+        Assert.False(row.Read());
+    }
+
+    private static void AssertSinglePendingParsecCommand(SqliteConnection connection, string rentalId,
+        string attemptId)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            "SELECT payload FROM command_outbox WHERE type='ParsecConnect' AND rental_id=$rental AND status='pending'";
+        command.Parameters.AddWithValue("$rental", rentalId);
+        using var row = command.ExecuteReader();
+        Assert.True(row.Read());
+        Assert.Contains(attemptId, row.GetString(0), StringComparison.Ordinal);
+        Assert.False(row.Read());
+    }
+
+    private static long CountRentalAttempts(SqliteConnection connection, string rentalId)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT COUNT(*) FROM parsec_attempts WHERE rental_id=$rental";
+        command.Parameters.AddWithValue("$rental", rentalId);
+        return (long)command.ExecuteScalar()!;
     }
 
     private static HttpRequestMessage SignedStatusRequest(LeaseFixture fixture, ParsecStatusReport report)

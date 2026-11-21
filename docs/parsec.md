@@ -17,19 +17,25 @@
 3. Windows OCR ภาษาอังกฤษ (หรือภาษาของโปรไฟล์) และหน้าต่าง Parsec เปิดได้เต็มจอ
 4. ตั้ง `PARSEC_LOGIN_LAYOUT` (JSON) เฉพาะเครื่องที่พิกัดคลิกไม่ตรง; ค่าเริ่มต้นอ้างอิงจอ 1920x1080
 
-## Flow
+## Flow (2 รอบ)
 
-1. ลูกค้าเปิดหน้าของฉัน → การ์ดเครื่องที่ active → "เชื่อมต่อด้วย Parsec"
+1. ลูกค้าเปิดหน้าของฉัน → การ์ดเครื่องที่ active → ปุ่ม "Parsec"
 2. เว็บขอ public key จาก Controller (เฉพาะเจ้าของ lease ที่ active)
-3. เบราว์เซอร์ seal credentials → `POST /api/my-leases/{rentalId}/parsec`
-4. Controller สร้าง `parsec_attempts` + queue `ParsecConnect` (TTL 150 วิ, 1 ครั้งต่อ lease, จำกัด 3 ครั้ง/10 นาที/เครื่อง)
+3. **รอบแรก:** เบราว์เซอร์ seal credentials → `POST /api/my-leases/{rentalId}/parsec` ด้วย `{idempotencyKey, secret}`
+4. Controller สร้าง `parsec_attempts` + queue `ParsecConnect` (TTL 150 วิ, ทำงานได้ครั้งละ 1 attempt ต่อ lease, จำกัด 3 ครั้ง/10 นาที/เครื่อง)
 5. Agent รับคำสั่ง ตอบรับทันที แล้วรายงานสถานะผ่าน `/agent/parsec-status` (signed): `starting`/`waiting_email`/`ready`/`failed` + error code
-6. จบการเช่า/หมดเวลา/shutdown/boot: Agent cleanup; Controller mark attempts ที่ค้างเป็น `LEASE_ENDED`
-7. Controller ล้าง payload ที่มี ciphertext เมื่อคำสั่งไม่อยู่ในสถานะ pending แล้ว
+6. ถ้า Parsec ขอยืนยันอีเมล/IP (`waiting_email`) เว็บแสดง AlertDialog ค้างไว้จนลูกค้ากด "ยืนยันอีเมลแล้ว"
+7. **รอบสอง:** เว็บ seal credentials เดิมอีกครั้ง แล้ว `POST .../parsec` ด้วย `{idempotencyKey ใหม่, secret, retryAttemptId: <attempt แรก>}`
+   - Controller ตรวจว่า attempt แรกเป็นของ lease/user/boot key เดียวกันและยัง `waiting_email`
+   - mark attempt แรก `failed` + error code `EMAIL_VERIFIED`, invalidate pending `ParsecConnect` ของ lease เดิม
+   - queue attempt ใหม่ใน transaction เดียวกัน (ผ่าน unique partial index `lease_parsec_pending`)
+   - Agent ล็อกอินอีกรอบโดย Parsec ไม่ติดยืนยันอีเมลแล้ว (ปกติจะได้ `ready`)
+8. จบการเช่า/หมดเวลา/shutdown/boot: Agent cleanup; Controller mark attempts ที่ค้างเป็น `LEASE_ENDED`
+9. Controller ล้าง payload ที่มี ciphertext เมื่อคำสั่งไม่อยู่ในสถานะ pending แล้ว
 
 ## Error codes
 
-ดู `services/Contracts/Parsec.cs` และข้อความไทยใน `src/lib/parsec-contracts.ts` (`INVALID_CREDENTIALS`, `CAPTCHA_REQUIRED`, `APP_NOT_FOUND`, `HOST_NOT_READY`, `TIMEOUT`, `TWO_FACTOR_UNSUPPORTED`, `PARSEC_BUSY`, ฯลฯ)
+ดู `services/Contracts/Parsec.cs` และข้อความไทยใน `src/lib/parsec-contracts.ts` (`INVALID_CREDENTIALS`, `CAPTCHA_REQUIRED`, `APP_NOT_FOUND`, `HOST_NOT_READY`, `TIMEOUT`, `TWO_FACTOR_UNSUPPORTED`, `PARSEC_BUSY`, `EMAIL_VERIFIED`, ฯลฯ)
 
 ## ความปลอดภัย
 
@@ -41,7 +47,8 @@
 
 1. เครื่องที่มี Parsec + auto-login → capability ขึ้นใน heartbeat
 2. ล็อกอินบัญชีทดสอบถูก → `READY` ภายใน 70 วิ
-3. รหัสผิด → `INVALID_CREDENTIALS`; 2FA → `TWO_FACTOR_UNSUPPORTED`
-4. จบการเช่า → parsecd ใน session ปิด, session files หาย, clipboard ว่าง
-5. ตรวจ log/DB: ไม่มีรหัสผ่าน/ภาพหน้าจอ
-6. เครื่องที่ไม่มี Parsec → capability ไม่ขึ้น และไม่มีปุ่มบนเว็บ
+3. ล็อกอินจาก IP ใหม่ → รอบแรกได้ `waiting_email`; กด "ยืนยันอีเมลแล้ว" → รอบสองต้องไม่ติดอีเมลและได้ `READY`
+4. รหัสผิด → `INVALID_CREDENTIALS`; 2FA → `TWO_FACTOR_UNSUPPORTED`; retry ผิด attempt → 409
+5. จบการเช่า → parsecd ใน session ปิด, session files หาย, clipboard ว่าง
+6. ตรวจ log/DB: ไม่มีรหัสผ่าน/ภาพหน้าจอ
+7. เครื่องที่ไม่มี Parsec → capability ไม่ขึ้น และไม่มีปุ่มบนเว็บ

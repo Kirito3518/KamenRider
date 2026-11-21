@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TopupPage } from "@/components/topup/topup-page";
+import { BankLogo } from "@/components/topup/topup-display";
 
 vi.mock("@/components/ui/layout/Navbar", () => ({ Navbar: () => null }));
 vi.mock("@/components/ui/layout/Footer", () => ({ Footer: () => null }));
@@ -147,5 +148,18 @@ describe("TopupPage", () => {
     expect(await screen.findByText("โหลดข้อมูลการเติมเงินไม่สำเร็จ")).toBeDefined();
     expect(screen.getByText("ระบบขัดข้อง")).toBeDefined();
     expect(screen.getByText("ลองใหม่")).toBeDefined();
+  });
+});
+
+describe("BankLogo", () => {
+  it("puts preset bank marks on the bank brand colour", () => {
+    render(<BankLogo bankCode="004" bankName="ธนาคารกสิกรไทย" />);
+
+    const image = screen.getByAltText("โลโก้ ธนาคารกสิกรไทย");
+    const tile = image.parentElement as HTMLElement;
+    const probe = document.createElement("span");
+    probe.style.backgroundColor = "#138f2d";
+
+    expect(tile.style.backgroundColor).toBe(probe.style.backgroundColor);
   });
 });

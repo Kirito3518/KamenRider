@@ -48,7 +48,7 @@ export function PendingMachines({
                 {loading ? <Skeleton className="h-5 w-8 rounded-3xl" /> : <Badge variant="busy">{pending.length}</Badge>}
               </span>
               <span className="text-sm text-muted-foreground">
-                ตรวจ fingerprint กับเครื่องจริงก่อนอนุมัติ · ตั้งค่าเครื่องได้จากไอคอนตั้งค่า
+                กดอนุมัติเพื่อตั้งค่าเครื่องก่อน แล้วยืนยันอีกครั้ง — ไม่ต้องกรอก fingerprint
               </span>
             </span>
           </span>
@@ -72,7 +72,7 @@ export function PendingMachines({
                   </EmptyMedia>
                   <EmptyTitle>ไม่มีเครื่องที่รออนุมัติ</EmptyTitle>
                   <EmptyDescription>
-                    เครื่องที่ลงทะเบียนใหม่จะแสดงที่นี่เพื่อตรวจ fingerprint ก่อนอนุมัติ
+                    เครื่องที่ลงทะเบียนใหม่จะแสดงที่นี่เพื่อตั้งค่าและอนุมัติ
                   </EmptyDescription>
                 </EmptyHeader>
               </Empty>
@@ -105,12 +105,14 @@ export function PendingMachines({
                     </Button>
                     <Button
                       type="button"
+                      variant="success"
                       size="sm"
                       aria-label={`อนุมัติเครื่อง ${machine.machineId}`}
                       title={machine.publicKeyFingerprint ? undefined : "Agent ยังไม่รายงาน fingerprint"}
                       disabled={!machine.publicKeyFingerprint}
                       onClick={() => onApprove(machine.machineId)}
                     >
+                      <ShieldCheck data-icon="inline-start" />
                       อนุมัติ
                     </Button>
                   </li>

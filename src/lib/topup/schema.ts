@@ -8,7 +8,7 @@
 
 import type Database from "better-sqlite3";
 
-export const TOPUP_SCHEMA_VERSION = 1;
+export const TOPUP_SCHEMA_VERSION = 3;
 
 const REGISTRY = `
   CREATE TABLE IF NOT EXISTS topup_schema_migrations (
@@ -213,6 +213,20 @@ const MIGRATION_1 = `
 
 const schemaReady = new WeakSet<object>();
 
+/**
+ * The PromptPay payee's bank account is needed to verify a slip's receiving
+ * bank/account, matching the reference implementation's payee identity.
+ */
+const MIGRATION_2 = `
+  ALTER TABLE topup_settings ADD COLUMN promptpay_bank_code TEXT;
+  ALTER TABLE topup_settings ADD COLUMN promptpay_account_number TEXT;
+`;
+
+/** The slip's PromptPay proxy value, shown when the provider masks the account. */
+const MIGRATION_3 = `
+  ALTER TABLE topup_transactions ADD COLUMN slip_receiver_proxy TEXT;
+`;
+
 export function ensureTopupSchema(database: Database.Database) {
   if (schemaReady.has(database)) return;
   database
@@ -233,6 +247,22 @@ export function ensureTopupSchema(database: Database.Database) {
             "INSERT INTO topup_schema_migrations(version, name, applied_at) VALUES(?,?,?)",
           )
           .run(1, "initial topup schema", now);
+      }
+      if (!applied.has(2)) {
+        database.exec(MIGRATION_2);
+        database
+          .prepare(
+            "INSERT INTO topup_schema_migrations(version, name, applied_at) VALUES(?,?,?)",
+          )
+          .run(2, "promptpay receiver identity", now);
+      }
+      if (!applied.has(3)) {
+        database.exec(MIGRATION_3);
+        database
+          .prepare(
+            "INSERT INTO topup_schema_migrations(version, name, applied_at) VALUES(?,?,?)",
+          )
+          .run(3, "slip receiver proxy snapshot", now);
       }
       database
         .prepare(

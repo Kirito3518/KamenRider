@@ -5,9 +5,12 @@ import toast from "react-hot-toast";
 import { AlertTriangle, Download, Monitor, RefreshCw } from "lucide-react";
 import { AdminPage, AdminPageHeader } from "@/components/admin/admin-page";
 import { AgentInstallDialog } from "@/components/admin/machines/agent-install-dialog";
-import { ApproveMachineDialog } from "@/components/admin/machines/approve-machine-dialog";
 import { ApprovedMachinesTable } from "@/components/admin/machines/approved-machines-table";
-import { MachineSettingsDialog, type MachineMetadataInput } from "@/components/admin/machines/machine-settings-dialog";
+import {
+  MachineSettingsDialog,
+  type MachineMetadataInput,
+  type MachineSettingsMode,
+} from "@/components/admin/machines/machine-settings-dialog";
 import { MachineStats } from "@/components/admin/machines/machine-stats";
 import { PendingMachines } from "@/components/admin/machines/pending-machines";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -15,6 +18,8 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import type { Machine } from "@/lib/machine-contracts";
+
+type SettingsTarget = { machineId: string; mode: MachineSettingsMode };
 
 async function responseError(response: Response, fallback: string) {
   const payload = (await response.json().catch(() => ({}))) as { error?: unknown };
@@ -29,8 +34,7 @@ export function MachinesManager({ actorId }: { actorId: string }) {
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState("");
   const [installOpen, setInstallOpen] = useState(false);
-  const [settingsMachineId, setSettingsMachineId] = useState<string | null>(null);
-  const [approveMachineId, setApproveMachineId] = useState<string | null>(null);
+  const [settingsTarget, setSettingsTarget] = useState<SettingsTarget | null>(null);
   const latestLoad = useRef(0);
 
   const load = useCallback(async (signal?: AbortSignal): Promise<boolean> => {
@@ -41,11 +45,8 @@ export function MachinesManager({ actorId }: { actorId: string }) {
       const nextMachines = (await response.json()) as Machine[];
       if (signal?.aborted || run !== latestLoad.current) return false;
       setMachines(nextMachines);
-      setSettingsMachineId((current) =>
-        current && !nextMachines.some((machine) => machine.machineId === current) ? null : current,
-      );
-      setApproveMachineId((current) =>
-        current && !nextMachines.some((machine) => machine.machineId === current) ? null : current,
+      setSettingsTarget((current) =>
+        current && !nextMachines.some((machine) => machine.machineId === current.machineId) ? null : current,
       );
       setNow(Date.now());
       setLoadError("");
@@ -104,7 +105,9 @@ export function MachinesManager({ actorId }: { actorId: string }) {
     await load();
   }
 
-  async function approveMachine(machine: Machine, fingerprint: string) {
+  async function approveMachine(machine: Machine) {
+    const fingerprint = machine.publicKeyFingerprint;
+    if (!fingerprint) throw new Error("Agent ยังไม่รายงาน fingerprint จึงยังอนุมัติไม่ได้");
     const response = await fetch(`/api/admin/machines/${encodeURIComponent(machine.machineId)}/approve`, {
       method: "POST",
       cache: "no-store",
@@ -112,7 +115,7 @@ export function MachinesManager({ actorId }: { actorId: string }) {
       body: JSON.stringify({ fingerprint }),
     });
     if (!response.ok) throw await responseError(response, "อนุมัติเครื่องไม่สำเร็จ");
-    setApproveMachineId(null);
+    setSettingsTarget(null);
     setMessage(`อนุมัติเครื่อง ${machine.displayName || machine.machineId} แล้ว`);
     toast.success("อนุมัติเครื่องแล้ว");
     await load();
@@ -127,14 +130,14 @@ export function MachinesManager({ actorId }: { actorId: string }) {
       body: JSON.stringify({ fingerprint: machine.publicKeyFingerprint }),
     });
     if (!response.ok) throw await responseError(response, "ปฏิเสธเครื่องไม่สำเร็จ");
-    setSettingsMachineId(null);
+    setSettingsTarget(null);
     setMessage(`ปฏิเสธเครื่อง ${machine.displayName || machine.machineId} แล้ว`);
     toast.success("ปฏิเสธเครื่องแล้ว");
     await load();
   }
 
-  const settingsMachine = machines?.find((machine) => machine.machineId === settingsMachineId) ?? null;
-  const approveMachineTarget = machines?.find((machine) => machine.machineId === approveMachineId) ?? null;
+  const settingsMachine = machines?.find((machine) => machine.machineId === settingsTarget?.machineId) ?? null;
+  const settingsMode: MachineSettingsMode = settingsTarget?.mode ?? "settings";
 
   return (
     <AdminPage>
@@ -185,14 +188,14 @@ export function MachinesManager({ actorId }: { actorId: string }) {
 
       <PendingMachines
         machines={machines}
-        onOpenSettings={setSettingsMachineId}
-        onApprove={setApproveMachineId}
+        onOpenSettings={(machineId) => setSettingsTarget({ machineId, mode: "settings" })}
+        onApprove={(machineId) => setSettingsTarget({ machineId, mode: "approve" })}
       />
 
       <ApprovedMachinesTable
         machines={machines}
         now={now}
-        onOpenSettings={setSettingsMachineId}
+        onOpenSettings={(machineId) => setSettingsTarget({ machineId, mode: "settings" })}
         onOpenInstall={() => setInstallOpen(true)}
       />
 
@@ -206,26 +209,18 @@ export function MachinesManager({ actorId }: { actorId: string }) {
       <AgentInstallDialog open={installOpen} onOpenChange={setInstallOpen} />
 
       <MachineSettingsDialog
-        key={settingsMachine?.machineId ?? "settings-closed"}
+        key={`${settingsTarget?.machineId ?? "closed"}:${settingsMode}`}
         machine={settingsMachine}
-        open={settingsMachineId !== null}
+        mode={settingsMode}
+        open={settingsTarget !== null}
         actorId={actorId}
         onOpenChange={(open) => {
-          if (!open) setSettingsMachineId(null);
+          if (!open) setSettingsTarget(null);
         }}
         onSave={saveMachineSettings}
         onReject={rejectMachine}
         onUpdated={load}
-      />
-
-      <ApproveMachineDialog
-        key={approveMachineTarget?.machineId ?? "approve-closed"}
-        machine={approveMachineTarget}
-        open={approveMachineId !== null}
-        onOpenChange={(open) => {
-          if (!open) setApproveMachineId(null);
-        }}
-        onConfirm={(fingerprint) => (approveMachineTarget ? approveMachine(approveMachineTarget, fingerprint) : Promise.reject(new Error("ไม่พบเครื่องที่ต้องการอนุมัติ")))}
+        onApprove={approveMachine}
       />
     </AdminPage>
   );

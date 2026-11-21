@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
+import { cn } from "@/lib/utils";
 import { PcControlCard } from "@/components/admin/pc-control-card";
 import {
   PcControlConfirmDialog,
@@ -25,6 +26,14 @@ import {
 } from "@/lib/pc-control";
 
 type ConfirmTarget = { kind: "powerOff" | "cancel" | "restartSunshine" | "unpairSunshine"; machine: PcControlMachine } | null;
+
+const buttonToneLegend = [
+  { label: "เปิดใช้งาน / เพิ่มเวลา", dotClassName: "bg-status-available" },
+  { label: "เชื่อมต่อ / ตั้งค่า", dotClassName: "bg-primary" },
+  { label: "ซ่อมบำรุง / ลดเวลา", dotClassName: "bg-status-busy" },
+  { label: "ปิด / ยกเลิก", dotClassName: "bg-destructive" },
+  { label: "ทั่วไป / รีเฟรช", dotClassName: "bg-muted-foreground" },
+] as const;
 
 async function postJson(path: string, body: unknown) {
   const response = await fetch(path, {
@@ -193,6 +202,23 @@ export function PcControl() {
           </Button>
         }
       />
+
+      <div
+        role="note"
+        aria-label="คำอธิบายสีของปุ่ม"
+        className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-2xl border bg-card px-4 py-3 text-xs text-muted-foreground"
+      >
+        <span className="font-medium text-foreground">สีของปุ่ม</span>
+        {buttonToneLegend.map(({ label, dotClassName }) => (
+          <span key={label} className="flex items-center gap-1.5">
+            <span
+              aria-hidden
+              className={cn("size-2 rounded-full", dotClassName)}
+            />
+            {label}
+          </span>
+        ))}
+      </div>
 
       {error ? (
         <Alert variant="destructive">

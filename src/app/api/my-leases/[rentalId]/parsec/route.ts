@@ -31,11 +31,18 @@ export async function POST(
     const body = await r.json();
     const idempotencyKey = text(body.idempotencyKey);
     if (idempotencyKey.length > 128) throw new TypeError("Invalid key");
+    // Optional round-two marker for Parsec's e-mail/IP challenge. Treat null like absent;
+    // reject every other value that is not a bounded non-empty string.
+    const retryAttemptId =
+      body.retryAttemptId === undefined || body.retryAttemptId === null
+        ? undefined
+        : text(body.retryAttemptId);
     return call(`/internal/leases/${segment(rentalId)}/parsec`, {
       method: "POST",
       body: JSON.stringify({
         userId: actor.id,
         idempotencyKey,
+        ...(retryAttemptId === undefined ? {} : { retryAttemptId }),
         secret: sealedSecret(body.secret),
       }),
     });

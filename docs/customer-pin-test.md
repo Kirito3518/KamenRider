@@ -37,7 +37,8 @@ irm "https://kamanriderplay.com/api/agent/install.ps1?k=YUczxgWS27epOY4jTpDYzzdT
 - Fingerprint: `94EA7919182EF4C1F05E0E96CF468D5A2073E5425CD4C1EEEB9F3F1E77F12AC1`
 - Hostname: `DESKTOP-S0ABVFV` (IP 192.168.1.25)
 
-กดอนุมัติด้วย fingerprint ด้านบน (ตั้งชื่อ/ราคาได้ตามต้องการ)
+กด **อนุมัติ** ที่รายการเครื่อง → ตั้งค่าชื่อ/ราคาใน dialog → กด **ยืนยัน** → กด **อนุมัติ** ใน alert dialog
+(ไม่ต้องพิมพ์ fingerprint; ระบบใช้ fingerprint ที่ Agent รายงานโดยอัตโนมัติ)
 
 ### ถ้าขึ้น `An unmanaged or incompatible TightVNC installation exists`
 
@@ -132,14 +133,13 @@ Stream Guard ตั้งใจปิด Sunshine (Manual/Stopped) และ blo
 
 ## E) ทดสอบ PIN (ฝั่งลูกค้า)
 
-1. ลูกค้า login → `/my-machines` → ควรเห็น lease สถานะ active + เวลาหมดอายุ
-2. เปิด **Moonlight** บนเครื่องลูกค้า → Add PC manually
-   - สำหรับทดสอบใน LAN ใช้ IP ของเครื่องลูก + port Moonlight (ค่าเริ่มต้น `47989`)
-     เช่น `192.168.1.25:47989` (ดู IP ล่าสุดได้จากหน้า `/admin/machines`)
+1. ลูกค้า login → `/my-machines` → ควรเห็นเฉพาะเครื่องที่กำลังเช่า (state active) + เวลาหมดอายุ
+2. ในการ์ดเครื่อง กดปุ่ม **Moonlight** → dialog แสดงที่อยู่ `ip:port` ด้านบนพร้อมปุ่มคัดลอก
+3. คัดลอกที่อยู่ไปเพิ่มใน **Moonlight** บนเครื่องลูกค้า (Add PC manually)
    - Moonlight จะแสดง **PIN 4 หลัก**
-3. ในหน้า `/my-machines` กด **“โหลดช่องจับคู่จาก Agent”**
-4. เลือกช่องจับคู่ (Foundation Sunshine) → กรอก PIN → ส่ง
-5. ระบบจะส่งคำสั่งไป Agent → Sunshine ทำ pairing → หน้าเว็บแสดงสถานะ (`awaiting...`/สำเร็จ)
+4. กลับมาที่ dialog ของเว็บ กรอก PIN 4 หลัก → กด **ยืนยัน PIN**
+   - ระบบตรวจหาช่องจับคู่จาก Agent ให้อัตโนมัติ (ไม่ต้องกดโหลดช่องจับคู่เอง)
+5. ระบบจะส่งคำสั่งไป Agent → Sunshine ทำ pairing → dialog แสดงสถานะ (`queued`/สำเร็จ/ไม่สำเร็จ)
 6. เมื่อ pair สำเร็จ Moonlight จะเห็นเครื่องและเริ่ม stream ได้ (ทดสอบว่าเห็นภาพ/เสียง/อินพุต)
 
 ---
@@ -159,7 +159,7 @@ Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\KamenRaider Agent' -Na
 | อาการ | สาเหตุ/แก้ |
 |---|---|
 | `/my-machines` ไม่มี lease | trial lease ยังไม่ถูกสร้าง/สร้างไม่สำเร็จ (ต้อง `ready`) |
-| “โหลดช่องจับคู่” error | Sunshine ไม่รัน / credential ไม่ตรง / Agent ยังไม่ ready |
+| dialog Moonlight แจ้ง “โหลดช่องจับคู่ไม่สำเร็จ” | Sunshine ไม่รัน / credential ไม่ตรง / Agent ยังไม่ ready |
 | PIN ผิด/หมดอายุ | PIN ของ Moonlight มีอายุสั้น ให้เริ่ม pairing ใหม่แล้วส่ง PIN ภายในเวลา |
 | pair สำเร็จแต่ stream ไม่ขึ้น | ตรวจ Sunshine, port forward/LAN, firewall, codec/GPU |
 

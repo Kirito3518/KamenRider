@@ -7,6 +7,8 @@ export async function PATCH(
   return machineApi(r, true, async (_, call) => {
     const b = await r.json();
     const revision = integer(b.expectedRevision);
+    if (b.parsecEnabled !== undefined && typeof b.parsecEnabled !== "boolean")
+      throw new TypeError("Invalid parsecEnabled");
     let vncLocalIp: string | null;
     if (b.vncLocalIp === undefined) {
       const machines = await call<Array<{ machineId: string; vncLocalIp: string | null }>>("/internal/machines");
@@ -20,6 +22,7 @@ export async function PATCH(
       moonlightPort: integer(b.moonlightPort, 1, 65535),
       sunshinePort: integer(b.sunshinePort, 1, 65535),
       vncLocalIp,
+      ...(b.parsecEnabled === undefined ? {} : { parsecEnabled: b.parsecEnabled }),
     };
     return call(
       `/internal/machines/${segment(machineId)}?expectedRevision=${revision}`,

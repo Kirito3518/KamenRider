@@ -1,49 +1,67 @@
 "use client";
+
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { Wallet } from "lucide-react";
-import { Badge } from "@/components/ui/badge";
+import { Monitor, MonitorPlay, MonitorX, Wallet } from "lucide-react";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { Button } from "@/components/ui/button";
+import {
+  Empty,
+  EmptyContent,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from "@/components/ui/empty";
 import { Footer } from "@/components/ui/layout/Footer";
 import { Navbar } from "@/components/ui/layout/Navbar";
+import { Spinner } from "@/components/ui/spinner";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { authClient } from "@/lib/auth-client";
-import { ParsecConnect } from "@/components/my-machines/parsec-connect";
 import { formatBalance } from "@/lib/money";
-import {
-  formatRentalDateTime,
-  formatRentalDuration,
-  rentalStateLabel,
-  rentalStateTone,
-} from "@/lib/rental-history";
-import type { Lease, Offer } from "@/lib/machine-contracts";
+import type { Lease } from "@/lib/machine-contracts";
+import { ActiveRentalCard } from "@/components/my-machines/active-rental-card";
+import { leaseApi, leaseErrorMessage } from "@/components/my-machines/lease-api";
 
-const foundationSunshineSlot = "foundation-sunshine-single-pending-slot";
 const leaseRefreshIntervalMs = 15_000;
-const maxExtensionHours = 24;
 
-async function api(path: string, body?: unknown) {
-  const r = await fetch(path, {
-    method: body ? "POST" : "GET",
-    cache: "no-store",
-    headers: { "Content-Type": "application/json" },
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  const data = await r.json();
-  if (!r.ok)
-    throw new Error(
-      r.status === 401 ? "กรุณาเข้าสู่ระบบ" : data.error || `${r.status}: คำขอไม่สำเร็จ`,
-    );
-  return data;
+function mergeExtendedLease(current: Lease, updated: Lease): Lease {
+  // The extend endpoint returns the raw Controller lease; keep the enriched
+  // connection/parsec/payment fields that were fetched by the list endpoint.
+  return {
+    ...current,
+    state: updated.state ?? current.state,
+    revision:
+      typeof updated.revision === "number"
+        ? updated.revision
+        : current.revision,
+    pendingRevision: updated.pendingRevision ?? null,
+    startsAtUtc: updated.startsAtUtc ?? current.startsAtUtc,
+    expiresAtUtc: updated.expiresAtUtc ?? current.expiresAtUtc,
+    endedAtUtc: updated.endedAtUtc ?? current.endedAtUtc,
+  };
+}
+
+function leaseName(lease: Lease) {
+  return lease.machineDisplayName || lease.machineId;
 }
 
 export function MyMachines() {
   const { data: session, refetch: refetchSession } = authClient.useSession();
+  const reduceMotion = useReducedMotion();
   const [leases, setLeases] = useState<Lease[]>([]);
   const [message, setMessage] = useState("กำลังโหลด…");
+  const [now, setNow] = useState(0);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [extensionNotice, setExtensionNotice] = useState<{
+    leaseId: string;
+    text: string;
+  } | null>(null);
   const refreshLeasesRef = useRef<(() => Promise<void>) | null>(null);
   const leaseMutationVersion = useRef(0);
   const leaseMutationsInFlight = useRef(0);
   const refreshAfterMutation = useRef(false);
+
   useEffect(() => {
     let active = true;
     let inFlight = false;
@@ -54,13 +72,14 @@ export function MyMachines() {
         refreshAfterMutation.current = false;
       const mutationVersionAtStart = leaseMutationVersion.current;
       try {
-        const data = (await api("/api/my-leases")) as Lease[];
+        const data = (await leaseApi<Lease[]>("/api/my-leases")) ?? [];
         if (active) {
           if (
             leaseMutationsInFlight.current > 0 ||
             mutationVersionAtStart !== leaseMutationVersion.current
           )
             return;
+          setNow(Date.now());
           setLeases(data);
           setMessage("");
         }
@@ -70,7 +89,7 @@ export function MyMachines() {
           leaseMutationsInFlight.current === 0 &&
           mutationVersionAtStart === leaseMutationVersion.current
         )
-          setMessage(String(error));
+          setMessage(leaseErrorMessage(error));
       } finally {
         inFlight = false;
         if (
@@ -98,6 +117,7 @@ export function MyMachines() {
       if (refreshLeasesRef.current === refresh) refreshLeasesRef.current = null;
     };
   }, []);
+
   const beginLeaseMutation = () => {
     leaseMutationsInFlight.current += 1;
     leaseMutationVersion.current += 1;
@@ -110,380 +130,202 @@ export function MyMachines() {
       void refreshLeasesRef.current?.();
     }
   };
+
+  async function extendLease(
+    lease: Lease,
+    hours: number,
+    idempotencyKey: string,
+  ) {
+    beginLeaseMutation();
+    try {
+      const updated = await leaseApi<Lease>(
+        `/api/my-leases/${encodeURIComponent(lease.id)}/extend`,
+        {
+          additionalSeconds: hours * 3_600,
+          expectedRevision: lease.revision,
+          idempotencyKey,
+        },
+      );
+      setLeases((current) =>
+        current.map((item) =>
+          item.id === lease.id ? mergeExtendedLease(item, updated) : item,
+        ),
+      );
+      setExtensionNotice({
+        leaseId: lease.id,
+        text: "ต่อเวลาแล้ว รอเครื่องยืนยันการเปลี่ยนแปลง",
+      });
+      void refetchSession();
+    } finally {
+      endLeaseMutation();
+    }
+  }
+
+  const activeLeases = leases.filter((lease) => lease.state === "active");
+  const preparingCount = leases.filter(
+    (lease) => lease.state === "pending" || lease.state === "preparing",
+  ).length;
+  const selectedLease =
+    activeLeases.find((lease) => lease.id === selectedId) ??
+    activeLeases[0] ??
+    null;
+  const nameCounts = new Map<string, number>();
+  for (const lease of activeLeases) {
+    const name = leaseName(lease);
+    nameCounts.set(name, (nameCounts.get(name) ?? 0) + 1);
+  }
+  const tabLabel = (lease: Lease) => {
+    const name = leaseName(lease);
+    return (nameCounts.get(name) ?? 0) > 1
+      ? `${name} · ${lease.id.slice(0, 6)}`
+      : name;
+  };
+  const notice =
+    extensionNotice && selectedLease?.id === extensionNotice.leaseId
+      ? extensionNotice.text
+      : null;
+
   return (
     <div className="flex min-h-screen flex-col">
       <Navbar />
-      <main className="mx-auto w-full max-w-4xl flex-1 space-y-5 p-5">
-        <div className="flex flex-wrap items-start justify-between gap-4">
+      <main className="mx-auto w-full max-w-5xl flex-1 px-5 pt-8 pb-16 sm:pt-10">
+        <motion.header
+          initial={reduceMotion ? false : { opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={
+            reduceMotion
+              ? { duration: 0 }
+              : { duration: 0.28, ease: [0.22, 1, 0.36, 1] }
+          }
+          className="flex flex-col justify-between gap-4 sm:flex-row sm:items-end"
+        >
           <div>
-            <h1 className="text-3xl font-bold">เครื่องของฉัน</h1>
-            <p className="text-sm text-muted-foreground">
-              รายการเช่าของคุณ — สถานะและการจับคู่มาจากเครื่องจริง
+            <h1 className="flex items-center gap-2 text-3xl font-bold tracking-tight">
+              <MonitorPlay aria-hidden className="size-7 text-primary" />
+              เครื่องของฉัน
+            </h1>
+            <p className="mt-1 text-sm text-muted-foreground">
+              แสดงเฉพาะเครื่องที่คุณกำลังเช่าอยู่
             </p>
           </div>
-          <div className="flex items-center gap-2 rounded-xl border px-3 py-2 text-sm">
-            <Wallet aria-hidden className="size-4 text-muted-foreground" />
+          <div className="flex w-fit items-center gap-2 rounded-xl border bg-card px-3 py-2 text-sm">
+            <Wallet
+              aria-hidden
+              className="size-4 text-muted-foreground"
+            />
             <span className="text-muted-foreground">ยอดเงินคงเหลือ</span>
-            <span className="font-medium tabular-nums">
+            <span className="font-semibold tabular-nums" aria-live="polite">
               {formatBalance(session?.user.balanceSatang ?? 0)}
             </span>
           </div>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => void refreshLeasesRef.current?.()}
+        </motion.header>
+
+        <p
+          role="status"
+          className="mt-4 min-h-5 text-sm text-muted-foreground"
+        >
+          {message}
+        </p>
+
+        {preparingCount > 0 ? (
+          <div
+            role="status"
+            className="mb-4 flex items-center gap-3 rounded-2xl border border-dashed bg-muted/30 p-4 text-sm"
           >
-            รีเฟรช
-          </Button>
-          <Button variant="outline" size="sm" nativeButton={false} render={<Link href="/history" />}>
-            ประวัติการเช่า
-          </Button>
-          <Button variant="outline" size="sm" nativeButton={false} render={<Link href="/rent" />}>
-            เช่าเครื่องเพิ่ม
-          </Button>
-        </div>
-        <p role="status">{message}</p>
-        {!message && !leases.length ? (
-          <div className="flex flex-col items-center gap-3 rounded-xl border border-dashed p-8 text-center">
-            <p>คุณยังไม่มีรายการเช่า</p>
-            <Button nativeButton={false} render={<Link href="/rent" />}>เลือกเครื่องที่หน้าเช่า</Button>
+            <Spinner />
+            <div className="flex flex-col gap-0.5">
+              <p className="font-medium">
+                กำลังเตรียมเครื่อง {preparingCount} รายการ
+              </p>
+              <p className="text-muted-foreground">
+                เครื่องจะแสดงในหน้านี้เมื่อพร้อมให้เชื่อมต่อ
+              </p>
+            </div>
           </div>
         ) : null}
-        {leases.map((lease) => (
-          <LeaseCard
-            key={lease.id}
-            lease={lease}
-            balanceSatang={session?.user.balanceSatang ?? 0}
-            onLeaseMutationStart={beginLeaseMutation}
-            onLeaseMutationEnd={endLeaseMutation}
-            onLeaseUpdate={(updated) => {
-              setLeases((current) =>
-                current.map((item) =>
-                  item.id === updated.id
-                    ? { ...item, ...updated, agent: updated.agent ?? item.agent }
-                    : item,
-                ),
-              );
-            }}
-            onBalanceRefresh={() => void refetchSession()}
-          />
-        ))}
+
+        {!message && activeLeases.length === 0 && preparingCount === 0 ? (
+          <Empty className="mt-6 border">
+            <EmptyHeader>
+              <EmptyMedia variant="icon">
+                <MonitorX aria-hidden />
+              </EmptyMedia>
+              <EmptyTitle>ยังไม่มีเครื่องที่กำลังเช่า</EmptyTitle>
+              <EmptyDescription>
+                เลือกเครื่องจากหน้าเช่า แล้วเครื่องที่กำลังใช้งานจะแสดงที่นี่
+              </EmptyDescription>
+            </EmptyHeader>
+            <EmptyContent>
+              <Button nativeButton={false} render={<Link href="/rent" />}>
+                เลือกเครื่องที่หน้าเช่า
+              </Button>
+              <Button
+                variant="outline"
+                nativeButton={false}
+                render={<Link href="/history" />}
+              >
+                ประวัติการเช่า
+              </Button>
+            </EmptyContent>
+          </Empty>
+        ) : null}
+
+        {activeLeases.length > 1 && selectedLease ? (
+          <Tabs
+            value={selectedLease.id}
+            onValueChange={(value) => setSelectedId(String(value))}
+            className="mt-2 gap-4"
+          >
+            <TabsList
+              aria-label="เลือกเครื่องที่กำลังเช่า"
+              className="h-auto w-full flex-wrap sm:w-fit"
+            >
+              {activeLeases.map((lease) => (
+                <TabsTrigger key={lease.id} value={lease.id}>
+                  <Monitor aria-hidden />
+                  {tabLabel(lease)}
+                </TabsTrigger>
+              ))}
+            </TabsList>
+            <TabsContent value={selectedLease.id}>
+              <AnimatePresence mode="wait" initial={false}>
+                <motion.div
+                  key={selectedLease.id}
+                  initial={reduceMotion ? false : { opacity: 0, y: 8 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={reduceMotion ? undefined : { opacity: 0, y: -8 }}
+                  transition={{ duration: 0.18 }}
+                >
+                  <ActiveRentalCard
+                    lease={selectedLease}
+                    balanceSatang={session?.user.balanceSatang ?? 0}
+                    now={now}
+                    extensionNotice={notice}
+                    onRefresh={() => void refreshLeasesRef.current?.()}
+                    onExtend={(hours, idempotencyKey) =>
+                      extendLease(selectedLease, hours, idempotencyKey)
+                    }
+                  />
+                </motion.div>
+              </AnimatePresence>
+            </TabsContent>
+          </Tabs>
+        ) : selectedLease ? (
+          <div className="mt-2">
+            <ActiveRentalCard
+              lease={selectedLease}
+              balanceSatang={session?.user.balanceSatang ?? 0}
+              now={now}
+              extensionNotice={notice}
+              onRefresh={() => void refreshLeasesRef.current?.()}
+              onExtend={(hours, idempotencyKey) =>
+                extendLease(selectedLease, hours, idempotencyKey)
+              }
+            />
+          </div>
+        ) : null}
       </main>
       <Footer />
     </div>
-  );
-}
-
-function LeaseCard({
-  lease,
-  balanceSatang,
-  onLeaseMutationStart,
-  onLeaseMutationEnd,
-  onLeaseUpdate,
-  onBalanceRefresh,
-}: {
-  lease: Lease;
-  balanceSatang: number;
-  onLeaseMutationStart: () => void;
-  onLeaseMutationEnd: () => void;
-  onLeaseUpdate: (lease: Lease) => void;
-  onBalanceRefresh: () => void;
-}) {
-  const [offer, setOffer] = useState<Offer>(null);
-  useEffect(() => {
-    if (!offer) return;
-    const timer = setTimeout(
-      () => setOffer(null),
-      Math.max(0, Date.parse(offer.validUntilUtc) - Date.now()),
-    );
-    return () => clearTimeout(timer);
-  }, [offer]);
-  const [message, setMessage] = useState("");
-  const [command, setCommand] = useState("");
-  const [extensionHours, setExtensionHours] = useState(1);
-  const [extensionBusy, setExtensionBusy] = useState(false);
-  const extensionRequestKey = useRef<string | null>(null);
-  const path = `/api/my-leases/${encodeURIComponent(lease.id)}/pair`;
-  const validExtensionHours =
-    Number.isSafeInteger(extensionHours) &&
-    extensionHours >= 1 &&
-    extensionHours <= maxExtensionHours;
-  const extensionCost = lease.payment
-    ? lease.payment.hourlyPriceSatang * extensionHours
-    : null;
-  const extensionAffordable =
-    extensionCost !== null && extensionCost <= balanceSatang;
-  const canExtend =
-    lease.state === "active" &&
-    lease.pendingRevision === null &&
-    lease.payment?.extendable === true;
-
-  async function pending() {
-    try {
-      setOffer(await api(path));
-      setMessage("");
-    } catch (e) {
-      setOffer(null);
-      setMessage(String(e));
-    }
-  }
-
-  async function extend() {
-    if (!validExtensionHours || !canExtend || extensionBusy) return;
-    setExtensionBusy(true);
-    onLeaseMutationStart();
-    try {
-      const updated = (await api(
-        `/api/my-leases/${encodeURIComponent(lease.id)}/extend`,
-        {
-          additionalSeconds: extensionHours * 3_600,
-          expectedRevision: lease.revision,
-          idempotencyKey:
-            extensionRequestKey.current ??
-            (extensionRequestKey.current = crypto.randomUUID()),
-        },
-      )) as Lease;
-      onLeaseUpdate(updated);
-      extensionRequestKey.current = null;
-      setMessage("ต่อเวลาแล้ว รอเครื่องยืนยันการเปลี่ยนแปลง");
-      onBalanceRefresh();
-    } catch (error) {
-      setMessage(String(error));
-    } finally {
-      onLeaseMutationEnd();
-      setExtensionBusy(false);
-    }
-  }
-
-  return (
-    <section className="space-y-3 rounded-xl border p-4">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <h2 className="text-xl font-bold">
-          {lease.machineDisplayName || lease.machineId}
-        </h2>
-        <Badge variant={rentalStateTone(lease.state)}>
-          {rentalStateLabel(lease.state)}
-        </Badge>
-      </div>
-      <p>
-        Revision {lease.revision}
-        {lease.pendingRevision !== null
-          ? ` · รอ ACK ${lease.pendingRevision}`
-          : ""}
-      </p>
-      <p>
-        สิ้นสุด:{" "}
-        {lease.expiresAtUtc
-          ? formatRentalDateTime(lease.expiresAtUtc)
-          : "ยังไม่เริ่มนับเวลา"}
-        {lease.endedAtUtc ? ` · สิ้นสุดจริง ${formatRentalDateTime(lease.endedAtUtc)}` : ""}
-      </p>
-      <p>
-        {lease.agent?.reachability === "reachable"
-          ? "Agent ติดต่อได้"
-          : lease.agent?.reachability === "unreachable"
-            ? "Agent ติดต่อไม่ได้"
-            : "ยังไม่ทราบสถานะการเชื่อมต่อของ Agent"}
-      </p>
-      <p className="text-sm text-muted-foreground">
-        Heartbeat ล่าสุด: {lease.agent?.lastSeenAt || "ไม่มีข้อมูล"}
-      </p>
-
-      {lease.payment ? (
-        <dl className="grid grid-cols-2 gap-3 rounded-lg bg-muted/50 p-3 text-sm sm:grid-cols-4">
-          <div>
-            <dt className="text-muted-foreground">ราคา/ชม.</dt>
-            <dd className="font-medium tabular-nums">
-              {formatBalance(lease.payment.hourlyPriceSatang)}
-            </dd>
-          </div>
-          <div>
-            <dt className="text-muted-foreground">เวลาที่ชำระ</dt>
-            <dd className="font-medium">
-              {formatRentalDuration(
-                lease.payment.durationSeconds + lease.payment.extensionSeconds,
-              )}
-            </dd>
-          </div>
-          <div>
-            <dt className="text-muted-foreground">ชำระแล้ว</dt>
-            <dd className="font-medium tabular-nums">
-              {formatBalance(lease.payment.paidSatang)}
-            </dd>
-          </div>
-          <div>
-            <dt className="text-muted-foreground">คืนเงินแล้ว</dt>
-            <dd className="font-medium tabular-nums">
-              {formatBalance(lease.payment.refundedSatang)}
-            </dd>
-          </div>
-        </dl>
-      ) : lease.state !== "pending" ? (
-        <p className="text-sm text-muted-foreground">
-          รายการนี้ไม่มีข้อมูลการชำระเงิน (สร้างก่อนเปิดระบบเช่าจริง) จึงไม่สามารถต่อเวลาได้
-        </p>
-      ) : null}
-
-      {lease.state === "active" ? (
-        <>
-          <p className="break-all">
-            {lease.connection?.address
-              ? `เชื่อมต่อ: ${lease.connection.address}`
-              : "เชื่อมต่อ: ยังไม่มีที่อยู่สาธารณะที่ตรวจสอบแล้ว กรุณาติดต่อผู้ดูแล"}
-          </p>
-          {lease.connection?.address && lease.connection.stale ? (
-            <p className="text-sm text-status-busy">
-              ข้อมูลที่อยู่เชื่อมต่ออาจล้าสมัย — ตรวจสอบกับผู้ดูแลก่อนใช้งาน
-            </p>
-          ) : null}
-          <button className="rounded border p-2" onClick={pending}>
-            โหลดช่องจับคู่จาก Agent
-          </button>
-          <p>
-            กดโหลดช่องจับคู่ แล้วเริ่ม Pair ใน Moonlight จากนั้นส่ง PIN 4
-            หลักที่ Moonlight แสดงภายใน 30 วินาที Sunshine รับคำขอจับคู่ได้ครั้งละหนึ่งรายการ
-          </p>
-          <form
-            className="space-y-3"
-            onSubmit={async (e) => {
-              e.preventDefault();
-              const form = e.currentTarget;
-              const d = new FormData(form);
-              try {
-                const result = await api(path, {
-                  pairingId: d.get("pairingId"),
-                  pin: d.get("pin"),
-                  idempotencyKey: crypto.randomUUID(),
-                });
-                setCommand(result.commandId);
-                setMessage(`สถานะ: ${result.status}`);
-                form.reset();
-                setOffer(null);
-              } catch (error) {
-                setMessage(String(error));
-              }
-            }}
-          >
-            <label className="block">
-              อุปกรณ์ที่จะจับคู่
-              <select
-                className="ml-2 max-w-full rounded border p-2"
-                name="pairingId"
-                required
-                defaultValue=""
-              >
-                <option value="" disabled>
-                  เลือกช่องจับคู่
-                </option>
-                {offer?.pairingIds.map((id) => (
-                  <option key={id} value={id}>
-                    {id === foundationSunshineSlot
-                      ? "Sunshine ของเครื่องนี้"
-                      : id}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="block">
-              PIN
-              <input
-                className="ml-2 rounded border p-2"
-                name="pin"
-                inputMode="numeric"
-                pattern="[0-9]{4}"
-                maxLength={4}
-                autoComplete="off"
-                required
-              />
-            </label>
-            <button
-              disabled={!offer?.pairingIds.length}
-              className="rounded border p-2 disabled:opacity-50"
-            >
-              ส่ง PIN
-            </button>
-          </form>
-          {command ? (
-            <button
-              className="rounded border p-2"
-              onClick={() =>
-                api(`${path}/${encodeURIComponent(command)}`)
-                  .then((s) => setMessage(`สถานะ: ${s.status}`))
-                  .catch((e) => setMessage(String(e)))
-              }
-            >
-              ตรวจสถานะการจับคู่
-            </button>
-          ) : null}
-          <form
-            className="space-y-3 rounded-lg border p-3"
-            onSubmit={(event) => {
-              event.preventDefault();
-              void extend();
-            }}
-          >
-            <label className="block">
-              ต่อเวลา (ชั่วโมง)
-              <input
-                className="ml-2 w-24 rounded border p-2"
-                type="number"
-                name="extensionHours"
-                min={1}
-                max={maxExtensionHours}
-                step={1}
-                value={extensionHours}
-                onChange={(event) => {
-                  extensionRequestKey.current = null;
-                  setExtensionHours(Number(event.target.value));
-                }}
-                required
-              />
-            </label>
-            {extensionCost !== null ? (
-              <p className="text-sm">
-                ค่าใช้จ่ายครั้งนี้{" "}
-                <span className="font-medium tabular-nums">
-                  {formatBalance(extensionCost)}
-                </span>{" "}
-                · ยอดเงินคงเหลือ{" "}
-                <span className="font-medium tabular-nums">
-                  {formatBalance(balanceSatang)}
-                </span>
-              </p>
-            ) : null}
-            {extensionCost !== null && !extensionAffordable ? (
-              <p className="text-sm text-status-maintenance">
-                ยอดเงินไม่เพียงพอ{" "}
-                <Link href="/topup" className="underline underline-offset-4">
-                  ไปหน้าเติมเงิน
-                </Link>
-              </p>
-            ) : null}
-            <button
-              disabled={
-                extensionBusy ||
-                !canExtend ||
-                !validExtensionHours ||
-                !extensionAffordable
-              }
-              className="rounded border p-2 disabled:opacity-50"
-            >
-              ต่อเวลา
-            </button>
-            <p className="text-sm text-muted-foreground">
-              ระบบหักค่าเช่าตามชั่วโมงที่ต่อทันที และจะคืนเงินตามเวลาที่ไม่ได้ใช้ให้อัตโนมัติเมื่อสิ้นสุดการเช่า
-            </p>
-          </form>
-          <ParsecConnect leaseId={lease.id} initial={lease.parsec ?? null} />
-        </>
-      ) : lease.state === "pending" ? (
-        <p>ระบบกำลังยืนยันการเช่ากับเครื่อง กรุณารอสักครู่แล้วรีเฟรชอีกครั้ง</p>
-      ) : (
-        <p>รอเครื่องและสิทธิ์พร้อมก่อนจับคู่</p>
-      )}
-      <p role="status">{message}</p>
-    </section>
   );
 }

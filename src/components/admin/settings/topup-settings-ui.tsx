@@ -78,13 +78,21 @@ export function BankLogoTile({
   }
   if (preset) {
     return (
-      // Local, trusted SVG bank logo bundled with the app.
-      // eslint-disable-next-line @next/next/no-img-element
-      <img
-        src={preset.logoUrl}
-        alt={`โลโก้ ${bankName ?? preset.name}`}
-        className={cn("size-9 shrink-0 rounded-xl object-contain", className)}
-      />
+      <span
+        className={cn(
+          "flex size-9 shrink-0 items-center justify-center overflow-hidden rounded-xl",
+          className,
+        )}
+        style={{ backgroundColor: preset.color }}
+      >
+        {/* White, transparent-background bank marks; the brand colour is the tile surface. */}
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          src={preset.logoUrl}
+          alt={`โลโก้ ${bankName ?? preset.name}`}
+          className="size-full object-contain"
+        />
+      </span>
     );
   }
   const shortName = bankName?.slice(0, 4) ?? bankCode;

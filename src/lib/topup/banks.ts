@@ -5,6 +5,8 @@
  * matching can rely on them.
  */
 
+import type { CSSProperties } from "react";
+
 export type BankPreset = {
   key: string;
   code: string;
@@ -44,4 +46,20 @@ export function getBankPresetByLogoKey(
 
 export function isKnownBankLogoKey(key: string): boolean {
   return BY_KEY.has(key);
+}
+
+/**
+ * Soft, theme-safe surface derived from the bank's brand colour. Used for the
+ * selected-account card, the transfer panel and the bank channel row so each
+ * bank is recognisable at a glance; the logo itself sits on the full brand
+ * colour in `BankLogo`.
+ */
+export function getBankSurfaceStyle(
+  bank: BankPreset | undefined | null,
+): CSSProperties | undefined {
+  if (!bank?.color) return undefined;
+  return {
+    backgroundColor: `${bank.color}1f`,
+    borderColor: `${bank.color}59`,
+  };
 }

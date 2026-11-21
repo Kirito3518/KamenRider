@@ -404,14 +404,14 @@ If the command fails after installing service/binaries, do **not** immediately r
 
 ### 11.5 Approve the machine
 
-1. On the Child (elevated), read the fingerprint and verify it matches what you approved:
+1. On the Child (elevated), you can read the fingerprint for an out-of-band identity check (no typing into the web UI is required):
 
 ```powershell
 Get-Content "$env:ProgramData\KamenRaider\Agent\enrollment-receipt.json"
-# PublicKeyFingerprint is the 64-char value to type into the approval box
+# PublicKeyFingerprint is the 64-char value the web sends to the Controller automatically
 ```
 
-2. On `/admin/machines`, fill in name (leave it empty once to let the Agent hostname become the display name), price in **satang** (e.g. `2000` = 20 THB/hour), Moonlight/Sunshine ports, and the confirmed VNC LAN IP, then **Approve** by typing the fingerprint.
+2. On `/admin/machines`, click **อนุมัติ** on the pending row. The settings dialog opens; fill in name (leave it empty once to let the Agent hostname become the display name), price in **satang** (e.g. `2000` = 20 THB/hour), Moonlight/Sunshine ports, and optionally the confirmed VNC LAN IP. Click **ยืนยัน**, then **อนุมัติ** in the confirmation alert. No fingerprint typing is required; the web sends the Agent-reported value automatically.
 3. The Agent receives the configuration revision on its next sync. The machine now shows hostname/CPU/GPU/RAM and the applied Sunshine credential revision.
 
 > Ports set in the admin UI are metadata + Agent configuration; they do not reconfigure Sunshine or the router by themselves. Keep the values equal to the actual Sunshine/Moonlight setup.
@@ -436,7 +436,7 @@ Get-Content "$env:ProgramData\KamenRaider\Agent\enrollment-receipt.json"
 | Child: `Get-Service 'KamenRaider Agent','KamenRaider Stream Guard'` | Running/Automatic |
 | Child: `Get-Service tvnserver` | Running/Automatic (installed by Agent package) |
 | Child: `Get-Service SunshineService` | Stopped/Manual (Stream Guard owns its lifecycle) |
-| `/admin/machines` | machine pending → approved, fingerprint verified |
+| `/admin/machines` | machine pending → settings dialog → confirmation alert → approved; fingerprint sent automatically |
 | After first sync | hostname filled, CPU/GPU/RAM populated, `appliedSunshineCredentialRevision` = fleet revision |
 | Machine readiness | stays `notReady` (expected, see section 0) |
 | `/admin/pc-control` | shows machine card; wake/VNC actions require valid network/firewall and readiness constraints |
