@@ -41,18 +41,23 @@ public sealed class DeviceIdentity : IAgentRequestSigner, IDisposable
             if ((directoryInfo.Attributes & FileAttributes.ReparsePoint) != 0)
                 throw new InvalidDataException("Identity directory must not be a reparse point");
 
-            var service = WindowsIdentity.GetCurrent().User!;
+            using var windowsIdentity = WindowsIdentity.GetCurrent();
+            var service = windowsIdentity.User!;
+            // LocalSystem's token user is SYSTEM, but its token owner (used for newly created
+            // objects) is BUILTIN\Administrators. The Agent now runs as LocalSystem, so the
+            // identity owner must match the token owner, not the token user.
+            var owner = windowsIdentity.Owner ?? service;
             var administrators = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
             var system = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
             if (directoryInfo.GetAccessControl(AccessControlSections.Owner)
                     .GetOwner(typeof(SecurityIdentifier)) is not SecurityIdentifier existingDirectoryOwner ||
-                (!service.Equals(existingDirectoryOwner) && !IsAdoptableLegacyOwner(service, existingDirectoryOwner)))
+                (!owner.Equals(existingDirectoryOwner) && !IsAdoptableLegacyOwner(owner, existingDirectoryOwner)))
                 throw new UnauthorizedAccessException("Identity directory owner does not match the current service account.");
 
             var directorySecurity = new DirectorySecurity();
             directorySecurity.SetAccessRuleProtection(true, false);
-            directorySecurity.SetOwner(service);
-            foreach (var sid in new[] { service, administrators, system }.Distinct())
+            directorySecurity.SetOwner(owner);
+            foreach (var sid in new[] { service, owner, administrators, system }.Distinct())
             {
                 directorySecurity.AddAccessRule(new FileSystemAccessRule(
                     sid,
@@ -64,7 +69,7 @@ public sealed class DeviceIdentity : IAgentRequestSigner, IDisposable
             directoryInfo.SetAccessControl(directorySecurity);
             var appliedDirectorySecurity = directoryInfo.GetAccessControl(AccessControlSections.Access | AccessControlSections.Owner);
             if (!appliedDirectorySecurity.AreAccessRulesProtected ||
-                !service.Equals(appliedDirectorySecurity.GetOwner(typeof(SecurityIdentifier))))
+                !owner.Equals(appliedDirectorySecurity.GetOwner(typeof(SecurityIdentifier))))
                 throw new UnauthorizedAccessException("Identity directory ACL could not be secured for the current service account.");
 
             var path = Path.Combine(identityDirectory, "identity.json");
@@ -98,18 +103,18 @@ public sealed class DeviceIdentity : IAgentRequestSigner, IDisposable
 
             if (identityInfo.GetAccessControl(AccessControlSections.Owner)
                     .GetOwner(typeof(SecurityIdentifier)) is not SecurityIdentifier existingFileOwner ||
-                (!service.Equals(existingFileOwner) && !IsAdoptableLegacyOwner(service, existingFileOwner)))
+                (!owner.Equals(existingFileOwner) && !IsAdoptableLegacyOwner(owner, existingFileOwner)))
                 throw new UnauthorizedAccessException("Identity file owner does not match the current service account.");
 
             var fileSecurity = new FileSecurity();
             fileSecurity.SetAccessRuleProtection(true, false);
-            fileSecurity.SetOwner(service);
-            foreach (var sid in new[] { service, administrators, system }.Distinct())
+            fileSecurity.SetOwner(owner);
+            foreach (var sid in new[] { service, owner, administrators, system }.Distinct())
                 fileSecurity.AddAccessRule(new FileSystemAccessRule(sid, FileSystemRights.FullControl, AccessControlType.Allow));
             identityInfo.SetAccessControl(fileSecurity);
             var appliedFileSecurity = identityInfo.GetAccessControl(AccessControlSections.Access | AccessControlSections.Owner);
             if (!appliedFileSecurity.AreAccessRulesProtected ||
-                !service.Equals(appliedFileSecurity.GetOwner(typeof(SecurityIdentifier))))
+                !owner.Equals(appliedFileSecurity.GetOwner(typeof(SecurityIdentifier))))
                 throw new UnauthorizedAccessException("Identity file ACL could not be secured for the current service account.");
 
             saved = JsonSerializer.Deserialize<Saved>(File.ReadAllText(path))
@@ -119,12 +124,20 @@ public sealed class DeviceIdentity : IAgentRequestSigner, IDisposable
         return new(saved.MachineId, Convert.FromBase64String(saved.PrivateKey));
     }
 
-    // A legacy install ran the Agent as the virtual service account S-1-5-80-...; only SYSTEM (the
-    // new service account) may adopt that identity, and it re-owns it immediately below.
+    // A legacy install ran the Agent as the virtual service account S-1-5-80-...; only SYSTEM
+    // (whose token owner is BUILTIN\Administrators) may adopt that identity, and it re-owns it
+    // immediately below. An identity directory owned by BUILTIN\Administrators is also adopted:
+    // the LocalSystem token uses that owner for newly created objects.
     [System.Runtime.Versioning.SupportedOSPlatform("windows")]
-    private static bool IsAdoptableLegacyOwner(SecurityIdentifier current, SecurityIdentifier owner) =>
-        current.Equals(new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null)) &&
-        owner.Value.StartsWith("S-1-5-80-", StringComparison.Ordinal);
+    private static bool IsAdoptableLegacyOwner(SecurityIdentifier currentOwner, SecurityIdentifier existingOwner)
+    {
+        var administrators = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
+        var system = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
+        if (!currentOwner.Equals(system) && !currentOwner.Equals(administrators))
+            return false;
+        return existingOwner.Value.StartsWith("S-1-5-80-", StringComparison.Ordinal)
+            || existingOwner.Equals(administrators);
+    }
 
     public string Sign(string method, string path, DateTimeOffset timestamp, string nonce, string body) =>        Convert.ToBase64String(key.SignData(
             Encoding.UTF8.GetBytes($"{MachineId}\n{method}\n{path}\n{timestamp.ToUnixTimeSeconds()}\n{nonce}\n{Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(body)))}"),
