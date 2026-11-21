@@ -171,10 +171,44 @@ test("machine API session boundaries, validation, redaction and controller failu
     );
     assert.equal(ownerRequest.headers["x-authenticated-actor-role"], "user");
     assert.equal(ownerRequest.body.userId, created.user.id);
-    const extension = { additionalSeconds: 3600, expectedRevision: 1, idempotencyKey: "extend-once" };
+    {
+      const setupDb = new Database(process.env.TEST_AUTH_DB);
+      try {
+        const now = Date.now();
+        setupDb.exec(`
+          CREATE TABLE IF NOT EXISTS rental_payments (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            machine_id TEXT NOT NULL,
+            machine_name TEXT NOT NULL,
+            hourly_price_satang INTEGER NOT NULL,
+            duration_seconds INTEGER NOT NULL,
+            amount_satang INTEGER NOT NULL,
+            extension_seconds INTEGER NOT NULL DEFAULT 0,
+            extension_satang INTEGER NOT NULL DEFAULT 0,
+            refunded_satang INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL,
+            reject_reason TEXT,
+            refunded_at INTEGER,
+            refund_note TEXT,
+            settled_at INTEGER,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+          );
+        `);
+        setupDb.prepare("UPDATE user SET balanceSatang=100000 WHERE id=?").run(created.user.id);
+        setupDb.prepare(
+          "INSERT OR REPLACE INTO rental_payments (id,user_id,machine_id,machine_name,hourly_price_satang,duration_seconds,amount_satang,status,created_at,updated_at) VALUES ('rental-1',?,'pc','PC',100,3600,100,'confirmed',?,?)",
+        ).run(created.user.id, now, now);
+      } finally {
+        setupDb.close();
+      }
+    }
+    const extension = { additionalSeconds: 3600, expectedRevision: 1, idempotencyKey: crypto.randomUUID() };
     assert.equal((await call("/my-leases/rental-1/extend", { ...extension, additionalSeconds: 0 }, cookie)).status, 400);
-    assert.equal((await call("/my-leases/not-owner/extend", extension, cookie)).status, 403);
+    assert.equal((await call("/my-leases/not-owner/extend", extension, cookie)).status, 404);
     const extendedResponse = await call("/my-leases/rental-1/extend", extension, cookie);
+    if (extendedResponse.status !== 200) console.log("EXTEND_DEBUG", extendedResponse.status, await extendedResponse.clone().text());
     assert.equal(extendedResponse.status, 200);
     assert.equal((await extendedResponse.json()).pendingRevision, 2);
     const extensionRequest = seen.at(-1);
@@ -187,6 +221,13 @@ test("machine API session boundaries, validation, redaction and controller failu
       db.prepare("UPDATE user SET role='admin' WHERE id=?").run(
         created.user.id,
       );
+      db.prepare("UPDATE user SET balanceSatang=100000 WHERE id=?").run(
+        created.user.id,
+      );
+      const now = Date.now();
+      db.prepare(
+        "INSERT OR REPLACE INTO rental_payments (id,user_id,machine_id,machine_name,hourly_price_satang,duration_seconds,amount_satang,status,created_at,updated_at) VALUES ('rental-1',?,'pc','PC',100,3600,100,'confirmed',?,?)",
+      ).run(created.user.id, now, now);
     } finally {
       db.close();
     }

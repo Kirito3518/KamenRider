@@ -22,6 +22,7 @@ export function GET(request: Request) {
           (m) =>
             m.approvalStatus === "approved" &&
             (m.availability ?? "rentable") === "rentable" &&
+            (typeof m.operationalState === "string" || m.canRent === true) &&
             Number.isSafeInteger(m.hourlyPriceMinorUnits) &&
             m.hourlyPriceMinorUnits >= 100 &&
             m.hourlyPriceMinorUnits % 100 === 0,
