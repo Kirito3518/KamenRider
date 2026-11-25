@@ -1,6 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { controllerCall } = vi.hoisted(() => ({ controllerCall: vi.fn() }));
+const { controllerCall, settleRentalRefunds, listRentalPayments } = vi.hoisted(() => ({
+  controllerCall: vi.fn(),
+  settleRentalRefunds: vi.fn(),
+  listRentalPayments: vi.fn(),
+}));
 
 type MockAction = (
   actor: { id: string; role: string },
@@ -23,9 +27,10 @@ vi.mock("@/lib/machine-api", () => ({
 }));
 
 vi.mock("@/lib/rental-payments", () => ({
-  listRentalPayments: () => [],
+  getMemberBalance: () => 95_000,
+  listRentalPayments,
   reconcilePendingRentals: async () => [],
-  settleRentalRefunds: () => ({ refundedSatang: 0, refundedPayments: 0 }),
+  settleRentalRefunds,
 }));
 
 vi.mock("@/lib/rental-service", () => ({
@@ -37,9 +42,10 @@ import { GET } from "@/app/api/my-leases/route";
 
 const HEARTBEAT_AT = "2026-11-08T03:04:05.000Z";
 
+/** Controller lease records; the id is random and NOT the payment id. */
 const LEASES = [
   {
-    id: "rental-1",
+    id: "lease-1",
     userId: "renter-1",
     machineId: "pc-one",
     state: "active",
@@ -47,9 +53,10 @@ const LEASES = [
     startsAtUtc: "2026-11-08T02:00:00.000Z",
     expiresAtUtc: "2026-11-08T04:00:00.000Z",
     pendingRevision: null,
+    paymentId: "payment-1",
   },
   {
-    id: "rental-2",
+    id: "lease-2",
     userId: "renter-1",
     machineId: "pc-offline",
     state: "preparing",
@@ -57,9 +64,10 @@ const LEASES = [
     startsAtUtc: null,
     expiresAtUtc: null,
     pendingRevision: null,
+    paymentId: "payment-2",
   },
   {
-    id: "rental-3",
+    id: "lease-3",
     userId: "renter-1",
     machineId: "pc-unknown",
     state: "preparing",
@@ -67,9 +75,10 @@ const LEASES = [
     startsAtUtc: null,
     expiresAtUtc: null,
     pendingRevision: null,
+    paymentId: null,
   },
   {
-    id: "rental-4",
+    id: "lease-4",
     userId: "renter-1",
     machineId: "pc-unrecognized",
     state: "preparing",
@@ -77,8 +86,29 @@ const LEASES = [
     startsAtUtc: null,
     expiresAtUtc: null,
     pendingRevision: null,
+    paymentId: null,
   },
 ];
+
+const PAYMENT = {
+  id: "payment-1",
+  userId: "renter-1",
+  machineId: "pc-one",
+  machineName: "PC ONE",
+  hourlyPriceSatang: 1_000,
+  durationSeconds: 3_600,
+  amountSatang: 1_000,
+  extensionSeconds: 0,
+  extensionSatang: 0,
+  refundedSatang: 0,
+  status: "confirmed" as const,
+  rejectReason: null,
+  refundedAt: null,
+  refundNote: null,
+  settledAt: null,
+  createdAt: 1_760_000_000_000,
+  updatedAt: 1_760_000_000_000,
+};
 
 function controllerMachine(
   machineId: string,
@@ -113,6 +143,10 @@ function controllerMachine(
 describe("GET /api/my-leases", () => {
   beforeEach(() => {
     controllerCall.mockReset();
+    settleRentalRefunds.mockReset();
+    settleRentalRefunds.mockReturnValue({ refundedSatang: 0, refundedPayments: 0 });
+    listRentalPayments.mockReset();
+    listRentalPayments.mockReturnValue([PAYMENT]);
     controllerCall.mockImplementation(async (path: string) => {
       if (path === "/internal/users/renter-1/leases") return LEASES;
       if (path === "/internal/machines")
@@ -132,7 +166,7 @@ describe("GET /api/my-leases", () => {
     });
   });
 
-  it("maps Controller heartbeat state to each lease without exposing machine network data", async () => {
+  it("returns the lease feed and wallet balance after settling refunds", async () => {
     const response = await GET(new Request("http://localhost/api/my-leases"));
     const data = await response.json();
 
@@ -140,24 +174,30 @@ describe("GET /api/my-leases", () => {
       "/internal/users/renter-1/leases",
     );
     expect(controllerCall).toHaveBeenCalledWith("/internal/machines");
-    expect(data.map(({ id, agent }: (typeof data)[number]) => ({ id, agent }))).toEqual([
+    expect(settleRentalRefunds).toHaveBeenCalledWith(
+      expect.anything(),
+      LEASES,
+      { userId: "renter-1" },
+    );
+    expect(data).toMatchObject({ balanceSatang: 95_000 });
+    expect(data.leases.map(({ id, agent }: (typeof data.leases)[number]) => ({ id, agent }))).toEqual([
       {
-        id: "rental-1",
+        id: "lease-1",
         agent: { reachability: "reachable", lastSeenAt: HEARTBEAT_AT },
       },
       {
-        id: "rental-2",
+        id: "lease-2",
         agent: {
           reachability: "unreachable",
           lastSeenAt: "2026-11-08T02:00:00.000Z",
         },
       },
       {
-        id: "rental-3",
+        id: "lease-3",
         agent: { reachability: "unknown", lastSeenAt: null },
       },
       {
-        id: "rental-4",
+        id: "lease-4",
         agent: { reachability: "unknown", lastSeenAt: HEARTBEAT_AT },
       },
     ]);
@@ -174,6 +214,57 @@ describe("GET /api/my-leases", () => {
       "boot-1",
     ])
       expect(responseData).not.toContain(privateValue);
+  });
+
+  it("attaches the rental payment by paymentId even though the lease id differs", async () => {
+    const response = await GET(new Request("http://localhost/api/my-leases"));
+    const data = await response.json();
+
+    const paidLease = data.leases.find(
+      (lease: { id: string }) => lease.id === "lease-1",
+    );
+    expect(paidLease.paymentId).toBe("payment-1");
+    expect(paidLease.payment).toMatchObject({
+      hourlyPriceSatang: 1_000,
+      paidSatang: 1_000,
+      refundedSatang: 0,
+      extendable: true,
+    });
+
+    // Leases without a matching payment keep a null payment instead of silently
+    // borrowing another rental's money.
+    expect(
+      data.leases.find((lease: { id: string }) => lease.id === "lease-3").payment,
+    ).toBeNull();
+    expect(
+      data.leases.find((lease: { id: string }) => lease.id === "lease-4").payment,
+    ).toBeNull();
+  });
+
+  it("lists a pending payment as an idempotent pre-lease entry", async () => {
+    listRentalPayments.mockReturnValue([
+      PAYMENT,
+      {
+        ...PAYMENT,
+        id: "payment-pending",
+        machineId: "pc-unrecognized",
+        machineName: "PC UNRECOGNIZED",
+        status: "pending",
+      },
+    ]);
+    const response = await GET(new Request("http://localhost/api/my-leases"));
+    const data = await response.json();
+
+    expect(data.leases[0]).toMatchObject({
+      id: "payment-pending",
+      state: "pending",
+      machineDisplayName: "PC UNRECOGNIZED",
+    });
+    // The pending entry is synthetic and must not consume the Controller lease
+    // payment: the active lease still gets its own payment attached.
+    expect(
+      data.leases.find((lease: { id: string }) => lease.id === "lease-1").payment,
+    ).not.toBeNull();
   });
 
   it("exposes a verified public connect address only for an active lease", async () => {
@@ -198,22 +289,24 @@ describe("GET /api/my-leases", () => {
         };
       throw new Error(`Unexpected Controller request: ${path}`);
     });
+    listRentalPayments.mockReturnValue([]);
 
     const response = await GET(new Request("http://localhost/api/my-leases"));
     const data = await response.json();
+    const leases = data.leases;
 
-    expect(data[0].connection).toEqual({
+    expect(leases[0].connection).toEqual({
       address: "203.0.113.7:47989",
       stale: true,
     });
-    expect(data[0].machineDisplayName).toBe("DESKTOP-ONE");
-    expect(data[1].connection).toEqual({ address: null, stale: false });
+    expect(leases[0].machineDisplayName).toBe("DESKTOP-ONE");
+    expect(leases[1].connection).toEqual({ address: null, stale: false });
     expect(controllerCall).toHaveBeenCalledWith(
-      "/internal/leases/rental-1/connection",
+      "/internal/leases/lease-1/connection",
     );
     expect(
       controllerCall.mock.calls.some(([path]) =>
-        String(path).includes("rental-2/connection"),
+        String(path).includes("lease-2/connection"),
       ),
     ).toBe(false);
     expect(JSON.stringify(data)).not.toContain("must not reach the browser");

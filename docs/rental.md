@@ -49,7 +49,9 @@ Migration `028-rental-power-lifecycle.sql` เพิ่ม `machines.availabilit
 | ตรวจพบ boot ใหม่ (reboot) | เวลาที่ตรวจพบ |
 | Reconcile หลังบูต (preparing → failed / ending → completed) | เวลาที่ตรวจพบ |
 
-`LeaseDto` เพิ่ม `EndedAtUtc` และ Controller มี endpoint สำหรับแอดมิน `GET /internal/leases?take=N` (1–500, ใหม่→เก่า)
+`LeaseDto` เพิ่ม `EndedAtUtc` และ `PaymentId`; Controller มี endpoint สำหรับแอดมิน `GET /internal/leases?take=N` (1–500, ใหม่→เก่า) และ endpoint เจ้าของ/แอดมิน `GET /internal/leases/{id}` สำหรับอ่าน lease เดี่ยว
+
+`PaymentId` คือ idempotency key ของการสร้าง lease (ฝั่งเว็บใช้ `rental_payments.id` เป็นค่านี้) ซึ่ง Controller เก็บไว้ใน `lease_requests` (`scope='create:<userId>'`) และอ่านคืนผ่าน subquery โดยไม่เปลี่ยน schema/`user_version` — ผลคือ payment ทุกรายการ (รวมรายการเก่า) join กลับหา lease ได้ด้วย `lease.paymentId` แม้ `lease.id` จะเป็น GUID ที่ Controller สร้างเอง
 
 ### Auth DB (Next.js)
 
@@ -74,41 +76,57 @@ Migration `028-rental-power-lifecycle.sql` เพิ่ม `machines.availabilit
 ### ต่อเวลา (`POST /api/my-leases/{id}/extend`)
 
 1. บังคับ `additionalSeconds` เป็นพหุคูณของ 3600 และ 1–24 ชม.
-2. ตรวจ payment ของเจ้าของ → หักเงิน + บันทึก extension (`charged`)
-3. เรียก Controller extend; 4xx → ปล่อย extension คืนเงินทันที; 503 → คงเงินที่หักไว้ (retry ด้วย key เดิมได้ ไม่หักซ้ำ) และส่วนที่ไม่ได้ใช้จะถูกคืนตอนสิ้นสุด
+2. อ่าน lease จาก Controller (`GET /internal/leases/{id}`) เพื่อ resolve `paymentId`; ตรวจว่าเป็นเจ้าของก่อนหักเงิน
+3. หักเงิน + บันทึก extension (`charged`) ใน payment ที่ resolve ได้ (ไม่ใช่ lease id แบบสุ่ม)
+4. เรียก Controller extend; 4xx → ปล่อย extension คืนเงินทันที; 503 → คงเงินที่หักไว้ (retry ด้วย key เดิมได้ ไม่หักซ้ำ) และส่วนที่ไม่ได้ใช้จะถูกคืนตอนสิ้นสุด
+5. ถ้า Agent ไม่ ACK คำสั่ง `ApplyLease` จน command หมดอายุ Controller จะปลด optimistic lock (`pending_revision`) และ revive แถว outbox เดิมเมื่อต่อเวลาครั้งถัดไป จึงไม่ค้าง 409/ไม่ชน unique constraint
 
 ### คืนเงินอัตโนมัติ
 
 `GET /api/my-leases`, `GET /api/rentals` และ `GET /api/admin/rentals` เรียก `settleRentalRefunds` ก่อนแสดงผล: หา payment ที่ `confirmed` และ `settled_at IS NULL` ที่ lease สิ้นสุดแล้ว → คำนวณ/คืนเงิน + mark settled (CAS กันคืนซ้ำ) แล้วจึงประกอบประวัติ
 
+การจับคู่ lease กับ payment ใช้ `lease.paymentId` (idempotency key ของ create) เป็นหลัก และ fallback เป็น `lease.id` เฉพาะรายการเก่าที่ไม่มีข้อมูล; ถ้า lease จบแล้วแต่ยังไม่มี `endedAtUtc` ระบบจะยังไม่ mark settled เพื่อรอ end time จริง แล้วค่อยคืนในการอ่านครั้งถัดไป (ไม่คืน 0 ถาวร)
+
+`GET /api/my-leases` คืน `{ leases, balanceSatang }` โดยอ่านยอดเงินหลัง settle — `/my-machines` จึงแสดงยอดเงินที่ได้รับคืนจาก poll (3 วิ) ได้ทันทีโดยไม่ต้องรอ session refetch และขึ้น notice "คืนเงินค่าเช่าที่ไม่ได้ใช้ … เข้ายอดเงินแล้ว"
+
 `reconcilePendingRentals` จะลองสร้าง lease ซ้ำด้วย idempotency key เดิมเมื่อ payment ยัง `pending` (Controller คืน lease เดิมได้ถ้าสร้างสำเร็จไปแล้ว)
+
+### ยกเลิกการเช่า (`POST /api/my-leases/{id}/cancel`)
+
+เจ้าของยกเลิก lease ที่ `preparing`/`active` ได้: อ่าน lease เพื่อ resolve paymentId → เรียก Controller cancel (จับคู่ Sunshine/ปิดเครื่อง) → settle refund ทันที → คืน `{ lease, refundedSatang, paymentRefundedSatang, balanceSatang }`; ฝั่ง UI แสดงยอดคืนและอัปเดตยอดเงินทันที
 
 ### ประวัติการเช่า
 
 - `GET /api/rentals` (เจ้าของ): `{ balanceSatang, controllerAvailable, summary, entries }` — ถ้า Controller ล่มจะ fallback แสดงข้อมูลการชำระเงินโดย `state: "unknown"` และ `controllerAvailable: false`
 - `GET /api/admin/rentals` (แอดมิน): join lease ล่าสุด 500 รายการ + payment + ชื่อ/อีเมลสมาชิก; `summary` มีรายได้สุทธิ/คืนเงินทั้งหมดจาก payment table
-- `GET /api/my-leases`: ข้อมูล lease สำหรับหน้า `/my-machines` พร้อม `payment` ต่อรายการ และ entry `pending` สำหรับการเช่าที่ยังรอยืนยัน
-- `/my-machines` กรองแสดงเฉพาะ `state=active`; รายการ `pending`/`preparing` แสดงเป็นแถบ "กำลังเตรียมเครื่อง"; รายการที่สิ้นสุดแล้วดูได้ที่ `/history`
+- `GET /api/my-leases`: `{ leases, balanceSatang }` สำหรับหน้า `/my-machines` พร้อม `payment` ต่อรายการ (จับคู่ด้วย `paymentId`) และ entry `pending` สำหรับการเช่าที่ยังรอยืนยัน
+- `/my-machines` กรองแสดงเฉพาะ `state=active`; รายการ `pending`/`preparing` แสดงเป็นแถบ "กำลังเตรียมเครื่อง" และการ์ดเปิดเครื่อง; รายการที่สิ้นสุดแล้วดูได้ที่ `/history`
 - Parsec เป็น flow 2 รอบ: รอบแรกขออีเมลยืนยัน IP, รอบสองส่งด้วย `retryAttemptId` หลังลูกค้ายืนยันอีเมล (รายละเอียดใน [parsec.md](parsec.md))
 
 ## หน้าเว็บ
 
 | หน้า | ลูกค้าเห็น |
 | --- | --- |
-| `/rent` | ราคาเต็มบาท/ชม., จำนวนชั่วโมงเต็ม, ยอดรวม, ยอดเงินคงเหลือ, ปุ่มยืนยันการเช่า (ต้อง login) |
-| `/my-machines` | แสดงเฉพาะเครื่องที่กำลังเช่า (state `active`); มี Tabs ตามชื่อเครื่องเมื่อเช่าหลายเครื่อง; สถานะ/เวลา/ราคา, ต่อเวลาผ่าน dialog, เชื่อมต่อ Moonlight (PIN) หรือ Parsec (2 รอบ) ผ่าน dialog, ยอดเงินคงเหลือ |
+| `/rent` | ราคาเต็มบาท/ชม., จำนวนชั่วโมงเต็ม, ยอดรวม, ยอดเงินคงเหลือ, ปุ่มยืนยันการเช่า (ต้อง login) — สถานะเครื่องอัปเดตแบบ realtime ผ่าน SSE และ fallback polling |
+| `/my-machines` | แสดงเฉพาะเครื่องที่กำลังเช่า (state `active`); มี Tabs ตามชื่อเครื่องเมื่อเช่าหลายเครื่อง; สถานะ/เวลา/ราคา, ต่อเวลาผ่าน dialog, ยกเลิกพร้อมยอดคืน, เชื่อมต่อ Moonlight (PIN) หรือ Parsec (2 รอบ) ผ่าน dialog, ยอดเงินคงเหลืออัปเดตทุก poll |
 | `/history` | 2 Tabs: ประวัติการเติมเงิน และประวัติการเช่า (เวลาเริ่ม–สิ้นสุดจริง, ยอดชำระ/คืน/สุทธิ, สถานะ, ค้นหา/กรอง/แบ่งหน้า) |
 | `/admin/rentals` | Dashboard ประวัติการเช่า: stat cards, กราฟรายได้/จำนวน, ผู้เช่า/เครื่อง/เวลา/ยอดชำระ/คืน/สุทธิ, ค้นหา/กรอง/เรียง/แบ่งหน้า, รายละเอียด |
+
+## Realtime machine list (`/rent`)
+
+- `GET /api/machines/stream` เป็น Server-Sent Events แบบ public: hub เดียวใน process poll Controller ทุก 2 วิ (single-flight), hash รายการ public เป็น `version`, ส่ง `machines` event เมื่อเปลี่ยน, ส่ง `status` live/offline และ `heartbeat` ทุก 15 วิ; หยุด poll เมื่อไม่มีผู้ฟัง 30 วิ และ backoff 1→2→4→8→15 วิเมื่อ Controller ล่ม
+- Client (`src/hooks/use-rental-machines.ts`) hydrate ด้วย `GET /api/machines` ตามเดิม แล้วเปิด EventSource; ถ้าใช้ไม่ได้/error/ขาด heartbeat จะ fallback polling ทุก 3 วิเฉพาะตอนแท็บ visible, คงรายการเดิมเมื่อ error และ reconnect เมื่อ focus/online/visible
+- `GET /api/machines` ยังคง contract เดิม (array ของ public DTO) และใช้ `toPublicMachines()` ตัวเดียวกับ hub; dialog ฝั่ง client จะเตือนและ disable ปุ่มเมื่อเครื่องที่เลือกถูกเช่าไปแล้ว
 
 ## ข้อจำกัดและ edge cases
 
 - ระบบเติมเงินออนไลน์อยู่ใน [topup.md](topup.md); ยังไม่มีใบเสร็จ/ภาษี
-- ไม่มีปุ่มให้ลูกค้ายกเลิกเอง/ขอคืนเงินเอง; แอดมินใช้ PC Control หรือปรับยอดสมาชิกพร้อมเหตุผล
+- การคืนเงินยังทำงานเมื่อมีผู้เปิดหน้า customer/admin ที่เรียก settle (`/my-machines` poll 3 วิ, `/history`, `/admin/rentals`) — ไม่มี background job; เมื่อไม่มีใครเปิดหน้า เงินจะถูกคืนตอนมีการอ่านครั้งถัดไป
 - ถ้า Controller DB ถูก restore จนไม่มี lease แต่ payment ยัง confirmed ระบบจะไม่คืนเงินอัตโนมัติ (แสดง "ไม่ทราบสถานะ") — ควรตรวจกับ Controller ก่อน
 - รายการเช่าที่สร้างก่อนมีระบบชำระเงิน (legacy) แสดงในประวัติโดยไม่มีตัวเลขเงินและต่อเวลาไม่ได้
-- การคืนเงินทำงานเมื่อมีผู้เปิดหน้า history/poll; ไม่มี background job
 - ฝั่งแอดมินดู lease ล่าสุด 500 รายการ; pagination ทั้งหมดเป็นงานอนาคต
 - เงินคืนคิดตามเวลาจริงเป็นวินาที จึงอาจมีเศษสตางค์ในยอดเงินสมาชิก (การชำระเป็นบาทเต็มเสมอ)
+- SSE hub ออกแบบสำหรับ single Node process (deployment ปัจจุบัน); ถ้าขยายหลาย instance แต่ละ process จะ poll ของตัวเอง
 
 ## คำสั่งตรวจสอบ
 

@@ -20,8 +20,10 @@ namespace KamenRaider.Agent.Parsec;
 ///
 /// The delivery budget is six seconds per attempt and three bounded attempts; every failure is
 /// swallowed and reported as <c>false</c> so a network problem can never throw into an attempt.
-/// Nothing about the credential is ever placed in the body: the report carries only the attempt
-/// id, the boot key id, the state, the error code and the sanitised message.
+/// The Controller acknowledges an accepted report with <c>204 No Content</c>, so any 2xx status is
+/// treated as acceptance (an optional <c>{"accepted":false}</c> body still rejects a stale
+/// attempt). Nothing about the credential is ever placed in the body: the report carries only the
+/// attempt id, the boot key id, the state, the error code and the sanitised message.
 /// </remarks>
 public sealed class ParsecStatusHttpReporter : IParsecStatusReporter
 {
@@ -137,6 +139,13 @@ public sealed class ParsecStatusHttpReporter : IParsecStatusReporter
     /// One signed POST. <c>true</c>/<c>false</c> are final answers from the Controller
     /// (accepted / no longer current); <c>null</c> means a transient failure worth retrying.
     /// </summary>
+    /// <remarks>
+    /// The Controller's <c>/agent/parsec-status</c> route returns <c>204 No Content</c> on
+    /// success, so the HTTP status is the acceptance signal. A 2xx response is accepted even
+    /// when the body is empty or absent; a JSON body may still veto it with
+    /// <c>{"accepted":false}</c> (an alternate Controller rejecting a stale attempt). 4xx is a
+    /// final rejection and 408/429/5xx are transient.
+    /// </remarks>
     private async Task<bool?> SendOnceAsync(Uri endpoint, string body, CancellationToken cancellationToken)
     {
         var timestamp = time.GetUtcNow();
@@ -162,18 +171,22 @@ public sealed class ParsecStatusHttpReporter : IParsecStatusReporter
             return false;
 
         var content = await ReadBoundedAsync(response, timeout.Token).ConfigureAwait(false);
-        if (content is null)
-            return false;
+        // The Controller answers 204 No Content; an absent/oversized body on a 2xx is still an
+        // acceptance. Only an explicit JSON `accepted` flag may veto it.
+        if (content is null || content.Length == 0)
+            return true;
         try
         {
             using var document = JsonDocument.Parse(content);
-            return document.RootElement.ValueKind == JsonValueKind.Object &&
-                   document.RootElement.TryGetProperty("accepted", out var accepted) &&
-                   accepted.ValueKind is JsonValueKind.True;
+            if (document.RootElement.ValueKind != JsonValueKind.Object ||
+                !document.RootElement.TryGetProperty("accepted", out var accepted))
+                return true;
+            return accepted.ValueKind is JsonValueKind.True;
         }
         catch (JsonException)
         {
-            return false;
+            // A 2xx status is authoritative even when an alternate Controller's body is not JSON.
+            return true;
         }
     }
 

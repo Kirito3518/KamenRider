@@ -142,6 +142,27 @@ Import-Certificate -FilePath "$Certs\caddy-root.crt" -CertStoreLocation Cert:\Lo
 "CADDY_ROOT = $($caddyRoot.FullName)"
 ```
 
+### VNC gateway ผ่าน origin เดียวกัน (จำเป็นเมื่อเบราว์เซอร์ต่อ Controller:7443 ตรงไม่ได้)
+
+VNC viewer เปิด WebSocket `wss://.../admin/vnc` ไปที่ Controller โดยตรง ถ้าแอดมินเข้าจากภายนอก LAN (เช่นผ่าน Cloudflare ที่ proxy เฉพาะ 443) ต้องให้ reverse proxy ส่งต่อ path นี้ไป Controller `https://127.0.0.1:7443` แล้วตั้ง `VNC_PUBLIC_WS_URL=wss://<public-host>/admin/vnc`:
+
+```caddyfile
+https://$MotherIp {
+    tls internal
+
+    @vnc path /admin/vnc
+    handle @vnc {
+        reverse_proxy https://${MotherIp}:7443
+    }
+
+    reverse_proxy 127.0.0.1:3000
+}
+```
+
+- Caddy ต้องเชื่อถือ certificate ของ Controller (import `controller-root.cer`เข้า `LocalMachine\Root` ตามขั้นตอนด้านบน) และต้อง forward WebSocket upgrade + header `Origin` ตามค่าเริ่มต้น
+- Cloudflare proxy/Tunnel รองรับ WebSocket บนพอร์ต 443 เท่านั้น จึงใช้วิธี path นี้แทนการเปิดพอร์ต 7443 สู่อินเทอร์เน็ต; ห้ามตั้ง `VNC_PUBLIC_WS_URL` เป็น `wss://<LAN-IP>:7443` ถ้าเบราว์เซอร์อยู่นอก LAN
+- ถ้าแอดมินอยู่ใน LAN และเบราว์เซอร์เชื่อถือ cert ของ Controller แล้ว ไม่ต้องตั้ง `VNC_PUBLIC_WS_URL` (ระบบจะ derive จาก `AGENT_CONTROLLER_URL` ตามเดิม)
+
 ---
 
 ## E. Mother PC — data directories and ACLs
@@ -201,6 +222,9 @@ AGENT_PACKAGE_SHA256=$agentSha
 AGENT_CONTROLLER_URL=https://${MotherIp}:7443
 AGENT_TRUST_ROOT_THUMBPRINT=$ControllerThumbprint
 AGENT_VNC_ALLOWED_SOURCE_IP=
+# Optional browser-facing VNC endpoint when the Admin browser cannot reach the Controller's own
+# TLS port (Cloudflare / reverse proxy). Must be wss://.../admin/vnc (no query/hash).
+VNC_PUBLIC_WS_URL=
 CONTROLLER_WAKE_INTERFACE_ADDRESS=$MotherIp
 CONTROLLER_WAKE_BROADCAST_ADDRESS=192.168.1.255
 AGENT_UPDATE_ENABLED=false

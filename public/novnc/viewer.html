@@ -11,11 +11,40 @@
       #status { min-height: 2rem; padding: .6rem 1rem; font-size: .875rem; }
       #screen { flex: 1; min-height: 0; overflow: auto; }
       #screen canvas { display: block; margin: auto; }
+      #password-prompt {
+        position: fixed; inset: 0; z-index: 10;
+        display: flex; flex-direction: column; align-items: center; justify-content: center;
+        gap: .8rem; padding: 1.5rem; text-align: center;
+        background: rgba(17, 24, 39, .94);
+      }
+      #password-prompt[hidden] { display: none; }
+      #password-prompt .hint { max-width: 34rem; margin: 0; font-size: .9rem; line-height: 1.5; color: #d1d5db; }
+      #password-prompt label { font-size: .9rem; font-weight: 600; }
+      #password-prompt input {
+        width: min(22rem, 80vw); padding: .5rem .75rem; font-size: 1rem; color: #f9fafb;
+        background: #1f2937; border: 1px solid #4b5563; border-radius: .5rem;
+      }
+      #password-prompt .actions { display: flex; flex-wrap: wrap; gap: .5rem; justify-content: center; }
+      #password-prompt button {
+        padding: .45rem .9rem; font-size: .9rem; color: #f9fafb; cursor: pointer;
+        background: #2563eb; border: 1px solid #3b82f6; border-radius: .5rem;
+      }
+      #password-prompt button.secondary { background: #374151; border-color: #4b5563; }
     </style>
   </head>
   <body>
     <p id="status" role="status" aria-live="polite">กำลังเตรียมการเชื่อมต่อ…</p>
     <div id="screen" aria-label="หน้าจอเครื่องลูก"></div>
+    <form id="password-prompt" hidden aria-labelledby="password-title">
+      <h2 id="password-title">ต้องใช้รหัสผ่าน VNC ของเครื่องนี้</h2>
+      <p id="password-hint" class="hint"></p>
+      <label for="password-input">รหัสผ่าน VNC (เฉพาะเครื่องนี้)</label>
+      <input id="password-input" type="password" autocomplete="off" spellcheck="false" autocapitalize="off" />
+      <div class="actions">
+        <button type="submit">ลองเชื่อมต่อใหม่</button>
+        <button type="button" id="password-cancel" class="secondary">ยกเลิก</button>
+      </div>
+    </form>
     <script type="module">
       import RFB from "./core/rfb.js";
 
@@ -28,46 +57,222 @@
 
       const status = document.getElementById("status");
       const screen = document.getElementById("screen");
+      const promptForm = document.getElementById("password-prompt");
+      const passwordInput = document.getElementById("password-input");
+      const passwordHint = document.getElementById("password-hint");
+      const passwordCancel = document.getElementById("password-cancel");
+
       // The managed TightVNC install uses this reviewed value and the Agent never exposes it
-      // outside the local private data directory. VNC is source-restricted to the Mother and
-      // reachable only through the authenticated admin gateway, so the viewer authenticates
-      // automatically instead of asking the administrator every time.
+      // outside the local private data directory. Machines provisioned before 2026-11-21 kept a
+      // random per-machine password, so a rejected managed password must not end the session:
+      // the Admin can supply that machine's password in the overlay below and retry.
       const managedVncPassword = "KamenVNC";
+      const ticketPattern = /^[A-Za-z0-9_-]{43}$/;
+      const ticketWaitMs = 12000;
+
       let rfb = null;
       let started = false;
+      let connected = false;
+      let authFailed = false;
+      let pendingTicket = false;
+      let retryingWithPassword = false;
+      let password = managedVncPassword;
+      let passwordAttempted = false;
+      let socketProbe = { opened: false };
+      let ticketWaitTimer = 0;
 
       function setStatus(message) {
         status.textContent = message;
         window.parent.postMessage({ type: "kr-vnc-status", message }, window.location.origin);
       }
 
-      window.addEventListener("message", (event) => {
-        if (event.origin !== window.location.origin || event.source !== window.parent) return;
-        if (event.data?.type !== "kr-vnc-connect" || started) return;
-        const { webSocketUrl, ticket } = event.data;
-        if (typeof ticket !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(ticket)) return;
-        let socketUrl;
-        try { socketUrl = new URL(webSocketUrl); } catch { return; }
-        if (socketUrl.protocol !== "wss:" || socketUrl.pathname !== "/admin/vnc" || socketUrl.search || socketUrl.hash) return;
+      function clearTicketWaitTimer() {
+        if (ticketWaitTimer) {
+          clearTimeout(ticketWaitTimer);
+          ticketWaitTimer = 0;
+        }
+      }
 
+      function hidePasswordPrompt() {
+        promptForm.hidden = true;
+        passwordInput.value = "";
+      }
+
+      function validConnectPayload(data) {
+        const { ticket, webSocketUrl } = data;
+        if (typeof ticket !== "string" || !ticketPattern.test(ticket)) return null;
+        if (typeof webSocketUrl !== "string") return null;
+        let socketUrl;
+        try { socketUrl = new URL(webSocketUrl); } catch { return null; }
+        // The Admin UI only ever hands over the Controller's read-only gateway endpoint.
+        if (socketUrl.protocol !== "wss:" || socketUrl.pathname !== "/admin/vnc" || socketUrl.search || socketUrl.hash) return null;
+        return { ticket, webSocketUrl: socketUrl.toString() };
+      }
+
+      function detachRfb() {
+        if (!rfb) return;
+        try { rfb.disconnect(); } catch { /* already disconnected */ }
+        rfb = null;
+      }
+
+      function connect(payload, retrying) {
         started = true;
+        connected = false;
+        authFailed = false;
+        pendingTicket = false;
+        retryingWithPassword = Boolean(retrying);
+        passwordAttempted = password !== managedVncPassword;
+        clearTicketWaitTimer();
+        hidePasswordPrompt();
+        socketProbe = { opened: false };
+        detachRfb();
+        screen.replaceChildren();
+
+        let socket;
         try {
-          rfb = new RFB(screen, socketUrl.toString(), { wsProtocols: ["binary", `kamen-vnc-${ticket}`] });
-          rfb.viewOnly = true;
-          rfb.scaleViewport = true;
-          rfb.clipViewport = true;
-          rfb.addEventListener("connect", () => setStatus("เชื่อมต่อแล้ว · โหมดดูอย่างเดียว"));
-          rfb.addEventListener("disconnect", (event) => setStatus(event.detail?.clean ? "ปิดการเชื่อมต่อแล้ว" : "การเชื่อมต่อขาด"));
-          rfb.addEventListener("credentialsrequired", () => {
-            rfb.sendCredentials({ password: managedVncPassword });
-          });
-          rfb.addEventListener("securityfailure", () => setStatus("VNC ปฏิเสธการยืนยันตัวตน"));
+          // Creating the WebSocket here (instead of inside RFB) lets the viewer tell a
+          // gateway/network/TLS failure (the socket never opened) apart from a VNC
+          // authentication failure for its status text.
+          socket = new WebSocket(payload.webSocketUrl, ["binary", `kamen-vnc-${payload.ticket}`]);
         } catch {
           setStatus("เริ่ม viewer ไม่สำเร็จ");
+          return;
+        }
+        socket.addEventListener("open", () => { socketProbe.opened = true; });
+
+        try {
+          const session = new RFB(screen, socket);
+          rfb = session;
+          session.viewOnly = true;
+          session.scaleViewport = true;
+          session.clipViewport = true;
+          session.addEventListener("connect", () => {
+            if (rfb !== session) return;
+            connected = true;
+            hidePasswordPrompt();
+            setStatus("เชื่อมต่อแล้ว · โหมดดูอย่างเดียว");
+          });
+          session.addEventListener("credentialsrequired", () => {
+            if (rfb !== session) return;
+            session.sendCredentials({ password });
+          });
+          session.addEventListener("securityfailure", () => {
+            if (rfb !== session) return;
+            onAuthenticationFailure();
+          });
+          session.addEventListener("disconnect", (event) => {
+            if (rfb !== session) return;
+            onDisconnect(event);
+          });
+        } catch {
+          try { socket.close(); } catch { /* ignore */ }
+          setStatus("เริ่ม viewer ไม่สำเร็จ");
+        }
+      }
+
+      function onAuthenticationFailure() {
+        authFailed = true;
+        passwordHint.textContent = passwordAttempted
+          ? "รหัสผ่านที่กรอกยังใช้ไม่ได้ กรอกรหัสผ่าน VNC ของเครื่องนี้อีกครั้ง (รหัสผ่านจะไม่ถูกบันทึกหรือส่งออกจากหน้านี้)"
+          : "รหัสผ่านกลาง KamenVNC ใช้ไม่ได้กับเครื่องนี้ เครื่องที่ติดตั้งก่อน 2026-11-21 ใช้รหัสผ่านเฉพาะเครื่อง กรอกรหัสผ่าน VNC ของเครื่องนี้เพื่อลองใหม่ (รหัสผ่านจะไม่ถูกบันทึกหรือส่งออกจากหน้านี้)";
+        setStatus("VNC ปฏิเสธการยืนยันตัวตน — กรอกรหัสผ่านของเครื่องนี้");
+        promptForm.hidden = false;
+        passwordInput.value = "";
+        passwordInput.focus();
+      }
+
+      function onDisconnect(event) {
+        if (authFailed) {
+          // The password overlay already explains the rejected authentication.
+          authFailed = false;
+          return;
+        }
+        const clean = Boolean(event?.detail?.clean);
+        if (connected) {
+          connected = false;
+          setStatus("การเชื่อมต่อหลุด — session อาจสิ้นสุด (สูงสุด 1 ชั่วโมง) หรือเครื่องลูกออฟไลน์");
+        } else if (clean) {
+          setStatus("ปิดการเชื่อมต่อแล้ว");
+        } else if (!socketProbe.opened && retryingWithPassword) {
+          // A replacement ticket is single-use as well; a rejected WebSocket upgrade here means
+          // the new ticket could not be redeemed, not that the network is down.
+          setStatus("Gateway VNC ปฏิเสธตั๋วใหม่ (อาจถูกใช้ไปแล้วหรือหมดอายุ) กรุณาปิดจอนี้แล้วเปิดใหม่");
+        } else if (!socketProbe.opened) {
+          setStatus("เชื่อมต่อ gateway VNC ไม่ได้: ตรวจสอบว่าเบราว์เซอร์เข้าถึง WSS URL ได้ (LAN IP หรือ reverse proxy) และใบรับรอง TLS ใช้งานได้");
+        } else {
+          setStatus("Gateway VNC ตัดการเชื่อมต่อก่อน VNC พร้อม — ตั๋วอาจหมดอายุหรือถูกใช้ไปแล้ว หรือเครื่องลูกไม่ตอบสนอง");
+        }
+      }
+
+      window.addEventListener("message", (event) => {
+        if (event.origin !== window.location.origin || event.source !== window.parent) return;
+        const data = event.data;
+        if (!data || typeof data !== "object") return;
+
+        if (data.type === "kr-vnc-connect") {
+          if (started) return;
+          const payload = validConnectPayload(data);
+          if (!payload) {
+            setStatus("ข้อมูลเชื่อมต่อ VNC ไม่ถูกต้อง");
+            return;
+          }
+          connect(payload);
+        } else if (data.type === "kr-vnc-reconnect") {
+          if (!started || !pendingTicket) return;
+          const payload = validConnectPayload(data);
+          if (!payload) {
+            pendingTicket = false;
+            clearTicketWaitTimer();
+            setStatus("ข้อมูลตั๋ว VNC ใหม่ไม่ถูกต้อง");
+            return;
+          }
+          connect(payload, true);
+        } else if (data.type === "kr-vnc-ticket-error") {
+          if (!pendingTicket) return;
+          pendingTicket = false;
+          clearTicketWaitTimer();
+          const detail = typeof data.message === "string" ? data.message.slice(0, 200) : "ไม่ทราบสาเหตุ";
+          setStatus(`ขอตั๋ว VNC ใหม่ไม่สำเร็จ: ${detail}`);
+          passwordHint.textContent = "ขอตั๋ว VNC ใหม่ไม่สำเร็จ ปิดจอนี้แล้วเปิดใหม่ได้ หรือลองอีกครั้ง";
+          promptForm.hidden = false;
         }
       });
 
-      window.addEventListener("beforeunload", () => { if (rfb) rfb.disconnect(); });
+      promptForm.addEventListener("submit", (event) => {
+        event.preventDefault();
+        if (pendingTicket) return;
+        const entered = passwordInput.value;
+        if (!entered) {
+          passwordInput.focus();
+          return;
+        }
+        // The typed password lives only in this frame's memory for the retry below; it is never
+        // logged, persisted or posted to any other window.
+        password = entered;
+        hidePasswordPrompt();
+        pendingTicket = true;
+        setStatus("กำลังขอตั๋ว VNC ใหม่เพื่อลองรหัสผ่าน…");
+        window.parent.postMessage({ type: "kr-vnc-need-ticket" }, window.location.origin);
+        clearTicketWaitTimer();
+        ticketWaitTimer = window.setTimeout(() => {
+          if (!pendingTicket) return;
+          pendingTicket = false;
+          password = managedVncPassword;
+          setStatus("หน้าจอหลักไม่ตอบสนองคำขอตั๋วใหม่ กรุณาปิดจอนี้แล้วเปิดใหม่");
+        }, ticketWaitMs);
+      });
+
+      passwordCancel.addEventListener("click", () => {
+        hidePasswordPrompt();
+        setStatus("ยกเลิกการยืนยันตัวตนแล้ว");
+      });
+
+      window.addEventListener("beforeunload", () => {
+        password = "";
+        clearTicketWaitTimer();
+        detachRfb();
+      });
+
       window.parent.postMessage({ type: "kr-vnc-ready" }, window.location.origin);
     </script>
   </body>

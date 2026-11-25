@@ -568,3 +568,90 @@ test("payment summary and member balance expose the money ledger", async () => {
     db.close();
   }
 });
+
+test("a Controller lease settles through its paymentId, not its random lease id", async () => {
+  const api = await ledger();
+  const db = fixture();
+  try {
+    const startsAt = Date.parse("2026-11-18T03:00:00.000Z");
+    const { payment } = createPaid(db, api, { hours: 2 });
+    assert.equal(balance(db), 92_000);
+
+    // The Controller mints a random lease id; the web payment id is only
+    // available as paymentId (the create idempotency key).
+    const settled = api.settleRentalRefunds(
+      db,
+      [
+        {
+          id: "controller-lease-7c3a",
+          paymentId: payment.id,
+          state: "completed",
+          startsAtUtc: new Date(startsAt).toISOString(),
+          endedAtUtc: new Date(startsAt + 80 * 60 * 1000).toISOString(),
+        },
+      ],
+      { now: startsAt + 90 * 60 * 1000 },
+    );
+    assert.equal(settled.refundedSatang, 2667);
+    assert.equal(settled.refundedPayments, 1);
+    assert.equal(balance(db), 94_667);
+    assert.ok(api.getRentalPayment(db, payment.id).settledAt);
+
+    // A snapshot without paymentId whose id is not a payment id must never
+    // settle somebody else's payment.
+    const untouched = createConfirmed(db, api, { hours: 1 });
+    const ignored = api.settleRentalRefunds(
+      db,
+      [{ id: "another-random-lease", state: "failed", startsAtUtc: null, endedAtUtc: new Date().toISOString() }],
+      { now: Date.now() },
+    );
+    assert.equal(ignored.refundedSatang, 0);
+    assert.equal(api.getRentalPayment(db, untouched.id).settledAt, null);
+  } finally {
+    db.close();
+  }
+});
+
+test("a terminal lease without an end instant settles only once endedAtUtc is recorded", async () => {
+  const api = await ledger();
+  const db = fixture();
+  try {
+    const startsAt = Date.parse("2026-11-18T03:00:00.000Z");
+    const { payment } = createPaid(db, api, { hours: 1 });
+    assert.equal(balance(db), 96_000);
+    const snapshot = {
+      id: "controller-lease-missing-end",
+      paymentId: payment.id,
+      state: "completed",
+      startsAtUtc: new Date(startsAt).toISOString(),
+      endedAtUtc: null,
+    };
+
+    // The lease is terminal but the proration instant is not persisted yet:
+    // skipping leaves settled_at NULL so a later read can settle it.
+    const skipped = api.settleRentalRefunds(db, [snapshot], {
+      now: startsAt + 61 * 60 * 1000,
+    });
+    assert.equal(skipped.refundedSatang, 0);
+    assert.equal(skipped.refundedPayments, 0);
+    assert.equal(api.getRentalPayment(db, payment.id).settledAt, null);
+    assert.equal(balance(db), 96_000);
+
+    // Once ended_at exists the same read settles the half-unused hour.
+    const settled = api.settleRentalRefunds(
+      db,
+      [
+        {
+          ...snapshot,
+          endedAtUtc: new Date(startsAt + 30 * 60 * 1000).toISOString(),
+        },
+      ],
+      { now: startsAt + 61 * 60 * 1000 },
+    );
+    assert.equal(settled.refundedSatang, 2_000);
+    assert.equal(balance(db), 98_000);
+    assert.ok(api.getRentalPayment(db, payment.id).settledAt);
+  } finally {
+    db.close();
+  }
+});

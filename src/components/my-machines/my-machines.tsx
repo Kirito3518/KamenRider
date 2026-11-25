@@ -1,8 +1,14 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { Monitor, MonitorPlay, MonitorX, Wallet } from "lucide-react";
+import {
+  CircleCheck,
+  Monitor,
+  MonitorPlay,
+  MonitorX,
+  Wallet,
+} from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { Button } from "@/components/ui/button";
 import {
@@ -26,6 +32,14 @@ import { leaseApi, leaseErrorMessage } from "@/components/my-machines/lease-api"
 import { CardsGridSkeleton, LoadingRegion } from "@/components/loading";
 
 const leaseRefreshIntervalMs = 3_000;
+/** How long the "unexpected refund" banner stays before fading away. */
+const refundNoticeDurationMs = 10_000;
+
+/** The lease feed settles refunds before responding and returns the wallet too. */
+type MyLeasesResponse = {
+  leases: Lease[];
+  balanceSatang: number;
+};
 
 function mergeExtendedLease(current: Lease, updated: Lease): Lease {
   // The extend endpoint returns the raw Controller lease; keep the enriched
@@ -52,6 +66,14 @@ export function MyMachines() {
   const { data: session, refetch: refetchSession } = authClient.useSession();
   const reduceMotion = useReducedMotion();
   const [leases, setLeases] = useState<Lease[]>([]);
+  // Locally tracked wallet. Seeded from the session, then kept current from every
+  // lease poll and from mutation responses so refunds appear immediately without
+  // waiting for a session refetch.
+  const [balanceSatang, setBalanceSatang] = useState<number | null>(null);
+  // Amount of an unexpected (poll-driven) refund banner; null when hidden.
+  const [refundNoticeSatang, setRefundNoticeSatang] = useState<number | null>(
+    null,
+  );
   const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(true);
   const [now, setNow] = useState(0);
@@ -64,6 +86,51 @@ export function MyMachines() {
   const leaseMutationVersion = useRef(0);
   const leaseMutationsInFlight = useRef(0);
   const refreshAfterMutation = useRef(false);
+  const balanceRef = useRef<number | null>(null);
+  const refundNoticeTimer = useRef<number | null>(null);
+
+  const applyBalance = useCallback((next: number) => {
+    if (!Number.isFinite(next)) return;
+    balanceRef.current = next;
+    setBalanceSatang(next);
+  }, []);
+
+  const dismissRefundNotice = useCallback(() => {
+    if (refundNoticeTimer.current !== null) {
+      window.clearTimeout(refundNoticeTimer.current);
+      refundNoticeTimer.current = null;
+    }
+    setRefundNoticeSatang(null);
+  }, []);
+
+  /** Announce a poll-discovered credit that no local mutation produced. */
+  const announceRefund = useCallback((amountSatang: number) => {
+    if (!(amountSatang > 0)) return;
+    if (refundNoticeTimer.current !== null)
+      window.clearTimeout(refundNoticeTimer.current);
+    setRefundNoticeSatang(amountSatang);
+    refundNoticeTimer.current = window.setTimeout(() => {
+      refundNoticeTimer.current = null;
+      setRefundNoticeSatang(null);
+    }, refundNoticeDurationMs);
+  }, []);
+
+  const sessionBalanceSatang = session?.user.balanceSatang;
+  // Mirror the latest session wallet into a ref so the polling loop can compare
+  // against it without re-subscribing or writing state from an effect.
+  const sessionBalanceRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    sessionBalanceRef.current =
+      typeof sessionBalanceSatang === "number" ? sessionBalanceSatang : null;
+  }, [sessionBalanceSatang]);
+
+  useEffect(() => {
+    return () => {
+      if (refundNoticeTimer.current !== null)
+        window.clearTimeout(refundNoticeTimer.current);
+    };
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -75,15 +142,29 @@ export function MyMachines() {
         refreshAfterMutation.current = false;
       const mutationVersionAtStart = leaseMutationVersion.current;
       try {
-        const data = (await leaseApi<Lease[]>("/api/my-leases")) ?? [];
+        const data = await leaseApi<MyLeasesResponse>("/api/my-leases");
         if (active) {
           if (
             leaseMutationsInFlight.current > 0 ||
             mutationVersionAtStart !== leaseMutationVersion.current
           )
             return;
+          const nextBalanceSatang =
+            typeof data?.balanceSatang === "number" ? data.balanceSatang : null;
+          const previousBalanceSatang =
+            balanceRef.current ?? sessionBalanceRef.current;
+          if (nextBalanceSatang !== null) {
+            applyBalance(nextBalanceSatang);
+            // The route settles unused-time refunds before answering; a credit
+            // that no local mutation accounted for is exactly such a refund.
+            if (
+              previousBalanceSatang !== null &&
+              nextBalanceSatang > previousBalanceSatang
+            )
+              announceRefund(nextBalanceSatang - previousBalanceSatang);
+          }
           setNow(Date.now());
-          setLeases(data);
+          setLeases(Array.isArray(data?.leases) ? data.leases : []);
           setMessage("");
           setLoading(false);
         }
@@ -122,11 +203,13 @@ export function MyMachines() {
       document.removeEventListener("visibilitychange", refresh);
       if (refreshLeasesRef.current === refresh) refreshLeasesRef.current = null;
     };
-  }, []);
+  }, [announceRefund, applyBalance]);
 
   const beginLeaseMutation = () => {
     leaseMutationsInFlight.current += 1;
     leaseMutationVersion.current += 1;
+    // A refund banner describes an earlier poll, not the action just started.
+    dismissRefundNotice();
   };
   const endLeaseMutation = () => {
     leaseMutationsInFlight.current -= 1;
@@ -135,6 +218,11 @@ export function MyMachines() {
       refreshAfterMutation.current = true;
       void refreshLeasesRef.current?.();
     }
+  };
+
+  const handleLeaseCancelled = (nextBalanceSatang?: number) => {
+    if (typeof nextBalanceSatang === "number") applyBalance(nextBalanceSatang);
+    void refreshLeasesRef.current?.();
   };
 
   async function extendLease(
@@ -190,17 +278,28 @@ export function MyMachines() {
     extensionNotice && selectedLease?.id === extensionNotice.leaseId
       ? extensionNotice.text
       : null;
+  const displayedBalanceSatang = balanceSatang ?? sessionBalanceSatang ?? 0;
   const renderLeaseCard = (lease: Lease) =>
     lease.state === "preparing" ? (
-      <PowerOnRentalCard key={lease.id} lease={lease} onRefresh={() => void refreshLeasesRef.current?.()} />
+      <PowerOnRentalCard
+        key={lease.id}
+        lease={lease}
+        onRefresh={() => void refreshLeasesRef.current?.()}
+        onCancelled={handleLeaseCancelled}
+        onMutationStart={beginLeaseMutation}
+        onMutationEnd={endLeaseMutation}
+      />
     ) : (
       <ActiveRentalCard
         lease={lease}
-        balanceSatang={session?.user.balanceSatang ?? 0}
+        balanceSatang={displayedBalanceSatang}
         now={now}
         extensionNotice={lease.id === selectedLease?.id ? notice : null}
         onRefresh={() => void refreshLeasesRef.current?.()}
         onExtend={(hours, idempotencyKey) => extendLease(lease, hours, idempotencyKey)}
+        onCancelled={handleLeaseCancelled}
+        onMutationStart={beginLeaseMutation}
+        onMutationEnd={endLeaseMutation}
       />
     );
 
@@ -234,7 +333,7 @@ export function MyMachines() {
             />
             <span className="text-muted-foreground">ยอดเงินคงเหลือ</span>
             <span className="font-semibold tabular-nums" aria-live="polite">
-              {formatBalance(session?.user.balanceSatang ?? 0)}
+              {formatBalance(displayedBalanceSatang)}
             </span>
           </div>
         </motion.header>
@@ -245,6 +344,19 @@ export function MyMachines() {
         >
           {message}
         </p>
+
+        {refundNoticeSatang !== null ? (
+          <p
+            role="status"
+            className="mt-1 flex items-start gap-2 rounded-xl border border-status-available/30 bg-status-available/10 px-3 py-2 text-sm text-status-available"
+          >
+            <CircleCheck aria-hidden className="mt-0.5 size-4 shrink-0" />
+            <span>
+              คืนเงินค่าเช่าที่ไม่ได้ใช้ {formatBalance(refundNoticeSatang)}{" "}
+              เข้ายอดเงินแล้ว
+            </span>
+          </p>
+        ) : null}
 
         {loading ? (
           <LoadingRegion label="กำลังโหลดเครื่องของฉัน" className="mt-2">

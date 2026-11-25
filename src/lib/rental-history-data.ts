@@ -21,6 +21,8 @@ export type ControllerLeaseView = {
   startsAtUtc: string | null;
   expiresAtUtc: string | null;
   endedAtUtc?: string | null;
+  /** The rental payment this Controller lease was created for (the create idempotency key). */
+  paymentId?: string | null;
 };
 
 export type ControllerMachineView = {
@@ -126,8 +128,11 @@ export function buildRentalHistoryEntries(input: {
   const payments = new Map(input.payments.map((payment) => [payment.id, payment]));
   const entries: RentalHistoryEntry[] = [];
   for (const lease of input.leases) {
-    const payment = payments.get(lease.id) ?? null;
-    payments.delete(lease.id);
+    // The Controller lease id is random; the payment is joined by the create
+    // idempotency key it exposes as paymentId.
+    const paymentKey = lease.paymentId ?? lease.id;
+    const payment = payments.get(paymentKey) ?? null;
+    payments.delete(paymentKey);
     entries.push(baseEntry(lease, payment, machines));
   }
   if (input.includeLocalOnly !== false) {
@@ -163,8 +168,9 @@ export function buildAdminRentalHistoryEntries(input: {
     };
   };
   for (const lease of input.leases) {
-    const payment = payments.get(lease.id) ?? null;
-    payments.delete(lease.id);
+    const paymentKey = lease.paymentId ?? lease.id;
+    const payment = payments.get(paymentKey) ?? null;
+    payments.delete(paymentKey);
     entries.push(withUser(baseEntry(lease, payment, machines), lease.userId || payment?.userId || ""));
   }
   if (input.includeUnmatchedPayments) {

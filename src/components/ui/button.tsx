@@ -11,6 +11,8 @@ const buttonVariants = cva(
         discord: "bg-discord text-discord-foreground hover:bg-discord/90",
         busy: "border-status-busy/30 bg-status-busy/15 text-status-busy hover:bg-status-busy/25 focus-visible:border-status-busy/40 focus-visible:ring-status-busy/20",
         success: "border-status-available/30 bg-status-available/15 text-status-available hover:bg-status-available/25 focus-visible:border-status-available/40 focus-visible:ring-status-available/20 dark:bg-status-available/20 dark:hover:bg-status-available/30",
+        parsec:
+          "border-transparent bg-[linear-gradient(93deg,var(--parsec-blue),var(--parsec-pink))] text-white shadow-sm hover:shadow-md hover:brightness-110 focus-visible:border-parsec-pink/60 focus-visible:ring-parsec-pink/40 dark:focus-visible:ring-parsec-pink/40",
         maintenance: "border-status-maintenance/30 bg-status-maintenance/15 text-status-maintenance disabled:opacity-100",
         outline:
           "border-border bg-background hover:bg-muted hover:text-foreground aria-expanded:bg-muted aria-expanded:text-foreground dark:bg-transparent dark:hover:bg-input/30",

@@ -51,14 +51,15 @@ export function GET(request: Request) {
       controllerAvailable = false;
     }
 
+    const paymentIdsForLeases = leases.map((lease) => lease.paymentId ?? lease.id);
     const payments = controllerAvailable
-      ? listRentalPaymentsByIds(database, leases.map((lease) => lease.id))
+      ? listRentalPaymentsByIds(database, paymentIdsForLeases)
       : listRentalPayments(database);
 
     if (controllerAvailable) settleRentalRefunds(database, leases);
 
     const settledPayments = controllerAvailable
-      ? listRentalPaymentsByIds(database, leases.map((lease) => lease.id))
+      ? listRentalPaymentsByIds(database, paymentIdsForLeases)
       : payments;
     const userIds = [
       ...leases.map((lease) => lease.userId),

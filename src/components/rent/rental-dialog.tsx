@@ -38,10 +38,13 @@ export function RentalDialog({
   machine,
   onClose,
   returnFocusRef,
+  available = true,
 }: {
   machine: RentalMachine | null;
   onClose: () => void;
   returnFocusRef: RefObject<HTMLButtonElement | null>;
+  /** False when the selected machine stopped being rentable while the dialog was open. */
+  available?: boolean;
 }) {
   const router = useRouter();
   const { data: session, isPending: sessionPending, refetch } = authClient.useSession();
@@ -70,7 +73,8 @@ export function RentalDialog({
   }
 
   async function submit() {
-    if (!machine || !session || !validHours || insufficient || pending) return;
+    if (!machine || !session || !validHours || insufficient || pending || !available)
+      return;
     const id = requestId ?? crypto.randomUUID();
     setRequestId(id);
     setPending(true);
@@ -130,6 +134,15 @@ export function RentalDialog({
             ชำระค่าเช่าจากยอดเงินคงเหลือของคุณ แล้วไปกดปุ่มเปิดเครื่องในหน้าเครื่องของฉัน
           </DialogDescription>
         </DialogHeader>
+        {machine && !available ? (
+          <Alert variant="destructive" role="alert">
+            <AlertTriangle aria-hidden />
+            <AlertTitle>ไม่สามารถเช่าเครื่องนี้ได้</AlertTitle>
+            <AlertDescription>
+              เครื่องนี้ไม่พร้อมให้เช่าแล้ว กรุณาเลือกเครื่องอื่น
+            </AlertDescription>
+          </Alert>
+        ) : null}
         {machine && (
           <>
             <dl className="grid grid-cols-[auto_1fr] gap-x-6 gap-y-3 text-sm">
@@ -277,7 +290,7 @@ export function RentalDialog({
                   </Alert>
                 ) : null}
                 <Button
-                  disabled={pending || !validHours || insufficient}
+                  disabled={pending || !validHours || insufficient || !available}
                   onClick={submit}
                   className="w-full"
                 >

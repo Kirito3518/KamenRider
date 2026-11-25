@@ -6,6 +6,8 @@ public record LeaseDto(string Id,string UserId,string MachineId,string State,lon
     public bool CanRequestPower { get; init; }
     /// <summary>Seconds remaining before an unpowered lease is abandoned (null otherwise).</summary>
     public int? PowerDeadlineRemainingSeconds { get; init; }
+    /// <summary>The renter's create idempotency key, which is also the web rental payment id (null for leases created before it was recorded).</summary>
+    public string? PaymentId { get; init; }
 }
 public record ActiveLeaseConfirmation(string RentalId,long LeaseRevision,string BootId,DateTimeOffset ExpiresAtUtc);
 public record CreateLeaseRequest(string UserId,string MachineId,int DurationSeconds,string IdempotencyKey);

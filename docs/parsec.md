@@ -1,6 +1,28 @@
 # Parsec — ให้ลูกค้าเข้าสู่ระบบด้วยบัญชีของตัวเอง (แบบ 0jay)
 
-สถานะ: implemented ใน Agent/Controller/web (2026-11-20) — **ยังต้องทดสอบบนเครื่องจริงกับบัญชี Parsec ทดสอบก่อนเปิดใช้**
+สถานะ: implemented ใน Agent/Controller/web (2026-11-20) · แก้บั๊ก fatal ที่ทำให้เริ่มใช้งานไม่ได้แล้ว (2026-11-25) — **ต้อง redeploy Controller + Agent package และยังต้องทดสอบบนเครื่องจริงกับบัญชี Parsec ทดสอบก่อนเปิดใช้**
+
+## การแก้ไขล่าสุด (2026-11-25)
+
+ก่อนหน้านี้ flow นี้ไม่มีทางสำเร็จเลยเพราะ 2 บั๊ก:
+
+1. **เว็บปฏิเสธ sealed secret จริงทุกครั้ง** — route `/api/my-leases/{id}/parsec` ใช้ตัวตรวจ `text()` เพดาน 128 ตัวอักษรกับทุกฟิลด์ แต่ RSA-2048 OAEP wrapped key มี 342 ตัวอักษร → ตอบ 400 `Invalid request` ก่อนถึง Controller. แก้เป็นตัวตรวจ base64url เฉพาะ (`wrappedKey ≤ 512`, `iv ≤ 64`, `ciphertext ≤ 8192`) ตรงกับ Controller
+2. **Agent ข้ามการล็อกอินหลังรายงาน `starting`** — reporter ต้องได้ JSON `{"accepted":true}` แต่ Controller ตอบ `204 No Content` → Agent ตีว่า attempt ไม่ถูกถืออยู่แล้วและไม่รัน automation; attempt ค้างจนหมดเวลา 150 วิ. แก้ให้ถือว่า 2xx ทุกกรณีสำเร็จ (204/body ว่าง/JSON ไม่มี `accepted`), 4xx = ปฏิเสธถาวร, 408/429/5xx = retry
+
+เพิ่มเติม: attempt ที่หมดอายุถูก mark `failed/TIMEOUT` ทันทีเมื่อมีการอ่านสถานะ (ไม่ต้องรอ Agent sync) และหน้า `/my-machines` แสดง TIMEOUT พร้อมปุ่มลองใหม่แทน spinner ค้าง; ปุ่ม Parsec เปิด dialog ได้แม้เครื่องยังไม่พร้อมเพื่ออ่านเหตุผล; ข้อความ 409 เปลี่ยนเป็นข้อความกลาง ๆ (busy/rate-limit/ยังไม่เปิดใช้) ไม่เดาว่าเป็นอีเมลยืนยัน
+
+**Rollout หลังแก้:** rebuild + publish Controller, build `public/agent/AgentPackage.zip` ใหม่และอัปเดต Agent ทุกเครื่อง, deploy เว็บ แล้วจึงทดสอบ; ถ้า Agent ยังเป็น build เก่า attempt จะยังค้างแบบเดิม
+
+## Troubleshooting (อาการที่เคยเจอ)
+
+| อาการ | สาเหตุ/ทางแก้ |
+| --- | --- |
+| กดยืนยันแล้วขึ้น `400: คำขอไม่สำเร็จ` | เว็บ build เก่ายังใช้ validator 128 ตัวอักษร — deploy เว็บใหม่ |
+| attempt ค้าง `starting` แล้ว `TIMEOUT` | Agent build เก่าไม่รับ 204 — อัปเดต Agent package ทุกเครื่อง |
+| ปุ่ม Parsec disabled “ยังไม่พร้อม” | เครื่องยังไม่ approved/active lease, admin ยังไม่เปิด Parsec ของเครื่อง, หรือ Agent ยังไม่รายงาน `parsecd.exe` (ต้องติดตั้งระดับเครื่องที่ `C:\Program Files\Parsec`) |
+| ข้อความ busy/rate-limited | มี attempt ค้างหรือกดเกิน 3 ครั้ง/10 นาที/เครื่อง — รอแล้วลองใหม่ |
+| ค้างที่ `waiting_email` | ยืนยันอีเมล/IP ตามที่ Parsec ส่ง แล้วกด “ยืนยันอีเมลแล้ว” เพื่อทำรอบสอง |
+
 
 ## หลักการ
 

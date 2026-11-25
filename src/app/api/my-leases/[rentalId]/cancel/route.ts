@@ -1,6 +1,6 @@
 import { ControllerError } from "@/lib/controller-client";
 import { integer, machineApi, segment, text } from "@/lib/machine-api";
-import { settleRentalRefunds } from "@/lib/rental-payments";
+import { getMemberBalance, settleRentalRefunds } from "@/lib/rental-payments";
 import { authDatabase, type ControllerLeaseRecord } from "@/lib/rental-service";
 
 function cancelError(error: unknown) {
@@ -33,16 +33,41 @@ export async function POST(
         throw new TypeError("Unexpected request field");
       const expectedRevision = integer(record.expectedRevision);
       const idempotencyKey = text(record.idempotencyKey);
+
+      // Read the lease first: it owns the payment mapping (the Controller lease
+      // id is random, the payment id is the create idempotency key), and a
+      // missing/foreign lease fails before the cancel mutation runs. A Controller
+      // that predates the lease-lookup route returns 404: fall back to the legacy
+      // cancel path so a rolling web/Controller deployment keeps working.
+      let before: ControllerLeaseRecord | null = null;
+      try {
+        before = await call<ControllerLeaseRecord>(
+          `/internal/leases/${segment(rentalId)}`,
+        );
+      } catch (error) {
+        if (!(error instanceof ControllerError && error.status === 404)) throw error;
+      }
       const lease = await call<ControllerLeaseRecord>(`/internal/leases/${segment(rentalId)}/cancel`, {
         method: "POST",
         body: JSON.stringify({ expectedRevision, idempotencyKey }),
       });
       const database = await authDatabase();
-      const settled = settleRentalRefunds(database, [lease], { userId: actor.id });
+      const paymentId = lease.paymentId ?? before?.paymentId ?? rentalId;
+      // Settle with the resolved payment key so the refund lands even when the
+      // Controller lease id differs from the rental payment id.
+      const settled = settleRentalRefunds(database, [{ ...lease, paymentId }], {
+        userId: actor.id,
+      });
       const payment = database
         .prepare("SELECT refunded_satang FROM rental_payments WHERE id=? AND user_id=?")
-        .get(rentalId, actor.id) as { refunded_satang?: number } | undefined;
-      return { lease, refundedSatang: settled.refundedSatang, paymentRefundedSatang: payment?.refunded_satang ?? 0 };
+        .get(paymentId, actor.id) as { refunded_satang?: number } | undefined;
+      return {
+        lease,
+        refundedSatang: settled.refundedSatang,
+        paymentRefundedSatang: payment?.refunded_satang ?? 0,
+        // Read the wallet after settlement so the credited refund is included.
+        balanceSatang: getMemberBalance(database, actor.id),
+      };
     },
     false,
     cancelError,

@@ -305,6 +305,7 @@ export function PcControl() {
       <PcControlVncDialog
         key={"vnc:" + (vncTarget?.machineId ?? "closed")}
         machine={vncTarget}
+        now={now}
         onClose={() => setVncTarget(null)}
       />
     </AdminPage>

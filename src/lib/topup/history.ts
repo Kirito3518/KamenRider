@@ -174,6 +174,42 @@ function summaryFor(database: Database.Database, where: WhereClause): TopupSumma
   };
 }
 
+export type TopupTotals = {
+  /** Every top-up transaction ever created. */
+  total: number;
+  /** Completed transactions, regardless of when they completed. */
+  completed: number;
+  /** Money actually credited by completed transactions. */
+  creditedSatang: number;
+  /** Requested amounts (falls back to credited for coupons/legacy rows). */
+  requestedSatang: number;
+};
+
+/**
+ * All-time top-up aggregate for the admin overview. This is intentionally not
+ * range-bound: the dashboard pairs it with the selected-period stats so the
+ * lifetime totals stay visible while a period is filtered.
+ */
+export function readTopupTotals(database: Database.Database): TopupTotals {
+  ensureTopupSchema(database);
+  const row = database
+    .prepare(
+      `SELECT
+         count(*) AS total,
+         COALESCE(SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END), 0) AS completed,
+         COALESCE(SUM(CASE WHEN status = 'completed' THEN credited_satang ELSE 0 END), 0) AS creditedSatang,
+         COALESCE(SUM(COALESCE(requested_satang, credited_satang, 0)), 0) AS requestedSatang
+       FROM topup_transactions`,
+    )
+    .get() as TopupTotals;
+  return {
+    total: Number(row.total) || 0,
+    completed: Number(row.completed) || 0,
+    creditedSatang: Number(row.creditedSatang) || 0,
+    requestedSatang: Number(row.requestedSatang) || 0,
+  };
+}
+
 export function listCustomerTopups(
   database: Database.Database,
   userId: string,

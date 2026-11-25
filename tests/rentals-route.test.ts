@@ -106,8 +106,11 @@ describe("POST /api/rentals", () => {
           durationSeconds: number;
           idempotencyKey: string;
         };
+        // The real Controller mints a random lease id and reports the create
+        // idempotency key (the payment id) separately as paymentId.
         return {
-          id: body.idempotencyKey,
+          id: "controller-lease-" + crypto.randomUUID(),
+          paymentId: body.idempotencyKey,
           userId: body.userId,
           machineId: body.machineId,
           state: "preparing",
@@ -304,7 +307,10 @@ describe("rental history routes", () => {
       if (path === "/internal/users/renter-1/leases")
         return [
           {
-            id: paymentRow.id,
+            // The Controller lease id is random and differs from the payment id;
+            // the create idempotency key is exposed as paymentId.
+            id: "lease-from-controller",
+            paymentId: paymentRow.id,
             userId: "renter-1",
             machineId: "pc-1",
             state: "completed",
@@ -324,8 +330,10 @@ describe("rental history routes", () => {
     const body = await response.json();
     expect(body.controllerAvailable).toBe(true);
     expect(body.summary.totalRentals).toBe(1);
+    // The payment is joined through paymentId: money fields are present even
+    // though the Controller lease id is not the payment id.
     expect(body.entries[0]).toMatchObject({
-      rentalId: paymentRow.id,
+      rentalId: "lease-from-controller",
       machineName: "PC ONE",
       state: "completed",
       hourlyPriceSatang: 1_000,
@@ -359,7 +367,8 @@ describe("rental history routes", () => {
         expect(path).toBe("/internal/leases?take=500");
         return [
           {
-            id: paymentRow.id,
+            id: "lease-from-controller",
+            paymentId: paymentRow.id,
             userId: "renter-1",
             machineId: "pc-1",
             state: "active",

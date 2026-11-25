@@ -102,6 +102,9 @@ Invoke-RestMethod http://127.0.0.1:5081/internal/machines -Headers @{ 'X-Service
 # Web
 (Invoke-WebRequest http://localhost:3000/ -UseBasicParsing).StatusCode
 (Invoke-WebRequest http://localhost:3000/api/machines -UseBasicParsing).Content
+
+# Realtime machine SSE (frames must arrive incrementally; Ctrl+C to stop)
+curl.exe -N -H "Accept: text/event-stream" http://localhost:3000/api/machines/stream
 ```
 
 ```powershell

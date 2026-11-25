@@ -10,7 +10,7 @@ import { AccountDropdown } from "@/components/auth/account-dropdown";
 import { useThemeTransition } from "@/hooks/use-theme-transition";
 import type { AdminMember } from "@/lib/admin";
 
-const titles: Record<string, string> = { "/admin": "ภาพรวม", "/admin/overview": "ภาพรวม", "/admin/pc-control": "PC Control", "/admin/users": "สมาชิก", "/admin/balances": "ยอดเงินสมาชิก", "/admin/machines": "เครื่องและ Agent", "/admin/rentals": "ประวัติการเช่า", "/admin/topups": "ประวัติการเติมเงิน", "/admin/agent-releases": "Agent releases", "/admin/settings/topup": "ตั้งค่าเติมเงิน", "/admin/settings/sunshine": "ตั้งค่า Sunshine" };
+const titles: Record<string, string> = { "/admin": "ภาพรวม", "/admin/overview": "ภาพรวม", "/admin/pc-control": "PC Control", "/admin/users": "สมาชิก", "/admin/machines": "เครื่องและ Agent", "/admin/rentals": "ประวัติการเช่า", "/admin/topups": "ประวัติการเติมเงิน", "/admin/agent-releases": "Agent releases", "/admin/settings/topup": "ตั้งค่าเติมเงิน", "/admin/settings/sunshine": "ตั้งค่า Sunshine" };
 export function AdminShell({ user, children }: { user: AdminMember; children: React.ReactNode }) {
   const pathname = usePathname();
   const toggleTheme = useThemeTransition();

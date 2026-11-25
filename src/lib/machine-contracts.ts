@@ -95,6 +95,11 @@ export type Lease = {
   wakeRequestedAtUtc?: string | null;
   /** True while the renter may still press Power to boot this prepared lease. */
   canRequestPower?: boolean;
+  /**
+   * The rental payment this Controller lease was created for. The Controller
+   * lease id is not the payment id, so payment lookups must use this field.
+   */
+  paymentId?: string | null;
   payment?: LeasePaymentInfo | null;
 };
 export type Offer = { pairingIds: string[]; validUntilUtc: string } | null;

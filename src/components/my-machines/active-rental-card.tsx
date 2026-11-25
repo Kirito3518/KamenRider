@@ -5,10 +5,8 @@ import Link from "next/link";
 import {
   AlertTriangle,
   Clock,
-  Gamepad2,
   History,
   Monitor,
-  MonitorPlay,
   Plus,
   Radio,
   RefreshCw,
@@ -39,6 +37,7 @@ import { ExtendRentalDialog } from "@/components/my-machines/extend-rental-dialo
 import { CancelRentalButton } from "@/components/my-machines/cancel-rental-button";
 import { MoonlightDialog } from "@/components/my-machines/moonlight-dialog";
 import { ParsecDialog } from "@/components/my-machines/parsec-dialog";
+import { MoonlightMark, ParsecMark } from "@/components/brands/streaming-logos";
 
 type StatusTone = "available" | "busy" | "destructive" | "secondary";
 
@@ -156,6 +155,7 @@ function ConnectOption({
   badge,
   badgeTone,
   disabled,
+  variant,
   onClick,
 }: {
   title: string;
@@ -165,19 +165,22 @@ function ConnectOption({
   badge: string;
   badgeTone: "available" | "busy" | "secondary";
   disabled?: boolean;
+  /** Brand-colored button style: green Moonlight vs blue→pink Parsec gradient. */
+  variant: "success" | "parsec";
   onClick: (event: MouseEvent<HTMLButtonElement>) => void;
 }) {
   return (
     <Button
       type="button"
-      variant="outline"
+      variant={variant}
       onClick={onClick}
       disabled={disabled}
       className="h-auto w-full items-center justify-start gap-3 rounded-2xl p-3 text-left whitespace-normal"
     >
       <span
         className={cn(
-          "grid size-11 shrink-0 place-items-center rounded-full bg-primary/10 text-primary",
+          "grid size-11 shrink-0 place-items-center rounded-full",
+          variant === "parsec" ? "bg-white/20 text-white" : "bg-status-available/20 text-status-available",
           iconClassName,
         )}
       >
@@ -188,7 +191,12 @@ function ConnectOption({
           {title}
           <Badge variant={badgeTone}>{badge}</Badge>
         </span>
-        <span className="text-xs font-normal text-muted-foreground">
+        <span
+          className={cn(
+            "text-xs font-normal",
+            variant === "parsec" ? "text-white/85" : "text-muted-foreground",
+          )}
+        >
           {description}
         </span>
       </span>
@@ -203,6 +211,9 @@ export function ActiveRentalCard({
   extensionNotice,
   onRefresh,
   onExtend,
+  onCancelled,
+  onMutationStart,
+  onMutationEnd,
 }: {
   lease: Lease;
   balanceSatang: number;
@@ -210,6 +221,11 @@ export function ActiveRentalCard({
   extensionNotice: string | null;
   onRefresh: () => void;
   onExtend: (hours: number, idempotencyKey: string) => Promise<void>;
+  /** Receives the authoritative post-refund balance returned by the cancel route. */
+  onCancelled: (balanceSatang?: number) => void;
+  /** Optional hooks so the page can suppress poll-driven refund notices mid-request. */
+  onMutationStart?: () => void;
+  onMutationEnd?: () => void;
 }) {
   const reduceMotion = useReducedMotion();
   const [moonlightOpen, setMoonlightOpen] = useState(false);
@@ -409,7 +425,10 @@ export function ActiveRentalCard({
               <ConnectOption
                 title="Moonlight"
                 description="สตรีมผ่าน Sunshine · PIN 4 หลักใช้ครั้งเดียวต่ออุปกรณ์"
-                icon={<MonitorPlay aria-hidden />}
+                icon={
+                  <MoonlightMark className="size-6" />
+                }
+                variant="success"
                 badge={moonlightBadge.label}
                 badgeTone={moonlightBadge.tone}
                 onClick={(event) => {
@@ -425,11 +444,12 @@ export function ActiveRentalCard({
                       ? "เข้าสู่ระบบด้วยบัญชี Parsec ของคุณเอง"
                       : "เครื่องนี้ยังไม่พร้อมสำหรับ Parsec"
                   }
-                  icon={<Gamepad2 aria-hidden />}
-                  iconClassName="bg-secondary text-secondary-foreground"
+                  icon={<ParsecMark className="h-6 w-auto" />}
+                  variant="parsec"
                   badge={parsecBadge.label}
                   badgeTone={parsecBadge.tone}
-                  disabled={!parsecReady}
+                  // Still openable when the Agent hasn't advertised Parsec: the dialog explains
+                  // why it is unavailable instead of hiding that reason behind a disabled button.
                   onClick={(event) => {
                     parsecTriggerRef.current = event.currentTarget;
                     setParsecOpen(true);
@@ -453,7 +473,12 @@ export function ActiveRentalCard({
         </CardContent>
 
         <div className="flex justify-end px-4">
-          <CancelRentalButton lease={lease} onCancelled={onRefresh} />
+          <CancelRentalButton
+            lease={lease}
+            onCancelled={onCancelled}
+            onMutationStart={onMutationStart}
+            onMutationEnd={onMutationEnd}
+          />
         </div>
 
         <CardFooter className="grid grid-cols-2 gap-2 sm:grid-cols-4">

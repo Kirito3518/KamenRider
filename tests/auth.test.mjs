@@ -55,7 +55,7 @@ test("real credential/session lifecycle and account boundaries", async () => {
   const changeHeaders = { "Content-Type": "application/json", Origin: base };
   assert.equal((await fetch(memberEndpoint, { method: "POST", headers: changeHeaders, body: JSON.stringify(changeBody) })).status, 401);
   assert.equal((await fetch(memberEndpoint, { method: "POST", headers: { ...changeHeaders, Cookie: cookie }, body: JSON.stringify(changeBody) })).status, 403);
-  for (const path of ["/admin", "/admin/users", "/admin/balances", "/admin/machines", "/admin/rentals"]) {
+  for (const path of ["/admin", "/admin/overview", "/admin/users", "/admin/machines", "/admin/rentals"]) {
     const guest = await fetch(`${base}${path}`, { redirect: "manual" });
     const guestHtml = await guest.text();
     assert.ok([307, 308].includes(guest.status) || guestHtml.includes("NEXT_REDIRECT"), `${path} must redirect guests`);
@@ -132,7 +132,7 @@ test("real credential/session lifecycle and account boundaries", async () => {
     assert.equal((await sendChange({ ...requestBody, requestId: crypto.randomUUID(), action: "debit", amount: "3.00" })).status, 400);
     assert.equal((await sendChange({ requestId: crypto.randomUUID(), action: "role", role: "admin", reason: "ทดสอบเพิ่มสิทธิ์" })).status, 200);
     assert.equal((await sendChange({ requestId: crypto.randomUUID(), action: "role", role: "user", reason: "คืนสิทธิ์สมาชิก" })).status, 200);
-    for (const path of ["/admin", "/admin/users", "/admin/balances", "/admin/machines", "/admin/rentals"]) {
+    for (const path of ["/admin/overview", "/admin/users", "/admin/machines", "/admin/rentals"]) {
       const response = await fetch(`${base}${path}`, { headers: { Cookie: cookie }, redirect: "manual" });
       const html = await response.text();
       assert.equal(response.status, 200, `${path} must open for admin`);
@@ -142,7 +142,26 @@ test("real credential/session lifecycle and account boundaries", async () => {
         assert.ok(html.includes(user.email));
         assert.ok(html.includes("รายชื่อสมาชิกและการจัดการบัญชี"), "member table must render without streaming errors");
       }
+      if (path === "/admin/overview") {
+        // Stable Thai dashboard strings only; the machine section may fall back
+        // when the Controller is unreachable, the money sections must still render.
+        assert.ok(html.includes("ภาพรวมระบบ"), "overview dashboard must render");
+        assert.ok(html.includes("ข้อมูล ณ เวลาที่โหลด"), "overview must show when the data was loaded");
+        assert.ok(html.includes("สมาชิกทั้งหมด"), "overview money sections must render without a Controller");
+      }
     }
+    const adminRoot = await fetch(`${base}/admin`, { headers: { Cookie: cookie }, redirect: "manual" });
+    const adminRootHtml = await adminRoot.text();
+    assert.ok(
+      [307, 308].includes(adminRoot.status) || adminRootHtml.includes("NEXT_REDIRECT"),
+      "/admin must redirect admins instead of rendering the overview inline",
+    );
+    const redirectLocation = adminRoot.headers.get("location") || "";
+    assert.ok(
+      redirectLocation.includes("/admin/overview") ||
+        (!redirectLocation && (adminRootHtml.includes("/admin/overview") || adminRootHtml.includes("NEXT_REDIRECT"))),
+      "/admin must redirect to the overview dashboard",
+    );
     const { default: Database } = await import("better-sqlite3");
     const database = new Database(process.env.TEST_AUTH_DB);
     try {

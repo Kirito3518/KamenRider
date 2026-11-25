@@ -1,3 +1,4 @@
+import Link from "next/link";
 import type { LucideIcon } from "lucide-react";
 import {
   Card,
@@ -12,7 +13,7 @@ import { cn } from "@/lib/utils";
  * Shared Admin proportions, matching the `/admin/users` dashboard:
  * full-width column with 16px gaps, a compact page header, 4-up stat cards and
  * flat `rounded-2xl` card surfaces. Keep these components server-safe so both
- * Server Components (overview/balances) and Client Components can use them.
+ * Server Components (e.g. overview) and Client Components can use them.
  */
 
 export function AdminPage({ className, ...props }: React.ComponentProps<"div">) {
@@ -67,34 +68,49 @@ export function AdminStatCard({
   hint,
   icon: Icon,
   tone = "primary",
+  href,
 }: {
   label: string;
   value: React.ReactNode;
   hint?: React.ReactNode;
   icon: LucideIcon;
   tone?: keyof typeof statToneClassName;
+  /** Optional detail-page link; the whole card becomes clickable when set. */
+  href?: string;
 }) {
+  const card = (
+    <AdminCard className="h-full">
+      <CardHeader>
+        <CardTitle className="text-sm font-normal text-muted-foreground">{label}</CardTitle>
+        <CardAction>
+          <span
+            className={cn(
+              "flex size-8 items-center justify-center rounded-xl",
+              statToneClassName[tone],
+            )}
+          >
+            <Icon aria-hidden className="size-4" />
+          </span>
+        </CardAction>
+      </CardHeader>
+      <CardContent>
+        <div className="text-2xl font-semibold tracking-tight break-words tabular-nums">{value}</div>
+        {hint ? <div className="mt-1 text-xs text-muted-foreground">{hint}</div> : null}
+      </CardContent>
+    </AdminCard>
+  );
   return (
     <section className="h-full min-w-0">
-      <AdminCard className="h-full">
-        <CardHeader>
-          <CardTitle className="text-sm font-normal text-muted-foreground">{label}</CardTitle>
-          <CardAction>
-            <span
-              className={cn(
-                "flex size-8 items-center justify-center rounded-xl",
-                statToneClassName[tone],
-              )}
-            >
-              <Icon aria-hidden className="size-4" />
-            </span>
-          </CardAction>
-        </CardHeader>
-        <CardContent>
-          <div className="text-2xl font-semibold tracking-tight break-words tabular-nums">{value}</div>
-          {hint ? <div className="mt-1 text-xs text-muted-foreground">{hint}</div> : null}
-        </CardContent>
-      </AdminCard>
+      {href ? (
+        <Link
+          href={href}
+          className="block h-full rounded-2xl outline-none transition-colors hover:bg-muted/40 focus-visible:ring-3 focus-visible:ring-ring/50"
+        >
+          {card}
+        </Link>
+      ) : (
+        card
+      )}
     </section>
   );
 }

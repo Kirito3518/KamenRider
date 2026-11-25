@@ -7,7 +7,7 @@ import {
   getRentalPayment,
   releaseRentalExtension,
 } from "@/lib/rental-payments";
-import { authDatabase } from "@/lib/rental-service";
+import { authDatabase, type ControllerLeaseRecord } from "@/lib/rental-service";
 
 const noStore = { "Cache-Control": "no-store" };
 
@@ -23,6 +23,23 @@ function extendErrorResponse(error: unknown) {
       { status: 503, headers: noStore },
     );
   return null;
+}
+
+/** Maps a failed lease lookup to the renter-facing extension errors. */
+function leaseLookupError(error: unknown): never {
+  if (error instanceof ControllerError) {
+    if (error.status === 404)
+      throw new RentalPaymentError("payment-not-found", "ไม่พบรายการเช่านี้", 404);
+    if (error.status === 403)
+      throw new RentalPaymentError("payment-not-found", "ไม่มีสิทธิ์ต่อเวลาการเช่านี้", 403);
+    if (error.status === 503)
+      throw new RentalPaymentError(
+        "controller-unavailable",
+        "ระบบยังไม่ยืนยันการต่อเวลา กรุณาลองใหม่",
+        503,
+      );
+  }
+  throw error;
 }
 
 export async function POST(
@@ -50,8 +67,29 @@ export async function POST(
       const expectedRevision = integer(record.expectedRevision);
       const idempotencyKey = text(record.idempotencyKey);
 
+      // Resolve the lease (and through it the rental payment) before charging:
+      // the Controller lease id is random, so the payment is only reachable via
+      // the create idempotency key it exposes as paymentId. A Controller that
+      // predates the lease-lookup route returns 404 here; fall back to the URL id
+      // so a rolling web/Controller deployment keeps the previous behaviour.
+      let lease: ControllerLeaseRecord | null = null;
+      try {
+        lease = await call<ControllerLeaseRecord>(
+          `/internal/leases/${segment(rentalId)}`,
+        );
+      } catch (error) {
+        if (!(error instanceof ControllerError && error.status === 404))
+          leaseLookupError(error);
+      }
+      // The Controller always reports the owner here; only enforce the check when
+      // it does. Charging is still gated by the payment owner below and the
+      // Controller re-checks ownership on the extend POST.
+      if (lease && typeof lease.userId === "string" && lease.userId && lease.userId !== actor.id)
+        throw new RentalPaymentError("payment-not-found", "ไม่มีสิทธิ์ต่อเวลาการเช่านี้", 403);
+
       const database = await authDatabase();
-      const payment = getRentalPayment(database, rentalId);
+      const paymentId = lease?.paymentId ?? rentalId;
+      const payment = getRentalPayment(database, paymentId);
       if (!payment || payment.userId !== actor.id)
         throw new RentalPaymentError(
           "payment-not-found",
@@ -61,7 +99,7 @@ export async function POST(
 
       chargeRentalExtension(database, {
         userId: actor.id,
-        paymentId: rentalId,
+        paymentId,
         hours: additionalSeconds / RENTAL_HOUR_SECONDS,
         requestKey: idempotencyKey,
       });
@@ -83,12 +121,14 @@ export async function POST(
           );
         releaseRentalExtension(database, {
           userId: actor.id,
-          paymentId: rentalId,
+          paymentId,
           requestKey: idempotencyKey,
         });
         if (error instanceof ControllerError) {
           if (error.status === 404)
             throw new RentalPaymentError("payment-not-found", "ไม่พบรายการเช่านี้", 404);
+          if (error.status === 403)
+            throw new RentalPaymentError("payment-not-found", "ไม่มีสิทธิ์ต่อเวลาการเช่านี้", 403);
           throw new RentalPaymentError(
             "machine-unavailable",
             "ไม่สามารถต่อเวลาได้ในขณะนี้",

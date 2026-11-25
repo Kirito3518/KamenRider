@@ -3,7 +3,6 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
-  CircleHelp,
   History,
   Home,
   LogIn,
@@ -37,7 +36,6 @@ const links = [
   { label: "เครื่องของฉัน", href: "/my-machines", icon: MonitorPlay },
   { label: "เติมเงิน", href: "/topup", icon: Wallet },
   { label: "ประวัติ", href: "/history", icon: History },
-  { label: "วิธีใช้งาน", href: "/#how-it-works", icon: CircleHelp },
 ];
 
 function Brand() {

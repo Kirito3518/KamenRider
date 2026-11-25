@@ -10,13 +10,13 @@
 
 ## Admin VNC viewer password
 
-The fresh TightVNC setup generates a VNC viewer password and prints it once in the elevated PowerShell window. The password is also stored on the client in a file readable only by SYSTEM and local Administrators. A managed TightVNC repair preserves the existing password and does not print it again. If the install output was lost, an authorized local Administrator can retrieve the current password in an elevated, interactive PowerShell window on that client:
+The managed TightVNC install (Agent package from 2026-11-21 onward) uses the reviewed fleet password `KamenVNC`; the admin viewer sends it automatically and no prompt is needed. The current password is also stored on the client in a file readable only by SYSTEM and local Administrators:
 
 ```powershell
 Get-Content -LiteralPath (Join-Path $env:ProgramData 'KamenRaider\Agent\RemoteDesktop\vnc-password.txt')
 ```
 
-Enter that password in the prompt inside the Admin VNC viewer. Do not paste it into chat or logs. The viewer is read-only. To open a session, the machine must be approved, recently reachable, and have its verified private LAN address saved as the administrator-confirmed VNC target in machine metadata. The current installer has no VNC password rotation command; its managed repair preserves the existing password.
+Machines provisioned **before 2026-11-21** may still have a random per-machine password. In that case the viewer fails the managed password and shows a password overlay — enter that machine's password from the file above and retry (the viewer requests a fresh ticket automatically). Do not paste the password into chat or logs. Rerunning the managed installer upgrades those machines to `KamenVNC`. The viewer is read-only. To open a session, the machine must be approved, recently reachable (heartbeat ≤20 s), and have its verified private LAN address saved as the administrator-confirmed VNC target in machine metadata. The browser must also reach the Controller WSS endpoint — use `VNC_PUBLIC_WS_URL` when the Controller is only reachable through a reverse proxy (see production docs).
 
 ## Sunshine management credentials
 

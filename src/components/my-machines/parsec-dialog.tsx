@@ -8,12 +8,13 @@ import {
   type FormEvent,
   type RefObject,
 } from "react";
-import { MailCheck, ShieldCheck, WifiOff } from "lucide-react";
+import { MailCheck, RefreshCw, ShieldCheck, WifiOff } from "lucide-react";
 import toast from "react-hot-toast";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import {
   AlertDialog,
   AlertDialogAction,
+  AlertDialogCancel,
   AlertDialogContent,
   AlertDialogDescription,
   AlertDialogFooter,
@@ -34,6 +35,7 @@ import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
+import { ParsecMark } from "@/components/brands/streaming-logos";
 import {
   leaseApi,
   leaseErrorMessage,
@@ -51,6 +53,12 @@ import type { Lease } from "@/lib/machine-contracts";
 
 const attemptPollIntervalMs = 2_000;
 const clockTickMs = 5_000;
+/**
+ * A 409 can mean a login is already running, the machine is rate-limited, or Parsec is not
+ * enabled/advertised — not only a stale e-mail challenge. Keep the copy neutral and actionable.
+ */
+const conflictMessage =
+  "เริ่มเชื่อมต่อ Parsec ไม่ได้ในขณะนี้ — เครื่องอาจกำลังเชื่อมต่ออยู่ ถูกจำกัดจำนวนครั้ง หรือยังไม่ได้เปิดใช้งาน Parsec กรุณารอสักครู่แล้วลองใหม่";
 
 function connectionHost(address: string | null | undefined) {
   if (!address) return null;
@@ -104,6 +112,10 @@ export function ParsecDialog({
   const [verifySending, setVerifySending] = useState(false);
   const [verifyError, setVerifyError] = useState("");
   const [now, setNow] = useState(() => Date.now());
+  // Set when the customer presses "ลองใหม่" on a locally timed-out attempt. The form appears
+  // immediately even if the next refresh still reports the stale running state (offline Agent
+  // or clock skew); the submit itself re-reads the authoritative state.
+  const [retryOverride, setRetryOverride] = useState(false);
   const mounted = useRef(true);
   const emailRef = useRef<HTMLInputElement>(null);
   const firstRequestKey = useRef<string | null>(null);
@@ -124,6 +136,14 @@ export function ParsecDialog({
         setState(next);
         setNow(Date.now());
         setMessage("");
+        // The authoritative state supersedes the local retry view unless it is still the same
+        // timed-out running attempt (the Controller read path normally resolves it to failed).
+        const nextAttempt = next.attempt;
+        const stillTimedOut =
+          parsecAttemptIsRunning(nextAttempt) &&
+          nextAttempt !== null &&
+          Date.parse(nextAttempt.expiresAtUtc) <= Date.now();
+        if (!stillTimedOut) setRetryOverride(false);
       }
       return next;
     } catch (error) {
@@ -149,6 +169,12 @@ export function ParsecDialog({
   const attempt = state?.attempt ?? null;
   const running = parsecAttemptIsRunning(attempt);
   const available = state?.available === true && Boolean(state.publicKey);
+  const attemptExpired = attempt
+    ? Date.parse(attempt.expiresAtUtc) <= now
+    : false;
+  // An Agent that never reports back would otherwise leave the dialog spinning forever: past
+  // its expiresAtUtc a running attempt is terminal (the Controller read path fails it TIMEOUT).
+  const attemptTimedOut = running && attemptExpired && !retryOverride;
 
   useEffect(() => {
     if (!open || !running) return;
@@ -173,16 +199,16 @@ export function ParsecDialog({
     }
   }, [attempt, verifyOpen]);
 
-  const attemptExpired = attempt
-    ? Date.parse(attempt.expiresAtUtc) <= now
-    : false;
   const showForm =
     available &&
-    (attempt === null ||
+    !attemptTimedOut &&
+    (retryOverride ||
+      attempt === null ||
       attempt.state === "failed" ||
       attempt.state === "waiting_email");
   const showRunning =
     available &&
+    !attemptTimedOut &&
     attempt !== null &&
     (attempt.state === "queued" || attempt.state === "starting");
 
@@ -233,19 +259,19 @@ export function ParsecDialog({
         toast.success("เชื่อมต่อ Parsec สำเร็จ");
         return;
       }
-      if (
-        !current.attempt ||
-        (current.attempt.state !== "waiting_email" &&
-          current.attempt.state !== "failed")
-      ) {
-        if (
-          current.attempt?.state === "queued" ||
-          current.attempt?.state === "starting"
-        )
-          throw new Error("Parsec กำลังทำงานอยู่ กรุณารอสักครู่");
-      }
+      const currentExpired = current.attempt
+        ? Date.parse(current.attempt.expiresAtUtc) <= Date.now()
+        : false;
+      // Only queued/starting block a new POST. A current waiting_email attempt is expected:
+      // round two deliberately supersedes it with retryAttemptId.
+      const currentBusy =
+        !currentExpired &&
+        (current.attempt?.state === "queued" ||
+          current.attempt?.state === "starting");
+      if (currentBusy) throw new Error("Parsec กำลังทำงานอยู่ กรุณารอสักครู่");
+      // Round two is only valid while the challenged attempt is still waiting_email/current.
       const retryAttemptId =
-        current.attempt?.state === "waiting_email"
+        current.attempt?.state === "waiting_email" && !currentExpired
           ? current.attempt.attemptId
           : undefined;
       const keyRef = retryAttemptId ? retryRequestKey : firstRequestKey;
@@ -262,6 +288,7 @@ export function ParsecDialog({
       // A successful normal attempt supersedes any stale round-two key from an
       // earlier challenge, otherwise a later round two could reuse it accidentally.
       if (!retryAttemptId) retryRequestKey.current = null;
+      setRetryOverride(false);
       setState({ ...current, attempt: created });
       if (retryAttemptId) {
         setVerifyError("");
@@ -272,7 +299,7 @@ export function ParsecDialog({
     } catch (error) {
       const text =
         leaseErrorStatus(error) === 409
-          ? "รายการเชื่อมต่อก่อนหน้ายังไม่พร้อมสำหรับการยืนยันอีเมล กรุณารอสักครู่แล้วลองอีกครั้ง"
+          ? conflictMessage
           : leaseErrorMessage(error);
       if (inAlert) setVerifyError(text);
       else {
@@ -304,6 +331,14 @@ export function ParsecDialog({
       setVerifyOpen(false);
   }
 
+  /** Reveals the form again after a locally timed-out attempt so the customer can retry. */
+  function handleExpiredRetry() {
+    setMessage("");
+    setVerifyError("");
+    setVerifyOpen(false);
+    setRetryOverride(true);
+  }
+
   const ip = connectionHost(lease.connection?.address);
   const targetEmail = email.trim() || "อีเมลของบัญชี Parsec";
 
@@ -323,6 +358,7 @@ export function ParsecDialog({
           setVerifyOpen(false);
           setVerifySending(false);
           setVerifyError("");
+          setRetryOverride(false);
           setState(null);
           firstRequestKey.current = null;
           retryRequestKey.current = null;
@@ -335,7 +371,10 @@ export function ParsecDialog({
           className="max-h-[calc(100dvh-2rem)] overflow-y-auto"
         >
           <DialogHeader className="pr-8">
-            <DialogTitle>เชื่อมต่อด้วย Parsec</DialogTitle>
+            <DialogTitle className="flex items-center gap-2">
+              <ParsecMark className="h-6 w-auto" />
+              เชื่อมต่อด้วย Parsec
+            </DialogTitle>
             <DialogDescription>
               ใช้บัญชี Parsec ของคุณเอง — รหัสผ่านถูกเข้ารหัสในเบราว์เซอร์ด้วยกุญแจของ Agent
             </DialogDescription>
@@ -391,7 +430,30 @@ export function ParsecDialog({
                 </Alert>
               ) : null}
 
-              {attempt?.state === "waiting_email" && !verifyOpen ? (
+              {attemptTimedOut ? (
+                <div className="flex flex-col gap-3">
+                  <Alert variant="destructive">
+                    <AlertTitle>{PARSEC_STATE_LABELS.failed}</AlertTitle>
+                    <AlertDescription>
+                      {parsecErrorLabel("TIMEOUT")} — เครื่องไม่ตอบกลับภายในเวลาที่กำหนด
+                      กด “ลองใหม่” เพื่อเริ่มเชื่อมต่ออีกครั้ง
+                    </AlertDescription>
+                  </Alert>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="w-full"
+                    onClick={handleExpiredRetry}
+                  >
+                    <RefreshCw data-icon="inline-start" />
+                    ลองใหม่
+                  </Button>
+                </div>
+              ) : null}
+
+              {attempt?.state === "waiting_email" &&
+              !verifyOpen &&
+              !attemptTimedOut ? (
                 <Alert>
                   <MailCheck aria-hidden />
                   <AlertTitle>Parsec รอยืนยันอีเมล</AlertTitle>
@@ -475,11 +537,7 @@ export function ParsecDialog({
 
       <AlertDialog
         open={verifyOpen}
-        onOpenChange={(next) => {
-          // The verification alert is intentionally acknowledgement-only: it stays
-          // open until the customer uses its single action button.
-          if (next) setVerifyOpen(true);
-        }}
+        onOpenChange={(next) => setVerifyOpen(next)}
       >
         <AlertDialogContent>
           <AlertDialogHeader>
@@ -531,12 +589,14 @@ export function ParsecDialog({
             <Alert>
               <AlertTitle>หมดเวลารอผลจากเครื่อง</AlertTitle>
               <AlertDescription>
-                กด “ปิด” แล้วลองเชื่อมต่ออีกครั้งหลังยืนยันอีเมลแล้ว
+                กด “ปิด” แล้วกด “ลองใหม่” ในหน้าต่างเชื่อมต่อ Parsec
+                เพื่อเริ่มเชื่อมต่ออีกครั้ง
               </AlertDescription>
             </Alert>
           ) : null}
 
           <AlertDialogFooter>
+            <AlertDialogCancel>ปิด</AlertDialogCancel>
             <AlertDialogAction
               onClick={handleVerifyAction}
               disabled={verifyActionDisabled}

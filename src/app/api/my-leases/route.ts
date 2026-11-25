@@ -1,6 +1,7 @@
 import { machineApi, segment } from "@/lib/machine-api";
 import type { Lease, LeasePaymentInfo, Machine } from "@/lib/machine-contracts";
 import {
+  getMemberBalance,
   listRentalPayments,
   reconcilePendingRentals,
   settleRentalRefunds,
@@ -109,8 +110,11 @@ export function GET(r: Request) {
     const active = await Promise.all(
       leases.map(async (lease) => {
         const machine = machineById.get(lease.machineId);
-        const payment = payments.get(lease.id) ?? null;
-        payments.delete(lease.id);
+        // The Controller lease id is not the payment id; the create idempotency
+        // key it reports as paymentId is.
+        const paymentKey = lease.paymentId ?? lease.id;
+        const payment = payments.get(paymentKey) ?? null;
+        payments.delete(paymentKey);
         return {
           ...lease,
           // Agent-reported display name (hostname by default); safe to show the
@@ -141,6 +145,11 @@ export function GET(r: Request) {
       }),
     );
 
-    return [...pending, ...active];
+    return {
+      leases: [...pending, ...active],
+      // Refunds settled above are already credited, so the wallet must be read
+      // after settlement or the renter would briefly see a stale balance.
+      balanceSatang: getMemberBalance(database, actor.id),
+    };
   });
 }

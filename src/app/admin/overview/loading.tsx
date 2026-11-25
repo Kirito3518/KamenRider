@@ -1,5 +1,5 @@
-import { AdminStatsTablePageSkeleton } from "@/components/loading";
+import { AdminOverviewPageSkeleton } from "@/components/loading";
 
 export default function Loading() {
-  return <AdminStatsTablePageSkeleton label="กำลังโหลดภาพรวมระบบ" />;
+  return <AdminOverviewPageSkeleton />;
 }

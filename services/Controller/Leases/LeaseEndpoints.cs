@@ -6,6 +6,14 @@ public static class LeaseEndpoints {
     private static string Actor(HttpContext context) => context.Request.Headers["X-Authenticated-Actor-Id"].ToString();
     private static bool IsAdmin(HttpContext context) => context.Request.Headers["X-Authenticated-Actor-Role"] == "admin";
     public static void MapLeases(this WebApplication app) {
+        // Lease lookup by id: the web app resolves the rental payment through LeaseDto.PaymentId,
+        // so it must be able to read one lease before charging an extension or a cancellation.
+        app.MapGet("/internal/leases/{id}",async(string id,HttpContext context,LeaseService leases,CancellationToken ct)=>{
+            var actor=Actor(context);if(string.IsNullOrWhiteSpace(actor)) return Results.StatusCode(403);
+            var lease=await leases.GetLeaseAsync(id,ct);if(lease is null) return Results.NotFound();
+            if(!IsAdmin(context)&&lease.UserId!=actor) return Results.StatusCode(403);
+            return Results.Ok(lease);
+        });
         app.MapGet("/internal/leases/{id}/connection",async(string id,HttpContext context,LeaseService leases,KamenRaider.Controller.Data.ControllerDatabase db,IServiceProvider services,CancellationToken ct)=>{
             var lease=await leases.GetLeaseAsync(id,ct);if(lease is null)return Results.NotFound();
             if(string.IsNullOrWhiteSpace(Actor(context))||lease.UserId!=Actor(context))return Results.StatusCode(403);

@@ -98,6 +98,10 @@ public sealed partial class ControllerDatabase
             var lease = FindLease(tx, rentalId) ?? throw new KeyNotFoundException();
             if (string.IsNullOrWhiteSpace(actorId) || lease.Dto.UserId != actorId)
                 throw new UnauthorizedAccessException();
+            // Reading must not depend on an Agent heartbeat: an offline Agent would otherwise
+            // leave queued/starting/waiting_email attempts (and the renter's spinner) alive
+            // forever, because expiry used to run only inside accepted Agent syncs.
+            ExpireParsecAttempts(tx, clock.GetUtcNow().ToUnixTimeMilliseconds());
             var capability = ReadMachineParsecCapability(tx, lease.Dto.MachineId);
             ParsecAttemptDto? attempt = null;
             using (var command = LeaseCommand(tx,
@@ -121,6 +125,7 @@ public sealed partial class ControllerDatabase
             var lease = FindLease(tx, rentalId) ?? throw new KeyNotFoundException();
             if (string.IsNullOrWhiteSpace(actorId) || lease.Dto.UserId != actorId)
                 throw new UnauthorizedAccessException();
+            ExpireParsecAttempts(tx, clock.GetUtcNow().ToUnixTimeMilliseconds());
             using var command = LeaseCommand(tx,
                 $"SELECT {ParsecAttemptColumns} FROM parsec_attempts WHERE attempt_id=$attempt AND rental_id=$rental",
                 ("$attempt", attemptId), ("$rental", rentalId));
@@ -146,6 +151,9 @@ public sealed partial class ControllerDatabase
         lock (gate)
         {
             using var tx = connection.BeginTransaction();
+            // A globally quarantined Controller must refuse new lease-mutating work; the
+            // ParsecEndpoints.Execute wrapper maps this to 409 Conflict like the other lease paths.
+            EnsureNotRestoreQuarantined(tx);
             var lease = FindLease(tx, rentalId) ?? throw new KeyNotFoundException();
             if (lease.Dto.UserId != actorId) throw new UnauthorizedAccessException();
             if (lease.Dto.State != "active" || string.IsNullOrWhiteSpace(lease.Boot))

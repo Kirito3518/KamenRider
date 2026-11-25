@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import type { LucideIcon } from "lucide-react";
 import type { ReactNode } from "react";
 import {
@@ -36,6 +37,21 @@ const groupToneClassName = {
   available: "text-status-available",
   busy: "text-status-busy",
 } as const;
+
+/**
+ * The VNC ticket route/Controller only accepts a machine that is approved, has a recent
+ * heartbeat and an Admin-confirmed `vncLocalIp`. `localIp` is the Agent-reported machine
+ * address and is NOT the VNC target, so gating on it let Admins press เปิดจอ while the
+ * Controller was guaranteed to reject the ticket. Return the blocking reason instead.
+ */
+export function vncTargetIssue(machine: PcControlMachine, now: number) {
+  if (!machine.vncLocalIp || !machine.vncLocalIp.trim())
+    return "ยังไม่ได้ตั้งค่า VNC target";
+  if (machine.approvalStatus !== "approved") return "เครื่องยังไม่ได้รับอนุมัติให้เปิดจอ";
+  if (!agentOnline(machine, now))
+    return "Agent ออฟไลน์หรือ heartbeat เกิน 20 วินาที";
+  return "";
+}
 
 /**
  * One action cluster inside the PC card. The group label and tone keep the
@@ -104,6 +120,7 @@ export function PcControlCard({
   const leaseActionable =
     lease !== null && lease.state === "active" && lease.pendingRevision === null && !terminalLeaseStates.has(lease.state);
   const remaining = lease?.remainingSeconds ?? null;
+  const vncIssue = vncTargetIssue(machine, now);
   const lifecycle = machine.operationalState ?? "unknown";
   const lifecycleLabel =
     lifecycle === "available"
@@ -158,10 +175,18 @@ export function PcControlCard({
             <EmptyDescription>เปิดดูหน้าจอเมื่อต้องการ ไม่มีการสตรีมตลอดเวลา</EmptyDescription>
           </EmptyHeader>
           <EmptyContent>
-            <Button variant="default" size="sm" onClick={onOpenVnc} disabled={busy || !machine.localIp}>
+            <Button variant="default" size="sm" onClick={onOpenVnc} disabled={busy || Boolean(vncIssue)}>
               <Monitor data-icon="inline-start" />
               เปิดจอ
             </Button>
+            {vncIssue ? (
+              <p className="text-xs text-muted-foreground">
+                {vncIssue} ·{" "}
+                <Link className="underline underline-offset-4 hover:text-foreground" href="/admin/machines">
+                  ตั้งค่า VNC target
+                </Link>
+              </p>
+            ) : null}
           </EmptyContent>
         </Empty>
 

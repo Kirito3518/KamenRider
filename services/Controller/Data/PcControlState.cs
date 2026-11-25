@@ -168,7 +168,7 @@ public sealed partial class ControllerDatabase
             var revision = checked(expectedRevision + 1);
             ExecuteLease(tx, "UPDATE leases SET pending_revision=$revision,pending_expires_at=$expiry WHERE id=$id",
                 ("$revision", revision), ("$expiry", targetExpiry), ("$id", lease.Dto.Id));
-            var commandId = AddCommand(tx, lease, "ApplyLease", revision, lease.Boot!, lease.Dto.ExpiresAtUtc!.Value.ToUnixTimeMilliseconds(),
+            var commandId = AddApplyLeaseCommand(tx, lease, revision, lease.Boot!, lease.Dto.ExpiresAtUtc!.Value.ToUnixTimeMilliseconds(),
                 new { startsAtUtc = lease.Dto.StartsAtUtc, expiresAtUtc = DateTimeOffset.FromUnixTimeMilliseconds(targetExpiry) });
             SaveRequest(tx, scope, idempotencyKey, fingerprint, lease.Dto.Id);
             RecordMachineAdminAction(tx, machineId, actorId, idempotencyKey, "adjustTime", commandId,

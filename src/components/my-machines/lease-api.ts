@@ -1,5 +1,7 @@
 "use client";
 
+import { formatBalance } from "@/lib/money";
+
 /** Error carrying the HTTP status so dialogs can give action-specific feedback. */
 export class LeaseApiError extends Error {
   constructor(
@@ -80,9 +82,34 @@ export function requestRentalPower(rentalId: string) {
   );
 }
 
+export type CancelRentalResult = {
+  /** The cancelled Controller lease (not needed for rendering the refund message). */
+  lease: unknown;
+  /** Refund credited by this exact cancel request. */
+  refundedSatang: number;
+  /** Total refund already recorded for the rental payment (may predate the cancel). */
+  paymentRefundedSatang: number;
+  /** Authoritative wallet balance after refunds were settled. */
+  balanceSatang: number;
+};
+
 export function cancelRental(rentalId: string, expectedRevision: number) {
-  return leaseApi<{ lease: unknown; refundedSatang: number; paymentRefundedSatang: number }>(
+  return leaseApi<CancelRentalResult>(
     `/api/my-leases/${encodeURIComponent(rentalId)}/cancel`,
     { expectedRevision, idempotencyKey: crypto.randomUUID() },
   );
+}
+
+/**
+ * Thai confirmation shown after a cancel succeeded. The same wording is used by
+ * both the active-rental card and the power-on card.
+ */
+export function cancelRentalMessage(
+  result: Pick<CancelRentalResult, "refundedSatang" | "paymentRefundedSatang">,
+) {
+  if (result.refundedSatang > 0)
+    return `ยกเลิกแล้ว คืนเงิน ${formatBalance(result.refundedSatang)}`;
+  if (result.paymentRefundedSatang > 0)
+    return `ยกเลิกแล้ว คืนเงินแล้ว ${formatBalance(result.paymentRefundedSatang)}`;
+  return "ยกเลิกการเช่าแล้ว ไม่มียอดคืน";
 }

@@ -327,6 +327,55 @@ public sealed class ParsecTests
     }
 
     [Fact]
+    public async Task ReadPathExpiresAnAttemptPastItsDeadlineWithoutAnAgentSync()
+    {
+        using var context = await ActiveAttempt();
+        var fixture = context.Fixture;
+        // Keep the rental alive so only the attempt window can fail the attempt.
+        using (var leaseConnection = Open(fixture.Path))
+        using (var lease = leaseConnection.CreateCommand())
+        {
+            lease.CommandText = "UPDATE leases SET expires_at=expires_at+3600000";
+            lease.ExecuteNonQuery();
+        }
+        fixture.Time.Now = fixture.Time.Now.AddSeconds(ParsecControllerConstants.AttemptWindowSeconds + 5);
+
+        // No Agent sync: the renter-facing read itself must settle the timeout so the UI stops
+        // spinning while the machine is offline.
+        var state = fixture.Db.GetLeaseParsecState(context.LeaseId, "alice");
+        var attempt = Assert.IsType<ParsecAttemptDto>(state.Attempt);
+        Assert.Equal(ParsecStates.Failed, attempt.State);
+        Assert.Equal(ParsecErrorCodes.Timeout, attempt.ErrorCode);
+
+        // The read path also purges the sealed payload that can no longer be delivered.
+        using var connection = Open(fixture.Path);
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT status,payload FROM command_outbox WHERE type='ParsecConnect'";
+        using var row = command.ExecuteReader();
+        Assert.True(row.Read());
+        Assert.Equal("expired", row.GetString(0));
+        Assert.Equal("{}", row.GetString(1));
+    }
+
+    [Fact]
+    public async Task AttemptReadPathAlsoExpiresAPastDeadlineAttempt()
+    {
+        using var context = await ActiveAttempt();
+        var fixture = context.Fixture;
+        using (var leaseConnection = Open(fixture.Path))
+        using (var lease = leaseConnection.CreateCommand())
+        {
+            lease.CommandText = "UPDATE leases SET expires_at=expires_at+3600000";
+            lease.ExecuteNonQuery();
+        }
+        fixture.Time.Now = fixture.Time.Now.AddSeconds(ParsecControllerConstants.AttemptWindowSeconds + 5);
+
+        var attempt = fixture.Db.GetParsecAttempt(context.LeaseId, context.Attempt.AttemptId, "alice");
+        Assert.Equal(ParsecStates.Failed, attempt.State);
+        Assert.Equal(ParsecErrorCodes.Timeout, attempt.ErrorCode);
+    }
+
+    [Fact]
     public async Task RentalEndFailsPendingAttemptsAndDropsTheirPayload()
     {
         using var context = await ActiveAttempt();
@@ -359,21 +408,27 @@ public sealed class ParsecTests
     }
 
     /// <summary>
-    /// Creates, prepares and applies a second active lease on a non-default machine. The fixture's
-    /// helper only knows "pc", so this mirrors its prepare/apply two-step for a machine the caller
-    /// has already enrolled with <see cref="LeaseFixture.AddRentableMachine"/>.
+    /// Creates and activates a second lease on a non-default machine. The fixture's helper only
+    /// knows "pc", so this mirrors its power request plus boot-reconciliation two-step for a machine
+    /// the caller has already enrolled with <see cref="LeaseFixture.AddRentableMachine"/>.
     /// </summary>
     private static async Task<LeaseDto> ActivateOn(LeaseFixture fixture, string machineId, string boot,
         string idempotencyKey)
     {
         var lease = await fixture.Leases.CreateLeaseAsync("alice", machineId, 60, idempotencyKey, default);
+        // The power-on lifecycle requires an explicit renter power request before a boot can prove
+        // the machine and activate the prepared lease.
+        await fixture.Leases.RequestPowerAsync(lease.Id, "alice", Guid.NewGuid().ToString("N"), default);
         var configRevision = fixture.Db.List().Single(machine => machine.MachineId == machineId).ConfigRevision;
-        SyncResponse Sync(params CommandResult[] results) =>
-            fixture.Db.Sync(machineId,
-                new SyncRequest(boot, "192.0.2.1", "001122334455", configRevision, "ready", results));
-        var prepare = Assert.Single(Sync().Commands);
-        var apply = Assert.Single(Sync(new CommandResult(prepare.CommandId, "applied", prepare.LeaseRevision)).Commands);
-        Sync(new CommandResult(apply.CommandId, "applied", apply.LeaseRevision));
+        var hold = fixture.Db.Reconcile(machineId, new ReconcileRequest(boot, configRevision, true));
+        var challenge = hold.Challenge ?? throw new InvalidOperationException(
+            $"The reconcile hold did not issue a challenge: {hold.Action}");
+        var proof = fixture.Db.Reconcile(machineId,
+            new ReconcileRequest(boot, configRevision, true, true, true, true, challenge, StreamReady: true));
+        if (proof.Lease is null)
+            throw new InvalidOperationException($"The boot proof did not activate the prepared lease: {proof.Action}");
+        fixture.Db.Sync(machineId,
+            new SyncRequest(boot, "192.0.2.1", "001122334455", configRevision, "ready", []));
         var active = (await fixture.Leases.GetLeaseAsync(lease.Id, default))!;
         Assert.Equal("active", active.State);
         return active;

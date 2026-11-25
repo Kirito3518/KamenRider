@@ -255,6 +255,11 @@ AGENT_TRUST_ROOT_THUMBPRINT=<Controller certificate thumbprint>
 # With https://192.168.1.10 the VNC source address is derived automatically.
 AGENT_VNC_ALLOWED_SOURCE_IP=
 
+# Optional: browser-facing VNC WebSocket when admins cannot reach Controller:7443 directly.
+# Must be an absolute wss URL with path exactly /admin/vnc, e.g. wss://example.com/admin/vnc
+# (requires a reverse-proxy route that forwards the WebSocket upgrade to https://127.0.0.1:7443).
+VNC_PUBLIC_WS_URL=
+
 # Optional Wake-on-LAN (Mother NIC + /24 broadcast)
 CONTROLLER_WAKE_INTERFACE_ADDRESS=192.168.1.10
 CONTROLLER_WAKE_BROADCAST_ADDRESS=192.168.1.255
@@ -419,8 +424,10 @@ Get-Content "$env:ProgramData\KamenRaider\Agent\enrollment-receipt.json"
 ### 11.6 Optional: VNC
 
 - TightVNC is installed by the Agent package and only accepts the Controller LAN IP (`AGENT_VNC_ALLOWED_SOURCE_IP`, or derived from `AGENT_CONTROLLER_URL`).
-- Save the machine's LAN IP as the admin-confirmed VNC target, run the probe, then use the read-only viewer in `/admin/pc-control`.
-- The VNC password is stored on the Child at `%ProgramData%\KamenRaider\Agent\RemoteDesktop\vnc-password.txt` (elevated). Type it in the viewer prompt; never paste it into chat/tickets.
+- Save the machine's LAN IP as the admin-confirmed VNC target in `/admin/machines`, run the probe, then use the read-only viewer in `/admin/pc-control`. The **เปิดจอ** button is enabled only when the machine is approved, has a saved VNC target and a heartbeat ≤20 s.
+- The managed install (Agent package from 2026-11-21) uses the fleet password `KamenVNC`; the viewer sends it automatically. Machines provisioned earlier may keep a random per-machine password stored at `%ProgramData%\KamenRaider\Agent\RemoteDesktop\vnc-password.txt` (elevated) — the viewer prompts for it after the managed password is rejected. Never paste it into chat/tickets.
+- The browser must be able to open `wss://<AGENT_CONTROLLER_URL host>/admin/vnc` and trust the Controller certificate. If admins access the web through a domain/reverse proxy that cannot reach Controller:7443, add a proxy route for `/admin/vnc` and set `VNC_PUBLIC_WS_URL=wss://<public-host>/admin/vnc` (see `production-commands.md`).
+- A ticket is single-use and only authorises the handshake; an established session can stay open up to 1 hour.
 
 ---
 
@@ -455,7 +462,7 @@ Get-Content "$env:ProgramData\KamenRaider\Agent\enrollment-receipt.json"
 | Installer: certificate not found | Import `controller-root.cer` into `LocalMachine\Root`; the thumbprint in `.env.local` must match exactly. |
 | Installer download fails | Child cannot reach `https://192.168.1.10`; import Caddy root CA, open firewall 443, verify DNS/IP. |
 | Agent rejects HTTPS to Controller | Controller cert SAN must include the host/IP used in `AGENT_CONTROLLER_URL`; re-issue the cert or use an IP SAN. |
-| VNC viewer fails | Machine approved + heartbeat ≤20 s + saved VNC target + TightVNC running + Controller IP allowed by the Child firewall rule. |
+| VNC viewer fails ("open screen" error / black / disconnect) | Machine approved + heartbeat ≤20 s + saved VNC target + TightVNC running; the browser must reach the resolved WSS URL (LAN IP or `VNC_PUBLIC_WS_URL` via a proxy that forwards `/admin/vnc`), trust the Controller certificate, and the VNC password must match (managed `KamenVNC` or the per-machine password from `vnc-password.txt`). The viewer now shows which stage failed. |
 | Signed request 401 | Mother/Child clock skew > ±60 s (enable Windows Time), or identity was re-installed with a new key. |
 | Public connect address missing | Only returned for an **active** lease; rentals are blocked until readiness evidence exists (section 0). |
 

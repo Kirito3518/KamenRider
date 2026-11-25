@@ -27,6 +27,7 @@ import { formatBalance } from "@/lib/money";
 import type { Lease } from "@/lib/machine-contracts";
 import {
   cancelRental,
+  cancelRentalMessage,
   leaseErrorMessage,
   requestRentalPower,
 } from "@/components/my-machines/lease-api";
@@ -39,9 +40,17 @@ import {
 export function PowerOnRentalCard({
   lease,
   onRefresh,
+  onCancelled,
+  onMutationStart,
+  onMutationEnd,
 }: {
   lease: Lease;
   onRefresh: () => void;
+  /** Receives the authoritative post-refund balance returned by the cancel route. */
+  onCancelled?: (balanceSatang?: number) => void;
+  /** Optional hooks so the page can suppress poll-driven refund notices mid-request. */
+  onMutationStart?: () => void;
+  onMutationEnd?: () => void;
 }) {
   const reduceMotion = useReducedMotion();
   const [powering, setPowering] = useState(false);
@@ -57,33 +66,34 @@ export function PowerOnRentalCard({
     if (powering) return;
     setPowering(true);
     setError("");
+    onMutationStart?.();
     try {
       await requestRentalPower(lease.id);
-      onRefresh();
     } catch (cause) {
       setError(leaseErrorMessage(cause));
     } finally {
       setPowering(false);
+      onMutationEnd?.();
     }
+    onRefresh();
   }
 
   async function cancel() {
     if (cancelling) return;
     setCancelling(true);
     setError("");
+    onMutationStart?.();
     try {
       const result = await cancelRental(lease.id, lease.revision);
       setCancelOpen(false);
-      setRefundNotice(
-        result.refundedSatang > 0
-          ? `ยกเลิกแล้ว คืนเงิน ${formatBalance(result.refundedSatang)}`
-          : "ยกเลิกการเช่าแล้ว",
-      );
+      setRefundNotice(cancelRentalMessage(result));
+      onCancelled?.(result.balanceSatang);
       onRefresh();
     } catch (cause) {
       setError(leaseErrorMessage(cause));
     } finally {
       setCancelling(false);
+      onMutationEnd?.();
     }
   }
 
@@ -190,7 +200,7 @@ export function PowerOnRentalCard({
           <p className="text-sm text-muted-foreground">
             ชำระแล้ว {formatBalance(paid)} · กดยกเลิกเพื่อคืนเงินตามเวลาที่เหลือ
           </p>
-          <Button variant="outline" size="sm" onClick={() => setCancelOpen(true)} disabled={cancelling}>
+          <Button variant="destructive" size="sm" onClick={() => setCancelOpen(true)} disabled={cancelling}>
             <XCircle data-icon="inline-start" />
             ยกเลิกการเช่า
           </Button>

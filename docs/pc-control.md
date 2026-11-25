@@ -52,16 +52,24 @@
 
 - Controller: `PcControlTests` (snapshot, force power off, EndLease, adjust ±, admin pairing, endpoint auth) + migration/schema tests
 - Agent: `PcControlAgentCommandTests` (EndLease/ShutdownMachine dispatch, boot/fence guards, shrunk expiry)
-- Web: `tests/pc-control.test.tsx`, `tests/pc-control-routes.test.ts`, และ machines-manager regression
+- Web: `tests/pc-control.test.tsx`, `tests/pc-control-routes.test.ts`, `tests/pc-control-vnc.test.tsx`, `tests/vnc-ticket-route.test.ts` และ machines-manager regression
 - คำสั่ง:
 
 ```
 dotnet test services/Controller.Tests/Controller.Tests.csproj --filter "FullyQualifiedName~PcControl|FullyQualifiedName~Migration"
 dotnet test services/Agent.Tests/Agent.Tests.csproj --filter "FullyQualifiedName~PcControl"
-pnpm exec vitest run --configLoader runner tests/pc-control.test.tsx tests/pc-control-routes.test.ts tests/machines-manager.test.tsx
+pnpm exec vitest run --configLoader runner tests/pc-control.test.tsx tests/pc-control-routes.test.ts tests/pc-control-vnc.test.tsx tests/vnc-ticket-route.test.ts tests/machines-manager.test.tsx
 pnpm exec tsc --noEmit
 pnpm lint
 ```
+
+## การแก้ไข VNC ล่าสุด (2026-11-25)
+
+- **ตั๋ว VNC มีอายุ 60 วิเพื่อทำ handshake เท่านั้น** — เดิม UI ทิ้ง ticket เมื่อครบ 60 วิ ทำให้ iframe ถูก unmount และ session ที่กำลังดูอยู่หลุดทั้งที่ Controller รองรับได้ถึง 1 ชั่วโมง. แก้ให้หมดอายุเฉพาะกรณียังไม่เริ่ม handshake; session ที่เชื่อมแล้วอยู่นานได้ตาม Controller
+- ปุ่ม “เปิดจอ” ตรวจ `vncLocalIp` (VNC target ที่แอดมินยืนยัน), สถานะ approved และ heartbeat ≤20 วิ ก่อนเปิด; ถ้ายังไม่พร้อมจะแสดงเหตุผล + ลิงก์ไป `/admin/machines`
+- เพิ่ม env `VNC_PUBLIC_WS_URL` (optional) สำหรับ deployment ที่เบราว์เซอร์ต่อ Controller ตรงไม่ได้ (Cloudflare/reverse proxy) — ต้องเป็น `wss://.../admin/vnc` แบบ absolute, ไม่มี query/hash; ถ้าไม่ตั้งจะ derive จาก `AGENT_CONTROLLER_URL` เหมือนเดิม. Proxy ต้อง forward WebSocket upgrade ของ path `/admin/vnc`, คง header `Origin` และใช้ TLS ที่เบราว์เซอร์เชื่อถือ
+- Viewer ลองรหัสผ่าน managed (`KamenVNC`) ก่อน; ถ้าถูกปฏิเสธจะแสดงช่องกรอกรหัสผ่านของเครื่องนั้น (เครื่องที่ติดตั้งก่อน 2026-11-21 ใช้รหัสสุ่มเฉพาะเครื่อง) แล้วขอตั๋วใหม่ให้อัตโนมัติ — รหัสผ่านอยู่ใน iframe เท่านั้น ไม่ถูกบันทึก/ส่งออก
+- ข้อความ error จาก `/api/admin/vnc-ticket` เป็นภาษาไทยและแยกสาเหตุ: ยังไม่ตั้งค่า `AGENT_CONTROLLER_URL`, URL ผิดรูปแบบ, เครื่องยังไม่พร้อม (409), Controller ปฏิเสธสิทธิ์ ฯลฯ
 
 ## ข้อจำกัด / สิ่งที่ยังไม่ทดสอบ
 

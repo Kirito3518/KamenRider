@@ -17,6 +17,12 @@ export type ControllerLeaseRecord = {
   expiresAtUtc: string | null;
   pendingRevision: number | null;
   endedAtUtc?: string | null;
+  /**
+   * The create idempotency key sent by the web app, i.e. the `rental_payments.id`
+   * this Controller lease was created for. Null for leases created before the
+   * Controller recorded it (or by callers other than the web app).
+   */
+  paymentId?: string | null;
 };
 
 export async function authDatabase() {

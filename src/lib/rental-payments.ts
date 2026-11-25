@@ -500,7 +500,10 @@ export function releaseRentalExtension(
 }
 
 export type ControllerLeaseSnapshot = {
+  /** The Controller-issued lease id. This is NOT the rental payment id. */
   id: string;
+  /** The create idempotency key the web app sent, i.e. `rental_payments.id`. */
+  paymentId?: string | null;
   state: string;
   startsAtUtc?: string | null;
   endedAtUtc?: string | null;
@@ -582,8 +585,13 @@ export function settleRentalRefunds(
 ): SettleRentalsResult {
   ensureRentalSchema(database);
   const now = options.now ?? Date.now();
-  const leaseById = new Map(leases.map((lease) => [lease.id, lease]));
-  if (leaseById.size === 0) return { refundedSatang: 0, refundedPayments: 0 };
+  // A Controller lease id is random and is never the rental payment id: the
+  // create idempotency key (exposed as paymentId) is. Fall back to the lease id
+  // only for snapshots that predate the payment mapping.
+  const leaseByPaymentId = new Map(
+    leases.map((lease) => [lease.paymentId ?? lease.id, lease]),
+  );
+  if (leaseByPaymentId.size === 0) return { refundedSatang: 0, refundedPayments: 0 };
 
   const rows = database
     .prepare(
@@ -596,13 +604,18 @@ export function settleRentalRefunds(
   let refundedPayments = 0;
   for (const row of rows) {
     const payment = toPayment(row);
-    const lease = leaseById.get(payment.id);
+    const lease = leaseByPaymentId.get(payment.id);
     if (!lease) continue;
     const ended =
       Boolean(lease.endedAtUtc) ||
       lease.state === "failed" ||
       lease.state === "completed";
     if (!ended) continue;
+    // A terminal lease can briefly lack its end instant (cancel raced the
+    // ended_at write, or the row predates the migration). Proration needs that
+    // instant: leave the payment unsettled and settle it on a later read once
+    // ended_at exists. A lease that never started keeps the full-refund path.
+    if (!lease.endedAtUtc && lease.startsAtUtc) continue;
     const { refundSatang, note } = calculateRefund(payment, lease);
     let applied = 0;
     try {

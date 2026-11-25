@@ -3,7 +3,9 @@ using Microsoft.Data.Sqlite;
 using System.Text.Json;
 namespace KamenRaider.Controller.Data;
 public sealed partial class ControllerDatabase {
-    private const string LeaseColumns="id,user_id,machine_id,state,revision,starts_at,expires_at,pending_revision,duration_seconds,preparation_deadline,pending_expires_at,boot_id,ended_at,wake_requested_at_unix_ms";
+    // The trailing correlated subquery surfaces the create idempotency key (the web rental payment
+    // id) without a schema migration; it stays null for leases created before the key was recorded.
+    private const string LeaseColumns="id,user_id,machine_id,state,revision,starts_at,expires_at,pending_revision,duration_seconds,preparation_deadline,pending_expires_at,boot_id,ended_at,wake_requested_at_unix_ms,(SELECT r.request_key FROM lease_requests r WHERE r.rental_id=leases.id AND r.scope='create:'||leases.user_id LIMIT 1) AS payment_id";
     private const int CleanupGraceSeconds=30;
     private const int BootPreparationDeadlineSeconds=300;
     private record LeaseRow(LeaseDto Dto,int Duration,long PreparationDeadline,long? PendingExpiry,string? Boot,DateTimeOffset? EndedAt,DateTimeOffset? WakeRequested);
@@ -12,7 +14,8 @@ public sealed partial class ControllerDatabase {
         var wake=Instant(r,13);
         var dto=new LeaseDto(r.GetString(0),r.GetString(1),r.GetString(2),r.GetString(3),r.GetInt64(4),Instant(r,5),Instant(r,6),r.IsDBNull(7)?null:r.GetInt64(7),Instant(r,12)) {
             WakeRequestedAtUtc=wake,
-            CanRequestPower=r.GetString(3)=="preparing"&&r.IsDBNull(11)&&wake is null
+            CanRequestPower=r.GetString(3)=="preparing"&&r.IsDBNull(11)&&wake is null,
+            PaymentId=r.IsDBNull(14)?null:r.GetString(14)
         };
         return new LeaseRow(dto,r.GetInt32(8),r.GetInt64(9),r.IsDBNull(10)?null:r.GetInt64(10),r.IsDBNull(11)?null:r.GetString(11),Instant(r,12),wake);
     }
@@ -47,6 +50,10 @@ public sealed partial class ControllerDatabase {
         // activated (including one where the renter never pressed Power) ends at its deadline.
         ExecuteLease(tx,"UPDATE leases SET state=CASE WHEN state='preparing' THEN 'failed' ELSE 'ending' END,ended_at=COALESCE(ended_at,CASE WHEN state='preparing' THEN $now ELSE COALESCE(expires_at,$now) END),pending_revision=NULL,pending_expires_at=NULL,allocation_held=0 WHERE (state='preparing' AND preparation_deadline <= $now) OR (state IN ('preparing','active') AND expires_at <= $now)",("$now",now));
         ExecuteLease(tx,"UPDATE command_outbox SET status='expired' WHERE status='pending' AND (valid_until <= $now OR (type NOT IN ('EndLease','ShutdownMachine') AND rental_id IN (SELECT id FROM leases WHERE state IN ('failed','ending'))))",("$now",now));
+        // A pending extension is settled by its ApplyLease command ack, a fresh boot, an expiry or a
+        // cancel; once no pending ApplyLease row remains there is nothing left to acknowledge, so the
+        // optimistic revision lock must be released instead of blocking every later extension (409).
+        ExecuteLease(tx,"UPDATE leases SET pending_revision=NULL,pending_expires_at=NULL WHERE pending_revision IS NOT NULL AND NOT EXISTS(SELECT 1 FROM command_outbox c WHERE c.rental_id=leases.id AND c.type='ApplyLease' AND c.status='pending')");
         // A Parsec login may not outlive its lease. Expired/ending/completed rentals close any
         // queued attempt and drop the sealed payload that is still waiting in the outbox.
         ExecuteLease(tx,"UPDATE parsec_attempts SET state='failed',error_code=$code,message=NULL,updated_at_unix_ms=$now WHERE state IN ('queued','starting','waiting_email') AND rental_id IN (SELECT id FROM leases WHERE state IN ('failed','ending','completed'))",("$code",ParsecErrorCodes.LeaseEnded),("$now",now));
@@ -162,7 +169,7 @@ public sealed partial class ControllerDatabase {
             if(lease.Dto.State!="active"||lease.Dto.Revision!=expectedRevision||lease.Dto.PendingRevision is not null) throw new InvalidOperationException("Lease state or revision conflict");
             var revision=checked(expectedRevision+1);var expiry=lease.Dto.ExpiresAtUtc!.Value.AddSeconds(additionalSeconds).ToUnixTimeMilliseconds();
             ExecuteLease(tx,"UPDATE leases SET pending_revision=$revision,pending_expires_at=$expiry WHERE id=$id",("$revision",revision),("$expiry",expiry),("$id",rentalId));
-            AddCommand(tx,lease,"ApplyLease",revision,lease.Boot!,lease.Dto.ExpiresAtUtc.Value.ToUnixTimeMilliseconds(),new { startsAtUtc=lease.Dto.StartsAtUtc, expiresAtUtc=DateTimeOffset.FromUnixTimeMilliseconds(expiry) });
+            AddApplyLeaseCommand(tx,lease,revision,lease.Boot!,lease.Dto.ExpiresAtUtc.Value.ToUnixTimeMilliseconds(),new { startsAtUtc=lease.Dto.StartsAtUtc, expiresAtUtc=DateTimeOffset.FromUnixTimeMilliseconds(expiry) });
             SaveRequest(tx,scope,idempotencyKey,fp,rentalId);
             var result=FindLease(tx,rentalId)!.Dto;tx.Commit();return result;
         }

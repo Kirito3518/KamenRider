@@ -30,6 +30,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
+import { MoonlightMark } from "@/components/brands/streaming-logos";
 import { leaseApi, leaseErrorMessage } from "@/components/my-machines/lease-api";
 import type {
   Lease,
@@ -242,7 +243,10 @@ export function MoonlightDialog({
         className="max-h-[calc(100dvh-2rem)] overflow-y-auto"
       >
         <DialogHeader className="pr-8">
-          <DialogTitle>เชื่อมต่อด้วย Moonlight</DialogTitle>
+          <DialogTitle className="flex items-center gap-2">
+            <MoonlightMark className="size-6 text-status-available" />
+            เชื่อมต่อด้วย Moonlight
+          </DialogTitle>
           <DialogDescription>
             คัดลอกที่อยู่ด้านบนไปเพิ่มใน Moonlight แล้วกรอก PIN 4 หลักที่
             Moonlight แสดง

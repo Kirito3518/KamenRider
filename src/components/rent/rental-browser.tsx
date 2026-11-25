@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { MonitorX } from "lucide-react";
+import toast from "react-hot-toast";
 import { Navbar } from "@/components/ui/layout/Navbar";
 import { Footer } from "@/components/ui/layout/Footer";
 import { Button } from "@/components/ui/button";
@@ -23,11 +24,11 @@ import {
   EmptyTitle,
 } from "@/components/ui/empty";
 import { useLandingMotion } from "@/hooks/use-landing-motion";
+import { useRentalMachines } from "@/hooks/use-rental-machines";
 import {
   filterMachines,
   type MachineFilter,
   type MachineSort,
-  type RentalMachine,
 } from "@/lib/rental-machines";
 import { MachineCard } from "@/components/rent/machine-card";
 import { RentalDialog } from "@/components/rent/rental-dialog";
@@ -48,49 +49,28 @@ export function RentalBrowser() {
   const pageRef = useLandingMotion();
   const [filter, setFilter] = useState<MachineFilter>("all");
   const [sort, setSort] = useState<MachineSort>("name");
-  const [selected, setSelected] = useState<RentalMachine | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
   const rentTriggerRef = useRef<HTMLButtonElement>(null);
-  const [rentalMachines, setMachines] = useState<
-    import("@/lib/rental-machines").RentalMachine[]
-  >([]);
-  const [loadMessage, setLoadMessage] = useState("");
-  const [loading, setLoading] = useState(true);
+  const { machines: rentalMachines, loading, live, error } = useRentalMachines();
+  const selected =
+    selectedId === null
+      ? null
+      : rentalMachines.find((machine) => machine.id === selectedId) ?? null;
+  const selectedMissing = selectedId !== null && selected === null;
+
+  // A machine can drop out of the public list (maintenance, disabled, price
+  // change, Controller offline). Close the dialog and tell the customer. The
+  // state update is deferred one tick so it is a reaction to the machine list
+  // changing rather than a synchronous state write inside the effect body.
   useEffect(() => {
-    let active = true;
-    let current: AbortController | undefined;
-    async function refresh() {
-      current?.abort();
-      const abort = new AbortController();
-      current = abort;
-      try {
-        const response = await fetch("/api/machines", { cache: "no-store", signal: abort.signal });
-        if (!response.ok) throw new Error();
-        const machines = await response.json();
-        if (active && !abort.signal.aborted) {
-          setMachines(machines);
-          setSelected((selected) => selected ? machines.find((machine: RentalMachine) => machine.id === selected.id && machine.status === "available") ?? null : null);
-          setLoadMessage("");
-          setLoading(false);
-        }
-      } catch {
-        if (active && !abort.signal.aborted) {
-          setMachines([]);
-          setSelected(null);
-          setLoadMessage("ติดต่อระบบเครื่องไม่ได้ กรุณาลองใหม่");
-          setLoading(false);
-        }
-      }
-    }
-    void refresh();
-    const interval = window.setInterval(refresh, 15000);
-    window.addEventListener("focus", refresh);
-    return () => {
-      active = false;
-      current?.abort();
-      window.clearInterval(interval);
-      window.removeEventListener("focus", refresh);
-    };
-  }, []);
+    if (!selectedMissing) return;
+    const timeout = window.setTimeout(() => {
+      setSelectedId(null);
+      toast.error("เครื่องที่เลือกไม่พร้อมให้เช่าแล้ว กรุณาเลือกเครื่องอื่น");
+    }, 0);
+    return () => window.clearTimeout(timeout);
+  }, [selectedMissing]);
+
   const available = rentalMachines.filter(
     (machine) => machine.status === "available",
   ).length;
@@ -100,6 +80,7 @@ export function RentalBrowser() {
     unavailable: rentalMachines.length - available,
   };
   const results = filterMachines(rentalMachines, filter, sort);
+  const loadMessage = error ?? "";
 
   function resetFilters() {
     setFilter("all");
@@ -143,7 +124,31 @@ export function RentalBrowser() {
           </dl>
         </header>
 
-        {loadMessage ? (
+        {!loading && rentalMachines.length > 0 ? (
+          loadMessage ? (
+            <p role="status" className="mt-5 text-sm text-destructive">
+              {loadMessage}
+            </p>
+          ) : (
+            <p
+              role="status"
+              className="mt-5 flex items-center gap-2 text-xs text-muted-foreground"
+            >
+              <span
+                aria-hidden
+                className={
+                  live
+                    ? "size-2 rounded-full bg-status-available"
+                    : "size-2 rounded-full bg-muted-foreground"
+                }
+              />
+              {live
+                ? "เชื่อมต่อแบบเรียลไทม์ · สถานะอัปเดตทันที"
+                : "โหมดสำรอง · อัปเดตทุก 3 วินาที"}
+            </p>
+          )
+        ) : null}
+        {!loading && rentalMachines.length === 0 && loadMessage ? (
           <p role="status" className="mt-5 text-sm text-destructive">
             {loadMessage}
           </p>
@@ -218,7 +223,7 @@ export function RentalBrowser() {
                           machine={machine}
                           onSelect={(selectedMachine, trigger) => {
                             rentTriggerRef.current = trigger;
-                            setSelected(selectedMachine);
+                            setSelectedId(selectedMachine.id);
                           }}
                         />
                       ))}
@@ -251,7 +256,8 @@ export function RentalBrowser() {
       <Footer />
       <RentalDialog
         machine={selected}
-        onClose={() => setSelected(null)}
+        available={selected ? selected.status === "available" : true}
+        onClose={() => setSelectedId(null)}
         returnFocusRef={rentTriggerRef}
       />
     </div>

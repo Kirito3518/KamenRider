@@ -4,6 +4,7 @@ import {
   fireEvent,
   render,
   screen,
+  within,
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MyMachines } from "@/components/my-machines/my-machines";
@@ -90,11 +91,18 @@ function deferred<T>() {
 describe("MyMachines", () => {
   let fetchSpy: ReturnType<typeof vi.fn>;
   let leases: unknown[];
+  let balanceSatang: number;
   let leaseListRequests: number;
   let visibilityDescriptor: PropertyDescriptor | undefined;
 
+  /** The lease feed returns `{ leases, balanceSatang }` after settling refunds. */
+  function listResponse(nextLeases: unknown[] = leases) {
+    return response({ leases: nextLeases, balanceSatang });
+  }
+
   beforeEach(() => {
     authState.balanceSatang = 100_000;
+    balanceSatang = 100_000;
     vi.useFakeTimers({
       toFake: ["setInterval", "clearInterval", "Date"],
       now: NOW,
@@ -110,7 +118,7 @@ describe("MyMachines", () => {
       const url = String(input);
       if (url === "/api/my-leases") {
         leaseListRequests += 1;
-        return response(leases);
+        return listResponse();
       }
       throw new Error(`Unexpected request: ${url}`);
     });
@@ -162,6 +170,8 @@ describe("MyMachines", () => {
     expect(screen.getByText("กำลังใช้งาน")).toBeDefined();
     expect(screen.getByText("฿800.00")).toBeDefined();
     expect(screen.getByText("฿400.00 / ชม.")).toBeDefined();
+    // The wallet is shown from the locally tracked balance.
+    expect(screen.getByText("฿1,000.00")).toBeDefined();
     // The ip:port lives in the Moonlight dialog, not on the card itself.
     expect(screen.queryByText("203.0.113.7:47989")).toBeNull();
   });
@@ -301,25 +311,74 @@ describe("MyMachines", () => {
     expect((parsecButton as HTMLButtonElement).disabled).toBe(false);
   });
 
-  it("disables Parsec when the Agent has not advertised it", async () => {
-    leases = [
-      lease({
-        parsec: {
-          available: false,
-          bootKeyId: null,
-          publicKey: null,
-          attempt: null,
-        },
-      }),
-    ];
+  it("opens Parsec when the Agent has not advertised it and explains why inside the dialog", async () => {
+    const notReady = {
+      available: false,
+      bootKeyId: null,
+      publicKey: null,
+      attempt: null,
+    };
+    leases = [lease({ parsec: notReady })];
+    fetchSpy.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/my-leases") return listResponse();
+      if (url === "/api/my-leases/rental-1/parsec") return response(notReady);
+      throw new Error(`Unexpected request: ${url}`);
+    });
 
     render(<MyMachines />);
 
     const parsecButton = await screen.findByRole("button", {
       name: /Parsec/,
     });
-    expect((parsecButton as HTMLButtonElement).disabled).toBe(true);
+    // The button is no longer disabled: the dialog itself carries the explanatory alert.
+    expect((parsecButton as HTMLButtonElement).disabled).toBe(false);
     expect(screen.getByText("ยังไม่พร้อม")).toBeDefined();
+
+    fireEvent.click(parsecButton);
+
+    const dialog = await screen.findByRole("dialog");
+    expect(
+      await within(dialog).findByText("เครื่องนี้ยังไม่พร้อมสำหรับ Parsec"),
+    ).toBeDefined();
+    expect(within(dialog).queryByLabelText("อีเมล Parsec")).toBeNull();
+  });
+
+  it("shows an expired Parsec attempt as a timeout with a retry path, not an endless spinner", async () => {
+    const parsecState = {
+      available: true,
+      bootKeyId: "boot-key-1",
+      publicKey: "public-key",
+      attempt: {
+        attemptId: "attempt-1",
+        state: "starting",
+        errorCode: null,
+        message: null,
+        createdAtUtc: "2026-11-08T03:24:00.000Z",
+        updatedAtUtc: "2026-11-08T03:24:00.000Z",
+        expiresAtUtc: "2026-11-08T03:26:00.000Z",
+      },
+    };
+    leases = [lease({ parsec: parsecState })];
+    fetchSpy.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/my-leases") return listResponse();
+      // The read path may still race with the Agent; keep reporting the stale running attempt.
+      if (url === "/api/my-leases/rental-1/parsec") return response(parsecState);
+      throw new Error(`Unexpected request: ${url}`);
+    });
+
+    render(<MyMachines />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /Parsec/ }));
+
+    const dialog = await screen.findByRole("dialog");
+    expect(
+      await within(dialog).findByText(/หมดเวลารอผลจากเครื่อง/),
+    ).toBeDefined();
+    expect(within(dialog).queryByLabelText("Loading")).toBeNull();
+    fireEvent.click(within(dialog).getByRole("button", { name: "ลองใหม่" }));
+    expect(await within(dialog).findByLabelText("อีเมล Parsec")).toBeDefined();
   });
 
   it("removes leases omitted by an authoritative refresh", async () => {
@@ -341,7 +400,7 @@ describe("MyMachines", () => {
           : leases.filter(
               (item) => (item as { id: string }).id === "rental-1",
             );
-      return response(leases);
+      return listResponse();
     });
 
     render(<MyMachines />);
@@ -373,7 +432,7 @@ describe("MyMachines", () => {
     });
     expect(fetchSpy).toHaveBeenCalledTimes(1);
 
-    firstRequest.resolve(response(leases));
+    firstRequest.resolve(listResponse());
     await act(async () => {
       await Promise.resolve();
       await Promise.resolve();
@@ -402,13 +461,74 @@ describe("MyMachines", () => {
     expect(fetchSpy).toHaveBeenCalledTimes(3);
   });
 
+  it("updates the header balance from polling and announces an unexpected refund", async () => {
+    render(<MyMachines />);
+
+    await screen.findByRole("heading", { level: 2, name: "PC ONE" });
+    expect(screen.getByText("฿1,000.00")).toBeDefined();
+    expect(screen.queryByText(/คืนเงินค่าเช่าที่ไม่ได้ใช้/)).toBeNull();
+
+    // The list route settled an unused-time refund before responding.
+    balanceSatang = 102_667;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3_000);
+    });
+
+    expect(
+      await screen.findByText(
+        "คืนเงินค่าเช่าที่ไม่ได้ใช้ ฿26.67 เข้ายอดเงินแล้ว",
+      ),
+    ).toBeDefined();
+    expect(screen.getByText("฿1,026.67")).toBeDefined();
+  });
+
+  it("does not announce a poll-driven refund while a local mutation is in flight", async () => {
+    const extendRequest = deferred<Response>();
+    fetchSpy.mockImplementation(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url === "/api/my-leases") return listResponse();
+        if (url === "/api/my-leases/rental-1/extend") {
+          expect(init?.method).toBe("POST");
+          return extendRequest.promise;
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      },
+    );
+
+    render(<MyMachines />);
+    fireEvent.click(await screen.findByRole("button", { name: "ต่อเวลา" }));
+    fireEvent.click(screen.getByRole("button", { name: "ยืนยันต่อเวลา" }));
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    // A refund-looking poll response that lands during the extend must be dropped.
+    balanceSatang = 110_000;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(9_000);
+    });
+    expect(screen.queryByText(/คืนเงินค่าเช่าที่ไม่ได้ใช้/)).toBeNull();
+
+    extendRequest.resolve(response(leases[0]));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(
+      await screen.findByText("ต่อเวลาแล้ว รอเครื่องยืนยันการเปลี่ยนแปลง"),
+    ).toBeDefined();
+  });
+
   it("extends a rental through the dialog and keeps the pending ACK visible", async () => {
     const initial = lease();
     leases = [initial];
     fetchSpy.mockImplementation(
       async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
-        if (url === "/api/my-leases") return response(leases);
+        if (url === "/api/my-leases") return listResponse();
         if (url === "/api/my-leases/rental-1/extend") {
           expect(JSON.parse(String(init?.body))).toMatchObject({
             additionalSeconds: 7_200,
@@ -444,8 +564,64 @@ describe("MyMachines", () => {
     ).toBe(true);
   });
 
+  it("applies the cancel response balance without reporting an unexpected refund", async () => {
+    const refreshGate = deferred<Response>();
+    let listRequests = 0;
+    fetchSpy.mockImplementation(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url === "/api/my-leases") {
+          listRequests += 1;
+          // Keep the post-cancel refresh pending so the confirmation stays mounted.
+          return listRequests === 1 ? listResponse() : refreshGate.promise;
+        }
+        if (url === "/api/my-leases/rental-1/cancel") {
+          expect(JSON.parse(String(init?.body))).toMatchObject({
+            expectedRevision: 1,
+          });
+          balanceSatang = 102_667;
+          return response({
+            lease: { id: "rental-1", state: "cancelled" },
+            refundedSatang: 2_667,
+            paymentRefundedSatang: 2_667,
+            balanceSatang,
+          });
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      },
+    );
+
+    render(<MyMachines />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "ยกเลิกการเช่า" }),
+    );
+    const dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "ยืนยันยกเลิก" }),
+    );
+
+    expect(await screen.findByText("ยกเลิกแล้ว คืนเงิน ฿26.67")).toBeDefined();
+    expect(screen.getByText("฿1,026.67")).toBeDefined();
+    // The refund came from this local cancel, so the poll-driven banner stays quiet.
+    expect(screen.queryByText(/คืนเงินค่าเช่าที่ไม่ได้ใช้/)).toBeNull();
+
+    // Let the authoritative refresh land: the cancelled card disappears.
+    leases = [];
+    await act(async () => {
+      refreshGate.resolve(
+        response({ leases, balanceSatang: 102_667 }),
+      );
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(
+      await screen.findByText("ยังไม่มีเครื่องที่กำลังเช่า"),
+    ).toBeDefined();
+    expect(screen.queryByText(/คืนเงินค่าเช่าที่ไม่ได้ใช้/)).toBeNull();
+  });
+
   it("blocks extension when the remaining balance is too low", async () => {
     authState.balanceSatang = 1_000;
+    balanceSatang = 1_000;
     leases = [lease({ payment: payment({ hourlyPriceSatang: 40_000 }) })];
 
     render(<MyMachines />);

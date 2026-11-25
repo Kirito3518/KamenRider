@@ -7,9 +7,10 @@
     "build": "next build --webpack",
     "start": "next start",
     "lint": "eslint",
-    "test:machines": "vitest run --configLoader runner tests/machines-manager.test.tsx tests/agent-releases-manager.test.tsx && node --test tests/admin-vnc-target-drafts.test.mjs tests/agent-install-vnc-source.test.mjs tests/agent-install-expiry.test.mjs tests/agent-install-script.test.mjs && node tests/run-machines.mjs",
+    "test:machines": "vitest run --configLoader runner tests/machines-manager.test.tsx tests/agent-releases-manager.test.tsx tests/pc-control.test.tsx tests/pc-control-routes.test.ts tests/pc-control-vnc.test.tsx tests/vnc-ticket-route.test.ts tests/admin-vnc-viewer.test.tsx && node --test tests/admin-vnc-target-drafts.test.mjs tests/agent-install-vnc-source.test.mjs tests/agent-install-expiry.test.mjs tests/agent-install-script.test.mjs && node tests/run-machines.mjs",
     "test:rentals": "vitest run --configLoader runner tests/rental-dialog.test.tsx tests/rental-history.test.tsx tests/admin-rentals-manager.test.tsx tests/rentals-route.test.ts tests/my-machines.test.tsx tests/my-machines-dialogs.test.tsx tests/parsec-route.test.ts tests/my-leases-route.test.ts && node --test tests/rental-ledger.test.mjs",
     "test:topups": "vitest run --configLoader runner tests/topup-db.test.ts tests/topup-providers.test.ts tests/topup-routes.test.ts tests/topup-verify.test.ts tests/topup-banks.test.ts tests/topup-ui.test.tsx tests/customer-history.test.tsx tests/topup-admin-settings.test.tsx tests/admin-topups-manager.test.tsx",
+    "test:realtime": "vitest run --configLoader runner tests/public-machines-route.test.ts tests/public-machines-mapping.test.ts tests/machines-live-hub.test.ts tests/public-machines-stream-route.test.ts tests/rental-browser.test.tsx tests/rental-dialog.test.tsx tests/rental-machine-card.test.tsx",
     "test:auth": "node tests/run-auth.mjs"
   },
   "dependencies": {

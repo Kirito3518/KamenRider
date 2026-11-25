@@ -13,6 +13,22 @@ public sealed partial class ControllerDatabase {
         ExecuteLease(tx,"UPDATE leases SET boot_id=$boot WHERE id=$id",("$boot",boot),("$id",lease.Dto.Id));
         AddCommand(tx,lease,"PrepareMachine",1,boot,lease.PreparationDeadline,new {});
     }
+    /// <summary>
+    /// Queues an ApplyLease command for a revision. When a previous ApplyLease for the same
+    /// rental/revision is still on the dead outbox (expired, failed or invalidated after the
+    /// optimistic pending lock was released), the row is revived instead of inserting a duplicate
+    /// that would violate UNIQUE(rental_id,type,lease_revision).
+    /// </summary>
+    private string AddApplyLeaseCommand(SqliteTransaction tx,LeaseRow lease,long revision,string boot,long validUntil,object payload) {
+        var payloadJson=JsonSerializer.Serialize(payload);
+        using(var existing=LeaseCommand(tx,"SELECT command_id FROM command_outbox WHERE rental_id=$rental AND type='ApplyLease' AND lease_revision=$revision AND status IN ('expired','failed','invalidated') ORDER BY rowid DESC LIMIT 1",("$rental",lease.Dto.Id),("$revision",revision))) {
+            if(existing.ExecuteScalar() is string previousId) {
+                ExecuteLease(tx,"UPDATE command_outbox SET status='pending',boot_id=$boot,valid_until=$until,payload=$payload,error_code=NULL WHERE command_id=$id",("$boot",boot),("$until",validUntil),("$payload",payloadJson),("$id",previousId));
+                return previousId;
+            }
+        }
+        return AddCommand(tx,lease,"ApplyLease",revision,boot,validUntil,payload);
+    }
     private CommandEnvelope[] PendingCommands(SqliteTransaction tx,string machineId,string boot) {
         if (IsRestoreQuarantined(tx)) return [];
         using var cmd=LeaseCommand(tx,"SELECT command_id,type,rental_id,lease_revision,boot_id,valid_until,payload FROM command_outbox WHERE machine_id=$id AND boot_id=$boot AND status='pending' ORDER BY rowid",("$id",machineId),("$boot",boot));

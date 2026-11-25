@@ -12,7 +12,7 @@ import { MoonlightDialog } from "@/components/my-machines/moonlight-dialog";
 import { ParsecDialog } from "@/components/my-machines/parsec-dialog";
 import { ExtendRentalDialog } from "@/components/my-machines/extend-rental-dialog";
 import type { Lease } from "@/lib/machine-contracts";
-import type { ParsecLeaseState } from "@/lib/parsec-contracts";
+import type { ParsecAttempt, ParsecLeaseState } from "@/lib/parsec-contracts";
 
 const toast = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn() }));
 vi.mock("react-hot-toast", () => ({ default: toast }));
@@ -67,8 +67,9 @@ function response(body: unknown, status = 200) {
 
 function attempt(
   attemptId: string,
-  state: "queued" | "starting" | "waiting_email" | "ready" | "failed",
-) {
+  state: ParsecAttempt["state"],
+  overrides: Partial<ParsecAttempt> = {},
+): ParsecAttempt {
   return {
     attemptId,
     state,
@@ -77,6 +78,7 @@ function attempt(
     createdAtUtc: new Date(NOW).toISOString(),
     updatedAtUtc: new Date(NOW).toISOString(),
     expiresAtUtc: ATTEMPT_EXPIRY,
+    ...overrides,
   };
 }
 
@@ -343,10 +345,10 @@ describe("ParsecDialog", () => {
         ).disabled,
       ).toBe(false),
     );
-    // The alert is acknowledgement-only: no cancel/close control and Escape is ignored.
-    expect(within(alert).getAllByRole("button")).toHaveLength(1);
-    fireEvent.keyDown(document, { key: "Escape" });
-    expect(screen.queryByRole("alertdialog")).not.toBeNull();
+    // The alert is dismissible: close button plus the round-two action. It must not trap the
+    // customer for the whole attempt.
+    expect(within(alert).getAllByRole("button")).toHaveLength(2);
+    expect(within(alert).getByRole("button", { name: "ปิด" })).toBeDefined();
 
     fireEvent.click(
       within(alert).getByRole("button", { name: "ยืนยันอีเมลแล้ว" }),
@@ -376,6 +378,101 @@ describe("ParsecDialog", () => {
       expect(screen.queryByRole("alertdialog")).toBeNull(),
     );
     expect(await screen.findByText("เชื่อมต่อ Parsec สำเร็จแล้ว")).toBeDefined();
+  });
+
+  it("lets the customer dismiss the e-mail alert while polling continues in the main dialog", async () => {
+    fetchSpy.mockImplementation(
+      async (_input: RequestInfo | URL, init?: RequestInit) => {
+        if (init?.method !== "POST") return response(parsecState);
+        const first = attempt("attempt-1", "queued");
+        parsecState = { ...parsecState, attempt: first };
+        return response(first);
+      },
+    );
+
+    renderDialog();
+    fireEvent.change(await screen.findByLabelText("อีเมล Parsec"), {
+      target: { value: "renter@example.com" },
+    });
+    fireEvent.change(screen.getByLabelText("รหัสผ่าน Parsec"), {
+      target: { value: "secret-password" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "เชื่อมต่อ Parsec" }));
+
+    await screen.findByRole("alertdialog");
+    // Escape closes the acknowledgement alert (no trap).
+    fireEvent.keyDown(document, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
+    // The main dialog still shows the running attempt and keeps polling it.
+    expect(screen.getByText("กำลังส่งคำขอไปยังเครื่อง")).toBeDefined();
+
+    parsecState = {
+      ...parsecState,
+      attempt: attempt("attempt-1", "ready"),
+    };
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_000);
+    });
+
+    expect(await screen.findByText("เชื่อมต่อ Parsec สำเร็จแล้ว")).toBeDefined();
+    expect(toast.success).toHaveBeenCalledWith("เชื่อมต่อ Parsec สำเร็จ");
+  });
+
+  it.each(["queued", "starting", "waiting_email"] as const)(
+    "treats an expired %s attempt as a terminal timeout instead of an endless spinner",
+    async (state) => {
+      parsecState = {
+        ...parsecState,
+        attempt: attempt("attempt-expired", state, {
+          expiresAtUtc: "2026-11-08T03:25:00.000Z",
+        }),
+      };
+      fetchSpy.mockImplementation(async (_input, init) => {
+        if (init?.method !== "POST") return response(parsecState);
+        throw new Error("Unexpected POST");
+      });
+
+      renderDialog();
+
+      expect(
+        await screen.findByText(/หมดเวลารอผลจากเครื่อง/),
+      ).toBeDefined();
+      expect(screen.queryByLabelText("Loading")).toBeNull();
+      expect(
+        screen.queryByText("กำลังเข้าสู่ระบบ Parsec บนเครื่อง"),
+      ).toBeNull();
+      expect(
+        screen.queryByText("กำลังส่งคำขอไปยังเครื่อง"),
+      ).toBeNull();
+      // The retry path reveals the form again instead of spinning forever.
+      fireEvent.click(screen.getByRole("button", { name: "ลองใหม่" }));
+      expect(await screen.findByLabelText("อีเมล Parsec")).toBeDefined();
+    },
+  );
+
+  it("uses neutral actionable copy for a 409 instead of claiming e-mail verification", async () => {
+    fetchSpy.mockImplementation(
+      async (_input: RequestInfo | URL, init?: RequestInit) => {
+        if (init?.method !== "POST") return response(parsecState);
+        return response({ error: "Parsec login is already running" }, 409);
+      },
+    );
+
+    renderDialog();
+    fireEvent.change(await screen.findByLabelText("อีเมล Parsec"), {
+      target: { value: "renter@example.com" },
+    });
+    fireEvent.change(screen.getByLabelText("รหัสผ่าน Parsec"), {
+      target: { value: "secret-password" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "เชื่อมต่อ Parsec" }));
+
+    const message = await screen.findByText(/เริ่มเชื่อมต่อ Parsec ไม่ได้ในขณะนี้/);
+    expect(message.textContent).toContain("ถูกจำกัดจำนวนครั้ง");
+    expect(message.textContent).toContain("ยังไม่ได้เปิดใช้งาน Parsec");
+    // No e-mail-verification copy and no acknowledgement alert for a plain conflict.
+    expect(screen.queryByText(/ยืนยันอีเมล/)).toBeNull();
+    expect(screen.queryByRole("alertdialog")).toBeNull();
   });
 
   it("does not show e-mail confirmation controls before Parsec requires it", async () => {

@@ -113,6 +113,9 @@ describe("PcControl", () => {
     expect(screen.getByText("Alice")).toBeDefined();
     expect(screen.getByText(/01:00:00|00:59:5/)).toBeDefined();
     expect(calls.some((call) => call.url === VNC_TICKET_URL)).toBe(false);
+    expect(
+      (screen.getByRole("button", { name: "เปิดจอ" }) as HTMLButtonElement).disabled,
+    ).toBe(false);
 
     fireEvent.click(screen.getByRole("button", { name: "เปิดจอ" }));
     await waitFor(() => expect(calls.some((call) => call.url === VNC_TICKET_URL)).toBe(true));
@@ -120,6 +123,58 @@ describe("PcControl", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "ปิดจอ" }));
     await waitFor(() => expect(screen.queryByTitle("หน้าจอ VNC ของ pc-1")).toBeNull());
+  });
+
+  it("disables เปิดจอ when the admin-confirmed VNC target is missing, even if localIp exists", async () => {
+    const missingTarget = { ...machine, localIp: "192.0.2.10", vncLocalIp: null };
+    fetchSpy.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      calls.push({ url });
+      if (url === SNAPSHOT_URL)
+        return jsonResponse({
+          serverTimeUtc: new Date().toISOString(),
+          machines: [missingTarget],
+        });
+      throw new Error(`Unexpected fetch URL: ${url}`);
+    });
+
+    render(<PcControl />);
+    await screen.findByText("PC-01");
+
+    const button = screen.getByRole("button", { name: "เปิดจอ" }) as HTMLButtonElement;
+    expect(button.disabled).toBe(true);
+    expect(screen.getByText(/ยังไม่ได้ตั้งค่า VNC target/)).toBeDefined();
+    expect(
+      screen.getByRole("link", { name: "ตั้งค่า VNC target" }).getAttribute("href"),
+    ).toBe("/admin/machines");
+
+    fireEvent.click(button);
+    expect(calls.some((call) => call.url === VNC_TICKET_URL)).toBe(false);
+  });
+
+  it("disables เปิดจอ when the Agent heartbeat is stale", async () => {
+    const stale = {
+      ...machine,
+      lastSeenAt: new Date(Date.now() - 60_000).toISOString(),
+    };
+    fetchSpy.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      calls.push({ url });
+      if (url === SNAPSHOT_URL)
+        return jsonResponse({
+          serverTimeUtc: new Date().toISOString(),
+          machines: [stale],
+        });
+      throw new Error(`Unexpected fetch URL: ${url}`);
+    });
+
+    render(<PcControl />);
+    await screen.findByText("PC-01");
+
+    expect(
+      (screen.getByRole("button", { name: "เปิดจอ" }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+    expect(screen.getByText(/Agent ออฟไลน์/)).toBeDefined();
   });
 
   it("forces power off through the confirmation dialog", async () => {

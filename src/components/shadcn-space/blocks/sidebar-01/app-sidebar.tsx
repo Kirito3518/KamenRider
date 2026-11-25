@@ -23,7 +23,6 @@ export function AppSidebar() {
         { title: "ประวัติการเติมเงิน", href: "/admin/topups", icon: Wallet },
         { title: "Agent releases", href: "/admin/agent-releases", icon: Package },
         { title: "สมาชิก", href: "/admin/users", icon: Users },
-        { title: "ยอดเงินสมาชิก", href: "/admin/balances", icon: Wallet },
         { title: "ตั้งค่าเติมเงิน", href: "/admin/settings/topup", icon: Settings2 },
         { title: "ตั้งค่า Sunshine", href: "/admin/settings/sunshine", icon: KeyRound },
       ]} />

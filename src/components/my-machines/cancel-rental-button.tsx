@@ -13,17 +13,26 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
-import { formatBalance } from "@/lib/money";
 import type { Lease } from "@/lib/machine-contracts";
-import { cancelRental, leaseErrorMessage } from "@/components/my-machines/lease-api";
+import {
+  cancelRental,
+  cancelRentalMessage,
+  leaseErrorMessage,
+} from "@/components/my-machines/lease-api";
 
 export function CancelRentalButton({
   lease,
   onCancelled,
+  onMutationStart,
+  onMutationEnd,
   className,
 }: {
   lease: Lease;
-  onCancelled: () => void;
+  /** Receives the authoritative post-refund balance returned by the cancel route. */
+  onCancelled: (balanceSatang?: number) => void;
+  /** Optional hooks so the page can suppress poll-driven refund notices mid-request. */
+  onMutationStart?: () => void;
+  onMutationEnd?: () => void;
   className?: string;
 }) {
   const [open, setOpen] = useState(false);
@@ -36,25 +45,28 @@ export function CancelRentalButton({
     if (busy) return;
     setBusy(true);
     setError("");
+    onMutationStart?.();
     try {
       const result = await cancelRental(lease.id, lease.revision);
       setOpen(false);
-      setMessage(
-        result.refundedSatang > 0
-          ? `ยกเลิกแล้ว คืนเงิน ${formatBalance(result.refundedSatang)}`
-          : "ยกเลิกการเช่าแล้ว",
-      );
-      onCancelled();
+      setMessage(cancelRentalMessage(result));
+      onCancelled(result.balanceSatang);
     } catch (cause) {
       setError(leaseErrorMessage(cause));
     } finally {
       setBusy(false);
+      onMutationEnd?.();
     }
   }
 
   return (
     <span className={className}>
-      <Button variant="outline" size="sm" onClick={() => setOpen(true)} disabled={busy}>
+      <Button
+        variant="destructive"
+        size="sm"
+        onClick={() => setOpen(true)}
+        disabled={busy}
+      >
         <XCircle data-icon="inline-start" />
         ยกเลิกการเช่า
       </Button>

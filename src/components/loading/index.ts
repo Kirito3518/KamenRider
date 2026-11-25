@@ -19,6 +19,7 @@ export {
 } from "@/components/loading/skeleton-layouts";
 export {
   AccountPageSkeleton,
+  AdminOverviewPageSkeleton,
   AdminRentalsPageSkeleton,
   AdminShellSkeleton,
   AdminStatsTablePageSkeleton,

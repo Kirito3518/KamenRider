@@ -228,6 +228,37 @@ export function AdminTopupsPageSkeleton() {
   );
 }
 
+/** Loading preset for `/admin/overview` (status line, KPI rows, charts and lists). */
+export function AdminOverviewPageSkeleton() {
+  return (
+    <PageSkeleton label="กำลังโหลดภาพรวมระบบ">
+      <PageHeaderSkeleton withActions actionCount={2} />
+      <SkeletonBlock className="h-4 w-80 max-w-full" radius="rounded-full" />
+      <StatGridSkeleton count={4} />
+      <CardsGridSkeleton count={1} columns="grid-cols-1" rows={0} cardClassName="h-64" />
+      <div className="rounded-2xl border bg-card p-4">
+        <SkeletonBlock className="h-5 w-40" radius="rounded-full" />
+        <SkeletonBlock className="mt-2 h-3 w-56 max-w-full" radius="rounded-full" />
+        <div className="mt-4">
+          <TableSkeleton rows={5} columns={3} frame={false} />
+        </div>
+      </div>
+      <StatGridSkeleton count={5} columns="sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5" />
+      <CardsGridSkeleton count={2} columns="xl:grid-cols-2" rows={0} cardClassName="h-80" />
+      <div className="rounded-2xl border bg-card p-4">
+        <SkeletonBlock className="h-5 w-40" radius="rounded-full" />
+        <div className="mt-4">
+          <TableSkeleton rows={5} columns={6} frame={false} />
+        </div>
+      </div>
+      <StatGridSkeleton count={3} columns="sm:grid-cols-2 xl:grid-cols-3" />
+      <CardsGridSkeleton count={2} columns="xl:grid-cols-2" rows={0} cardClassName="h-80" />
+      <StatGridSkeleton count={4} />
+      <CardsGridSkeleton count={2} columns="xl:grid-cols-2" rows={0} cardClassName="h-80" />
+    </PageSkeleton>
+  );
+}
+
 /** Loading preset for `/admin/agent-releases` (KPI row and release lists). */
 export function AgentReleasesPageSkeleton() {
   return (

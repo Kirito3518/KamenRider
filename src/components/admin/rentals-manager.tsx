@@ -16,35 +16,16 @@ import {
 } from "lucide-react";
 import { motion, useReducedMotion } from "motion/react";
 import {
-  Bar,
-  BarChart,
-  CartesianGrid,
-  XAxis,
-  YAxis,
-} from "recharts";
-import {
   AdminCard,
   AdminPage,
   AdminPageHeader,
   AdminStatCard,
   AdminStatGrid,
 } from "@/components/admin/admin-page";
+import { RentalCharts } from "@/components/admin/rental-charts";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
-import {
-  ChartContainer,
-  ChartTooltip,
-  ChartTooltipContent,
-  type ChartConfig,
-} from "@/components/ui/chart";
 import {
   Empty,
   EmptyDescription,
@@ -118,26 +99,12 @@ const stateOptions: { value: RentalDisplayState | "all"; label: string }[] = [
   { value: "unknown", label: "ไม่ทราบสถานะ" },
 ];
 
-const revenueConfig = {
-  revenueBaht: { label: "รายได้สุทธิ (บาท)", color: "var(--primary)" },
-} satisfies ChartConfig;
-
-const countConfig = {
-  count: { label: "จำนวนรายการ", color: "var(--status-busy)" },
-} satisfies ChartConfig;
-
 function percentageHint(current: number, previous: number) {
   if (previous <= 0) return "ยังไม่มีข้อมูลเปรียบเทียบ";
   const change = ((current - previous) / previous) * 100;
   return `${change >= 0 ? "+" : ""}${change.toFixed(1)}% เทียบช่วงก่อนหน้า`;
 }
 
-function revenueChartData(response: AdminRentalHistoryResponse) {
-  return (response.chart ?? []).map((point) => ({
-    ...point,
-    revenueBaht: point.revenueSatang / 100,
-  }));
-}
 
 export function RentalsManager() {
   const reduceMotion = useReducedMotion();
@@ -216,10 +183,6 @@ export function RentalsManager() {
     Boolean(filters.q) ||
     filters.state !== "all" ||
     filters.machineId !== "all";
-  const chartData = data ? revenueChartData(data) : [];
-  const noChartData = chartData.every(
-    (point) => point.revenueBaht === 0 && point.count === 0,
-  );
 
   const cards = [
     {
@@ -429,82 +392,19 @@ export function RentalsManager() {
         ))}
       </AdminStatGrid>
 
-      <div className="grid items-start gap-4 xl:grid-cols-2">
-        <Card className="gap-3 rounded-2xl border shadow-none">
-          <CardHeader>
-            <CardTitle>รายได้จากการเช่าตามช่วงเวลา</CardTitle>
-            <CardDescription>{data?.filters.period === "custom" ? "ช่วงที่กำหนด" : "เปรียบเทียบกับช่วงก่อนหน้าเมื่อมีข้อมูล"}</CardDescription>
-            {data ? (
-              <p className="text-xs text-muted-foreground">
-                ช่วงก่อนหน้า: {formatBalance(data.chartPrevious.revenueSatang)} ·{" "}
-                {percentageHint(stats.revenueSatang, data.chartPrevious.revenueSatang)}
-              </p>
-            ) : null}
-          </CardHeader>
-          <CardContent>
-            {loading && !data ? (
-              <SkeletonBlock className="h-60 w-full" />
-            ) : noChartData ? (
-              <p className="flex h-60 items-center justify-center text-sm text-muted-foreground">
-                ยังไม่มีข้อมูลรายได้ในช่วงที่เลือก
-              </p>
-            ) : (
-              <ChartContainer
-                config={revenueConfig}
-                className="h-60 w-full aspect-auto"
-                initialDimension={{ width: 600, height: 240 }}
-                role="region"
-                aria-label="กราฟรายได้จากการเช่า"
-              >
-                <BarChart accessibilityLayer data={chartData} margin={{ top: 8, right: 8, bottom: 4, left: 0 }}>
-                  <CartesianGrid vertical={false} strokeDasharray="3 4" />
-                  <XAxis dataKey="label" tickLine={false} axisLine={false} tickMargin={10} minTickGap={16} tick={{ fontSize: 11, fill: "var(--muted-foreground)" }} />
-                  <YAxis tickLine={false} axisLine={false} tickMargin={8} tick={{ fontSize: 11, fill: "var(--muted-foreground)" }} tickFormatter={(value) => `฿${Number(value).toLocaleString("th-TH")}`} />
-                  <ChartTooltip content={<ChartTooltipContent />} />
-                  <Bar dataKey="revenueBaht" fill="var(--color-revenueBaht)" radius={[4, 4, 0, 0]} isAnimationActive={false} />
-                </BarChart>
-              </ChartContainer>
-            )}
-          </CardContent>
-        </Card>
-        <Card className="gap-3 rounded-2xl border shadow-none">
-          <CardHeader>
-            <CardTitle>จำนวนรายการเช่าตามช่วงเวลา</CardTitle>
-            <CardDescription>รายการที่ชำระแล้วจากฐานข้อมูล</CardDescription>
-            {data ? (
-              <p className="text-xs text-muted-foreground">
-                ช่วงก่อนหน้า: {data.chartPrevious.count.toLocaleString("th-TH")} รายการ ·{" "}
-                {percentageHint(stats.rentalCount, data.chartPrevious.count)}
-              </p>
-            ) : null}
-          </CardHeader>
-          <CardContent>
-            {loading && !data ? (
-              <SkeletonBlock className="h-60 w-full" />
-            ) : noChartData ? (
-              <p className="flex h-60 items-center justify-center text-sm text-muted-foreground">
-                ยังไม่มีข้อมูลรายการในช่วงที่เลือก
-              </p>
-            ) : (
-              <ChartContainer
-                config={countConfig}
-                className="h-60 w-full aspect-auto"
-                initialDimension={{ width: 600, height: 240 }}
-                role="region"
-                aria-label="กราฟจำนวนรายการเช่า"
-              >
-                <BarChart accessibilityLayer data={chartData} margin={{ top: 8, right: 8, bottom: 4, left: -16 }}>
-                  <CartesianGrid vertical={false} strokeDasharray="3 4" />
-                  <XAxis dataKey="label" tickLine={false} axisLine={false} tickMargin={10} minTickGap={16} tick={{ fontSize: 11, fill: "var(--muted-foreground)" }} />
-                  <YAxis allowDecimals={false} tickLine={false} axisLine={false} tickMargin={8} tick={{ fontSize: 11, fill: "var(--muted-foreground)" }} />
-                  <ChartTooltip content={<ChartTooltipContent />} />
-                  <Bar dataKey="count" fill="var(--color-count)" radius={[4, 4, 0, 0]} isAnimationActive={false} />
-                </BarChart>
-              </ChartContainer>
-            )}
-          </CardContent>
-        </Card>
-      </div>
+      {data ? (
+        <RentalCharts
+          chart={data.chart}
+          chartPrevious={data.chartPrevious}
+          current={{ revenueSatang: stats.revenueSatang, rentalCount: stats.rentalCount }}
+          previous={{ revenueSatang: previous.revenueSatang, rentalCount: previous.rentalCount }}
+        />
+      ) : (
+        <div className="grid items-start gap-4 xl:grid-cols-2">
+          <SkeletonBlock className="h-80 w-full" />
+          <SkeletonBlock className="h-80 w-full" />
+        </div>
+      )}
 
       <AdminCard>
         <div className="flex flex-wrap items-center justify-between gap-2 border-b p-4">
