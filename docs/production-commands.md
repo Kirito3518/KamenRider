@@ -144,7 +144,26 @@ Import-Certificate -FilePath "$Certs\caddy-root.crt" -CertStoreLocation Cert:\Lo
 
 ### VNC gateway ผ่าน origin เดียวกัน (จำเป็นเมื่อเบราว์เซอร์ต่อ Controller:7443 ตรงไม่ได้)
 
-VNC viewer เปิด WebSocket `wss://.../admin/vnc` ไปที่ Controller โดยตรง ถ้าแอดมินเข้าจากภายนอก LAN (เช่นผ่าน Cloudflare ที่ proxy เฉพาะ 443) ต้องให้ reverse proxy ส่งต่อ path นี้ไป Controller `https://127.0.0.1:7443` แล้วตั้ง `VNC_PUBLIC_WS_URL=wss://<public-host>/admin/vnc`:
+VNC viewer เปิด WebSocket `wss://.../admin/vnc` ไปที่ Controller โดยตรง ถ้าแอดมินเข้าจากภายนอก LAN (เช่นผ่าน Cloudflare ที่ proxy เฉพาะ 443) ต้องให้ reverse proxy ส่งต่อ path นี้ไป Controller `https://127.0.0.1:7443` แล้วตั้ง `VNC_PUBLIC_WS_URL=wss://<public-host>/admin/vnc`
+
+**วิธีที่แนะนำ (มีในโค้ด ไมต้องติดตั้ง Caddy เพิ่ม):** รันเว็บ production ด้วย custom server `node server.mjs` แทน `next start` — มันเสิร์ฟ Next เหมือนเดิมและ proxy WebSocket `/admin/vnc` ไป `VNC_PROXY_TARGET` (ค่าเริ่มต้น `https://127.0.0.1:7443`, ไม่ตรวจ certificate ของ Controller เพราะ TLS ฝั่ง public ถูก terminate ที่ Cloudflare/Caddy) โดย:
+
+```powershell
+# .env.local
+VNC_PUBLIC_WS_URL=wss://<public-host>/admin/vnc
+VNC_PROXY_TARGET=https://127.0.0.1:7443
+# ถ้า certificate ของ Controller ใช้ชื่อ/IP อื่น ให้ระบุ SNI:
+# VNC_PROXY_SERVERNAME=192.168.1.100
+```
+
+```powershell
+# Task/launcher ของเว็บ (working directory = repo)
+$env:NODE_ENV='production'; $env:PORT='3000'; node server.mjs
+```
+
+Cloudflare Tunnel ยังชี้ `http://127.0.0.1:3000` เหมือนเดิม; ไม่ต้องเปิดพอร์ต 7443 สู่อินเทอร์เน็ต
+
+ทางเลือกถ้าไม่ใช้ custom server: ใช้ Caddy proxy path เองตามตัวอย่างนี้
 
 ```caddyfile
 https://$MotherIp {
