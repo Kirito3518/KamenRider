@@ -1,4 +1,5 @@
 import { Suspense } from "react";
+import { connection } from "next/server";
 import { LayoutDashboard } from "lucide-react";
 import { AdminPage, AdminPageHeader } from "@/components/admin/admin-page";
 import { OverviewControls } from "@/components/admin/overview/overview-controls";
@@ -34,6 +35,9 @@ async function OverviewHeaderControls({
   searchParams: OverviewSectionSearchParams;
 }) {
   const filters = flattenOverviewSearchParams(await searchParams);
+  // The period picker resolves the default range with Date.now(); make that
+  // request-time before the Cache Components shell prerender evaluates it.
+  await connection();
   const range = resolveOverviewRange(filters);
   return <OverviewControls period={range.period} from={range.from} to={range.to} />;
 }

@@ -1,4 +1,5 @@
 import "server-only";
+import { connection } from "next/server";
 import type Database from "better-sqlite3";
 import type { AdminMember, MemberTotals } from "@/lib/admin";
 import { readMemberTotals } from "@/lib/admin";
@@ -74,6 +75,9 @@ export async function getAdminOverviewStatus(
   raw: OverviewSearchParams,
 ): Promise<OverviewRange> {
   await requireAdminSession();
+  // `Date.now()` below is request data: without an explicit dynamic access the
+  // Cache Components prerender logs "unstable value Date.now()" for the shell.
+  await connection();
   const filters = flattenOverviewSearchParams(raw);
   const now = Date.now();
   const range = resolveOverviewRange(filters, now);
@@ -406,6 +410,7 @@ export type OverviewMachines = {
 
 async function readSummarizedMachines(): Promise<OverviewMachines> {
   const session = await requireAdminSession();
+  await connection();
   const now = Date.now();
   let snapshot: { available: boolean; machines: Machine[] } = { available: false, machines: [] };
   try {
