@@ -50,12 +50,17 @@ try {
     $shaUrl = "$base/agent/AgentPackage.sha256"
 
     Write-Step 'Preflight'
-    foreach ($name in @($ServiceName, $GuardServiceName)) {
-        $service = Get-Service -Name $name -ErrorAction SilentlyContinue
-        if (-not $service) {
-            throw "Service '$name' is not installed. Run the normal one-click installer first."
-        }
+    # `KamenRaider Agent` is the only service modern installs create. The old
+    # `KamenRaider Stream Guard` service is legacy (removed by the one-click
+    # installer and Cleanup-AgentInstall.ps1), so treat it as optional instead of
+    # failing the whole upgrade on machines that never had it.
+    $agentService = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+    if (-not $agentService) {
+        throw "Service '$ServiceName' is not installed. Run the normal one-click installer first."
     }
+    $guardService = Get-Service -Name $GuardServiceName -ErrorAction SilentlyContinue
+    $managedServiceNames = @($ServiceName)
+    if ($guardService) { $managedServiceNames += $GuardServiceName }
     if (-not (Test-Path -LiteralPath (Join-Path $InstallDir 'Agent.exe'))) {
         throw "Agent.exe was not found in '$InstallDir'. Run the normal one-click installer first."
     }
@@ -65,7 +70,7 @@ try {
 
     if ($Plan) {
         Write-Ok "Would download $packageUrl and update $InstallDir"
-        Write-Ok "Would stop '$ServiceName' and '$GuardServiceName', then restart both"
+        Write-Ok ("Would stop and restart: " + ($managedServiceNames -join ', '))
         Write-Ok 'Machine identity, enrollment ticket and receipt stay untouched under the data directory'
         return
     }
@@ -97,12 +102,12 @@ try {
         }
 
         Write-Step 'Back up the current installation'
-        Copy-Item -LiteralPath (Join-Path $InstallDir '*') -Destination $backupDir -Recurse -Force
+        Copy-Item -Path (Join-Path $InstallDir '*') -Destination $backupDir -Recurse -Force
         Write-Ok "Backup: $backupDir"
 
         Write-Step 'Stop Agent services'
         $originalStartTypes = @{}
-        foreach ($name in @($ServiceName, $GuardServiceName)) {
+        foreach ($name in $managedServiceNames) {
             $service = Get-Service -Name $name
             $originalStartTypes[$name] = $service.StartType
             if ($service.Status -ne 'Stopped') {
@@ -110,7 +115,7 @@ try {
                 Stop-Service -Name $name -Force
             }
         }
-        foreach ($name in @($ServiceName, $GuardServiceName)) {
+        foreach ($name in $managedServiceNames) {
             for ($i = 0; $i -lt 30; $i++) {
                 if ((Get-Service -Name $name).Status -eq 'Stopped') { break }
                 Start-Sleep -Seconds 1
@@ -135,11 +140,13 @@ try {
 
         Write-Step 'Start services'
         try {
-            foreach ($name in @($GuardServiceName, $ServiceName)) {
+            foreach ($name in $managedServiceNames) {
                 Set-Service -Name $name -StartupType $originalStartTypes[$name]
             }
-            Start-Service -Name $GuardServiceName
-            Start-Sleep -Seconds 2
+            if ($guardService) {
+                Start-Service -Name $GuardServiceName
+                Start-Sleep -Seconds 2
+            }
             Start-Service -Name $ServiceName
             for ($i = 0; $i -lt 30; $i++) {
                 if ((Get-Service -Name $ServiceName).Status -eq 'Running') { break }
@@ -151,8 +158,8 @@ try {
         } catch {
             Write-Host 'New binaries failed to start; rolling back...' -ForegroundColor Yellow
             Get-Process -Name Agent -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-            Copy-Item -LiteralPath (Join-Path $backupDir '*') -Destination $InstallDir -Recurse -Force
-            foreach ($name in @($GuardServiceName, $ServiceName)) {
+            Copy-Item -Path (Join-Path $backupDir '*') -Destination $InstallDir -Recurse -Force
+            foreach ($name in $managedServiceNames) {
                 Set-Service -Name $name -StartupType $originalStartTypes[$name]
                 Start-Service -Name $name -ErrorAction SilentlyContinue
             }
@@ -161,12 +168,13 @@ try {
 
         Write-Host ''
         Write-Step 'Result'
-        Get-Service -Name $ServiceName, $GuardServiceName |
+        Get-Service -Name $managedServiceNames |
             Select-Object Name, Status, StartType | Format-Table -AutoSize
         $versionFile = Join-Path $InstallDir 'Agent.dll'
         if (Test-Path -LiteralPath $versionFile) {
-            $version = [Diagnostics.FileVersionInfo]::GetVersionInfo($versionFile).FileVersion
-            Write-Ok "Installed Agent.dll version: $version"
+            # ProductVersion carries the build commit; FileVersion is always 1.0.0.0.
+            $version = [Diagnostics.FileVersionInfo]::GetVersionInfo($versionFile).ProductVersion
+            Write-Ok "Installed Agent.dll product version: $version"
         }
         Write-Ok 'Enrollment identity and ticket were not modified. Wait ~30 seconds, then refresh /admin/machines.'
     } finally {
@@ -175,6 +183,8 @@ try {
 } catch {
     Write-Host ''
     Write-Host ("FAILED: " + $_.Exception.Message) -ForegroundColor Red
-    Write-Host 'Nothing was left half-installed: on any failure the previous binaries are restored.' -ForegroundColor Yellow
+    Write-Host 'The previous binaries were restored when the update had already stopped the services.' -ForegroundColor Yellow
+    # Keep the elevated window open so the failure text can actually be read.
+    if ($Host.Name -eq 'ConsoleHost') { Read-Host 'Press Enter to close this window' | Out-Null }
     exit 1
 }
