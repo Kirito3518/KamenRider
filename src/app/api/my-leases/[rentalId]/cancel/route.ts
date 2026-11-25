@@ -2,6 +2,7 @@ import { ControllerError } from "@/lib/controller-client";
 import { integer, machineApi, segment, text } from "@/lib/machine-api";
 import { getMemberBalance, settleRentalRefunds } from "@/lib/rental-payments";
 import { authDatabase, type ControllerLeaseRecord } from "@/lib/rental-service";
+import { legacyPaymentIdForLease } from "@/lib/legacy-lease-payments";
 
 function cancelError(error: unknown) {
   if (!(error instanceof ControllerError)) return null;
@@ -52,7 +53,10 @@ export async function POST(
         body: JSON.stringify({ expectedRevision, idempotencyKey }),
       });
       const database = await authDatabase();
-      const paymentId = lease.paymentId ?? before?.paymentId ?? rentalId;
+      // Older Controllers do not report paymentId; recover it read-only from the
+      // lease request mapping so the cancellation refund is credited immediately.
+      const paymentId =
+        lease.paymentId ?? before?.paymentId ?? legacyPaymentIdForLease(rentalId) ?? rentalId;
       // Settle with the resolved payment key so the refund lands even when the
       // Controller lease id differs from the rental payment id.
       const settled = settleRentalRefunds(database, [{ ...lease, paymentId }], {

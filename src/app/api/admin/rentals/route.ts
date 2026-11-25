@@ -24,6 +24,7 @@ import {
   readRentalRevenue,
 } from "@/lib/rental-history-admin";
 import { authDatabase, type ControllerLeaseRecord } from "@/lib/rental-service";
+import { fillLegacyLeasePaymentIds } from "@/lib/legacy-lease-payments";
 
 const ADMIN_LEASE_WINDOW = 500;
 
@@ -50,6 +51,9 @@ export function GET(request: Request) {
     } catch {
       controllerAvailable = false;
     }
+
+    // Compatibility with Controllers that do not expose LeaseDto.paymentId yet.
+    if (controllerAvailable) leases = fillLegacyLeasePaymentIds(leases);
 
     const paymentIdsForLeases = leases.map((lease) => lease.paymentId ?? lease.id);
     const payments = controllerAvailable

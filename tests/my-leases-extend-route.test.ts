@@ -12,6 +12,7 @@ const h = vi.hoisted(() => {
     ControllerError: MockControllerError,
     db: null as Database.Database | null,
     paymentId: "" as string,
+    legacyPaymentId: null as string | null,
   };
 });
 
@@ -56,6 +57,10 @@ vi.mock("@/lib/controller-client", () => ({
 
 vi.mock("@/lib/rental-service", () => ({
   authDatabase: async () => h.db,
+}));
+
+vi.mock("@/lib/legacy-lease-payments", () => ({
+  legacyPaymentIdForLease: () => h.legacyPaymentId,
 }));
 
 import { POST as postExtend } from "@/app/api/my-leases/[rentalId]/extend/route";
@@ -127,6 +132,7 @@ describe("POST /api/my-leases/[rentalId]/extend", () => {
   beforeEach(() => {
     process.env.BETTER_AUTH_URL = "http://localhost";
     h.controllerCall.mockReset();
+    h.legacyPaymentId = null;
     const db = new Database(":memory:");
     db.exec(
       "CREATE TABLE user(id TEXT PRIMARY KEY, balanceSatang INTEGER NOT NULL DEFAULT 0, updatedAt TEXT);",
@@ -184,6 +190,29 @@ describe("POST /api/my-leases/[rentalId]/extend", () => {
       expectedRevision: 1,
       idempotencyKey: IDEMPOTENCY_KEY,
     });
+  });
+
+  it("charges the right payment through the legacy mapping when an old Controller omits paymentId", async () => {
+    // Production Controller predates GET /internal/leases/{id} and LeaseDto.paymentId;
+    // the web recovers the payment id from lease_requests so extension still charges
+    // against the correct rental instead of the random Controller lease id.
+    h.legacyPaymentId = h.paymentId;
+    h.controllerCall.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path === "/internal/leases/lease-1" && !init?.method)
+        throw new h.ControllerError(404);
+      if (path === "/internal/leases/lease-1/extend" && init?.method === "POST")
+        return { id: "lease-1", state: "active", revision: 2, pendingRevision: 2 };
+      throw new h.ControllerError(404);
+    });
+
+    const response = await postExtend(
+      request({ additionalSeconds: 3_600, expectedRevision: 1, idempotencyKey: IDEMPOTENCY_KEY }),
+      params(),
+    );
+
+    expect(response.status).toBe(200);
+    expect(extensionRow(h.db!)).toMatchObject({ status: "charged", amount_satang: 4_000 });
+    expect(balance(h.db!)).toBe(92_000);
   });
 
   it("releases the extension charge when the Controller rejects it with 409", async () => {

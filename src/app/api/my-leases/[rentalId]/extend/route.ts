@@ -8,6 +8,7 @@ import {
   releaseRentalExtension,
 } from "@/lib/rental-payments";
 import { authDatabase, type ControllerLeaseRecord } from "@/lib/rental-service";
+import { legacyPaymentIdForLease } from "@/lib/legacy-lease-payments";
 
 const noStore = { "Cache-Control": "no-store" };
 
@@ -88,7 +89,10 @@ export async function POST(
         throw new RentalPaymentError("payment-not-found", "ไม่มีสิทธิ์ต่อเวลาการเช่านี้", 403);
 
       const database = await authDatabase();
-      const paymentId = lease?.paymentId ?? rentalId;
+      // Older Controllers do not report paymentId; recover it read-only from the
+      // Controller's lease request mapping so extension charging stays correct.
+      const paymentId =
+        lease?.paymentId ?? legacyPaymentIdForLease(rentalId) ?? rentalId;
       const payment = getRentalPayment(database, paymentId);
       if (!payment || payment.userId !== actor.id)
         throw new RentalPaymentError(

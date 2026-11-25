@@ -12,6 +12,7 @@ const h = vi.hoisted(() => {
     ControllerError: MockControllerError,
     db: null as Database.Database | null,
     paymentId: "" as string,
+    legacyPaymentId: null as string | null,
   };
 });
 
@@ -56,6 +57,10 @@ vi.mock("@/lib/controller-client", () => ({
 
 vi.mock("@/lib/rental-service", () => ({
   authDatabase: async () => h.db,
+}));
+
+vi.mock("@/lib/legacy-lease-payments", () => ({
+  legacyPaymentIdForLease: () => h.legacyPaymentId,
 }));
 
 import { POST as postCancel } from "@/app/api/my-leases/[rentalId]/cancel/route";
@@ -125,6 +130,7 @@ describe("POST /api/my-leases/[rentalId]/cancel", () => {
   beforeEach(() => {
     process.env.BETTER_AUTH_URL = "http://localhost";
     h.controllerCall.mockReset();
+    h.legacyPaymentId = null;
     const db = new Database(":memory:");
     db.exec(
       "CREATE TABLE user(id TEXT PRIMARY KEY, balanceSatang INTEGER NOT NULL DEFAULT 0, updatedAt TEXT);",
@@ -196,6 +202,36 @@ describe("POST /api/my-leases/[rentalId]/cancel", () => {
     expect((await response.json()).error).toBe("ไม่พบรายการเช่านี้");
     expect(paymentRow(h.db!, h.paymentId).refunded_satang).toBe(0);
     expect(balance(h.db!)).toBe(96_000);
+  });
+
+  it("refunds immediately through the legacy Controller mapping when old Controllers omit paymentId", async () => {
+    // The production Controller predates LeaseDto.paymentId: the lease lookup route
+    // does not exist and the cancel response has no paymentId. The web recovers the
+    // payment id from the Controller's lease_requests mapping so the cancellation
+    // still credits the prorated refund in the same request.
+    h.legacyPaymentId = h.paymentId;
+    h.controllerCall.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path === "/internal/leases/lease-1" && !init?.method)
+        throw new h.ControllerError(404);
+      if (path === "/internal/leases/lease-1/cancel" && init?.method === "POST")
+        return lease(null, {
+          state: "ending",
+          endedAtUtc: "2026-11-18T03:30:00.000Z",
+        });
+      throw new h.ControllerError(404);
+    });
+
+    const response = await postCancel(
+      request({ expectedRevision: 1, idempotencyKey: IDEMPOTENCY_KEY }),
+      params(),
+    );
+
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.refundedSatang).toBe(2_000);
+    expect(body.paymentRefundedSatang).toBe(2_000);
+    expect(body.balanceSatang).toBe(98_000);
+    expect(paymentRow(h.db!, h.paymentId).settled_at).not.toBeNull();
   });
 
   it("falls back to the legacy cancel path when the Controller has no lease-lookup route", async () => {

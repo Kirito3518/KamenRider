@@ -28,6 +28,7 @@ import {
   createControllerLeaseWithRetry,
   type ControllerLeaseRecord,
 } from "@/lib/rental-service";
+import { fillLegacyLeasePaymentIds } from "@/lib/legacy-lease-payments";
 
 const noStore = { "Cache-Control": "no-store" };
 
@@ -155,6 +156,7 @@ export function GET(request: Request) {
         leases = await call<ControllerLeaseRecord[]>(
           `/internal/users/${segment(actor.id)}/leases`,
         );
+      leases = fillLegacyLeasePaymentIds(leases);
       settleRentalRefunds(database, leases, { userId: actor.id });
     }
 

@@ -8,6 +8,7 @@ import {
   type RentalPayment,
 } from "@/lib/rental-payments";
 import { authDatabase, createControllerLease, type ControllerLeaseRecord } from "@/lib/rental-service";
+import { fillLegacyLeasePaymentIds } from "@/lib/legacy-lease-payments";
 
 type LeaseConnection = { address: string | null; stale: boolean };
 
@@ -62,6 +63,10 @@ export function GET(r: Request) {
       leases = await call<ControllerLeaseRecord[]>(
         `/internal/users/${segment(actor.id)}/leases`,
       );
+
+    // Older Controllers only expose their random lease id; recover the payment
+    // mapping read-only so refund/extend keep working until the Controller upgrade.
+    leases = fillLegacyLeasePaymentIds(leases);
 
     settleRentalRefunds(database, leases, { userId: actor.id });
 
