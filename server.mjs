@@ -1,5 +1,5 @@
 import { createServer } from "node:http";
-import { connect as netConnect } from "node:net";
+import { connect as netConnect, isIP } from "node:net";
 import { connect as tlsConnect } from "node:tls";
 import next from "next";
 
@@ -86,10 +86,12 @@ function proxyVncUpgrade(req, socket, head) {
       ? tlsConnect({
           host: vncTarget.hostname,
           port: Number.parseInt(vncTarget.port || "443", 10),
-          servername:
-            process.env.VNC_PROXY_SERVERNAME || vncTarget.hostname,
-          // The Controller uses its own pinned certificate; the web origin TLS is terminated by
-          // Cloudflare/Caddy in front of this process.
+          // Node rejects SNI for IP literals; the Controller certificate is not validated here
+          // because the public TLS hop is terminated by Cloudflare/Caddy.
+          ...(process.env.VNC_PROXY_SERVERNAME &&
+          !isIP(process.env.VNC_PROXY_SERVERNAME)
+            ? { servername: process.env.VNC_PROXY_SERVERNAME }
+            : {}),
           rejectUnauthorized: false,
           ALPNProtocols: ["http/1.1"],
         })
@@ -184,7 +186,19 @@ server.on("upgrade", (req, socket, head) => {
     return;
   }
   if (pathname === vncPath) {
-    proxyVncUpgrade(req, socket, head);
+    try {
+      proxyVncUpgrade(req, socket, head);
+    } catch {
+      // A malformed upgrade must never crash the web server; report it to the viewer.
+      try {
+        socket.write(
+          "HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\nContent-Length: 20\r\n\r\nVNC gateway failure\n",
+        );
+      } catch {
+        /* ignore */
+      }
+      socket.destroy();
+    }
     return;
   }
   // Production Next does not need WebSocket upgrades; fail fast instead of leaving sockets open.
